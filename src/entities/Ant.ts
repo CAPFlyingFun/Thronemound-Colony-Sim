@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { ANT_CASTES, type AntCasteId } from '../data/antCastes';
+import { ANT_CASTES, type AntCaste, type AntCasteId } from '../data/antCastes';
 import type { PheromoneField } from '../systems/PheromoneField';
 
 export type AntMode = 'wander' | 'seekFood' | 'carryFood' | 'respondAlarm' | 'defend';
@@ -15,7 +15,7 @@ export interface AntContext {
 export class Ant extends Phaser.GameObjects.Container {
   readonly idNumber: number;
   readonly casteId: AntCasteId;
-  readonly caste = ANT_CASTES[this.casteId];
+  readonly caste: AntCaste;
   mode: AntMode = 'wander';
   private target = new Phaser.Math.Vector2();
   private nextThinkAt = 0;
@@ -27,7 +27,7 @@ export class Ant extends Phaser.GameObjects.Container {
     this.idNumber = idNumber;
     this.casteId = casteId;
     const caste = ANT_CASTES[casteId];
-    Object.defineProperty(this, 'caste', { value: caste });
+    this.caste = caste;
 
     const shadow = scene.add.ellipse(2, 5, 22 * caste.scale, 9 * caste.scale, 0x000000, 0.24);
     const abdomen = scene.add.ellipse(-7 * caste.scale, 0, 14 * caste.scale, 10 * caste.scale, caste.color);

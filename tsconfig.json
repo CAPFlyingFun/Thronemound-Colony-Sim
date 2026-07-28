@@ -1,6 +1,10 @@
 {
   "files": [],
-  "references": [],
+  "references": [
+    {
+      "path": "./tsconfig.app.json"
+    }
+  ],
   "compilerOptions": {
     "composite": true
   }
