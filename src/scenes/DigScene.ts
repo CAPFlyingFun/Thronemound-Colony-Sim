@@ -19,6 +19,7 @@ import { raycastVoxel } from '../voxel/raycast';
 import { DigSession } from '../voxel/DigSession';
 import { createVoxelMaterial, type VoxelMaterialBundle } from '../voxel/voxelMaterial';
 import { DEN_MIN_CHAMBER, DEN_MIN_DEPTH, QueenFounding } from '../voxel/QueenFounding';
+import { DEFAULT_BANDS, approach, clampStickOrigin, speedForStick, stickVector } from '../voxel/locomotion';
 
 const WORLD_SIZE = 128;
 const SURFACE_Y = 96;
@@ -26,8 +27,12 @@ const VOXEL_MM = 5;
 
 const EYE_HEIGHT = 1.6;
 const BODY_RADIUS = 0.45;
-const WALK_SPEED = 9;
-const SPRINT_SPEED = 16;
+/** Speeds now come from the stick curve (locomotion.ts); these are its anchors. */
+const WALK_ACCEL = 32;
+const WALK_DECEL = 40;
+/** Keyboard has no analogue axis, so it picks a band rather than full tilt. */
+const KEY_MAGNITUDE = 0.7;
+const STICK_RADIUS = 70;
 /**
  * Tuned for an ant, not a person. By the square-cube law an ant has enormous
  * drag relative to its mass, so its terminal velocity is very low and falls
@@ -87,6 +92,7 @@ export class DigScene {
 
   private readonly founding = new QueenFounding(SURFACE_Y, VOXEL_MM);
   /** After founding, the camera detaches from the queen and orbits the den. */
+  private debug = false;
   private colonyView = false;
   private orbit = { yaw: 0.7, pitch: 0.55, distance: 26 };
   private pinchStart: { distance: number; orbit: number } | null = null;
@@ -95,6 +101,9 @@ export class DigScene {
   private acting = false;
   private moveX = 0;
   private moveZ = 0;
+  private stickMagnitude = 0;
+  private keyboardDriving = false;
+  private readonly horizontal = new THREE.Vector2();
   private sprinting = false;
   private jumpQueued = false;
 
@@ -104,6 +113,8 @@ export class DigScene {
   private readonly foundButton: HTMLButtonElement;
   private readonly jumpButton: HTMLButtonElement;
   private readonly objective: HTMLDivElement;
+  private readonly stick: HTMLDivElement;
+  private readonly stickKnob: HTMLDivElement;
 
   private lookPointer: number | null = null;
   private movePointer: number | null = null;
@@ -160,7 +171,9 @@ export class DigScene {
     // ?debug=den pre-carves a qualifying shaft + chamber and drops the queen in
     // it. Founding otherwise needs 40 voxels of hand-digging, which makes both
     // manual iteration and the smoke test impractical.
-    if (new URLSearchParams(window.location.search).get('debug') === 'den') {
+    const debugFlag = new URLSearchParams(window.location.search).get('debug');
+    this.debug = debugFlag !== null;
+    if (debugFlag === 'den') {
       this.carveDebugDen();
     }
 
@@ -170,6 +183,8 @@ export class DigScene {
     this.foundButton = document.createElement('button');
     this.jumpButton = document.createElement('button');
     this.objective = document.createElement('div');
+    this.stick = document.createElement('div');
+    this.stickKnob = document.createElement('div');
     this.buildOverlay();
 
     this.buildInitialMeshes();
@@ -294,6 +309,11 @@ export class DigScene {
     this.foundButton.id = 'dig-found';
     this.foundButton.textContent = '\u{1F451} FOUND THE QUEEN\u2019S DEN';
     this.foundButton.hidden = true;
+    this.stick.className = 'dig-stick';
+    this.stick.id = 'dig-stick';
+    this.stickKnob.className = 'dig-stick-knob';
+    this.stick.appendChild(this.stickKnob);
+    this.hud.appendChild(this.stick);
     this.hud.appendChild(this.objective);
     this.hud.appendChild(this.foundButton);
     this.host.appendChild(this.hud);
@@ -331,6 +351,18 @@ export class DigScene {
     });
   }
 
+  private showStick(visible: boolean): void {
+    if (!visible) {
+      this.stick.classList.remove('is-live');
+      return;
+    }
+    this.stick.classList.add('is-live');
+    this.stick.style.left = `${this.moveOrigin.x}px`;
+    this.stick.style.top = `${this.moveOrigin.y}px`;
+    this.stickKnob.style.transform =
+      `translate(-50%, -50%) translate(${this.moveX * STICK_RADIUS}px, ${this.moveZ * STICK_RADIUS}px)`;
+  }
+
   private setMode(mode: Mode): void {
     this.mode = mode;
     this.session.cancelDig();
@@ -354,10 +386,20 @@ export class DigScene {
         this.acting = true;
         return;
       }
-      const half = canvas.clientWidth / 2;
-      if (event.clientX < half && this.movePointer === null) {
+      // Left 42% is the stick's activation zone; the rest looks.
+      const zone = canvas.clientWidth * 0.42;
+      if (event.clientX < zone && this.movePointer === null) {
         this.movePointer = event.pointerId;
-        this.moveOrigin = { x: event.clientX, y: event.clientY };
+        // The stick appears under the thumb, but its centre is clamped into a
+        // lower-left region — a purely free-floating stick can spawn beside the
+        // HUD or halfway up the screen, which wrecks precision while digging.
+        this.moveOrigin = clampStickOrigin(event.clientX, event.clientY, {
+          minX: STICK_RADIUS + 8,
+          maxX: Math.max(STICK_RADIUS + 8, zone - STICK_RADIUS - 8),
+          minY: canvas.clientHeight * 0.42,
+          maxY: canvas.clientHeight - STICK_RADIUS - 12,
+        });
+        this.showStick(true);
       } else if (this.lookPointer === null) {
         this.lookPointer = event.pointerId;
         this.lookLast = { x: event.clientX, y: event.clientY };
@@ -400,11 +442,12 @@ export class DigScene {
           this.pitch = THREE.MathUtils.clamp(this.pitch - dy * 0.0045, -1.5, 1.5);
         }
       } else if (event.pointerId === this.movePointer) {
-        const dx = event.clientX - this.moveOrigin.x;
-        const dy = event.clientY - this.moveOrigin.y;
-        const radius = 70;
-        this.moveX = THREE.MathUtils.clamp(dx / radius, -1, 1);
-        this.moveZ = THREE.MathUtils.clamp(dy / radius, -1, 1);
+        const v = stickVector(event.clientX - this.moveOrigin.x, event.clientY - this.moveOrigin.y, STICK_RADIUS);
+        this.moveX = v.x;
+        this.moveZ = v.y;
+        this.stickMagnitude = v.magnitude;
+        this.keyboardDriving = false;
+        this.showStick(true);
       }
     };
 
@@ -421,6 +464,8 @@ export class DigScene {
         this.movePointer = null;
         this.moveX = 0;
         this.moveZ = 0;
+        this.stickMagnitude = 0;
+        this.showStick(false);
       }
     };
 
@@ -440,10 +485,10 @@ export class DigScene {
 
     const keyDown = (event: KeyboardEvent) => {
       switch (event.code) {
-        case 'KeyW': case 'ArrowUp': this.moveZ = -1; break;
-        case 'KeyS': case 'ArrowDown': this.moveZ = 1; break;
-        case 'KeyA': case 'ArrowLeft': this.moveX = -1; break;
-        case 'KeyD': case 'ArrowRight': this.moveX = 1; break;
+        case 'KeyW': case 'ArrowUp': this.moveZ = -1; this.keyboardDriving = true; break;
+        case 'KeyS': case 'ArrowDown': this.moveZ = 1; this.keyboardDriving = true; break;
+        case 'KeyA': case 'ArrowLeft': this.moveX = -1; this.keyboardDriving = true; break;
+        case 'KeyD': case 'ArrowRight': this.moveX = 1; this.keyboardDriving = true; break;
         case 'ShiftLeft': case 'ShiftRight': this.sprinting = true; break;
         case 'Space': this.jumpQueued = true; event.preventDefault(); break;
         case 'KeyE': case 'Tab':
@@ -540,15 +585,30 @@ export class DigScene {
   }
 
   private updatePlayer(dt: number): void {
-    const speed = this.sprinting ? SPRINT_SPEED : WALK_SPEED;
     const forward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
     const right = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
 
     const wish = new THREE.Vector3()
       .addScaledVector(forward, -this.moveZ)
       .addScaledVector(right, this.moveX);
-    if (wish.lengthSq() > 1) wish.normalize();
-    const pressing = wish.lengthSq() > 0.0004;
+    // Direction and magnitude are separate: direction comes from the stick
+    // angle, speed from how far it's pushed. A keyboard has no analogue axis,
+    // so it selects a band instead of always running flat out.
+    const magnitude = this.keyboardDriving
+      ? (this.sprinting ? 1 : KEY_MAGNITUDE)
+      : Math.min(1, this.stickMagnitude);
+    if (wish.lengthSq() > 0) wish.normalize();
+    const targetSpeed = speedForStick(magnitude, DEFAULT_BANDS);
+
+    // Accelerate toward the wish velocity rather than snapping to it — this is
+    // what gives the ant any sense of mass at all.
+    const targetX = wish.x * targetSpeed;
+    const targetZ = wish.z * targetSpeed;
+    this.horizontal.set(
+      approach(this.horizontal.x, targetX, WALK_ACCEL, WALK_DECEL, dt),
+      approach(this.horizontal.y, targetZ, WALK_ACCEL, WALK_DECEL, dt),
+    );
+    const pressing = targetSpeed > 0.01;
 
     if (this.jumpQueued && this.grounded) {
       this.velocity.y = JUMP_SPEED;
@@ -558,9 +618,13 @@ export class DigScene {
 
     // Horizontal first, so we know whether a wall is in the way before deciding
     // between falling and climbing.
-    const movedX = this.moveHorizontal('x', wish.x * speed * dt);
-    const movedZ = this.moveHorizontal('z', wish.z * speed * dt);
+    const movedX = this.moveHorizontal('x', this.horizontal.x * dt);
+    const movedZ = this.moveHorizontal('z', this.horizontal.y * dt);
     const wallAhead = pressing && (!movedX || !movedZ);
+    // Kill the component that hit a wall so we don't keep integrating speed
+    // into a surface we can't enter.
+    if (!movedX) this.horizontal.x = 0;
+    if (!movedZ) this.horizontal.y = 0;
 
     /**
      * Ants climb. Pushing into a wall walks straight up it, which is both what
@@ -704,6 +768,7 @@ export class DigScene {
     this.modeButton.hidden = true;
     this.actionButton.hidden = true;
     this.jumpButton.hidden = true;
+    this.showStick(false);
     this.hud.classList.add('is-colony');
     // Frame the den from slightly above and outside.
     this.orbit = { yaw: this.yaw + Math.PI, pitch: 0.5, distance: 26 };
@@ -775,7 +840,7 @@ export class DigScene {
       <b>Carrying</b> ${this.session.carried}/${this.session.capacity} &nbsp;
       <b>Mound</b> ${this.world.deposited} &nbsp;
       <b>Dug</b> ${this.world.excavated}<br>
-      <span class="dim">${this.climbing ? '\u{1F9D7} climbing \u00b7 ' : ''}Target: ${targetName}${bar}${chamber} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
+      <span class="dim">${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 spd ${this.horizontal.length().toFixed(2)} \u00b7 ` : ''}${this.climbing ? '\u{1F9D7} climbing \u00b7 ' : ''}Target: ${targetName}${bar}${chamber} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
     `;
   }
 

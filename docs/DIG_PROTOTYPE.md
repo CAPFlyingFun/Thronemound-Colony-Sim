@@ -94,6 +94,42 @@ Playwright is a devDependency for that script only. CI sets
 `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` so deploys don't pull browsers they never
 launch; run `npx playwright install chromium` locally if you want it.
 
+## Movement feel
+
+Speed comes from **how far the stick is pushed**, not just its direction, so
+precise positioning while digging is possible:
+
+| Stick throw | Speed |
+|---|---|
+| 0 – 8% | dead zone |
+| 8 – 35% | crawl, up to 3.5 voxels/s |
+| 35 – 75% | walk, up to 9 |
+| 75 – 100% | run, up to 16 |
+
+The bands are landmarks for the thumb, but the response between them is
+continuous — a unit test asserts monotonicity and that no single 0.5% step of
+the stick changes speed by more than 0.35 voxels/s, so it can never feel like
+three discrete gears.
+
+Keyboard has no analogue axis, so it selects the walk band (`Shift` for run).
+
+Movement accelerates (32 voxels/s²) and decelerates (40) rather than snapping
+to velocity, which is what gives the ant any sense of mass.
+
+The touch stick is **constrained floating**: it appears under your thumb
+anywhere in the left 42% of the screen, but its centre is clamped into a
+lower-left region so it can't spawn beside the HUD or halfway up the screen.
+
+> **On frame rate:** `dt` is clamped to 50 ms, so below 20 fps the game runs in
+> slow motion rather than dropping frames. That's deliberate — large physics
+> steps would tunnel the ant through walls — but it means a struggling device
+> gets a slow game rather than a janky one. It also means headless smoke tests
+> (~8 fps under software rendering) measure ~0.39× real speed; compare ratios
+> there, not absolutes.
+
+`?debug=1` appends live position and speed to the readout, which is how those
+numbers get measured rather than eyeballed.
+
 ## Getting out of holes
 
 A jump clears **1.44 voxels** (`JUMP_SPEED 34` against `GRAVITY 400`), so

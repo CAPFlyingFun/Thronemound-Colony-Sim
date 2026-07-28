@@ -8,6 +8,7 @@ import { raycastVoxel } from '../src/voxel/raycast';
 import { DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
 import { DEN_MIN_CHAMBER, DEN_MIN_DEPTH, QueenFounding, countChamberAir } from '../src/voxel/QueenFounding';
+import { BAND_EDGES, DEFAULT_BANDS, STICK_DEADZONE, approach, clampStickOrigin, speedForStick, stickVector } from '../src/voxel/locomotion';
 
 const SURFACE = 96;
 const makeWorld = () => new VoxelWorld(128, 128, 128, layeredGenerator(SURFACE));
@@ -424,5 +425,73 @@ describe('den chamber threshold is achievable by hand', () => {
     for (let y = SURFACE; y >= floorY; y--) world.dig(64, y, 64);
     const q = new QueenFounding(SURFACE);
     expect(q.evaluate(world, 64, floorY, 64).phase).toBe('digging');
+  });
+});
+
+describe('locomotion', () => {
+  it('treats a barely-nudged stick as centred', () => {
+    expect(speedForStick(0)).toBe(0);
+    expect(speedForStick(STICK_DEADZONE)).toBe(0);
+    expect(speedForStick(STICK_DEADZONE + 0.01)).toBeGreaterThan(0);
+  });
+
+  it('reaches each band at its edge', () => {
+    const d = STICK_DEADZONE;
+    const at = (t: number) => speedForStick(d + t * (1 - d));
+    expect(at(BAND_EDGES.crawl)).toBeCloseTo(DEFAULT_BANDS.crawl, 5);
+    expect(at(BAND_EDGES.walk)).toBeCloseTo(DEFAULT_BANDS.walk, 5);
+    expect(at(1)).toBeCloseTo(DEFAULT_BANDS.run, 5);
+  });
+
+  it('is continuous and monotonic — no speed jumps between bands', () => {
+    let previous = -1;
+    for (let m = 0; m <= 1.0001; m += 0.01) {
+      const v = speedForStick(m);
+      expect(v).toBeGreaterThanOrEqual(previous - 1e-9);
+      previous = v;
+    }
+    // A step would show up as a large delta across one sample.
+    for (let m = 0.1; m < 1; m += 0.005) {
+      expect(Math.abs(speedForStick(m + 0.005) - speedForStick(m))).toBeLessThan(0.35);
+    }
+  });
+
+  it('gives a genuinely slow band for careful digging', () => {
+    // A third of the stick should be well under half walking pace, otherwise
+    // "crawl" is a label rather than a usable speed.
+    expect(speedForStick(0.3)).toBeLessThan(DEFAULT_BANDS.walk * 0.5);
+  });
+
+  it('accelerates and decelerates at different rates', () => {
+    expect(approach(0, 10, 20, 40, 0.1)).toBeCloseTo(2, 5);   // accel 20 * 0.1
+    expect(approach(10, 0, 20, 40, 0.1)).toBeCloseTo(6, 5);   // decel 40 * 0.1
+  });
+
+  it('snaps to the target rather than overshooting', () => {
+    expect(approach(0, 1, 100, 100, 1)).toBe(1);
+    expect(approach(5, 5, 10, 10, 1)).toBe(5);
+  });
+
+  it('clamps the stick origin into its region', () => {
+    const b = { minX: 80, maxX: 200, minY: 300, maxY: 700 };
+    expect(clampStickOrigin(10, 10, b)).toEqual({ x: 80, y: 300 });
+    expect(clampStickOrigin(999, 999, b)).toEqual({ x: 200, y: 700 });
+    expect(clampStickOrigin(120, 500, b)).toEqual({ x: 120, y: 500 });
+  });
+
+  it('clamps stick throw to the ring but keeps direction', () => {
+    const far = stickVector(300, 0, 70);
+    expect(far.magnitude).toBe(1);
+    expect(far.x).toBeCloseTo(1, 5);
+    const half = stickVector(35, 0, 70);
+    expect(half.magnitude).toBeCloseTo(0.5, 5);
+    const diagonal = stickVector(70, 70, 70);
+    expect(diagonal.magnitude).toBe(1);
+    expect(Math.hypot(diagonal.x, diagonal.y)).toBeCloseTo(1, 5);
+  });
+
+  it('reports a centred stick as zero rather than NaN', () => {
+    const v = stickVector(0, 0, 70);
+    expect(v).toEqual({ x: 0, y: 0, magnitude: 0 });
   });
 });
