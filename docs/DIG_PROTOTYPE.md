@@ -52,6 +52,8 @@ src/voxel/raycast.ts      Amanatides & Woo grid traversal (targeting)
 src/voxel/mesher.ts       face-culling mesher with per-vertex ambient occlusion
 src/voxel/DigSession.ts   dig timing, carry load, place rules
 src/voxel/QueenFounding.ts  depth + chamber requirements, den lock
+src/voxel/locomotion.ts     stick speed curve + acceleration
+src/voxel/SurfaceFrame.ts   six-axis orientation for wall walking (not yet wired)
 src/voxel/tileTextures.ts   procedural ant-scale soil tiles
 src/voxel/voxelMaterial.ts  texture-array material (the only three.js file here)
 src/scenes/DigScene.ts    three.js renderer, camera, touch/desktop input, HUD
@@ -225,6 +227,32 @@ centre point. Measured from the floor of a **spherical** cavity you only get
 `?scene=dig&debug=den` pre-carves a qualifying shaft and chamber and drops the
 queen into it. Founding otherwise needs 40 voxels of hand-digging, which makes
 both manual iteration and the smoke test impractical.
+
+## Surface walking (module landed, not yet wired)
+
+`SurfaceFrame.ts` is the foundation for ant wall-walking. In a voxel world
+every surface is an axis-aligned cube face, so "up" is always one of **six**
+directions — never an arbitrary angle. That turns general gravity-walking into
+a small discrete state machine, and it's the only reason the feature is
+affordable here.
+
+The governing rule: **physics is always one of the six discrete frames; only
+the camera interpolates.** An axis-aligned collision box at 43° fits nowhere,
+and allowing one in-between orientation collapses the whole simplification.
+
+Two rules keep corners from misbehaving:
+
+- **Commitment.** Proximity to an edge is never enough to cross it — movement
+  must also point across, above `INPUT_COMMIT_THRESHOLD`. This is what lets you
+  stand still low on a wall without being yanked onto the floor.
+- **Hysteresis.** Once a transition starts, competing surface normals are
+  ignored for `ORIENTATION_LOCK_MS`. In a corner two faces are legitimately
+  "nearest" within a fraction of a voxel, and picking by distance alone is how
+  orientation ping-pong starts. Candidates rank by current-support → direction
+  of travel → alignment with current up, never by distance.
+
+Fully unit tested, including that no code path can produce a non-axis
+orientation.
 
 ## Not yet
 

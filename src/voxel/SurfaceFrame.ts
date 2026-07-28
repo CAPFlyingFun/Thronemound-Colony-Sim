@@ -1,0 +1,254 @@
+/**
+ * Six-axis orientation for ant surface walking.
+ *
+ * In a voxel world every surface is an axis-aligned cube face, so "up" is
+ * always one of six directions — never an arbitrary angle. That turns general
+ * gravity-walking (hard, quaternion-shaped) into a small discrete state
+ * machine, and it is the single reason this feature is affordable here.
+ *
+ * The governing rule: **physics orientation is always one of the six discrete
+ * frames; only the CAMERA interpolates.** Never interpolate the collision box
+ * through an in-between angle — an axis-aligned box at 43 degrees fits nowhere,
+ * and the moment you allow it the whole simplification collapses.
+ *
+ * Pure logic, no three.js, no renderer — the corner cases are exactly the kind
+ * of thing that is miserable to debug by flailing in a browser and pleasant to
+ * debug in a test.
+ */
+
+import { isSolid, type VoxelId } from './VoxelWorld';
+
+export type AxisDirection = 'pos_x' | 'neg_x' | 'pos_y' | 'neg_y' | 'pos_z' | 'neg_z';
+
+export interface Vec3 {
+  x: number;
+  y: number;
+  z: number;
+}
+
+export const AXIS_VECTORS: Readonly<Record<AxisDirection, Readonly<Vec3>>> = {
+  pos_x: { x: 1, y: 0, z: 0 },
+  neg_x: { x: -1, y: 0, z: 0 },
+  pos_y: { x: 0, y: 1, z: 0 },
+  neg_y: { x: 0, y: -1, z: 0 },
+  pos_z: { x: 0, y: 0, z: 1 },
+  neg_z: { x: 0, y: 0, z: -1 },
+};
+
+export const ALL_AXES: readonly AxisDirection[] = [
+  'pos_x', 'neg_x', 'pos_y', 'neg_y', 'pos_z', 'neg_z',
+];
+
+/** World up — the frame you're in when not attached to anything. */
+export const WORLD_UP: AxisDirection = 'pos_y';
+
+export function axisVector(axis: AxisDirection): Readonly<Vec3> {
+  return AXIS_VECTORS[axis];
+}
+
+export function opposite(axis: AxisDirection): AxisDirection {
+  return axis.startsWith('pos') ? (axis.replace('pos', 'neg') as AxisDirection)
+    : (axis.replace('neg', 'pos') as AxisDirection);
+}
+
+/** Nearest axis direction to an arbitrary vector. */
+export function axisFromVector(v: Vec3): AxisDirection {
+  const ax = Math.abs(v.x);
+  const ay = Math.abs(v.y);
+  const az = Math.abs(v.z);
+  if (ax >= ay && ax >= az) return v.x >= 0 ? 'pos_x' : 'neg_x';
+  if (ay >= az) return v.y >= 0 ? 'pos_y' : 'neg_y';
+  return v.z >= 0 ? 'pos_z' : 'neg_z';
+}
+
+/** Are two axes perpendicular? (Neither equal nor opposite.) */
+export function isPerpendicular(a: AxisDirection, b: AxisDirection): boolean {
+  return a !== b && a !== opposite(b);
+}
+
+export type SurfaceMode =
+  | 'grounded'
+  | 'attached'
+  | 'transitioning'
+  | 'airborne';
+
+export interface SurfaceState {
+  mode: SurfaceMode;
+  /** Which way is "up" for gravity, movement plane and the collision box. */
+  up: AxisDirection;
+  /** Voxel the ant is standing on, if any. */
+  support: Vec3 | null;
+  /** Milliseconds remaining before another orientation change is allowed. */
+  lockRemaining: number;
+}
+
+/**
+ * Once a transition starts, competing surface normals are ignored until it
+ * finishes. Without this the ant ping-pongs between two faces in a corner,
+ * because both are legitimately "nearest" within a fraction of a voxel.
+ */
+export const ORIENTATION_LOCK_MS = 180;
+
+/** How close to an edge before crossing it is even considered. */
+export const EDGE_COMMIT_DISTANCE = 0.35;
+/** How firmly movement must point across an edge to commit to it. */
+export const INPUT_COMMIT_THRESHOLD = 0.45;
+
+export function createSurfaceState(): SurfaceState {
+  return { mode: 'grounded', up: WORLD_UP, support: null, lockRemaining: 0 };
+}
+
+export function tickLock(state: SurfaceState, dtMs: number): void {
+  state.lockRemaining = Math.max(0, state.lockRemaining - dtMs);
+}
+
+export function canChangeOrientation(state: SurfaceState): boolean {
+  return state.lockRemaining <= 0;
+}
+
+interface Sampler {
+  get(x: number, y: number, z: number): VoxelId;
+}
+
+export interface SurfaceCandidate {
+  /** The `up` this surface would give the ant. */
+  up: AxisDirection;
+  /** The solid voxel providing the surface. */
+  voxel: Vec3;
+  /** Ranking score; higher wins. */
+  score: number;
+}
+
+function floorVec(v: Vec3): Vec3 {
+  return { x: Math.floor(v.x), y: Math.floor(v.y), z: Math.floor(v.z) };
+}
+
+/**
+ * Every solid face touching the ant, ranked.
+ *
+ * Ranking deliberately does NOT go by distance alone. At a corner two faces are
+ * within a hair of each other, and picking by distance makes the choice
+ * arbitrary — which is how orientation ping-pong starts. Priority order:
+ *
+ *   1. the surface currently supporting us (stay put unless there's a reason)
+ *   2. the surface we're actively moving toward
+ *   3. the one best aligned with the current up (least disorienting)
+ */
+export function rankSurfaces(
+  world: Sampler,
+  position: Vec3,
+  state: SurfaceState,
+  moveDir: Vec3 | null,
+): SurfaceCandidate[] {
+  const base = floorVec(position);
+  const candidates: SurfaceCandidate[] = [];
+
+  for (const axis of ALL_AXES) {
+    // A surface whose normal is `axis` sits in the direction opposite `axis`.
+    const toward = axisVector(opposite(axis));
+    const voxel: Vec3 = {
+      x: base.x + toward.x,
+      y: base.y + toward.y,
+      z: base.z + toward.z,
+    };
+    if (!isSolid(world.get(voxel.x, voxel.y, voxel.z))) continue;
+
+    let score = 0;
+    if (state.support
+      && state.up === axis
+      && state.support.x === voxel.x && state.support.y === voxel.y && state.support.z === voxel.z) {
+      score += 100; // current support wins ties outright
+    }
+    if (moveDir) {
+      const dot = moveDir.x * toward.x + moveDir.y * toward.y + moveDir.z * toward.z;
+      if (dot > 0) score += 40 * dot; // moving into this surface
+    }
+    const up = axisVector(state.up);
+    const alignment = up.x * axisVector(axis).x + up.y * axisVector(axis).y + up.z * axisVector(axis).z;
+    score += 10 * alignment; // prefer the least disorienting change
+
+    candidates.push({ up: axis, voxel, score });
+  }
+
+  return candidates.sort((a, b) => b.score - a.score);
+}
+
+/** The surface directly beneath the ant in its current frame, if any. */
+export function supportBelow(world: Sampler, position: Vec3, up: AxisDirection): Vec3 | null {
+  const down = axisVector(opposite(up));
+  const base = floorVec(position);
+  const voxel = { x: base.x + down.x, y: base.y + down.y, z: base.z + down.z };
+  return isSolid(world.get(voxel.x, voxel.y, voxel.z)) ? voxel : null;
+}
+
+export interface EdgeDecision {
+  /** Whether to reorient this frame. */
+  commit: boolean;
+  /** The new up, if committing. */
+  up: AxisDirection | null;
+  reason: 'none' | 'no-support' | 'not-committed' | 'locked' | 'convex' | 'concave';
+}
+
+/**
+ * Decide whether the ant crosses onto an adjacent face.
+ *
+ * The commitment rule exists so you can stand still low on a wall without being
+ * yanked onto the floor: proximity alone is never enough, movement has to point
+ * across the edge as well.
+ */
+export function evaluateEdge(
+  world: Sampler,
+  position: Vec3,
+  state: SurfaceState,
+  moveDir: Vec3 | null,
+  moveMagnitude: number,
+): EdgeDecision {
+  if (!canChangeOrientation(state)) {
+    return { commit: false, up: null, reason: 'locked' };
+  }
+
+  const support = supportBelow(world, position, state.up);
+  if (support) {
+    // Still standing on our own surface — nothing to decide.
+    return { commit: false, up: null, reason: 'none' };
+  }
+
+  // Support has run out: we're at an edge. Only cross with committed movement.
+  if (!moveDir || moveMagnitude < INPUT_COMMIT_THRESHOLD) {
+    return { commit: false, up: null, reason: 'not-committed' };
+  }
+
+  const ranked = rankSurfaces(world, position, state, moveDir)
+    .filter((candidate) => candidate.up !== state.up);
+  const best = ranked[0];
+  if (!best) return { commit: false, up: null, reason: 'no-support' };
+
+  // Perpendicular to the old up is a convex edge (crawling over a lip);
+  // the reverse of it is concave (into an inside corner).
+  const reason = isPerpendicular(best.up, state.up) ? 'convex' : 'concave';
+  return { commit: true, up: best.up, reason };
+}
+
+/** Apply an orientation change and start the hysteresis lock. */
+export function applyOrientation(state: SurfaceState, up: AxisDirection, support: Vec3 | null): void {
+  state.up = up;
+  state.support = support;
+  state.mode = up === WORLD_UP ? 'grounded' : 'attached';
+  state.lockRemaining = ORIENTATION_LOCK_MS;
+}
+
+/**
+ * The wall an unattached ant could grip: solid, perpendicular to world up, and
+ * touching the ant. Returns the `up` that gripping it would produce.
+ */
+export function attachableWall(
+  world: Sampler,
+  position: Vec3,
+  state: SurfaceState,
+  facing: Vec3 | null,
+): AxisDirection | null {
+  if (state.mode === 'attached') return null;
+  const ranked = rankSurfaces(world, position, state, facing)
+    .filter((candidate) => isPerpendicular(candidate.up, WORLD_UP));
+  return ranked[0]?.up ?? null;
+}

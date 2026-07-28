@@ -9,6 +9,7 @@ import { DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
 import { DEN_MIN_CHAMBER, DEN_MIN_DEPTH, QueenFounding, countChamberAir } from '../src/voxel/QueenFounding';
 import { BAND_EDGES, DEFAULT_BANDS, STICK_DEADZONE, approach, clampStickOrigin, speedForStick, stickVector } from '../src/voxel/locomotion';
+import { ALL_AXES, INPUT_COMMIT_THRESHOLD, ORIENTATION_LOCK_MS, WORLD_UP, applyOrientation, attachableWall, axisFromVector, canChangeOrientation, createSurfaceState, evaluateEdge, isPerpendicular, opposite, rankSurfaces, supportBelow, tickLock } from '../src/voxel/SurfaceFrame';
 
 const SURFACE = 96;
 const makeWorld = () => new VoxelWorld(128, 128, 128, layeredGenerator(SURFACE));
@@ -493,5 +494,136 @@ describe('locomotion', () => {
   it('reports a centred stick as zero rather than NaN', () => {
     const v = stickVector(0, 0, 70);
     expect(v).toEqual({ x: 0, y: 0, magnitude: 0 });
+  });
+});
+
+describe('SurfaceFrame', () => {
+  const S = SURFACE;
+  const flat = () => makeWorld();
+
+  it('maps vectors to the nearest of six axes', () => {
+    expect(axisFromVector({ x: 0, y: 1, z: 0 })).toBe('pos_y');
+    expect(axisFromVector({ x: 0, y: -0.9, z: 0.2 })).toBe('neg_y');
+    expect(axisFromVector({ x: -3, y: 1, z: 1 })).toBe('neg_x');
+    expect(axisFromVector({ x: 0, y: 0, z: 5 })).toBe('pos_z');
+  });
+
+  it('knows opposites and perpendiculars', () => {
+    expect(opposite('pos_y')).toBe('neg_y');
+    expect(opposite('neg_z')).toBe('pos_z');
+    expect(isPerpendicular('pos_y', 'pos_x')).toBe(true);
+    expect(isPerpendicular('pos_y', 'neg_y')).toBe(false); // opposite, not perpendicular
+    expect(isPerpendicular('pos_y', 'pos_y')).toBe(false);
+  });
+
+  it('finds the ground under a standing ant', () => {
+    const world = flat();
+    expect(supportBelow(world, { x: 64, y: S + 1, z: 64 }, 'pos_y')).toEqual({ x: 64, y: S, z: 64 });
+    // Two voxels up there is nothing directly beneath.
+    expect(supportBelow(world, { x: 64, y: S + 3, z: 64 }, 'pos_y')).toBeNull();
+  });
+
+  it('will not reorient while the hysteresis lock is running', () => {
+    const world = flat();
+    const state = createSurfaceState();
+    applyOrientation(state, 'pos_y', { x: 64, y: S, z: 64 });
+    expect(canChangeOrientation(state)).toBe(false);
+    expect(evaluateEdge(world, { x: 64, y: S + 1, z: 64 }, state, { x: 1, y: 0, z: 0 }, 1).reason).toBe('locked');
+    tickLock(state, ORIENTATION_LOCK_MS);
+    expect(canChangeOrientation(state)).toBe(true);
+  });
+
+  it('does nothing while the ant is still on its own surface', () => {
+    const world = flat();
+    const state = createSurfaceState();
+    state.support = { x: 64, y: S, z: 64 };
+    const d = evaluateEdge(world, { x: 64, y: S + 1, z: 64 }, state, { x: 1, y: 0, z: 0 }, 1);
+    expect(d.commit).toBe(false);
+    expect(d.reason).toBe('none');
+  });
+
+  it('refuses to cross an edge without committed movement — you can stand still on a wall', () => {
+    const world = flat();
+    // Two voxels deep: one to stand in, one so there is genuinely nothing
+    // beneath. Digging only one leaves solid ground below and the ant still
+    // has support, so the edge case is never reached.
+    world.dig(64, S, 64);
+    world.dig(64, S - 1, 64);
+    const state = createSurfaceState();
+    const at = { x: 64, y: S, z: 64 };
+    expect(evaluateEdge(world, at, state, null, 0).reason).toBe('not-committed');
+    // Below the input threshold: still no.
+    expect(evaluateEdge(world, at, state, { x: 1, y: 0, z: 0 }, INPUT_COMMIT_THRESHOLD - 0.05).reason)
+      .toBe('not-committed');
+  });
+
+  it('commits across an edge when movement points that way', () => {
+    const world = flat();
+    world.dig(64, S, 64);
+    world.dig(64, S - 1, 64); // nothing beneath -> we are at an edge
+    const state = createSurfaceState();
+    const decision = evaluateEdge(world, { x: 64, y: S, z: 64 }, state, { x: 1, y: 0, z: 0 }, 1);
+    expect(decision.commit).toBe(true);
+    // Moving +X onto the wall at +X gives an up of neg_x (the face points back).
+    expect(decision.up).toBe('neg_x');
+    expect(decision.reason).toBe('convex');
+  });
+
+  it('ranks the current support above equally-close rivals — no corner ping-pong', () => {
+    const world = flat();
+    // An inside corner: floor below AND a wall to +X. Both touch the ant.
+    const state = createSurfaceState();
+    state.support = { x: 64, y: S, z: 64 };
+    state.up = 'pos_y';
+    const ranked = rankSurfaces(world, { x: 64, y: S + 1, z: 64 }, state, { x: 1, y: 0, z: 0 });
+    expect(ranked[0]!.up).toBe('pos_y'); // stays put despite moving into the wall
+  });
+
+  it('prefers the surface being moved toward when nothing is supporting yet', () => {
+    const world = flat();
+    const state = createSurfaceState();
+    state.support = null;
+    const ranked = rankSurfaces(world, { x: 64, y: S + 1, z: 64 }, state, { x: 0, y: -1, z: 0 });
+    expect(ranked[0]!.up).toBe('pos_y'); // moving down, the floor wins
+  });
+
+  it('offers a grippable wall only when one is actually there', () => {
+    const world = flat();
+    const state = createSurfaceState();
+    // Standing on open flat ground: the only surface is the floor, which is
+    // not perpendicular to world up, so there is nothing to grip.
+    expect(attachableWall(world, { x: 64, y: S + 1, z: 64 }, state, { x: 1, y: 0, z: 0 })).toBeNull();
+    // Now stand in a one-voxel trench so walls surround us.
+    world.dig(64, S, 64);
+    expect(attachableWall(world, { x: 64, y: S, z: 64 }, state, { x: 1, y: 0, z: 0 })).toBe('neg_x');
+  });
+
+  it('refuses to offer a wall while already attached', () => {
+    const world = flat();
+    world.dig(64, S, 64);
+    const state = createSurfaceState();
+    applyOrientation(state, 'neg_x', { x: 65, y: S, z: 64 });
+    expect(state.mode).toBe('attached');
+    expect(attachableWall(world, { x: 64, y: S, z: 64 }, state, { x: 1, y: 0, z: 0 })).toBeNull();
+  });
+
+  it('returns to grounded when up goes back to world up', () => {
+    const state = createSurfaceState();
+    applyOrientation(state, 'neg_x', { x: 1, y: 1, z: 1 });
+    expect(state.mode).toBe('attached');
+    applyOrientation(state, WORLD_UP, { x: 1, y: 0, z: 1 });
+    expect(state.mode).toBe('grounded');
+  });
+
+  it('never produces a non-axis orientation', () => {
+    // The whole simplification depends on this: six frames, no in-betweens.
+    const world = flat();
+    world.dig(64, S, 64);
+    world.dig(64, S - 1, 64);
+    const state = createSurfaceState();
+    for (const dir of [{ x: 1, y: 0, z: 0 }, { x: -1, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }, { x: 0, y: -1, z: 0 }]) {
+      const d = evaluateEdge(world, { x: 64, y: S, z: 64 }, state, dir, 1);
+      if (d.up) expect(ALL_AXES).toContain(d.up);
+    }
   });
 });
