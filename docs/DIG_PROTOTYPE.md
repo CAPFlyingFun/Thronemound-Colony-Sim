@@ -103,7 +103,25 @@ without changing the geometry:
 - **Step-up** — walking into a one-voxel rise lifts you over it, so a dug
   staircase works as a ramp with no sloped faces required.
 - **Wall climb** — pushing into a wall walks straight up it. This is what real
-  ants do, and it's what makes a vertical shaft survivable.
+  ants do, and it's what makes a vertical shaft survivable. It eases in over
+  ~150 ms and the camera leans into the wall with a slight crawl sway; without
+  those cues, ascending a sheer face is indistinguishable from levitating.
+
+Movement is tuned for an ant rather than a person. By the square-cube law an
+ant has huge drag relative to its mass, so terminal velocity is low and falls
+are effectively harmless — ants drop off things constantly and walk away.
+
+| | before | after |
+|---|---|---|
+| Gravity | 400 voxels/s² | 180 |
+| Terminal velocity | −1.30 m/s | −0.30 m/s |
+| Climb speed | 4.0 cm/s | 2.25 cm/s (~1.1 body lengths/s) |
+| Jump height | 1.45 voxels | 1.47 voxels |
+
+Jump height is deliberately unchanged. Gravity and jump are coupled
+(`h = v²/2g`), so softening gravity without re-deriving `JUMP_SPEED` would have
+silently turned a 1.4-voxel hop into a 3.2-voxel leap — enough to jump out of
+shafts and make climbing pointless.
 
 Climbing is gated on headroom. Without that check the ant pins against a
 ceiling and *hovers* — the blocked move cancels her velocity but she never

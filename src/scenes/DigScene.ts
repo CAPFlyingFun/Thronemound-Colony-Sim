@@ -26,14 +26,34 @@ const VOXEL_MM = 5;
 
 const EYE_HEIGHT = 1.6;
 const BODY_RADIUS = 0.45;
-const WALK_SPEED = 11;
-const SPRINT_SPEED = 19;
-const GRAVITY = 400;
-const JUMP_SPEED = 34;
+const WALK_SPEED = 9;
+const SPRINT_SPEED = 16;
+/**
+ * Tuned for an ant, not a person. By the square-cube law an ant has enormous
+ * drag relative to its mass, so its terminal velocity is very low and falls
+ * are effectively harmless — ants drop off things constantly and walk away.
+ * The old 400 / -260 pair modelled a human being and read as heavy.
+ */
+const GRAVITY = 180;
+const TERMINAL_VELOCITY = -60;
+/**
+ * Kept at ~1.45 voxels of jump height. Gravity and jump are coupled
+ * (h = v^2 / 2g), so softening gravity without re-deriving this would have
+ * silently turned a 1.4 voxel hop into a 3.2 voxel leap — enough to jump out
+ * of shafts and make climbing pointless.
+ */
+const JUMP_SPEED = 23;
 /** Rise the ant steps over without jumping — one voxel plus a hair. */
 const STEP_HEIGHT = 1.05;
-/** Vertical speed while pushing into a wall. */
-const CLIMB_SPEED = 8;
+/** A crawl, about two body lengths per second. */
+const CLIMB_SPEED = 4.5;
+/** Seconds to reach full climb speed. Snapping to it read as levitating. */
+const CLIMB_RAMP = 0.15;
+/** Radians of lean toward a wall you're gripping. */
+const CLIMB_LEAN = 0.07;
+/** Amplitude and rate of the crawl sway while climbing. */
+const CLIMB_SWAY = 0.025;
+const CLIMB_SWAY_HZ = 2.4;
 const REACH = 5.5;
 
 type Mode = 'dig' | 'place';
@@ -58,6 +78,12 @@ export class DigScene {
   private pitch = 0;
   private grounded = false;
   private climbing = false;
+  private climbRamp = 0;
+  private climbPhase = 0;
+  private cameraRoll = 0;
+  /** Outward normal of the wall currently being pushed into, if any. */
+  private readonly wallNormal = new THREE.Vector3();
+  private hasWall = false;
 
   private readonly founding = new QueenFounding(SURFACE_Y, VOXEL_MM);
   /** After founding, the camera detaches from the queen and orbits the den. */
@@ -506,6 +532,10 @@ export class DigScene {
       if (this.tryAxis(axis, amount)) return true;
       this.position.y = savedY;
     }
+    // Blocked: the wall faces back along the way we were heading.
+    this.wallNormal.set(0, 0, 0);
+    this.wallNormal[axis] = amount > 0 ? -1 : 1;
+    this.hasWall = true;
     return false;
   }
 
@@ -546,11 +576,17 @@ export class DigScene {
     headroom.y += 0.5;
     this.climbing = wallAhead && !this.collides(headroom);
     if (this.climbing) {
-      this.velocity.y = CLIMB_SPEED;
+      // Ease into the climb. Jumping straight to full speed was most of why
+      // this read as flying rather than crawling.
+      this.climbRamp = Math.min(1, this.climbRamp + dt / CLIMB_RAMP);
+      this.climbPhase += dt * CLIMB_SWAY_HZ * Math.PI * 2;
+      this.velocity.y = CLIMB_SPEED * this.climbRamp;
     } else {
+      this.climbRamp = Math.max(0, this.climbRamp - dt / CLIMB_RAMP);
       this.velocity.y -= GRAVITY * dt;
-      this.velocity.y = Math.max(this.velocity.y, -260);
+      this.velocity.y = Math.max(this.velocity.y, TERMINAL_VELOCITY);
     }
+    if (!wallAhead) this.hasWall = false;
 
     this.grounded = false;
     this.tryAxis('y', this.velocity.y * dt);
@@ -564,6 +600,20 @@ export class DigScene {
     this.camera.rotation.set(0, 0, 0);
     this.camera.rotateY(this.yaw);
     this.camera.rotateX(this.pitch);
+
+    // Visual proof you're gripping something: lean into the wall, and sway as
+    // the legs cycle. Without a cue like this, ascending a sheer face is
+    // indistinguishable from levitating. Eased so it never snaps.
+    let targetRoll = 0;
+    if (this.climbing && this.hasWall) {
+      const right = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+      const lateral = this.wallNormal.dot(right); // -1..1, which side the wall is on
+      targetRoll = lateral * CLIMB_LEAN + Math.sin(this.climbPhase) * CLIMB_SWAY;
+      targetRoll *= this.climbRamp;
+    }
+    this.cameraRoll = THREE.MathUtils.lerp(this.cameraRoll, targetRoll, 1 - Math.exp(-10 * dt));
+    if (Math.abs(this.cameraRoll) > 1e-4) this.camera.rotateZ(this.cameraRoll);
+
     this.headlamp.position.copy(this.camera.position);
   }
 
