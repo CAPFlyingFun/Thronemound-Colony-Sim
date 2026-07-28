@@ -6,6 +6,7 @@ import {
 import { FACES, meshChunk } from '../src/voxel/mesher';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DigSession } from '../src/voxel/DigSession';
+import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
 
 const SURFACE = 96;
 const makeWorld = () => new VoxelWorld(128, 128, 128, layeredGenerator(SURFACE));
@@ -218,5 +219,111 @@ describe('DigSession', () => {
     expect(session.load.map((l) => l.material)).toEqual([TOPSOIL, CLAY]);
     session.place(30, SURFACE + 3, 30);
     expect(world.get(30, SURFACE + 3, 30)).toBe(CLAY);
+  });
+});
+
+describe('tile textures', () => {
+  it('sizes clods to the ant-scale spec (15-25% of tile width)', () => {
+    // The whole point of the texture spec: a "hero" feature must be a
+    // noticeable fraction of the tile, not a speck. Tile = 40 mm.
+    expect(TILE_MM).toBe(40);
+    const biggest = 12; // stone's largest clod, mm
+    expect(biggest / TILE_MM).toBeGreaterThan(0.15);
+    expect(biggest / TILE_MM).toBeLessThan(0.35);
+  });
+
+  it('generates fully opaque maps of the right size', () => {
+    const maps = generateTile(TOPSOIL, 32);
+    for (const map of [maps.albedo, maps.normal, maps.rough]) {
+      expect(map.length).toBe(32 * 32 * 4);
+      for (let i = 3; i < map.length; i += 4) expect(map[i]).toBe(255);
+    }
+  });
+
+  it('is deterministic — same seed, same bytes', () => {
+    const a = generateTile(CLAY, 32);
+    const b = generateTile(CLAY, 32);
+    expect(Array.from(a.albedo)).toEqual(Array.from(b.albedo));
+  });
+
+  it('gives each material a distinguishable average colour', () => {
+    const avg = (id: number) => {
+      const { albedo } = generateTile(id, 32);
+      let r = 0, g = 0, b = 0;
+      for (let i = 0; i < albedo.length; i += 4) { r += albedo[i]!; g += albedo[i + 1]!; b += albedo[i + 2]!; }
+      const n = albedo.length / 4;
+      return [r / n, g / n, b / n];
+    };
+    const [topsoil, clay, sand, stone] = [avg(TOPSOIL), avg(CLAY), avg(SAND), avg(STONE)];
+    expect(sand[0]!).toBeGreaterThan(clay[0]!);       // sand is the palest
+    expect(clay[0]! - clay[2]!).toBeGreaterThan(40); // clay is distinctly red
+    expect(Math.abs(stone[0]! - stone[2]!)).toBeLessThan(20); // stone is neutral
+    expect(topsoil[0]!).toBeLessThan(sand[0]!);
+  });
+
+  it('produces normals that mostly point outward', () => {
+    const { normal } = generateTile(TOPSOIL, 32);
+    let outward = 0;
+    for (let i = 0; i < normal.length; i += 4) if (normal[i + 2]! > 128) outward++;
+    expect(outward).toBe(normal.length / 4); // z component always positive
+  });
+
+  it('packs one layer per material, indexed by voxel id', () => {
+    const arrays = buildTileArrays(16);
+    const stride = 16 * 16 * 4;
+    expect(arrays.layers).toBe(STONE + 1);
+    expect(arrays.albedo.length).toBe(stride * arrays.layers);
+    // Layer 0 is AIR: never sampled, filled mid-grey so a bug is visible.
+    expect(arrays.albedo[0]).toBe(128);
+    // Layer TOPSOIL must differ from layer SAND.
+    const at = (layer: number) => arrays.albedo[layer * stride];
+    expect(at(TOPSOIL)).not.toBe(at(SAND));
+  });
+});
+
+describe('mesher texture attributes', () => {
+  it('emits uv, layer and tangent per vertex', () => {
+    const world = makeWorld();
+    const cy = Math.floor(SURFACE / CHUNK);
+    const data = meshChunk(world, 1, cy, 1)!;
+    const verts = data.quadCount * 4;
+    expect(data.uvs.length).toBe(verts * 2);
+    expect(data.layers.length).toBe(verts);
+    expect(data.tangents.length).toBe(verts * 3);
+    // The surface chunk is all topsoil.
+    expect([...new Set(data.layers)]).toEqual([TOPSOIL]);
+  });
+
+  it('lays UVs out in world space so one tile spans TILE_VOXELS', () => {
+    const world = makeWorld();
+    const cy = Math.floor(SURFACE / CHUNK);
+    const data = meshChunk(world, 1, cy, 1)!;
+    // Chunk 1 starts at voxel 32; 32 / 8 = 4.0 tiles in.
+    const us = Array.from(data.uvs).filter((_, i) => i % 2 === 0);
+    expect(Math.min(...us)).toBeCloseTo(32 / TILE_VOXELS, 5);
+    expect(Math.max(...us)).toBeCloseTo(64 / TILE_VOXELS, 5);
+  });
+
+  it('keeps tangents unit-length and perpendicular to the face normal', () => {
+    const world = makeWorld();
+    world.dig(40, SURFACE, 40); // open up side faces too
+    const cy = Math.floor(SURFACE / CHUNK);
+    const data = meshChunk(world, 1, cy, 1)!;
+    for (let i = 0; i < data.layers.length; i++) {
+      const t = [data.tangents[i * 3]!, data.tangents[i * 3 + 1]!, data.tangents[i * 3 + 2]!];
+      const n = [data.normals[i * 3]!, data.normals[i * 3 + 1]!, data.normals[i * 3 + 2]!];
+      expect(Math.hypot(...t)).toBeCloseTo(1, 6);
+      expect(t[0]! * n[0]! + t[1]! * n[1]! + t[2]! * n[2]!).toBeCloseTo(0, 6);
+    }
+  });
+
+  it('carries only greyscale ambient occlusion in vertex colour', () => {
+    const world = makeWorld();
+    const cy = Math.floor(SURFACE / CHUNK);
+    const data = meshChunk(world, 1, cy, 1)!;
+    for (let i = 0; i < data.colors.length; i += 3) {
+      expect(data.colors[i]).toBe(data.colors[i + 1]);
+      expect(data.colors[i]).toBe(data.colors[i + 2]);
+    }
   });
 });

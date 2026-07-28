@@ -17,6 +17,7 @@ import {
 import { meshChunk } from '../voxel/mesher';
 import { raycastVoxel } from '../voxel/raycast';
 import { DigSession } from '../voxel/DigSession';
+import { createVoxelMaterial, type VoxelMaterialBundle } from '../voxel/voxelMaterial';
 
 const WORLD_SIZE = 128;
 const SURFACE_Y = 96;
@@ -41,7 +42,8 @@ export class DigScene {
   private readonly session: DigSession;
 
   private readonly meshes = new Map<number, THREE.Mesh>();
-  private readonly material: THREE.MeshLambertMaterial;
+  private readonly materialBundle: VoxelMaterialBundle;
+  private readonly material: THREE.MeshStandardMaterial;
   private readonly highlight: THREE.LineSegments;
   private readonly headlamp: THREE.PointLight;
 
@@ -89,7 +91,8 @@ export class DigScene {
     this.world = new VoxelWorld(WORLD_SIZE, WORLD_SIZE, WORLD_SIZE, layeredGenerator(SURFACE_Y));
     this.session = new DigSession(this.world, { capacity: 12 });
 
-    this.material = new THREE.MeshLambertMaterial({ vertexColors: true });
+    this.materialBundle = createVoxelMaterial();
+    this.material = this.materialBundle.material;
 
     const hemisphere = new THREE.HemisphereLight(0xd8e8ff, 0x4a3a26, 1.15);
     this.scene.add(hemisphere);
@@ -140,7 +143,7 @@ export class DigScene {
       this.scene.remove(mesh);
     });
     this.meshes.clear();
-    this.material.dispose();
+    this.materialBundle.dispose();
     this.highlight.geometry.dispose();
     (this.highlight.material as THREE.Material).dispose();
     this.renderer.dispose();
@@ -170,6 +173,9 @@ export class DigScene {
     geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
     geometry.setAttribute('normal', new THREE.BufferAttribute(data.normals, 3));
     geometry.setAttribute('color', new THREE.BufferAttribute(data.colors, 3));
+    geometry.setAttribute('aTileUv', new THREE.BufferAttribute(data.uvs, 2));
+    geometry.setAttribute('aLayer', new THREE.BufferAttribute(data.layers, 1));
+    geometry.setAttribute('aTangent', new THREE.BufferAttribute(data.tangents, 3));
     geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
     geometry.computeBoundingSphere();
     if (existing) {

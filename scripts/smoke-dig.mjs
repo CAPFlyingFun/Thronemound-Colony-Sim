@@ -98,14 +98,19 @@ await page.mouse.down();
 await page.waitForTimeout(250);
 await page.mouse.up();
 await page.waitForTimeout(400);
+// The HUD only repaints every 6th frame, so comparing readings taken at
+// different moments races it. Assert the conservation invariant on one settled
+// snapshot instead: everything dug is either still carried or now in the mound.
+await page.waitForTimeout(900);
 const placed = (await page.textContent('#dig-readout'))?.replace(/\s+/g, ' ').trim() ?? '';
 const mound = Number(/Mound (\d+)/.exec(placed)?.[1] ?? '0');
 const carryAfter = Number(/Carrying (\d+)/.exec(placed)?.[1] ?? '0');
+const dugFinal = Number(/Dug (\d+)/.exec(placed)?.[1] ?? '0');
 if (mound < 1) fail(`ADD mode placed nothing — "${placed}"`);
 else ok(`placed ${mound} voxel(s) back, now carrying ${carryAfter}`);
-if (mound > 0 && carryAfter !== carrying - mound) {
-  fail(`carry didn't drop by what was placed (${carrying} -> ${carryAfter}, placed ${mound})`);
-} else if (mound > 0) ok('placing removes exactly one voxel from the load');
+if (dugFinal !== carryAfter + mound) {
+  fail(`soil not conserved: dug ${dugFinal} != carried ${carryAfter} + mound ${mound}`);
+} else ok(`soil conserved end to end: dug ${dugFinal} = carried ${carryAfter} + mound ${mound}`);
 
 await shot('3-placed');
 

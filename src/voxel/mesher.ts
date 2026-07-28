@@ -8,11 +8,22 @@
  */
 
 import { AIR, CHUNK, isSolid, materialOf, type VoxelId } from './VoxelWorld';
+import { TILE_VOXELS } from './tileTextures';
 
 export interface MeshData {
   positions: Float32Array;
   normals: Float32Array;
   colors: Float32Array;
+  /**
+   * Texture coordinates in WORLD space divided by TILE_VOXELS, so the pattern
+   * flows continuously across neighbouring voxels of the same material instead
+   * of restarting on every cube face.
+   */
+  uvs: Float32Array;
+  /** Texture-array layer per vertex; equals the voxel id. */
+  layers: Float32Array;
+  /** Face tangent (the +U direction), for tangent-space normal mapping. */
+  tangents: Float32Array;
   indices: Uint32Array;
   quadCount: number;
 }
@@ -74,6 +85,9 @@ export function meshChunk(
   const positions: number[] = [];
   const normals: number[] = [];
   const colors: number[] = [];
+  const uvs: number[] = [];
+  const layers: number[] = [];
+  const tangents: number[] = [];
   const indices: number[] = [];
   let quadCount = 0;
 
@@ -93,9 +107,10 @@ export function meshChunk(
         const voxel = world.get(x, y, z);
         if (voxel === AIR) continue;
 
-        const material = materialOf(voxel);
+        // Per-voxel brightness jitter breaks up large same-material faces. The
+        // base colour now comes from the texture array, so vertex colour
+        // carries only shading (AO x jitter) and multiplies over the albedo.
         const tint = voxelTint(x, y, z);
-        const [br, bg, bb] = material.color;
 
         for (const face of FACES) {
           const [nx, ny, nz] = face.normal;
@@ -105,9 +120,23 @@ export function meshChunk(
           const first = positions.length / 3;
           const ao: number[] = [];
 
+          // Tangent points along axisA, which is exactly how UVs are laid out
+          // below — so the normal map's +X lines up with the texture's +U.
+          const tangent: [number, number, number] = [0, 0, 0];
+          tangent[axisA] = 1;
+
           for (const corner of face.corners) {
-            positions.push(x + corner[0], y + corner[1], z + corner[2]);
+            const wx = x + corner[0];
+            const wy = y + corner[1];
+            const wz = z + corner[2];
+            positions.push(wx, wy, wz);
             normals.push(nx, ny, nz);
+            layers.push(voxel);
+            tangents.push(tangent[0], tangent[1], tangent[2]);
+            // World-space UVs: neighbouring voxels of one material read as a
+            // single continuous surface, and one tile spans TILE_VOXELS.
+            const world = [wx, wy, wz] as const;
+            uvs.push(world[axisA]! / TILE_VOXELS, world[axisB]! / TILE_VOXELS);
 
             // Corner components are 0/1; map to -1/+1 offsets in the face plane.
             const da = corner[axisA] === 1 ? 1 : -1;
@@ -134,7 +163,7 @@ export function meshChunk(
             const level = aoLevel(sideA, sideB, diagonal);
             ao.push(level);
             const shade = AO_LEVELS[level]! * tint;
-            colors.push(br * shade, bg * shade, bb * shade);
+            colors.push(shade, shade, shade);
           }
 
           // Flip the split so the darker corner pair shares the seam; without
@@ -156,6 +185,9 @@ export function meshChunk(
     positions: new Float32Array(positions),
     normals: new Float32Array(normals),
     colors: new Float32Array(colors),
+    uvs: new Float32Array(uvs),
+    layers: new Float32Array(layers),
+    tangents: new Float32Array(tangents),
     indices: new Uint32Array(indices),
     quadCount,
   };
