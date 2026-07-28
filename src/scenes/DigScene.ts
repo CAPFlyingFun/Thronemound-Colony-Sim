@@ -30,6 +30,10 @@ const WALK_SPEED = 11;
 const SPRINT_SPEED = 19;
 const GRAVITY = 400;
 const JUMP_SPEED = 34;
+/** Rise the ant steps over without jumping — one voxel plus a hair. */
+const STEP_HEIGHT = 1.05;
+/** Vertical speed while pushing into a wall. */
+const CLIMB_SPEED = 8;
 const REACH = 5.5;
 
 type Mode = 'dig' | 'place';
@@ -53,6 +57,7 @@ export class DigScene {
   private yaw = 0;
   private pitch = 0;
   private grounded = false;
+  private climbing = false;
 
   private readonly founding = new QueenFounding(SURFACE_Y, VOXEL_MM);
   /** After founding, the camera detaches from the queen and orbits the den. */
@@ -71,6 +76,7 @@ export class DigScene {
   private readonly modeButton: HTMLButtonElement;
   private readonly actionButton: HTMLButtonElement;
   private readonly foundButton: HTMLButtonElement;
+  private readonly jumpButton: HTMLButtonElement;
   private readonly objective: HTMLDivElement;
 
   private lookPointer: number | null = null;
@@ -136,6 +142,7 @@ export class DigScene {
     this.modeButton = document.createElement('button');
     this.actionButton = document.createElement('button');
     this.foundButton = document.createElement('button');
+    this.jumpButton = document.createElement('button');
     this.objective = document.createElement('div');
     this.buildOverlay();
 
@@ -143,9 +150,23 @@ export class DigScene {
     this.bindInput();
     this.resize();
 
+    // iOS Safari fires `resize` mid-rotation with the OLD dimensions, so a
+    // single handler isn't enough — re-measure on the visual viewport and
+    // again shortly after an orientation change settles.
     const onResize = () => this.resize();
+    const onRotate = () => {
+      this.resize();
+      window.setTimeout(onResize, 120);
+      window.setTimeout(onResize, 400);
+    };
     window.addEventListener('resize', onResize);
-    this.cleanups.push(() => window.removeEventListener('resize', onResize));
+    window.addEventListener('orientationchange', onRotate);
+    window.visualViewport?.addEventListener('resize', onResize);
+    this.cleanups.push(() => {
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('orientationchange', onRotate);
+      window.visualViewport?.removeEventListener('resize', onResize);
+    });
 
     this.lastTime = performance.now();
     this.frame = requestAnimationFrame(this.tick);
@@ -228,8 +249,18 @@ export class DigScene {
     this.modeButton.textContent = '⛏ REMOVE';
     this.actionButton.className = 'dig-btn dig-action';
     this.actionButton.textContent = 'ACTION';
+    this.jumpButton.className = 'dig-btn dig-jump';
+    this.jumpButton.textContent = '\u2191 JUMP';
     controls.appendChild(this.modeButton);
+    controls.appendChild(this.jumpButton);
     controls.appendChild(this.actionButton);
+
+    const jumpDown = (event: Event) => {
+      event.preventDefault();
+      this.jumpQueued = true;
+    };
+    this.jumpButton.addEventListener('pointerdown', jumpDown);
+    this.cleanups.push(() => this.jumpButton.removeEventListener('pointerdown', jumpDown));
 
     this.objective.className = 'dig-objective';
     this.objective.id = 'dig-objective';
@@ -425,32 +456,57 @@ export class DigScene {
     return isSolid(this.world.get(Math.floor(x), Math.floor(y), Math.floor(z)));
   }
 
-  /** Axis-separated AABB sweep so we slide along walls instead of sticking. */
-  private moveAxis(axis: 'x' | 'y' | 'z', amount: number): void {
-    if (amount === 0) return;
-    const next = this.position.clone();
-    next[axis] += amount;
-
-    const minX = next.x - BODY_RADIUS;
-    const maxX = next.x + BODY_RADIUS;
-    const minY = next.y;
-    const maxY = next.y + EYE_HEIGHT;
-    const minZ = next.z - BODY_RADIUS;
-    const maxZ = next.z + BODY_RADIUS;
-
-    for (let x = Math.floor(minX); x <= Math.floor(maxX); x++) {
-      for (let y = Math.floor(minY); y <= Math.floor(maxY); y++) {
-        for (let z = Math.floor(minZ); z <= Math.floor(maxZ); z++) {
-          if (!isSolid(this.world.get(x, y, z))) continue;
-          if (axis === 'y') {
-            if (amount < 0) this.grounded = true;
-            this.velocity.y = 0;
-          }
-          return; // blocked on this axis; keep the other two
+  /** Does the ant's box overlap any solid voxel at this position? */
+  private collides(at: THREE.Vector3): boolean {
+    const minX = Math.floor(at.x - BODY_RADIUS);
+    const maxX = Math.floor(at.x + BODY_RADIUS);
+    const minY = Math.floor(at.y);
+    const maxY = Math.floor(at.y + EYE_HEIGHT);
+    const minZ = Math.floor(at.z - BODY_RADIUS);
+    const maxZ = Math.floor(at.z + BODY_RADIUS);
+    for (let x = minX; x <= maxX; x++) {
+      for (let y = minY; y <= maxY; y++) {
+        for (let z = minZ; z <= maxZ; z++) {
+          if (isSolid(this.world.get(x, y, z))) return true;
         }
       }
     }
+    return false;
+  }
+
+  /** Axis-separated sweep so we slide along walls instead of sticking. */
+  private tryAxis(axis: 'x' | 'y' | 'z', amount: number): boolean {
+    if (amount === 0) return true;
+    const next = this.position.clone();
+    next[axis] += amount;
+    if (this.collides(next)) {
+      if (axis === 'y') {
+        if (amount < 0) this.grounded = true;
+        this.velocity.y = 0;
+      }
+      return false;
+    }
     this.position.copy(next);
+    return true;
+  }
+
+  /**
+   * Horizontal move with a step-up. Walking into a rise of one voxel lifts the
+   * ant over it, which is what turns a dug staircase into a usable ramp — no
+   * sloped geometry required, and the nest keeps looking like a real nest
+   * (near-vertical shafts) rather than being forced into 45 degree corridors.
+   */
+  private moveHorizontal(axis: 'x' | 'z', amount: number): boolean {
+    if (this.tryAxis(axis, amount)) return true;
+    const savedY = this.position.y;
+    const lifted = this.position.clone();
+    lifted.y += STEP_HEIGHT;
+    if (!this.collides(lifted)) {
+      this.position.y = lifted.y;
+      if (this.tryAxis(axis, amount)) return true;
+      this.position.y = savedY;
+    }
+    return false;
   }
 
   private updatePlayer(dt: number): void {
@@ -462,6 +518,7 @@ export class DigScene {
       .addScaledVector(forward, -this.moveZ)
       .addScaledVector(right, this.moveX);
     if (wish.lengthSq() > 1) wish.normalize();
+    const pressing = wish.lengthSq() > 0.0004;
 
     if (this.jumpQueued && this.grounded) {
       this.velocity.y = JUMP_SPEED;
@@ -469,13 +526,34 @@ export class DigScene {
     }
     this.jumpQueued = false;
 
-    this.velocity.y -= GRAVITY * dt;
-    this.velocity.y = Math.max(this.velocity.y, -260);
-    this.grounded = false;
+    // Horizontal first, so we know whether a wall is in the way before deciding
+    // between falling and climbing.
+    const movedX = this.moveHorizontal('x', wish.x * speed * dt);
+    const movedZ = this.moveHorizontal('z', wish.z * speed * dt);
+    const wallAhead = pressing && (!movedX || !movedZ);
 
-    this.moveAxis('x', wish.x * speed * dt);
-    this.moveAxis('z', wish.z * speed * dt);
-    this.moveAxis('y', this.velocity.y * dt);
+    /**
+     * Ants climb. Pushing into a wall walks straight up it, which is both what
+     * real ants do and the thing that makes a vertical shaft survivable — a
+     * 1.44 voxel jump can't get you out of a hole you dug three deep.
+     */
+    // Only climb when there is somewhere to climb TO. Without this check the
+    // ant pins against a ceiling and hovers there — velocity is cancelled by
+    // the blocked move but she never becomes grounded, so she can neither rise
+    // nor fall. Refusing to climb lets gravity drop her back to the floor,
+    // where she can walk to the shaft instead.
+    const headroom = this.position.clone();
+    headroom.y += 0.5;
+    this.climbing = wallAhead && !this.collides(headroom);
+    if (this.climbing) {
+      this.velocity.y = CLIMB_SPEED;
+    } else {
+      this.velocity.y -= GRAVITY * dt;
+      this.velocity.y = Math.max(this.velocity.y, -260);
+    }
+
+    this.grounded = false;
+    this.tryAxis('y', this.velocity.y * dt);
 
     // Never let a mis-step drop the ant out of the volume.
     this.position.y = THREE.MathUtils.clamp(this.position.y, 1, WORLD_SIZE - 2);
@@ -575,6 +653,7 @@ export class DigScene {
     this.foundButton.hidden = true;
     this.modeButton.hidden = true;
     this.actionButton.hidden = true;
+    this.jumpButton.hidden = true;
     this.hud.classList.add('is-colony');
     // Frame the den from slightly above and outside.
     this.orbit = { yaw: this.yaw + Math.PI, pitch: 0.5, distance: 26 };
@@ -646,16 +725,23 @@ export class DigScene {
       <b>Carrying</b> ${this.session.carried}/${this.session.capacity} &nbsp;
       <b>Mound</b> ${this.world.deposited} &nbsp;
       <b>Dug</b> ${this.world.excavated}<br>
-      <span class="dim">Target: ${targetName}${bar}${chamber} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
+      <span class="dim">${this.climbing ? '\u{1F9D7} climbing \u00b7 ' : ''}Target: ${targetName}${bar}${chamber} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
     `;
   }
 
   private resize(): void {
     const width = this.host.clientWidth || window.innerWidth;
     const height = this.host.clientHeight || window.innerHeight;
-    this.renderer.setSize(width, height, false);
+    // updateStyle must stay ON. Passing `false` here resizes the draw buffer
+    // but leaves the canvas element's CSS size frozen at whatever it was on
+    // first paint, so rotating to landscape rendered a 852x393 buffer into a
+    // 393x852 element — stretched, and hanging off the screen.
+    this.renderer.setSize(width, height);
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.camera.aspect = width / Math.max(1, height);
     this.camera.updateProjectionMatrix();
+    // Landscape on a phone is short; give the HUD a chance to compact itself.
+    this.hud.classList.toggle('is-short', height < 500);
   }
 
   private hudCounter = 0;

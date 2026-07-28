@@ -15,7 +15,9 @@ never load each other's bundle.
 | Look | drag the **right half** | move the mouse (click once to capture the cursor, `Esc` to release) |
 | Dig / place | hold **ACTION** | hold left mouse button |
 | Toggle mode | tap **REMOVE / ADD** | `E` or `Tab` |
-| Jump | — | `Space` |
+| Jump | tap **JUMP** | `Space` |
+| Climb | push into a wall | push into a wall |
+| Step up | automatic | automatic |
 
 ## Scale
 
@@ -79,7 +81,8 @@ npm run typecheck
 npm run build
 npm run preview   # then, in another shell:
 npm run smoke:dig   # boots WebGL, digs, places, checks soil conservation
-npm run smoke:queen # pre-carves a den, founds it, checks the colony handoff
+npm run smoke:queen    # pre-carves a den, founds it, checks the colony handoff
+npm run smoke:mobility # rotation resize, and digging into a hole then climbing out
 ```
 
 The smoke test drives the **touch** path, since that's what ships to a phone,
@@ -90,6 +93,27 @@ survives a real round trip through the UI.
 Playwright is a devDependency for that script only. CI sets
 `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` so deploys don't pull browsers they never
 launch; run `npx playwright install chromium` locally if you want it.
+
+## Getting out of holes
+
+A jump clears **1.44 voxels** (`JUMP_SPEED 34` against `GRAVITY 400`), so
+digging two voxels down used to trap you permanently. Two mechanics fix it
+without changing the geometry:
+
+- **Step-up** — walking into a one-voxel rise lifts you over it, so a dug
+  staircase works as a ramp with no sloped faces required.
+- **Wall climb** — pushing into a wall walks straight up it. This is what real
+  ants do, and it's what makes a vertical shaft survivable.
+
+Climbing is gated on headroom. Without that check the ant pins against a
+ceiling and *hovers* — the blocked move cancels her velocity but she never
+becomes grounded, so she can neither rise nor fall. Refusing to climb lets
+gravity drop her back to the floor, where she can walk to the shaft instead.
+
+This is deliberately not literal 45° geometry. Real fire-ant nests are
+near-vertical shafts with chambers budding off them, so forcing everything to
+a ramp would make the nests look *less* like nests — and cost ~40% more digging
+for the same depth. Ants don't need ramps because ants climb.
 
 ## Textures
 

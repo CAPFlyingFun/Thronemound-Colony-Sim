@@ -11,7 +11,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc -b",
     "smoke:dig": "node scripts/smoke-dig.mjs",
-    "smoke:queen": "node scripts/smoke-queen.mjs"
+    "smoke:queen": "node scripts/smoke-queen.mjs",
+    "smoke:mobility": "node scripts/smoke-mobility.mjs"
   },
   "dependencies": {
     "phaser": "^3.90.0",
