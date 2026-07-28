@@ -7,6 +7,7 @@ import { FACES, meshChunk } from '../src/voxel/mesher';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
+import { DEN_MIN_CHAMBER, DEN_MIN_DEPTH, QueenFounding, countChamberAir } from '../src/voxel/QueenFounding';
 
 const SURFACE = 96;
 const makeWorld = () => new VoxelWorld(128, 128, 128, layeredGenerator(SURFACE));
@@ -325,5 +326,103 @@ describe('mesher texture attributes', () => {
       expect(data.colors[i]).toBe(data.colors[i + 1]);
       expect(data.colors[i]).toBe(data.colors[i + 2]);
     }
+  });
+});
+
+describe('QueenFounding', () => {
+  const hollow = (world: VoxelWorld, x: number, y: number, z: number, r: number) => {
+    for (let dy = -r; dy <= r; dy++)
+      for (let dz = -r; dz <= r; dz++)
+        for (let dx = -r; dx <= r; dx++)
+          if (dx * dx + dy * dy + dz * dz <= r * r + 0.5) world.dig(x + dx, y + dy, z + dz);
+  };
+
+  it('refuses to found at the surface', () => {
+    const world = makeWorld();
+    const q = new QueenFounding(SURFACE);
+    const status = q.evaluate(world, 64, SURFACE, 64);
+    expect(status.phase).toBe('digging');
+    expect(status.objective).toMatch(/Dig down/);
+    expect(q.found(world, 64, SURFACE, 64)).toBeNull();
+    expect(q.founded).toBe(false);
+  });
+
+  it('reports remaining depth in millimetres', () => {
+    const world = makeWorld();
+    const q = new QueenFounding(SURFACE, 5);
+    const status = q.evaluate(world, 64, SURFACE - 10, 64);
+    expect(status.depth).toBe(10);
+    expect(status.depthMm).toBe(50);
+    expect(status.objective).toContain(`${(DEN_MIN_DEPTH - 10) * 5} mm`);
+  });
+
+  it('is not satisfied by a bare shaft at depth', () => {
+    const world = makeWorld();
+    const q = new QueenFounding(SURFACE);
+    const y = SURFACE - DEN_MIN_DEPTH - 2;
+    for (let d = 0; d <= DEN_MIN_DEPTH + 4; d++) world.dig(64, SURFACE - d, 64);
+    const status = q.evaluate(world, 64, y, 64);
+    expect(status.depthMet).toBe(true);
+    expect(status.chamberMet).toBe(false);
+    expect(status.phase).toBe('digging');
+    expect(status.objective).toMatch(/Hollow out a chamber/);
+  });
+
+  it('becomes ready once a real chamber is hollowed at depth', () => {
+    const world = makeWorld();
+    const q = new QueenFounding(SURFACE);
+    const y = SURFACE - DEN_MIN_DEPTH - 2;
+    hollow(world, 64, y, 64, 2);
+    const status = q.evaluate(world, 64, y, 64);
+    expect(status.chamber).toBeGreaterThanOrEqual(DEN_MIN_CHAMBER);
+    expect(status.phase).toBe('ready');
+  });
+
+  it('locks the den once founded and never moves it', () => {
+    const world = makeWorld();
+    const q = new QueenFounding(SURFACE);
+    const y = SURFACE - DEN_MIN_DEPTH - 2;
+    hollow(world, 64, y, 64, 2);
+    const site = q.found(world, 64, y, 64);
+    expect(site).toEqual({ x: 64, y, z: 64, depth: DEN_MIN_DEPTH + 2 });
+    expect(q.founded).toBe(true);
+    // Walking elsewhere afterwards must not relocate or re-trigger it.
+    const later = q.evaluate(world, 10, SURFACE, 10);
+    expect(later.phase).toBe('founded');
+    expect(q.found(world, 10, SURFACE, 10)).toEqual(site);
+    expect(q.den).toEqual(site);
+  });
+
+  it('counts only air inside the radius ball', () => {
+    const world = makeWorld();
+    // Solid ground: the only air is above the surface.
+    expect(countChamberAir(world, 64, SURFACE - 20, 64, 1)).toBe(0);
+    world.dig(64, SURFACE - 20, 64);
+    expect(countChamberAir(world, 64, SURFACE - 20, 64, 1)).toBe(1);
+  });
+});
+
+describe('den chamber threshold is achievable by hand', () => {
+  it('passes for a 3x3x3 pocket dug off a shaft, measured from its floor', () => {
+    // The requirement has to be satisfiable from where a player actually
+    // STANDS — the chamber floor — not from a theoretical centre point.
+    const world = makeWorld();
+    const floorY = SURFACE - DEN_MIN_DEPTH - 2;
+    for (let y = SURFACE; y >= floorY; y--) world.dig(64, y, 64);
+    for (let dy = 0; dy < 3; dy++)
+      for (let dz = -1; dz <= 1; dz++)
+        for (let dx = -1; dx <= 1; dx++) world.dig(64 + dx, floorY + dy, 64 + dz);
+    const q = new QueenFounding(SURFACE);
+    const status = q.evaluate(world, 64, floorY, 64);
+    expect(status.chamber).toBeGreaterThanOrEqual(DEN_MIN_CHAMBER);
+    expect(status.phase).toBe('ready');
+  });
+
+  it('still rejects a bare shaft measured from its floor', () => {
+    const world = makeWorld();
+    const floorY = SURFACE - DEN_MIN_DEPTH - 2;
+    for (let y = SURFACE; y >= floorY; y--) world.dig(64, y, 64);
+    const q = new QueenFounding(SURFACE);
+    expect(q.evaluate(world, 64, floorY, 64).phase).toBe('digging');
   });
 });

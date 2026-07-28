@@ -18,6 +18,7 @@ import { meshChunk } from '../voxel/mesher';
 import { raycastVoxel } from '../voxel/raycast';
 import { DigSession } from '../voxel/DigSession';
 import { createVoxelMaterial, type VoxelMaterialBundle } from '../voxel/voxelMaterial';
+import { DEN_MIN_CHAMBER, DEN_MIN_DEPTH, QueenFounding } from '../voxel/QueenFounding';
 
 const WORLD_SIZE = 128;
 const SURFACE_Y = 96;
@@ -53,6 +54,12 @@ export class DigScene {
   private pitch = 0;
   private grounded = false;
 
+  private readonly founding = new QueenFounding(SURFACE_Y, VOXEL_MM);
+  /** After founding, the camera detaches from the queen and orbits the den. */
+  private colonyView = false;
+  private orbit = { yaw: 0.7, pitch: 0.55, distance: 26 };
+  private pinchStart: { distance: number; orbit: number } | null = null;
+
   private mode: Mode = 'dig';
   private acting = false;
   private moveX = 0;
@@ -63,6 +70,8 @@ export class DigScene {
   private readonly hud: HTMLDivElement;
   private readonly modeButton: HTMLButtonElement;
   private readonly actionButton: HTMLButtonElement;
+  private readonly foundButton: HTMLButtonElement;
+  private readonly objective: HTMLDivElement;
 
   private lookPointer: number | null = null;
   private movePointer: number | null = null;
@@ -116,9 +125,18 @@ export class DigScene {
 
     this.position.set(WORLD_SIZE / 2 + 0.5, SURFACE_Y + 3, WORLD_SIZE / 2 + 0.5);
 
+    // ?debug=den pre-carves a qualifying shaft + chamber and drops the queen in
+    // it. Founding otherwise needs 40 voxels of hand-digging, which makes both
+    // manual iteration and the smoke test impractical.
+    if (new URLSearchParams(window.location.search).get('debug') === 'den') {
+      this.carveDebugDen();
+    }
+
     this.hud = document.createElement('div');
     this.modeButton = document.createElement('button');
     this.actionButton = document.createElement('button');
+    this.foundButton = document.createElement('button');
+    this.objective = document.createElement('div');
     this.buildOverlay();
 
     this.buildInitialMeshes();
@@ -212,7 +230,23 @@ export class DigScene {
     this.actionButton.textContent = 'ACTION';
     controls.appendChild(this.modeButton);
     controls.appendChild(this.actionButton);
+
+    this.objective.className = 'dig-objective';
+    this.objective.id = 'dig-objective';
+    this.foundButton.className = 'dig-found';
+    this.foundButton.id = 'dig-found';
+    this.foundButton.textContent = '\u{1F451} FOUND THE QUEEN\u2019S DEN';
+    this.foundButton.hidden = true;
+    this.hud.appendChild(this.objective);
+    this.hud.appendChild(this.foundButton);
     this.host.appendChild(this.hud);
+
+    const foundDown = (event: Event) => {
+      event.preventDefault();
+      this.foundDen();
+    };
+    this.foundButton.addEventListener('pointerdown', foundDown);
+    this.cleanups.push(() => this.foundButton.removeEventListener('pointerdown', foundDown));
 
     const toggle = (event: Event) => {
       event.preventDefault();
@@ -278,6 +312,11 @@ export class DigScene {
 
     const mouseLook = (event: MouseEvent) => {
       if (!locked()) return;
+      if (this.colonyView) {
+        this.orbit.yaw -= event.movementX * 0.004;
+        this.orbit.pitch = THREE.MathUtils.clamp(this.orbit.pitch + event.movementY * 0.003, -0.2, 1.4);
+        return;
+      }
       this.yaw -= event.movementX * 0.0022;
       this.pitch = THREE.MathUtils.clamp(this.pitch - event.movementY * 0.0022, -1.5, 1.5);
     };
@@ -296,8 +335,13 @@ export class DigScene {
         const dx = event.clientX - this.lookLast.x;
         const dy = event.clientY - this.lookLast.y;
         this.lookLast = { x: event.clientX, y: event.clientY };
-        this.yaw -= dx * 0.0045;
-        this.pitch = THREE.MathUtils.clamp(this.pitch - dy * 0.0045, -1.5, 1.5);
+        if (this.colonyView) {
+          this.orbit.yaw -= dx * 0.006;
+          this.orbit.pitch = THREE.MathUtils.clamp(this.orbit.pitch + dy * 0.005, -0.2, 1.4);
+        } else {
+          this.yaw -= dx * 0.0045;
+          this.pitch = THREE.MathUtils.clamp(this.pitch - dy * 0.0045, -1.5, 1.5);
+        }
       } else if (event.pointerId === this.movePointer) {
         const dx = event.clientX - this.moveOrigin.x;
         const dy = event.clientY - this.moveOrigin.y;
@@ -330,6 +374,13 @@ export class DigScene {
     const contextMenu = (e: Event) => e.preventDefault();
     canvas.addEventListener('contextmenu', contextMenu);
 
+    const wheel = (event: WheelEvent) => {
+      if (!this.colonyView) return;
+      event.preventDefault();
+      this.orbit.distance = THREE.MathUtils.clamp(this.orbit.distance + event.deltaY * 0.05, 6, 90);
+    };
+    canvas.addEventListener('wheel', wheel, { passive: false });
+
     const keyDown = (event: KeyboardEvent) => {
       switch (event.code) {
         case 'KeyW': case 'ArrowUp': this.moveZ = -1; break;
@@ -360,6 +411,7 @@ export class DigScene {
       canvas.removeEventListener('pointerup', up);
       canvas.removeEventListener('pointercancel', up);
       canvas.removeEventListener('contextmenu', contextMenu);
+      canvas.removeEventListener('wheel', wheel);
       document.removeEventListener('mousemove', mouseLook);
       document.removeEventListener('pointerlockchange', lockChange);
       window.removeEventListener('keydown', keyDown);
@@ -479,22 +531,122 @@ export class DigScene {
     if (this.session.place(px, py, pz).kind === 'placed') this.acting = false;
   }
 
+  /**
+   * Dev shortcut: a shaft down to den depth with a chamber hollowed at the
+   * bottom. Deliberately a BOX rather than a sphere, because that is what a
+   * player actually digs — and standing on the floor of a sphere samples only
+   * 11 air voxels (the radius-2 ball reaches into the ground beneath), which
+   * would fail the requirement that a real 3x3x3 pocket comfortably passes.
+   */
+  private carveDebugDen(): void {
+    const cx = Math.floor(WORLD_SIZE / 2);
+    const cz = Math.floor(WORLD_SIZE / 2);
+    const floorY = SURFACE_Y - DEN_MIN_DEPTH - 2;
+    for (let y = SURFACE_Y; y >= floorY; y--) this.world.dig(cx, y, cz);
+    for (let dy = 0; dy < 3; dy++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) this.world.dig(cx + dx, floorY + dy, cz + dz);
+      }
+    }
+    this.position.set(cx + 0.5, floorY, cz + 0.5);
+  }
+
+  // ------------------------------------------------------------- founding
+
+  /**
+   * Commit the den and hand off. The queen stops being a character and becomes
+   * the fixed point the colony is built around, so the camera detaches and
+   * starts orbiting the chamber she just sealed herself into.
+   */
+  private foundDen(): void {
+    const site = this.founding.found(this.world, this.position.x, this.position.y, this.position.z);
+    if (!site) return;
+    this.colonyView = true;
+    this.acting = false;
+    // Orbiting from inside a solid volume means back-face culling shows you
+    // straight through the soil, leaving the nest hanging in the sky colour.
+    // That cutaway is genuinely the clearest way to read a burrow — it's what
+    // an ant farm looks like — so lean into it: swap the sky for dark earth so
+    // it reads as a cross-section rather than a rendering fault.
+    this.scene.background = new THREE.Color(0x1a1410);
+    this.scene.fog = new THREE.Fog(0x1a1410, 30, 190);
+    this.session.cancelDig();
+    this.highlight.visible = false;
+    this.foundButton.hidden = true;
+    this.modeButton.hidden = true;
+    this.actionButton.hidden = true;
+    this.hud.classList.add('is-colony');
+    // Frame the den from slightly above and outside.
+    this.orbit = { yaw: this.yaw + Math.PI, pitch: 0.5, distance: 26 };
+    this.announce(
+      'The queen sheds her wings and seals the chamber.',
+      'She will never leave it again \u2014 from here she lives on her own flight muscles until the first workers hatch.',
+    );
+  }
+
+  private announce(title: string, body: string): void {
+    const el = document.createElement('div');
+    el.className = 'dig-toast';
+    el.innerHTML = `<b>${title}</b><span>${body}</span>`;
+    this.hud.appendChild(el);
+    const timer = window.setTimeout(() => el.classList.add('is-out'), 6000);
+    const gone = window.setTimeout(() => el.remove(), 7200);
+    this.cleanups.push(() => {
+      window.clearTimeout(timer);
+      window.clearTimeout(gone);
+      el.remove();
+    });
+  }
+
+  /** Orbit the sealed den. Drag rotates, two fingers (or wheel) zoom. */
+  private updateColonyCamera(): void {
+    const den = this.founding.den;
+    if (!den) return;
+    const target = new THREE.Vector3(den.x + 0.5, den.y + 0.5, den.z + 0.5);
+    const { yaw, pitch, distance } = this.orbit;
+    this.camera.position.set(
+      target.x + Math.sin(yaw) * Math.cos(pitch) * distance,
+      target.y + Math.sin(pitch) * distance,
+      target.z + Math.cos(yaw) * Math.cos(pitch) * distance,
+    );
+    this.camera.lookAt(target);
+    this.headlamp.position.copy(target);
+  }
+
   private updateHud(): void {
     const readout = this.hud.querySelector('#dig-readout');
     if (!readout) return;
-    const depth = Math.round((SURFACE_Y - this.position.y) * VOXEL_MM);
+
+    const status = this.founding.evaluate(this.world, this.position.x, this.position.y, this.position.z);
+    this.objective.textContent = status.objective;
+    this.objective.classList.toggle('is-ready', status.phase === 'ready');
+    // Only offer the button while the site actually qualifies — step out of the
+    // chamber and the offer withdraws, which teaches the requirement better
+    // than any tooltip.
+    this.foundButton.hidden = status.phase !== 'ready';
+
+    if (this.colonyView) {
+      const den = this.founding.den!;
+      readout.innerHTML = `
+        <b>Queen\u2019s den</b> ${den.depth * VOXEL_MM} mm down &nbsp;
+        <b>Excavated</b> ${this.world.excavated} &nbsp;
+        <b>Mound</b> ${this.world.deposited}<br>
+        <span class="dim">Colony view \u00b7 drag to orbit \u00b7 pinch or scroll to zoom</span>
+      `;
+      return;
+    }
+
     const hit = this.currentTarget();
-    const targetName = hit ? materialOf(hit.voxel).name : '—';
-    const carried = this.session.carried;
-    const mound = this.world.deposited;
+    const targetName = hit ? materialOf(hit.voxel).name : '\u2014';
     const chew = this.session.chewRatio;
-    const bar = chew > 0 ? ` ${'▮'.repeat(Math.round(chew * 8)).padEnd(8, '▯')}` : '';
+    const bar = chew > 0 ? ` ${'\u25AE'.repeat(Math.round(chew * 8)).padEnd(8, '\u25AF')}` : '';
+    const chamber = status.depthMet ? ` \u00b7 Chamber ${status.chamber}/${DEN_MIN_CHAMBER}` : '';
     readout.innerHTML = `
-      <b>Depth</b> ${depth > 0 ? `${depth} mm` : 'surface'} &nbsp;
-      <b>Carrying</b> ${carried}/${this.session.capacity} &nbsp;
-      <b>Mound</b> ${mound} &nbsp;
+      <b>Depth</b> ${status.depth > 0 ? `${status.depthMm} mm` : 'surface'} &nbsp;
+      <b>Carrying</b> ${this.session.carried}/${this.session.capacity} &nbsp;
+      <b>Mound</b> ${this.world.deposited} &nbsp;
       <b>Dug</b> ${this.world.excavated}<br>
-      <span class="dim">Target: ${targetName}${bar} · ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels · ${this.meshes.size} chunks</span>
+      <span class="dim">Target: ${targetName}${bar}${chamber} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
     `;
   }
 
@@ -514,8 +666,12 @@ export class DigScene {
     const dt = Math.min((now - this.lastTime) / 1000, 0.05);
     this.lastTime = now;
 
-    this.updatePlayer(dt);
-    this.updateAction(dt);
+    if (this.colonyView) {
+      this.updateColonyCamera();
+    } else {
+      this.updatePlayer(dt);
+      this.updateAction(dt);
+    }
     this.drainDirty();
     if (++this.hudCounter % 6 === 0) this.updateHud();
 

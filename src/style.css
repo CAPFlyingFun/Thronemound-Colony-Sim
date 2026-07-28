@@ -122,3 +122,71 @@ canvas {
 @media (max-width: 480px) {
   .dig-hint { display: none; }
 }
+
+/* ------------------------------------------------ queen founding (Phase B) */
+
+.dig-objective {
+  position: absolute;
+  top: calc(max(10px, env(safe-area-inset-top)) + 62px);
+  left: 10px;
+  right: 10px;
+  padding: 7px 11px;
+  border-radius: 8px;
+  border-left: 3px solid #e6b95c;
+  background: rgba(14, 18, 12, 0.55);
+  color: #efe6cd;
+  font-size: 12.5px;
+}
+
+.dig-objective.is-ready {
+  border-left-color: #7fc4a0;
+  color: #d6f2e2;
+}
+
+.dig-found {
+  pointer-events: auto;
+  position: absolute;
+  left: 50%;
+  bottom: max(150px, calc(env(safe-area-inset-bottom) + 150px));
+  transform: translateX(-50%);
+  padding: 14px 20px;
+  border: none;
+  border-radius: 999px;
+  background: #e8d18a;
+  color: #221a08;
+  font: 700 14px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.dig-found[hidden] { display: none; }
+.dig-found:active { transform: translateX(-50%) scale(0.97); }
+
+/* In colony view the dig affordances are gone; only the readout stays. */
+.dig-hud.is-colony .dig-crosshair,
+.dig-hud.is-colony .dig-hint { display: none; }
+
+.dig-toast {
+  position: absolute;
+  left: 50%;
+  top: 42%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(420px, calc(100% - 40px));
+  padding: 16px 18px;
+  border-radius: 12px;
+  background: rgba(12, 15, 10, 0.86);
+  backdrop-filter: blur(8px);
+  color: #f1e9d3;
+  text-align: center;
+  opacity: 1;
+  transition: opacity 1.2s ease;
+}
+
+.dig-toast b { font-size: 15px; color: #f0d68f; }
+.dig-toast span { font-size: 12.5px; line-height: 1.55; color: #c9c2ae; }
+.dig-toast.is-out { opacity: 0; }
