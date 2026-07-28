@@ -26,6 +26,10 @@ jobs:
           node-version: 22
           cache: npm
       - name: Install dependencies
+        # Playwright is a devDependency for the local dig smoke test only; CI never
+        # launches a browser, so skip its ~400 MB postinstall download.
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
         run: npm ci
       - name: Run tests
         run: npm test

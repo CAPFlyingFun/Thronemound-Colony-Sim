@@ -17,3 +17,108 @@ body {
 canvas {
   display: block;
 }
+
+/* ---------------------------------------------------- dig prototype overlay */
+
+.dig-host {
+  position: relative;
+}
+
+.dig-hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  color: #f3ecd8;
+  font: 500 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.dig-readout {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  left: 10px;
+  right: 10px;
+  padding: 8px 11px;
+  border-radius: 9px;
+  background: rgba(14, 18, 12, 0.66);
+  backdrop-filter: blur(6px);
+  font-variant-numeric: tabular-nums;
+}
+
+.dig-readout b {
+  color: #b7d69a;
+  font-weight: 600;
+}
+
+.dig-readout .dim {
+  color: #8f9683;
+  font-size: 11px;
+}
+
+.dig-crosshair {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 16px;
+  height: 16px;
+  margin: -8px 0 0 -8px;
+  border: 1.5px solid rgba(255, 244, 190, 0.85);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+}
+
+.dig-controls {
+  position: absolute;
+  right: max(14px, env(safe-area-inset-right));
+  bottom: max(28px, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.dig-btn {
+  pointer-events: auto;
+  border: none;
+  border-radius: 999px;
+  color: #10140e;
+  font: 700 14px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.04em;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.dig-mode {
+  padding: 11px 16px;
+  background: #e6b95c;
+}
+
+.dig-mode.is-place {
+  background: #7fc4a0;
+}
+
+.dig-action {
+  width: 96px;
+  height: 96px;
+  background: rgba(243, 236, 216, 0.92);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
+
+.dig-action:active {
+  background: #e6b95c;
+  transform: scale(0.96);
+}
+
+.dig-hint {
+  position: absolute;
+  left: 10px;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  max-width: 52%;
+  color: rgba(243, 236, 216, 0.62);
+  font-size: 11px;
+}
+
+@media (max-width: 480px) {
+  .dig-hint { display: none; }
+}

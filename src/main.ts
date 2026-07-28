@@ -1,25 +1,17 @@
-import Phaser from 'phaser';
 import './style.css';
-import { BootScene } from './scenes/BootScene';
-import { MainMenuScene } from './scenes/MainMenuScene';
-import { SurfaceScene } from './scenes/SurfaceScene';
 
-const config: Phaser.Types.Core.GameConfig = {
-  type: Phaser.AUTO,
-  parent: 'app',
-  backgroundColor: '#182016',
-  scale: {
-    mode: Phaser.Scale.RESIZE,
-    autoCenter: Phaser.Scale.CENTER_BOTH,
-    width: window.innerWidth,
-    height: window.innerHeight,
-  },
-  render: {
-    antialias: true,
-    pixelArt: false,
-    roundPixels: false,
-  },
-  scene: [BootScene, MainMenuScene, SurfaceScene],
-};
+const params = new URLSearchParams(window.location.search);
 
-new Phaser.Game(config);
+if (params.get('scene') === 'dig') {
+  // 3D dig prototype. Both scenes are imported lazily so the three.js bundle
+  // and the Phaser bundle never ship together — each route loads only its own.
+  const host = document.getElementById('app');
+  if (host) {
+    host.classList.add('dig-host');
+    void import('./scenes/DigScene').then(({ DigScene }) => {
+      new DigScene(host);
+    });
+  }
+} else {
+  void import('./bootPhaser');
+}
