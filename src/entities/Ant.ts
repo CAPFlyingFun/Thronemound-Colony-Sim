@@ -1,12 +1,13 @@
 import Phaser from 'phaser';
 import { ANT_CASTES, type AntCaste, type AntCasteId } from '../data/antCastes';
+import { takeFood, type FoodNode } from '../game/FoodNode';
 import type { PheromoneField } from '../systems/PheromoneField';
 
 export type AntMode = 'wander' | 'seekFood' | 'carryFood' | 'respondAlarm' | 'defend';
 
 export interface AntContext {
   nest: Phaser.Math.Vector2;
-  foods: Phaser.Math.Vector2[];
+  foods: FoodNode[];
   pheromones: PheromoneField;
   now: number;
   onDeposit: (amount: number) => void;
@@ -21,6 +22,8 @@ export class Ant extends Phaser.GameObjects.Container {
   private nextThinkAt = 0;
   private carriedFood = 0;
   private lastAlarmRelayAt = 0;
+  private lastTrailDropAt = 0;
+  private readonly lastFoodPos = new Phaser.Math.Vector2();
 
   constructor(scene: Phaser.Scene, idNumber: number, casteId: AntCasteId, x: number, y: number) {
     super(scene, x, y);
@@ -65,9 +68,10 @@ export class Ant extends Phaser.GameObjects.Container {
       return;
     }
 
-    let closestFood: Phaser.Math.Vector2 | undefined;
+    let closestFood: FoodNode | undefined;
     let closestDistance = Number.POSITIVE_INFINITY;
     for (const food of context.foods) {
+      if (food.amount <= 0) continue;
       const distance = Phaser.Math.Distance.Between(this.x, this.y, food.x, food.y);
       if (distance < closestDistance && distance <= this.caste.awarenessRadius) {
         closestFood = food;
@@ -78,10 +82,13 @@ export class Ant extends Phaser.GameObjects.Container {
     const foodSignal = context.pheromones.strongest('food', this.x, this.y);
     if (closestFood) {
       this.mode = 'seekFood';
-      this.target.copy(closestFood);
+      this.target.set(closestFood.x, closestFood.y);
     } else if (foodSignal) {
+      // Trail crumbs advertise the FOOD's location (targetX/Y), so hearing any
+      // crumb along a forager's return path recruits you to the source — the
+      // starter sent ants to the crumb itself, which was an empty spot.
       this.mode = 'seekFood';
-      this.target.set(foodSignal.x, foodSignal.y);
+      this.target.set(foodSignal.targetX ?? foodSignal.x, foodSignal.targetY ?? foodSignal.y);
     } else if (Phaser.Math.Distance.Between(this.x, this.y, this.target.x, this.target.y) < 18) {
       this.mode = 'wander';
       this.chooseWanderTarget(context.nest.x, context.nest.y);
@@ -100,20 +107,37 @@ export class Ant extends Phaser.GameObjects.Container {
     }
 
     if (this.mode === 'seekFood') {
-      const foodIndex = context.foods.findIndex((food) => Phaser.Math.Distance.Between(this.x, this.y, food.x, food.y) < 19);
-      if (foodIndex >= 0) {
-        const food = context.foods[foodIndex];
-        if (food) {
-          this.carriedFood = this.caste.carryCapacity;
-          context.pheromones.add({
-            kind: 'food', x: food.x, y: food.y, strength: 1, radius: 230,
-            expiresAt: context.now + 8500, sourceAntId: this.idNumber,
-          });
-          context.foods.splice(foodIndex, 1);
+      const food = context.foods.find((f) => f.amount > 0 && Phaser.Math.Distance.Between(this.x, this.y, f.x, f.y) < 19);
+      if (food) {
+        const taken = takeFood(food, this.caste.carryCapacity);
+        if (taken > 0) {
+          this.carriedFood = taken;
+          this.lastFoodPos.set(food.x, food.y);
+          // Recruit ONLY while food remains — the starter advertised nodes at
+          // the exact moment it deleted them.
+          if (food.amount > 0) {
+            context.pheromones.add({
+              kind: 'food', x: food.x, y: food.y, strength: 1, radius: 230,
+              expiresAt: context.now + 8500, createdAt: context.now,
+              targetX: food.x, targetY: food.y, sourceAntId: this.idNumber,
+            });
+          }
           this.mode = 'carryFood';
           this.target.copy(context.nest);
         }
       }
+    }
+
+    // Return-path trail: a carrying ant lays crumbs pointing back at the food,
+    // so the whole homeward walk becomes a recruitment corridor (the classic
+    // ant-trail mechanic the starter only gestured at).
+    if (this.mode === 'carryFood' && context.now - this.lastTrailDropAt > 480) {
+      this.lastTrailDropAt = context.now;
+      context.pheromones.add({
+        kind: 'food', x: this.x, y: this.y, strength: 0.7, radius: 130,
+        expiresAt: context.now + 6000, createdAt: context.now,
+        targetX: this.lastFoodPos.x, targetY: this.lastFoodPos.y, sourceAntId: this.idNumber,
+      });
     }
 
     if (this.mode === 'carryFood' && Phaser.Math.Distance.Between(this.x, this.y, context.nest.x, context.nest.y) < 28) {

@@ -8,6 +8,11 @@ export interface PheromoneSignal {
   radius: number;
   expiresAt: number;
   sourceAntId?: number;
+  /** Where this signal points (a trail crumb advertises the FOOD, not itself). */
+  targetX?: number;
+  targetY?: number;
+  /** Set on add; lets the renderer fade trails by remaining lifetime. */
+  createdAt?: number;
 }
 
 export class PheromoneField {
@@ -20,7 +25,10 @@ export class PheromoneField {
   decay(now: number): void {
     for (let index = this.signals.length - 1; index >= 0; index--) {
       const signal = this.signals[index];
-      if (!signal || signal.expiresAt <= now || signal.strength <= 0.02) {
+      // Expiry-based removal only. (The old `strength <= 0.02` branch was dead
+      // code — nothing ever reduced strength.) Visual fade comes from
+      // createdAt/expiresAt in the renderer.
+      if (!signal || signal.expiresAt <= now) {
         this.signals.splice(index, 1);
       }
     }

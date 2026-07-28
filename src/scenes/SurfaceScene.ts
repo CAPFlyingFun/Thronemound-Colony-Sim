@@ -3,13 +3,16 @@ import { Ant } from '../entities/Ant';
 import { STARTING_CASTES } from '../data/antCastes';
 import { createColonyState, formatTime, totalPopulation } from '../game/GameState';
 import { PheromoneField } from '../systems/PheromoneField';
+import { createFoodNode, type FoodNode } from '../game/FoodNode';
 
 export class SurfaceScene extends Phaser.Scene {
   private readonly worldSize = 2200;
   private readonly nest = new Phaser.Math.Vector2(1100, 1100);
   private ants: Ant[] = [];
-  private foodPositions: Phaser.Math.Vector2[] = [];
+  private foods: FoodNode[] = [];
   private foodSprites: Phaser.GameObjects.Image[] = [];
+  private pheromoneGfx?: Phaser.GameObjects.Graphics;
+  private pinchDist = 0;
   private pheromones = new PheromoneField();
   private state = createColonyState(STARTING_CASTES);
   private hud?: Phaser.GameObjects.Text;
@@ -26,6 +29,10 @@ export class SurfaceScene extends Phaser.Scene {
     this.cameras.main.setZoom(1);
     this.cameras.main.centerOn(this.nest.x, this.nest.y);
     this.drawWorld();
+    // Trails render UNDER the ants (ants sit at depth=y, well above 5) but over
+    // the ground fill — pheromones are finally something you can see fade.
+    this.pheromoneGfx = this.add.graphics().setDepth(5);
+    this.input.addPointer(1);   // enable a second touch pointer for pinch zoom
     this.spawnFoods(18);
     this.spawnAnts();
     this.createHud();
@@ -42,13 +49,13 @@ export class SurfaceScene extends Phaser.Scene {
       const angle = Phaser.Math.FloatBetween(0, Math.PI * 2);
       const x = this.nest.x + Math.cos(angle) * Phaser.Math.Between(180, 430);
       const y = this.nest.y + Math.sin(angle) * Phaser.Math.Between(180, 430);
-      this.pheromones.add({ kind: 'alarm', x, y, strength: 1, radius: 260, expiresAt: time + 5200 });
+      this.pheromones.add({ kind: 'alarm', x, y, strength: 1, radius: 260, expiresAt: time + 5200, createdAt: time });
       this.flashThreat(x, y);
     }
 
     const context = {
       nest: this.nest,
-      foods: this.foodPositions,
+      foods: this.foods,
       pheromones: this.pheromones,
       now: time,
       onDeposit: (amount: number) => { this.state.food += amount; },
@@ -59,7 +66,8 @@ export class SurfaceScene extends Phaser.Scene {
       ant.move(delta, context);
     }
 
-    this.syncFoodSprites();
+    this.pruneFood();
+    this.renderPheromones(time);
     this.updateHud();
     this.applyDayNightTint();
   }
@@ -112,7 +120,7 @@ export class SurfaceScene extends Phaser.Scene {
         Phaser.Math.Clamp(this.nest.x + Math.cos(angle) * radius, 60, this.worldSize - 60),
         Phaser.Math.Clamp(this.nest.y + Math.sin(angle) * radius, 60, this.worldSize - 60),
       );
-      this.foodPositions.push(position);
+      this.foods.push(createFoodNode(position.x, position.y, Phaser.Math.Between(6, 14)));
       this.foodSprites.push(this.add.image(position.x, position.y, 'food').setDepth(position.y));
     }
   }
@@ -151,11 +159,41 @@ export class SurfaceScene extends Phaser.Scene {
     ]);
   }
 
-  private syncFoodSprites(): void {
-    while (this.foodSprites.length > this.foodPositions.length) {
-      this.foodSprites.pop()?.destroy();
+  // Prune BY INDEX so node k always owns sprite k. The starter spliced eaten
+  // food from the MIDDLE of one array while popping sprites off the END of the
+  // other — after the first pickup, eaten food kept a ghost sprite and real
+  // food at the tail turned invisible (ants visibly "eating grass").
+  private pruneFood(): void {
+    for (let i = this.foods.length - 1; i >= 0; i--) {
+      const node = this.foods[i];
+      if (!node) continue;
+      if (node.amount <= 0) {
+        this.foods.splice(i, 1);
+        this.foodSprites.splice(i, 1)[0]?.destroy();
+      } else {
+        // Shrink the sprite as the node is eaten down — visible depletion.
+        this.foodSprites[i]?.setScale(0.55 + 0.45 * (node.amount / node.initialAmount));
+      }
     }
-    if (this.foodPositions.length < 7 && Phaser.Math.Between(0, 120) === 0) this.spawnFoods(4);
+    if (this.foods.length < 7 && Phaser.Math.Between(0, 120) === 0) this.spawnFoods(4);
+  }
+
+  private renderPheromones(now: number): void {
+    const gfx = this.pheromoneGfx;
+    if (!gfx) return;
+    gfx.clear();
+    for (const s of this.pheromones.snapshot()) {
+      const frac = s.createdAt != null && s.expiresAt > s.createdAt
+        ? Phaser.Math.Clamp((s.expiresAt - now) / (s.expiresAt - s.createdAt), 0, 1)
+        : 1;
+      if (s.kind === 'food') {
+        gfx.fillStyle(0x9fe06a, 0.45 * frac * s.strength);
+        gfx.fillCircle(s.x, s.y, 6);
+      } else if (s.kind === 'alarm') {
+        gfx.lineStyle(2, 0xff6a4a, 0.5 * frac);
+        gfx.strokeCircle(s.x, s.y, 12 + 20 * (1 - frac));
+      }
+    }
   }
 
   private configureCameraControls(): void {
@@ -163,8 +201,23 @@ export class SurfaceScene extends Phaser.Scene {
       this.dragging = true;
       this.lastPointer.set(pointer.x, pointer.y);
     });
-    this.input.on('pointerup', () => { this.dragging = false; });
+    this.input.on('pointerup', () => { this.dragging = false; this.pinchDist = 0; });
     this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
+      // Two fingers down = pinch zoom (the HUD promised it; the starter never
+      // implemented it). One finger = pan, as before.
+      const p1 = this.input.pointer1;
+      const p2 = this.input.pointer2;
+      if (p1.isDown && p2.isDown) {
+        const dist = Phaser.Math.Distance.Between(p1.x, p1.y, p2.x, p2.y);
+        if (this.pinchDist > 0) {
+          const camera = this.cameras.main;
+          camera.setZoom(Phaser.Math.Clamp(camera.zoom * (dist / this.pinchDist), 0.55, 1.7));
+        }
+        this.pinchDist = dist;
+        this.dragging = false;
+        return;
+      }
+      this.pinchDist = 0;
       if (!this.dragging || pointer.isDown === false) return;
       const camera = this.cameras.main;
       camera.scrollX -= (pointer.x - this.lastPointer.x) / camera.zoom;
@@ -188,7 +241,7 @@ export class SurfaceScene extends Phaser.Scene {
     const angle = Phaser.Math.FloatBetween(0, Math.PI * 2);
     const x = this.nest.x + Math.cos(angle) * 160;
     const y = this.nest.y + Math.sin(angle) * 160;
-    this.pheromones.add({ kind: 'alarm', x, y, strength: 1, radius: 310, expiresAt: this.time.now + 6500 });
+    this.pheromones.add({ kind: 'alarm', x, y, strength: 1, radius: 310, expiresAt: this.time.now + 6500, createdAt: this.time.now });
     this.flashThreat(x, y);
   }
 
