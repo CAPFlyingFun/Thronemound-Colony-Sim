@@ -16,7 +16,8 @@ never load each other's bundle.
 | Dig / place | hold **ACTION** | hold left mouse button |
 | Toggle mode | tap **REMOVE / ADD** | `E` or `Tab` |
 | Jump | tap **JUMP** | `Space` |
-| Climb | push into a wall | push into a wall |
+| Grip / release wall | **CLIMB / RELEASE** button | `G` |
+| Auto-climb | push into a wall | push into a wall |
 | Step up | automatic | automatic |
 
 ## Scale
@@ -228,7 +229,7 @@ centre point. Measured from the floor of a **spherical** cavity you only get
 queen into it. Founding otherwise needs 40 voxels of hand-digging, which makes
 both manual iteration and the smoke test impractical.
 
-## Surface walking (module landed, not yet wired)
+## Surface walking
 
 `SurfaceFrame.ts` is the foundation for ant wall-walking. In a voxel world
 every surface is an axis-aligned cube face, so "up" is always one of **six**
@@ -253,6 +254,22 @@ Two rules keep corners from misbehaving:
 
 Fully unit tested, including that no code path can produce a non-axis
 orientation.
+
+**Wired in as of now.** Walk into a wall and the button changes from JUMP to
+CLIMB; press it (or `G`) and the ant grips the wall — gravity, the collision
+box, the movement plane and the camera all rotate into that face's frame.
+Press again to RELEASE. One context-sensitive button rather than three,
+because screen space is the scarce resource on a phone.
+
+The camera **slerps** into the new frame and swings slightly outward mid-turn,
+so it reads as the body crawling around the edge rather than the world spinning
+about a stationary head. Physics still snaps between the six discrete frames.
+
+**Ceilings are locked** (`CEILING_UP`). The maths handles all six directions,
+but inverted movement, input expectations and release behaviour each need their
+own pass — walls should feel excellent first.
+
+`?debug=1` shows the live `up` alongside position and speed.
 
 ## Not yet
 

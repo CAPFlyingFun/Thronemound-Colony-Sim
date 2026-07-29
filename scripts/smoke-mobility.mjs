@@ -132,5 +132,68 @@ const ok = (m) => console.log(`  ok  ${m}`);
   await page.close();
 }
 
+// ------------------------------------------------------- surface walking
+{
+  const page = await browser.newPage({ viewport: { width: 900, height: 1400 }, deviceScaleFactor: 1 });
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.goto(`${BASE}?scene=dig&debug=den`, { waitUntil: 'networkidle' });
+  await page.waitForSelector('canvas');
+  await page.waitForTimeout(2500);
+
+  const state = async () => {
+    const t = (await page.textContent('#dig-readout'))?.replace(/\s+/g, ' ') ?? '';
+    return {
+      up: /up (\w+)/.exec(t)?.[1] ?? null,
+      pos: (/pos ([-\d.]+),([-\d.]+),([-\d.]+)/.exec(t) ?? []).slice(1).map(Number),
+    };
+  };
+  const button = async () => ((await page.textContent('.dig-jump')) ?? '').trim();
+
+  const start = await state();
+  if (start.up !== 'pos_y') fail(`should start world-up, got ${start.up}`);
+  else ok(`starts grounded, up = ${start.up}`);
+  if (!/JUMP/.test(await button())) fail(`button should offer JUMP in the open, got "${await button()}"`);
+  else ok('button offers JUMP with no wall in reach');
+
+  // Walk into the chamber wall.
+  await page.keyboard.down('KeyW');
+  await page.waitForTimeout(1400);
+  await page.keyboard.up('KeyW');
+  await page.waitForTimeout(600);
+  if (!/CLIMB/.test(await button())) fail(`button should offer CLIMB at a wall, got "${await button()}"`);
+  else ok('button switches to CLIMB when a wall is in reach');
+
+  await page.keyboard.press('KeyG');
+  await page.waitForTimeout(900);
+  const gripped = await state();
+  if (gripped.up === 'pos_y') fail('grip did not change orientation');
+  else ok(`gripped the wall, up = ${gripped.up}`);
+  if (gripped.up === 'neg_y') fail('attached to a ceiling — those are meant to be locked');
+  else ok('did not attach to a ceiling');
+  if (!/RELEASE/.test(await button())) fail(`button should offer RELEASE while attached, got "${await button()}"`);
+  else ok('button offers RELEASE while attached');
+
+  await page.screenshot({ path: `${OUT}-4-gripped.png` });
+
+  // Attached, gravity should act along the new -up, not world -Y.
+  const beforeDrift = await state();
+  await page.waitForTimeout(1200);
+  const afterDrift = await state();
+  if (Math.abs(afterDrift.pos[1] - beforeDrift.pos[1]) > 0.5) {
+    fail(`fell in world Y while attached to a wall (${beforeDrift.pos[1]} -> ${afterDrift.pos[1]})`);
+  } else ok('does not fall in world Y while wall-attached');
+
+  await page.keyboard.press('KeyG');
+  await page.waitForTimeout(900);
+  const released = await state();
+  if (released.up !== 'pos_y') fail(`release should restore world up, got ${released.up}`);
+  else ok('release restores world up');
+
+  if (errors.length) fail(`page errors: ${errors.join(' | ')}`);
+  else ok('no page errors');
+  await page.close();
+}
+
 await browser.close();
 console.log(process.exitCode ? '\nMOBILITY SMOKE FAILED' : '\nMOBILITY SMOKE PASSED');

@@ -20,6 +20,10 @@ import { DigSession } from '../voxel/DigSession';
 import { createVoxelMaterial, type VoxelMaterialBundle } from '../voxel/voxelMaterial';
 import { DEN_MIN_CHAMBER, DEN_MIN_DEPTH, QueenFounding } from '../voxel/QueenFounding';
 import { DEFAULT_BANDS, approach, clampStickOrigin, speedForStick, stickVector } from '../voxel/locomotion';
+import {
+  WORLD_UP, applyOrientation, attachableWall, axisVector, createSurfaceState,
+  evaluateEdge, supportBelow, tickLock, type AxisDirection,
+} from '../voxel/SurfaceFrame';
 
 const WORLD_SIZE = 128;
 const SURFACE_Y = 96;
@@ -64,6 +68,18 @@ const CLIMB_LEAN = 0.07;
 /** Amplitude and rate of the crawl sway while climbing. */
 const CLIMB_SWAY = 0.025;
 const CLIMB_SWAY_HZ = 2.4;
+/** Seconds the edge-arc bulge lasts. */
+const CAMERA_TURN_TIME = 0.26;
+/** Exponential rate the camera orientation chases the physics frame. */
+const CAMERA_TURN_RATE = 13;
+/** How far the eye swings out while rounding an edge, in voxels. */
+const EDGE_ARC = 0.55;
+/**
+ * Ceilings are locked for now. The maths handles all six directions, but
+ * inverted movement, input expectations and release behaviour all need their
+ * own pass — walls should feel excellent first.
+ */
+const CEILING_UP: AxisDirection = 'neg_y';
 const REACH = 5.5;
 
 type Mode = 'dig' | 'place';
@@ -83,7 +99,15 @@ export class DigScene {
   private readonly headlamp: THREE.PointLight;
 
   private readonly position = new THREE.Vector3();
-  private readonly velocity = new THREE.Vector3();
+  private readonly surface = createSurfaceState();
+  /** Speed along `up`; replaces a world-Y velocity now that up moves. */
+  private upVelocity = 0;
+  /** Speed in the surface plane. */
+  private planarSpeed = 0;
+  private readonly cameraQuat = new THREE.Quaternion();
+  /** 1 -> 0 while an edge turn plays out. */
+  private cameraTurn = 0;
+  private toastCooldown = 0;
   private yaw = 0;
   private pitch = 0;
   private grounded = false;
@@ -110,7 +134,6 @@ export class DigScene {
   private moveZ = 0;
   private stickMagnitude = 0;
   private keyboardDriving = false;
-  private readonly horizontal = new THREE.Vector2();
   private sprinting = false;
   private jumpQueued = false;
 
@@ -305,7 +328,7 @@ export class DigScene {
 
     const jumpDown = (event: Event) => {
       event.preventDefault();
-      this.jumpQueued = true;
+      this.toggleGrip();
     };
     this.jumpButton.addEventListener('pointerdown', jumpDown);
     this.cleanups.push(() => this.jumpButton.removeEventListener('pointerdown', jumpDown));
@@ -368,6 +391,21 @@ export class DigScene {
     this.stick.style.top = `${this.moveOrigin.y}px`;
     this.stickKnob.style.transform =
       `translate(-50%, -50%) translate(${this.moveX * STICK_RADIUS}px, ${this.moveZ * STICK_RADIUS}px)`;
+  }
+
+  /**
+   * One button rather than three. Screen space is the scarce resource on a
+   * phone, especially in landscape, so the label changes with context instead
+   * of the layout changing under the thumb.
+   */
+  private refreshGripButton(): void {
+    if (this.colonyView) return;
+    const attached = this.surface.mode === 'attached';
+    const { forward } = this.surfaceBasis();
+    const wall = attached ? null : attachableWall(this.world, this.position, this.surface, forward);
+    const label = attached ? '\u2934 RELEASE' : wall ? '\u{1F9D7} CLIMB' : '\u2191 JUMP';
+    if (this.jumpButton.textContent !== label) this.jumpButton.textContent = label;
+    this.jumpButton.classList.toggle('is-grip', attached || wall !== null);
   }
 
   private setMode(mode: Mode): void {
@@ -533,6 +571,7 @@ export class DigScene {
         case 'KeyD': case 'ArrowRight': this.moveX = 1; this.keyboardDriving = true; break;
         case 'ShiftLeft': case 'ShiftRight': this.sprinting = true; break;
         case 'Space': this.jumpQueued = true; event.preventDefault(); break;
+        case 'KeyG': this.toggleGrip(); event.preventDefault(); break;
         case 'KeyE': case 'Tab':
           this.setMode(this.mode === 'dig' ? 'place' : 'dig');
           event.preventDefault();
@@ -569,17 +608,74 @@ export class DigScene {
     return isSolid(this.world.get(Math.floor(x), Math.floor(y), Math.floor(z)));
   }
 
-  /** Does the ant's box overlap any solid voxel at this position? */
-  private collides(at: THREE.Vector3): boolean {
-    const minX = Math.floor(at.x - BODY_RADIUS);
-    const maxX = Math.floor(at.x + BODY_RADIUS);
-    const minY = Math.floor(at.y);
-    const maxY = Math.floor(at.y + EYE_HEIGHT);
-    const minZ = Math.floor(at.z - BODY_RADIUS);
-    const maxZ = Math.floor(at.z + BODY_RADIUS);
-    for (let x = minX; x <= maxX; x++) {
-      for (let y = minY; y <= maxY; y++) {
-        for (let z = minZ; z <= maxZ; z++) {
+  // ------------------------------------------------------- surface frame
+
+  /** World axis letter that the current `up` runs along. */
+  private upAxis(): 'x' | 'y' | 'z' {
+    const u = this.surface.up;
+    return u.endsWith('_x') ? 'x' : u.endsWith('_y') ? 'y' : 'z';
+  }
+
+  private upSign(): number {
+    return this.surface.up.startsWith('pos') ? 1 : -1;
+  }
+
+  private upVec(): THREE.Vector3 {
+    const v = axisVector(this.surface.up);
+    return new THREE.Vector3(v.x, v.y, v.z);
+  }
+
+  /**
+   * A deterministic reference right-vector for each `up`, so yaw means the same
+   * thing every time you attach to a given face. Forward falls out as up x
+   * right, which keeps the basis right-handed in all six frames.
+   */
+  private referenceRight(): THREE.Vector3 {
+    const axis = this.upAxis();
+    return axis === 'y' ? new THREE.Vector3(1, 0, 0)
+      : axis === 'x' ? new THREE.Vector3(0, 1, 0)
+        : new THREE.Vector3(1, 0, 0);
+  }
+
+  /** Movement basis in the plane perpendicular to `up`, rotated by yaw. */
+  private surfaceBasis(): { forward: THREE.Vector3; right: THREE.Vector3 } {
+    const up = this.upVec();
+    const r0 = this.referenceRight();
+    const f0 = up.clone().cross(r0).normalize();
+    const cos = Math.cos(this.yaw);
+    const sin = Math.sin(this.yaw);
+    const forward = f0.clone().multiplyScalar(cos).addScaledVector(r0, -sin).normalize();
+    const right = r0.clone().multiplyScalar(cos).addScaledVector(f0, sin).normalize();
+    return { forward, right };
+  }
+
+  /**
+   * Does the ant's box overlap solid voxels here?
+   *
+   * The box is axis-aligned in the CURRENT frame: it runs EYE_HEIGHT along
+   * `up` from the contact point, and BODY_RADIUS either side on the two
+   * tangent axes. It is never interpolated through an in-between orientation —
+   * an axis-aligned box at 43 degrees fits nowhere, and allowing one would
+   * throw away the entire six-direction simplification.
+   */
+  private collides(at: THREE.Vector3, up = this.surface.up): boolean {
+    const axis = up.endsWith('_x') ? 'x' : up.endsWith('_y') ? 'y' : 'z';
+    const sign = up.startsWith('pos') ? 1 : -1;
+    const lo = { x: 0, y: 0, z: 0 };
+    const hi = { x: 0, y: 0, z: 0 };
+    for (const a of ['x', 'y', 'z'] as const) {
+      if (a === axis) {
+        const reach = EYE_HEIGHT * sign;
+        lo[a] = at[a] + Math.min(0, reach);
+        hi[a] = at[a] + Math.max(0, reach);
+      } else {
+        lo[a] = at[a] - BODY_RADIUS;
+        hi[a] = at[a] + BODY_RADIUS;
+      }
+    }
+    for (let x = Math.floor(lo.x); x <= Math.floor(hi.x); x++) {
+      for (let y = Math.floor(lo.y); y <= Math.floor(hi.y); y++) {
+        for (let z = Math.floor(lo.z); z <= Math.floor(hi.z); z++) {
           if (isSolid(this.world.get(x, y, z))) return true;
         }
       }
@@ -593,9 +689,10 @@ export class DigScene {
     const next = this.position.clone();
     next[axis] += amount;
     if (this.collides(next)) {
-      if (axis === 'y') {
-        if (amount < 0) this.grounded = true;
-        this.velocity.y = 0;
+      if (axis === this.upAxis()) {
+        // Moving against `up` and blocked means we landed on our surface.
+        if (amount * this.upSign() < 0) this.grounded = true;
+        this.upVelocity = 0;
       }
       return false;
     }
@@ -604,118 +701,152 @@ export class DigScene {
   }
 
   /**
-   * Horizontal move with a step-up. Walking into a rise of one voxel lifts the
-   * ant over it, which is what turns a dug staircase into a usable ramp — no
-   * sloped geometry required, and the nest keeps looking like a real nest
-   * (near-vertical shafts) rather than being forced into 45 degree corridors.
+   * Move along the surface plane with a step-up. Walking into a rise of one
+   * voxel lifts the ant over it, which is what turns a dug staircase into a
+   * usable ramp — no sloped geometry required.
    */
-  private moveHorizontal(axis: 'x' | 'z', amount: number): boolean {
+  private moveOnSurface(axis: 'x' | 'y' | 'z', amount: number): boolean {
     if (this.tryAxis(axis, amount)) return true;
-    const savedY = this.position.y;
-    const lifted = this.position.clone();
-    lifted.y += STEP_HEIGHT;
+    const up = this.upVec();
+    const saved = this.position.clone();
+    const lifted = this.position.clone().addScaledVector(up, STEP_HEIGHT);
     if (!this.collides(lifted)) {
-      this.position.y = lifted.y;
+      this.position.copy(lifted);
       if (this.tryAxis(axis, amount)) return true;
-      this.position.y = savedY;
+      this.position.copy(saved);
     }
-    // Blocked: the wall faces back along the way we were heading.
     this.wallNormal.set(0, 0, 0);
     this.wallNormal[axis] = amount > 0 ? -1 : 1;
     this.hasWall = true;
     return false;
   }
 
-  private updatePlayer(dt: number): void {
-    const forward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
-    const right = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+  /** Grip the wall in front, or let go of the one we're on. */
+  private toggleGrip(): void {
+    if (this.surface.mode === 'attached') {
+      applyOrientation(this.surface, WORLD_UP, null);
+      this.upVelocity = 0;
+      this.beginCameraTurn();
+      return;
+    }
+    const { forward } = this.surfaceBasis();
+    const wall = attachableWall(this.world, this.position, this.surface, forward);
+    if (!wall) {
+      if (this.grounded) {
+        this.upVelocity = JUMP_SPEED;
+        this.grounded = false;
+      }
+      return;
+    }
+    applyOrientation(this.surface, wall, supportBelow(this.world, this.position, wall));
+    this.upVelocity = 0;
+    this.beginCameraTurn();
+  }
 
+  private beginCameraTurn(): void {
+    this.cameraTurn = 1;
+  }
+
+  private updatePlayer(dt: number): void {
+    tickLock(this.surface, dt * 1000);
+
+    const { forward, right } = this.surfaceBasis();
     const wish = new THREE.Vector3()
       .addScaledVector(forward, -this.moveZ)
       .addScaledVector(right, this.moveX);
-    // Direction and magnitude are separate: direction comes from the stick
-    // angle, speed from how far it's pushed. A keyboard has no analogue axis,
-    // so it selects a band instead of always running flat out.
     const magnitude = this.keyboardDriving
       ? (this.sprinting ? 1 : KEY_MAGNITUDE)
       : Math.min(1, this.stickMagnitude);
     if (wish.lengthSq() > 0) wish.normalize();
     const targetSpeed = speedForStick(magnitude, DEFAULT_BANDS);
 
-    // Accelerate toward the wish velocity rather than snapping to it — this is
-    // what gives the ant any sense of mass at all.
-    const targetX = wish.x * targetSpeed;
-    const targetZ = wish.z * targetSpeed;
-    this.horizontal.set(
-      approach(this.horizontal.x, targetX, WALK_ACCEL, WALK_DECEL, dt),
-      approach(this.horizontal.y, targetZ, WALK_ACCEL, WALK_DECEL, dt),
-    );
+    this.planarSpeed = approach(this.planarSpeed, targetSpeed, WALK_ACCEL, WALK_DECEL, dt);
+    const step = wish.clone().multiplyScalar(this.planarSpeed * dt);
     const pressing = targetSpeed > 0.01;
 
     if (this.jumpQueued && this.grounded) {
-      this.velocity.y = JUMP_SPEED;
+      this.upVelocity = JUMP_SPEED;
       this.grounded = false;
     }
     this.jumpQueued = false;
 
-    // Horizontal first, so we know whether a wall is in the way before deciding
-    // between falling and climbing.
-    const movedX = this.moveHorizontal('x', this.horizontal.x * dt);
-    const movedZ = this.moveHorizontal('z', this.horizontal.y * dt);
-    const wallAhead = pressing && (!movedX || !movedZ);
-    // Kill the component that hit a wall so we don't keep integrating speed
-    // into a surface we can't enter.
-    if (!movedX) this.horizontal.x = 0;
-    if (!movedZ) this.horizontal.y = 0;
+    const upAxis = this.upAxis();
+    const planarAxes = (['x', 'y', 'z'] as const).filter((a) => a !== upAxis);
+    let blocked = false;
+    for (const axis of planarAxes) {
+      if (!this.moveOnSurface(axis, step[axis])) {
+        blocked = true;
+        this.planarSpeed = 0;
+      }
+    }
+    const wallAhead = pressing && blocked;
 
-    /**
-     * Ants climb. Pushing into a wall walks straight up it, which is both what
-     * real ants do and the thing that makes a vertical shaft survivable — a
-     * 1.44 voxel jump can't get you out of a hole you dug three deep.
-     */
-    // Only climb when there is somewhere to climb TO. Without this check the
-    // ant pins against a ceiling and hovers there — velocity is cancelled by
-    // the blocked move but she never becomes grounded, so she can neither rise
-    // nor fall. Refusing to climb lets gravity drop her back to the floor,
-    // where she can walk to the shaft instead.
-    const headroom = this.position.clone();
-    headroom.y += 0.5;
-    this.climbing = wallAhead && !this.collides(headroom);
+    const headroom = this.position.clone().addScaledVector(this.upVec(), 0.5);
+    this.climbing = wallAhead && !this.collides(headroom) && this.surface.mode !== 'attached';
     if (this.climbing) {
-      // Ease into the climb. Jumping straight to full speed was most of why
-      // this read as flying rather than crawling.
       this.climbRamp = Math.min(1, this.climbRamp + dt / CLIMB_RAMP);
       this.climbPhase += dt * CLIMB_SWAY_HZ * Math.PI * 2;
-      this.velocity.y = CLIMB_SPEED * this.climbRamp;
+      this.upVelocity = CLIMB_SPEED * this.climbRamp;
     } else {
       this.climbRamp = Math.max(0, this.climbRamp - dt / CLIMB_RAMP);
-      this.velocity.y -= GRAVITY * dt;
-      this.velocity.y = Math.max(this.velocity.y, TERMINAL_VELOCITY);
+      this.upVelocity -= GRAVITY * dt;
+      this.upVelocity = Math.max(this.upVelocity, TERMINAL_VELOCITY);
     }
     if (!wallAhead) this.hasWall = false;
 
     this.grounded = false;
-    this.tryAxis('y', this.velocity.y * dt);
+    this.tryAxis(upAxis, this.upVelocity * dt * this.upSign());
 
-    // Never let a mis-step drop the ant out of the volume.
+    // Crossing onto an adjacent face. Proximity alone never commits — movement
+    // has to point across the edge too, which is what lets you stand still low
+    // on a wall without being yanked onto the floor.
+    if (this.surface.mode === 'attached' || this.surface.up !== WORLD_UP) {
+      const decision = evaluateEdge(this.world, this.position, this.surface, wish, magnitude);
+      if (decision.commit && decision.up && decision.up !== CEILING_UP) {
+        applyOrientation(this.surface, decision.up, supportBelow(this.world, this.position, decision.up));
+        this.beginCameraTurn();
+      }
+    }
+    this.surface.support = supportBelow(this.world, this.position, this.surface.up);
+
     this.position.y = THREE.MathUtils.clamp(this.position.y, 1, WORLD_SIZE - 2);
     this.position.x = THREE.MathUtils.clamp(this.position.x, 1, WORLD_SIZE - 1);
     this.position.z = THREE.MathUtils.clamp(this.position.z, 1, WORLD_SIZE - 1);
 
-    this.camera.position.set(this.position.x, this.position.y + EYE_HEIGHT, this.position.z);
-    this.camera.rotation.set(0, 0, 0);
-    this.camera.rotateY(this.yaw);
+    this.updateCamera(dt);
+  }
+
+  /**
+   * Physics snaps between discrete frames; the camera eases. A 90 degree
+   * first-person flip is among the most nausea-inducing things a game can do,
+   * so the orientation slerps and the camera also bulges slightly outward
+   * mid-turn — that reads as the body crawling AROUND the edge rather than the
+   * world spinning about a stationary head.
+   */
+  private updateCamera(dt: number): void {
+    const up = this.upVec();
+    const { forward, right } = this.surfaceBasis();
+    const basis = new THREE.Matrix4().makeBasis(right, up, forward.clone().negate());
+    const target = new THREE.Quaternion().setFromRotationMatrix(basis);
+
+    this.cameraTurn = Math.max(0, this.cameraTurn - dt / CAMERA_TURN_TIME);
+    const blend = 1 - Math.exp(-CAMERA_TURN_RATE * dt);
+    this.cameraQuat.slerp(target, blend);
+
+    const eye = this.position.clone().addScaledVector(up, EYE_HEIGHT);
+    if (this.cameraTurn > 0) {
+      // Peak the bulge mid-turn so the arc reads as travel over the edge.
+      const arc = Math.sin(this.cameraTurn * Math.PI) * EDGE_ARC;
+      eye.addScaledVector(up, arc);
+    }
+    this.camera.position.copy(eye);
+    this.camera.quaternion.copy(this.cameraQuat);
     this.camera.rotateX(this.pitch);
 
-    // Visual proof you're gripping something: lean into the wall, and sway as
-    // the legs cycle. Without a cue like this, ascending a sheer face is
-    // indistinguishable from levitating. Eased so it never snaps.
     let targetRoll = 0;
     if (this.climbing && this.hasWall) {
-      const right = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
-      const lateral = this.wallNormal.dot(right); // -1..1, which side the wall is on
-      targetRoll = lateral * CLIMB_LEAN + Math.sin(this.climbPhase) * CLIMB_SWAY;
-      targetRoll *= this.climbRamp;
+      const lateral = this.wallNormal.dot(right);
+      targetRoll = (lateral * CLIMB_LEAN + Math.sin(this.climbPhase) * CLIMB_SWAY) * this.climbRamp;
     }
     this.cameraRoll = THREE.MathUtils.lerp(this.cameraRoll, targetRoll, 1 - Math.exp(-10 * dt));
     if (Math.abs(this.cameraRoll) > 1e-4) this.camera.rotateZ(this.cameraRoll);
@@ -882,7 +1013,7 @@ export class DigScene {
       <b>Carrying</b> ${this.session.carried}/${this.session.capacity} &nbsp;
       <b>Mound</b> ${this.world.deposited} &nbsp;
       <b>Dug</b> ${this.world.excavated}<br>
-      <span class="dim">${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 spd ${this.horizontal.length().toFixed(2)} \u00b7 ` : ''}${this.climbing ? '\u{1F9D7} climbing \u00b7 ' : ''}Target: ${targetName}${bar}${chamber} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
+      <span class="dim">${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 ` : ''}${this.climbing ? '\u{1F9D7} climbing \u00b7 ' : ''}Target: ${targetName}${bar}${chamber} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
     `;
   }
 
@@ -916,7 +1047,7 @@ export class DigScene {
       this.updateAction(dt);
     }
     this.drainDirty();
-    if (++this.hudCounter % 6 === 0) this.updateHud();
+    if (++this.hudCounter % 6 === 0) { this.updateHud(); this.refreshGripButton(); }
 
     this.renderer.render(this.scene, this.camera);
   };
