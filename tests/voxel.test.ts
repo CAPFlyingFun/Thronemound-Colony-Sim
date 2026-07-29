@@ -4,6 +4,7 @@ import {
   isSolid, layeredGenerator, materialOf,
 } from '../src/voxel/VoxelWorld';
 import { FACES, meshChunk } from '../src/voxel/mesher';
+import { CELL_COUNT, CHIP_CELLS, MAX_REMOVED, buildFracture, chipMeshData, erosionAt, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
@@ -901,5 +902,146 @@ describe('SurfaceFrame', () => {
     it('is finite even looking straight along an axis', () => {
       expect(rollBetween({ x: 0, y: 1, z: 0 }, WORLD_UP, 'pos_z')).toBe(0);
     });
+  });
+});
+
+describe('fracture', () => {
+  const S = SURFACE;
+
+  it('gives the same voxel the same seed every time', () => {
+    expect(hashVoxel(12, 34, 56, TOPSOIL)).toBe(hashVoxel(12, 34, 56, TOPSOIL));
+    expect(buildFracture(12, 34, 56, TOPSOIL).seed).toBe(buildFracture(12, 34, 56, TOPSOIL).seed);
+    // Same cell, different soil, is a different fracture — which matters where
+    // strata meet and one column changes material partway down.
+    expect(hashVoxel(12, 34, 56, TOPSOIL)).not.toBe(hashVoxel(12, 34, 56, CLAY));
+  });
+
+  it('gives neighbouring voxels different patterns', () => {
+    // Not "always" — 27! orderings means collisions are possible in principle.
+    // What matters is that a wall of soil doesn't chip in lockstep.
+    const seen = new Set<string>();
+    for (let x = 0; x < 6; x++) {
+      for (let z = 0; z < 6; z++) {
+        seen.add(buildFracture(x, S, z, TOPSOIL).order.join(','));
+      }
+    }
+    expect(seen.size).toBe(36);
+  });
+
+  it('never restores soil as progress rises', () => {
+    for (const [x, z] of [[3, 4], [17, 2], [40, 61]] as const) {
+      const pattern = buildFracture(x, S, z, TOPSOIL);
+      let previous = 0;
+      let goneBefore = new Set<number>();
+      for (let p = 0; p <= 1.0001; p += 0.01) {
+        const removed = removedAt(pattern, p);
+        expect(removed).toBeGreaterThanOrEqual(previous);
+        const gone = new Set(Array.from(pattern.order.slice(0, removed)));
+        // Superset, not merely a bigger count: a crumb can never come back.
+        for (const cell of goneBefore) expect(gone.has(cell)).toBe(true);
+        previous = removed;
+        goneBefore = gone;
+      }
+    }
+  });
+
+  it('is a perfect intact cube at zero progress', () => {
+    const pattern = buildFracture(8, S, 9, TOPSOIL);
+    expect(removedAt(pattern, 0)).toBe(0);
+    expect(erosionAt(pattern, 0)).toBe(0);
+
+    const data = chipMeshData(pattern, 8, S, 9, 0)!;
+    expect(data).not.toBeNull();
+    // Every internal face culled: only the 9 cell-faces per side survive.
+    expect(data.quadCount).toBe(6 * CHIP_CELLS * CHIP_CELLS);
+    // And it occupies exactly the original voxel, so an untouched target is
+    // indistinguishable from ordinary terrain.
+    for (let i = 0; i < data.positions.length; i += 3) {
+      expect(data.positions[i]!).toBeGreaterThanOrEqual(8 - 1e-6);
+      expect(data.positions[i]!).toBeLessThanOrEqual(9 + 1e-6);
+      expect(data.positions[i + 1]!).toBeGreaterThanOrEqual(S - 1e-6);
+      expect(data.positions[i + 2]!).toBeLessThanOrEqual(10 + 1e-6);
+    }
+  });
+
+  it('visibly loses volume well before the dig finishes', () => {
+    // The whole point: no more sitting perfect and then vanishing.
+    const pattern = buildFracture(21, S, 5, TOPSOIL);
+    expect(removedAt(pattern, 0.5)).toBeGreaterThan(0);
+    const early = chipMeshData(pattern, 21, S, 5, 0.05)!;
+    const late = chipMeshData(pattern, 21, S, 5, 0.85)!;
+    // Fewer crumbs standing late on. Quad count rises as they separate, so
+    // compare the thing that actually matters — how much soil is left.
+    expect(removedAt(pattern, 0.85)).toBeGreaterThan(removedAt(pattern, 0.05));
+    expect(early.quadCount).toBeGreaterThan(0);
+    expect(late.quadCount).toBeGreaterThan(0);
+  });
+
+  it('always leaves a crumb for the dig logic to finish', () => {
+    // The visual must never make the voxel vanish on its own — removing it is
+    // DigSession's call, not the renderer's.
+    for (const [x, z] of [[1, 1], [9, 14], [33, 7]] as const) {
+      const pattern = buildFracture(x, S, z, TOPSOIL);
+      expect(removedAt(pattern, 1)).toBeLessThanOrEqual(MAX_REMOVED);
+      expect(chipMeshData(pattern, x, S, z, 1)).not.toBeNull();
+    }
+  });
+
+  it('fires chip events only when soil actually breaks', () => {
+    const pattern = buildFracture(5, S, 5, TOPSOIL);
+    // Nothing between two points with no crumb boundary between them.
+    expect(eventsBetween(pattern, 0, 0)).toEqual([]);
+    const all = eventsBetween(pattern, 0, 1);
+    expect(all.some((e) => e.kind === 'DIG_RELEASE')).toBe(true);
+    expect(all.some((e) => e.kind === 'DIG_CRACK')).toBe(true);
+    // And the release fires once, at the end, not repeatedly.
+    expect(eventsBetween(pattern, 1, 1).length).toBe(0);
+  });
+
+  it('varies the feel by soil without needing separate systems', () => {
+    // Clay lets go in slabs, sand trickles.
+    expect(feelFor(CLAY).clumping).toBeGreaterThan(feelFor(SAND).clumping);
+    expect(feelFor(SAND).dust).toBeGreaterThan(feelFor(CLAY).dust);
+  });
+
+  it('stays cheap enough for a phone', () => {
+    // Worst case is every crumb standing and separated: 27 x 6 quads.
+    let worst = 0;
+    for (let p = 0; p <= 1; p += 0.02) {
+      const data = chipMeshData(buildFracture(2, S, 3, TOPSOIL), 2, S, 3, p);
+      worst = Math.max(worst, data?.quadCount ?? 0);
+    }
+    expect(worst).toBeLessThanOrEqual(CELL_COUNT * 6);
+  });
+
+  it('cannot be started on bedrock, so bedrock never gets a visual', () => {
+    // The scene builds a fracture only for a target DigSession accepted, and
+    // it refuses bedrock outright.
+    const world = makeWorld();
+    const session = new DigSession(world);
+    expect(session.beginDig(10, 2, 10).kind).toBe('bedrock');
+    expect(session.digging).toBeNull();
+  });
+
+  it('tracks exactly one target, so only one voxel is ever chipped', () => {
+    const world = makeWorld();
+    const session = new DigSession(world);
+    session.beginDig(20, SURFACE, 20);
+    expect(session.digging).toEqual({ x: 20, y: SURFACE, z: 20 });
+    session.beginDig(21, SURFACE, 20);
+    expect(session.digging).toEqual({ x: 21, y: SURFACE, z: 20 });
+  });
+
+  it('leaves soil conservation untouched — particles are cosmetic', () => {
+    // Chipping is a view of the dig. It has no route to the world or the load,
+    // so a full dig still moves exactly one voxel.
+    const world = makeWorld();
+    const session = new DigSession(world);
+    session.beginDig(20, SURFACE, 20);
+    session.tickDig(999);
+    expect(world.excavated).toBe(1);
+    expect(session.carried).toBe(1);
+    session.place(20, SURFACE + 2, 20);
+    expect(world.excavated).toBe(world.deposited);
   });
 });

@@ -78,6 +78,7 @@ const hud = async () => {
     seconds: Number(/([\d.]+)s\/cube/.exec(t)?.[1] ?? '0'),
     speed: Number(/spd ([\d.]+)/.exec(t)?.[1] ?? '0'),
     target: /Target: ([^ ·]+)/.exec(t)?.[1] ?? '',
+    chip: Number(/chip (\d+)\/\d+/.exec(t)?.[1] ?? 'NaN'),
   };
 };
 /**
@@ -118,10 +119,25 @@ await tap(450, 800);
 if (!await untilLabel('CANCEL')) fail('tapping soil did not start a dig');
 else ok('tap starts a dig and the button offers CANCEL');
 
+/*
+ * The voxel must come apart while she works, not sit perfect and vanish.
+ * `chip N/27` counts the crumbs still standing on the locked target: it only
+ * exists while something is being chipped, so it doubles as proof the
+ * temporary visual is created and later destroyed.
+ */
+const chipping = await until('the target to start crumbling', (s) => s.chip < 27, 60000);
+if (!(chipping.chip < 27)) fail(`target never lost a crumb — "${chipping.text}"`);
+else ok(`target is visibly chipping (${chipping.chip}/27 crumbs left)`);
+
 // 4. Tapping the same cube again cancels it, discarding progress.
 await tap(450, 800);
 if (!await untilLabel('DIG')) fail('tapping the cube again did not cancel');
 else ok('tapping the same cube again cancels');
+// Cancelling must take the temporary crumb mesh away and put the intact voxel
+// back — no `chip` readout means no active visual.
+const cleared = await until('the chipped visual to be torn down', (s) => Number.isNaN(s.chip), 20000);
+if (!Number.isNaN(cleared.chip)) fail(`cancel left a chipped visual behind — "${cleared.text}"`);
+else ok('cancelling removes the temporary chipped visual');
 const afterCancel = await hud();
 if (afterCancel.dug !== 0) fail(`a cancelled dig still removed soil: dug ${afterCancel.dug}`);
 else ok('a cancelled dig removes nothing');
@@ -139,6 +155,13 @@ if (dug.carrying !== dug.dug) fail(`spoil not conserved: dug ${dug.dug}, carryin
 else ok('soil conserved: everything dug is being carried');
 if (dug.seconds > 4.9) fail(`practice did not advance after a completed dig (${dug.seconds}s)`);
 else ok(`practice advanced: now ${dug.seconds}s/cube`);
+
+// Completing must also tear it down, leaving the normal terrain path to draw
+// the (now removed) voxel. A leftover crumb cluster would float in the hole.
+const afterDig = await until('the chipped visual to be torn down on completion',
+  (s) => Number.isNaN(s.chip), 20000);
+if (!Number.isNaN(afterDig.chip)) fail(`completion left a chipped visual behind — "${afterDig.text}"`);
+else ok('completing a dig removes the temporary visual');
 
 const dugShot = await shot('2-dug');
 if (Buffer.compare(surfaceShot, dugShot) === 0) fail('frame did not change after digging');

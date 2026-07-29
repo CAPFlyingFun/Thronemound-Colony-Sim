@@ -70,7 +70,8 @@ function aoLevel(side1: boolean, side2: boolean, corner: boolean): number {
 }
 
 /** Axis indices other than the face's own axis. */
-function tangentAxes(normal: Vec3): [number, number] {
+/** Shared with the fracture mesh, so both lay UVs out the same way. */
+export function tangentAxes(normal: Vec3): [number, number] {
   if (normal[0] !== 0) return [1, 2];
   if (normal[1] !== 0) return [0, 2];
   return [0, 1];

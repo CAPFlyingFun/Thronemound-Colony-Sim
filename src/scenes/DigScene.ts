@@ -15,6 +15,10 @@ import {
   isSolid, layeredGenerator, materialOf,
 } from '../voxel/VoxelWorld';
 import { meshChunk } from '../voxel/mesher';
+import {
+  buildFracture, chipMeshData, eventsBetween, hashVoxel, removedAt, wobbleAt,
+  CELL_COUNT, type DigEvent, type DigEventKind, type FracturePattern,
+} from '../voxel/fracture';
 import { raycastVoxel } from '../voxel/raycast';
 import { DigSession } from '../voxel/DigSession';
 import { createVoxelMaterial, type VoxelMaterialBundle } from '../voxel/voxelMaterial';
@@ -151,6 +155,36 @@ const MOUNT_DWELL = 0.2;
 const MOUNT_GRACE = 0.15;
 
 /**
+ * Hard cap on dirt fragments. One pooled InstancedMesh of this size is
+ * allocated once and reused forever — a phone should never be asked to
+ * allocate a mesh mid-dig.
+ */
+export const MAX_DIG_PARTICLES = 24;
+
+interface DigParticle {
+  position: THREE.Vector3;
+  velocity: THREE.Vector3;
+  life: number;
+  maxLife: number;
+  size: number;
+}
+
+/**
+ * The one voxel currently being chipped. There is never more than one, because
+ * DigSession only ever locks one target.
+ */
+interface ActiveDigVisual {
+  voxel: { x: number; y: number; z: number };
+  pattern: FracturePattern;
+  /** Highest progress seen. Latched, so the visual can never wind backwards. */
+  progress: number;
+  lastProgress: number;
+  /** Crumb count the current geometry was built for; -1 means never built. */
+  builtRemoved: number;
+  mesh: THREE.Mesh | null;
+}
+
+/**
  * Equirectangular sky. Poly Haven's "Table Mountain 2 Pure Sky", CC0.
  *
  * A JPEG rather than a .hdr: at 180 KB it costs a fraction of the download and
@@ -183,6 +217,21 @@ export class DigScene {
   private sky: THREE.Texture | null = null;
   private environment: THREE.Texture | null = null;
   private readonly hemisphere: THREE.HemisphereLight;
+
+  /** The voxel being chipped, and the pooled dirt it throws off. */
+  private chip: ActiveDigVisual | null = null;
+  private chipClock = 0;
+  private readonly particles: DigParticle[] = [];
+  private readonly particleMesh: THREE.InstancedMesh;
+  private readonly particleDummy = new THREE.Object3D();
+  /** Decaying camera nudge from the last big chip. */
+  private cameraKick = 0;
+  /**
+   * Audio hook. Left unset here on purpose — the events are wired and correctly
+   * timed, so sound is a matter of assigning this, not of finding where the
+   * chips happen.
+   */
+  digAudio: ((kind: DigEventKind, at: THREE.Vector3) => void) | null = null;
 
   private readonly position = new THREE.Vector3();
   private readonly surface = createSurfaceState();
@@ -288,6 +337,27 @@ export class DigScene {
     this.headlamp = new THREE.PointLight(0xffd9a0, 1.6, 26, 1.4);
     this.scene.add(this.headlamp);
 
+    // Pooled dirt. Allocated once, at full capacity, so a chip mid-dig never
+    // triggers a mesh allocation on a phone.
+    this.particleMesh = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshStandardMaterial({ color: 0x6b543a, roughness: 1, metalness: 0 }),
+      MAX_DIG_PARTICLES,
+    );
+    this.particleMesh.frustumCulled = false;
+    this.particleMesh.count = 0;
+    this.particleMesh.visible = false;
+    this.scene.add(this.particleMesh);
+    for (let i = 0; i < MAX_DIG_PARTICLES; i++) {
+      this.particles.push({
+        position: new THREE.Vector3(),
+        velocity: new THREE.Vector3(),
+        life: 0,
+        maxLife: 1,
+        size: 0.05,
+      });
+    }
+
     const box = new THREE.BoxGeometry(1.002, 1.002, 1.002);
     this.highlight = new THREE.LineSegments(
       new THREE.EdgesGeometry(box),
@@ -356,6 +426,9 @@ export class DigScene {
     });
     this.meshes.clear();
     this.materialBundle.dispose();
+    this.endChip();
+    this.particleMesh.geometry.dispose();
+    (this.particleMesh.material as THREE.Material).dispose();
     this.sky?.dispose();
     this.environment?.dispose();
     this.highlight.geometry.dispose();
@@ -371,9 +444,29 @@ export class DigScene {
     for (const index of this.world.allMeshableChunks()) this.rebuildChunk(index);
   }
 
+  /**
+   * The world as the MESHER should see it — identical, except that the voxel
+   * currently being chipped reads as air.
+   *
+   * `meshChunk` only wants `{ get }`, so hiding the target costs a four-line
+   * proxy and no change to the mesher at all. This is deliberately render-only:
+   * `this.world` remains the single source of truth for what exists, and the
+   * mask exists purely so the procedural chipped mesh isn't drawn inside an
+   * intact cube.
+   */
+  private meshSampler(): { get(x: number, y: number, z: number): number } {
+    const hidden = this.chip?.voxel;
+    if (!hidden) return this.world;
+    return {
+      get: (x, y, z) => (x === hidden.x && y === hidden.y && z === hidden.z
+        ? AIR
+        : this.world.get(x, y, z)),
+    };
+  }
+
   private rebuildChunk(index: number): void {
     const [cx, cy, cz] = this.world.chunkCoords(index);
-    const data = meshChunk(this.world, cx, cy, cz);
+    const data = meshChunk(this.meshSampler(), cx, cy, cz);
     const existing = this.meshes.get(index);
     if (!data) {
       if (existing) {
@@ -523,6 +616,253 @@ export class DigScene {
     }, undefined, () => {
       // Left on the flat colour deliberately — a missing sky is cosmetic.
     });
+  }
+
+  /* ------------------------------------------------- chipping the target */
+
+  /**
+   * Start showing the target coming apart.
+   *
+   * Hides the real voxel from chunk meshing, then draws the seeded crumb
+   * cluster in its place. One chunk rebuild here and one when it ends; nothing
+   * per frame. Refuses anything the dig logic wouldn't accept anyway, so
+   * bedrock never gets a visual.
+   */
+  private beginChip(x: number, y: number, z: number): void {
+    this.endChip();
+    const voxel = this.world.get(x, y, z);
+    if (!isSolid(voxel) || !materialOf(voxel).diggable) return;
+
+    this.chip = {
+      voxel: { x, y, z },
+      pattern: buildFracture(x, y, z, voxel),
+      progress: 0,
+      lastProgress: 0,
+      builtRemoved: -1,
+      mesh: null,
+    };
+    this.rebuildChunkAt(x, y, z);
+    this.refreshChipMesh();
+  }
+
+  /** Drop the temporary visual and put the intact voxel back on screen. */
+  private endChip(): void {
+    const chip = this.chip;
+    if (!chip) return;
+    if (chip.mesh) {
+      this.scene.remove(chip.mesh);
+      chip.mesh.geometry.dispose();
+    }
+    const { x, y, z } = chip.voxel;
+    this.chip = null;
+    // Clearing `chip` first is what un-masks it — the rebuild below sees the
+    // real world again.
+    this.rebuildChunkAt(x, y, z);
+  }
+
+  /**
+   * Rebuild the chunk holding this voxel — AND any neighbour across a seam.
+   *
+   * Masking a voxel opens up its neighbours' faces toward it, and a face on a
+   * chunk edge belongs to the NEIGHBOUR's mesh rather than this one. Rebuilding
+   * only the owning chunk left those faces culled, so you could see straight
+   * through the excavation into the sky. (64, 96, 64) sits on all three
+   * boundaries at once, which is exactly where it showed up.
+   *
+   * The same rule VoxelWorld.markDirty already applies for real edits — the
+   * render mask needs it for the same reason.
+   */
+  private rebuildChunkAt(x: number, y: number, z: number): void {
+    const span = Math.ceil(WORLD_SIZE / CHUNK);
+    const cx = Math.floor(x / CHUNK);
+    const cy = Math.floor(y / CHUNK);
+    const cz = Math.floor(z / CHUNK);
+    const touch = (nx: number, ny: number, nz: number) => {
+      if (nx < 0 || ny < 0 || nz < 0 || nx >= span || ny >= span || nz >= span) return;
+      this.rebuildChunk(this.world.chunkIndex(nx, ny, nz));
+    };
+    touch(cx, cy, cz);
+    const lx = x & (CHUNK - 1);
+    const ly = y & (CHUNK - 1);
+    const lz = z & (CHUNK - 1);
+    if (lx === 0) touch(cx - 1, cy, cz);
+    if (lx === CHUNK - 1) touch(cx + 1, cy, cz);
+    if (ly === 0) touch(cx, cy - 1, cz);
+    if (ly === CHUNK - 1) touch(cx, cy + 1, cz);
+    if (lz === 0) touch(cx, cy, cz - 1);
+    if (lz === CHUNK - 1) touch(cx, cy, cz + 1);
+  }
+
+  /**
+   * Reconcile the visual with whatever DigSession currently says.
+   *
+   * Done in one place every frame rather than hooked onto each of the seven
+   * call sites that can start or stop a dig. The session stays the only thing
+   * that decides what is being dug; this just follows it, so no start, cancel,
+   * out-of-reach abort or completion path can leave a stale crumb cluster
+   * behind.
+   */
+  private syncChip(): void {
+    const target = this.session.digging;
+    if (!target) {
+      if (this.chip) this.endChip();
+      return;
+    }
+    const chip = this.chip;
+    if (!chip || chip.voxel.x !== target.x || chip.voxel.y !== target.y || chip.voxel.z !== target.z) {
+      this.beginChip(target.x, target.y, target.z);
+    }
+  }
+
+  /** Regenerate the crumb geometry. Called only when a crumb actually breaks. */
+  private refreshChipMesh(): void {
+    const chip = this.chip;
+    if (!chip) return;
+    const { x, y, z } = chip.voxel;
+    const data = chipMeshData(chip.pattern, x, y, z, chip.progress);
+    if (!data) {
+      if (chip.mesh) {
+        this.scene.remove(chip.mesh);
+        chip.mesh.geometry.dispose();
+        chip.mesh = null;
+      }
+      return;
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(data.normals, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(data.colors, 3));
+    geometry.setAttribute('aTileUv', new THREE.BufferAttribute(data.uvs, 2));
+    geometry.setAttribute('aLayer', new THREE.BufferAttribute(data.layers, 1));
+    geometry.setAttribute('aTangent', new THREE.BufferAttribute(data.tangents, 3));
+    geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
+    geometry.computeBoundingSphere();
+    if (chip.mesh) {
+      chip.mesh.geometry.dispose();
+      chip.mesh.geometry = geometry;
+      return;
+    }
+    // Same material as the world, so the crumbs carry the same soil texture and
+    // cost one extra draw call rather than a second shader.
+    const mesh = new THREE.Mesh(geometry, this.material);
+    mesh.frustumCulled = false;
+    this.scene.add(mesh);
+    chip.mesh = mesh;
+  }
+
+  /**
+   * Advance the visual to match the dig.
+   *
+   * Geometry is rebuilt only when the number of surviving crumbs changes —
+   * roughly a dozen times across a whole dig. Everything else here is a
+   * transform, so holding a dig costs nothing per frame.
+   */
+  private updateChip(dt: number): void {
+    const chip = this.chip;
+    if (!chip) return;
+
+    chip.lastProgress = chip.progress;
+    chip.progress = Math.max(chip.progress, this.session.chewRatio);
+
+    for (const event of eventsBetween(chip.pattern, chip.lastProgress, chip.progress)) {
+      this.onDigEvent(event, chip);
+    }
+
+    const removed = removedAt(chip.pattern, chip.progress);
+    if (removed !== chip.builtRemoved) {
+      chip.builtRemoved = removed;
+      this.refreshChipMesh();
+    }
+
+    if (chip.mesh) {
+      // Loosened soil rocks slightly once it is nearly free. A transform, so it
+      // costs nothing and never touches the geometry.
+      this.chipClock += dt;
+      const wobble = wobbleAt(chip.pattern, chip.progress, this.chipClock);
+      const axis = chip.pattern.wobbleAxis;
+      chip.mesh.position.set(axis.x * wobble, axis.y * wobble, axis.z * wobble);
+      chip.mesh.rotation.set(axis.x * wobble, axis.y * wobble, axis.z * wobble);
+    }
+  }
+
+  /**
+   * Dust, sound cue and a nudge of the camera when soil actually gives way.
+   *
+   * Hooked off crumbs breaking rather than a frame timer, so the cadence
+   * follows what you can see instead of hissing continuously.
+   */
+  private onDigEvent(event: DigEvent, chip: ActiveDigVisual): void {
+    const origin = new THREE.Vector3(
+      chip.voxel.x + event.at.x,
+      chip.voxel.y + event.at.y,
+      chip.voxel.z + event.at.z,
+    );
+    this.digAudio?.(event.kind, origin);
+
+    if (event.kind === 'DIG_CHIP_SMALL' || event.kind === 'DIG_CHIP_LARGE') {
+      const burst = Math.round((event.kind === 'DIG_CHIP_LARGE' ? 5 : 3) * chip.pattern.feel.dust);
+      this.spawnDigParticles(origin, burst, chip.pattern.seed + chip.builtRemoved);
+    }
+    if (event.kind === 'DIG_RELEASE') {
+      this.spawnDigParticles(origin, Math.round(8 * chip.pattern.feel.dust), chip.pattern.seed);
+    }
+    // Only the bigger moments move the camera, and barely. Continuous shake
+    // while digging would be unbearable on a phone.
+    if (event.kind === 'DIG_CHIP_LARGE') this.cameraKick = Math.max(this.cameraKick, 0.012);
+    if (event.kind === 'DIG_RELEASE') this.cameraKick = Math.max(this.cameraKick, 0.03);
+  }
+
+  /* ---------------------------------------------------------- particles */
+
+  /**
+   * Dirt fragments, pooled.
+   *
+   * One InstancedMesh with a hard cap, so this is a single draw call and
+   * allocates nothing after construction. Purely cosmetic: particles are never
+   * voxels, never counted, and never touch the carry load — soil conservation
+   * runs entirely through DigSession and is not aware these exist.
+   */
+  private spawnDigParticles(origin: THREE.Vector3, count: number, seed: number): void {
+    let spawned = 0;
+    for (let i = 0; i < this.particles.length && spawned < count; i++) {
+      const p = this.particles[i]!;
+      if (p.life > 0) continue;
+      // Seeded so a given chip always throws dirt the same way.
+      const h = hashVoxel(seed + i, spawned, i * 7 + 1);
+      const a = ((h & 0xffff) / 0xffff) * Math.PI * 2;
+      const b = (((h >>> 16) & 0xffff) / 0xffff);
+      const speed = 0.6 + b * 1.6;
+      p.position.copy(origin);
+      p.velocity.set(Math.cos(a) * speed * 0.6, 0.8 + b * 1.4, Math.sin(a) * speed * 0.6);
+      p.life = 0.45 + b * 0.4;
+      p.maxLife = p.life;
+      p.size = 0.03 + b * 0.05;
+      spawned++;
+    }
+  }
+
+  private updateDigParticles(dt: number): void {
+    let live = 0;
+    for (const p of this.particles) {
+      if (p.life <= 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) continue;
+      // Gravity plus drag. No collision — at this size it would cost more than
+      // it would show, and these settle out of sight in under a second anyway.
+      p.velocity.y -= GRAVITY * dt * 0.5;
+      p.velocity.multiplyScalar(1 - Math.min(1, 2.4 * dt));
+      p.position.addScaledVector(p.velocity, dt);
+      const fade = Math.max(0, p.life / p.maxLife);
+      this.particleDummy.position.copy(p.position);
+      this.particleDummy.scale.setScalar(p.size * (0.4 + 0.6 * fade));
+      this.particleDummy.rotation.set(p.position.x * 9, p.position.y * 7, p.position.z * 11);
+      this.particleDummy.updateMatrix();
+      this.particleMesh.setMatrixAt(live, this.particleDummy.matrix);
+      live++;
+    }
+    this.particleMesh.count = live;
+    this.particleMesh.visible = live > 0;
+    if (live > 0) this.particleMesh.instanceMatrix.needsUpdate = true;
   }
 
   /** Would a grain placed here end up inside the ant? */
@@ -1276,6 +1616,12 @@ export class DigScene {
     this.cameraQuat.slerp(target, blend);
 
     const eye = this.position.clone().addScaledVector(up, EYE_HEIGHT);
+    // A nudge when soil actually lets go, decaying fast. Only the bigger
+    // moments set it, so this is a knock rather than a shake.
+    if (this.cameraKick > 0) {
+      this.cameraKick = Math.max(0, this.cameraKick - dt * 0.12);
+      eye.addScaledVector(up, -this.cameraKick);
+    }
     if (this.cameraTurn > 0) {
       // Peak the bulge mid-turn so the arc reads as travel over the edge.
       const arc = Math.sin(this.cameraTurn * Math.PI) * EDGE_ARC;
@@ -1360,6 +1706,8 @@ export class DigScene {
       if (this.withinReach(digging.x, digging.y, digging.z)) this.session.tickDig(dt);
       else this.session.cancelDig();
     }
+    this.syncChip();
+    this.updateChip(dt);
 
     // The highlight shows the locked cube while working, and whatever the
     // crosshair is on otherwise.
@@ -1492,13 +1840,18 @@ export class DigScene {
     const skill = this.debug
       ? ` \u00B7 ${this.session.secondsPerCube.toFixed(1)}s/cube after ${this.session.practiced}`
       : '';
+    // Crumbs left on the voxel being chipped. Debug-only, but it is the one
+    // piece of the effect a headless test can actually assert on.
+    const chipping = this.debug && this.chip
+      ? ` \u00B7 chip ${CELL_COUNT - removedAt(this.chip.pattern, this.chip.progress)}/${CELL_COUNT}`
+      : '';
     const chamber = status.depthMet ? ` \u00b7 Chamber ${status.chamber}/${DEN_MIN_CHAMBER}` : '';
     readout.innerHTML = `
       <b>Depth</b> ${status.depth > 0 ? `${status.depthMm} mm` : 'surface'} &nbsp;
       <b>Carrying</b> ${this.session.carried}/${this.session.capacity} &nbsp;
       <b>Mound</b> ${this.world.deposited} &nbsp;
       <b>Dug</b> ${this.world.excavated}<br>
-      <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 ` : ''}${this.weightless ? '\u{1FAB5} weightless \u00b7 ' : this.surface.mode === 'attached' ? '\u{1F9D7} gripping \u00b7 ' : ''}Target: ${targetName}${bar}${chamber}${skill} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
+      <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 ` : ''}${this.weightless ? '\u{1FAB5} weightless \u00b7 ' : this.surface.mode === 'attached' ? '\u{1F9D7} gripping \u00b7 ' : ''}Target: ${targetName}${bar}${chamber}${skill}${chipping} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
     `;
   }
 
@@ -1531,6 +1884,9 @@ export class DigScene {
       this.updatePlayer(dt);
       this.updateAction(dt);
     }
+    // Dirt keeps falling through the founding cutscene, so this runs in both
+    // views. It is a no-op with nothing alive.
+    this.updateDigParticles(dt);
     this.drainDirty();
     if (++this.hudCounter % 6 === 0) {
       this.updateHud();
