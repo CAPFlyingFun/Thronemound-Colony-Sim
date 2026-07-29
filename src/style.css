@@ -9,6 +9,33 @@ body,
   touch-action: none;
 }
 
+/*
+ * Kill every long-press affordance across the whole surface.
+ *
+ * `touch-action: none` alone stops scrolling and zooming but NOT iOS's
+ * selection callout, so holding a thumb where the joystick lives — which is
+ * exactly what you do to walk — popped the copy / look-up menu over the game.
+ * `-webkit-touch-callout` is the property that suppresses that menu;
+ * user-select stops the magnifier and the selection handles that come with it.
+ */
+html,
+body,
+#app,
+canvas {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Buttons are the one place a stray highlight could still appear. */
+button {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
 body {
   font-family: Arial, sans-serif;
   overscroll-behavior: none;

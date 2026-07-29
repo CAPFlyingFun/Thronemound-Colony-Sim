@@ -432,6 +432,10 @@ export class DigScene {
     };
 
     const down = (event: PointerEvent) => {
+      // Suppresses the residual long-press gesture on browsers that ignore
+      // -webkit-touch-callout. Safe because every input here is handled
+      // manually; nothing depends on the default click/focus behaviour.
+      if (event.cancelable) event.preventDefault();
       if (event.pointerType !== 'mouse') {
         this.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
         // A second finger in colony view starts a pinch rather than an orbit.
