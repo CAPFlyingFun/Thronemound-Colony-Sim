@@ -6,7 +6,7 @@ import {
 import { FACES, meshChunk } from '../src/voxel/mesher';
 import { MAX_LOOSE_CLODS, LooseSoil } from '../src/voxel/LooseSoil';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, styleForVoxel } from '../src/voxel/clod';
-import { HEX_AIR, HEX_NEIGHBOURS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
+import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
 import { CELL_COUNT, CHIP_CELLS, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, crumbAt, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
@@ -1495,5 +1495,112 @@ describe('hex grid experiment', () => {
     expect(world.dig(0, 0, 0)).not.toBe(HEX_AIR);
     expect(world.get(0, 0, 0)).toBe(HEX_AIR);
     expect(world.dig(0, 0, 0)).toBe(HEX_AIR);
+  });
+
+  it('winds every triangle to face the way its normal points', () => {
+    /*
+     * The bug this pins, and it cost a build to find by eye: every triangle was
+     * fanned the other way round, so each face's front pointed INTO the soil.
+     * The material is FrontSide, so the walls around you were culled and you
+     * saw the inside of the far ones through them — no walls, floating in a
+     * bowl. Winding is invisible to a face count and invisible to a normal
+     * check; it only shows up as a cross product.
+     */
+    const world = new HexWorld(2, 4, 0);
+    world.dig(0, 0, -1);
+    world.dig(0, 0, -2);
+    const data = meshHexWorld(world, () => 1);
+    const at = (i: number) => [
+      data.positions[i * 3]!, data.positions[i * 3 + 1]!, data.positions[i * 3 + 2]!,
+    ] as const;
+
+    let checked = 0;
+    for (let t = 0; t < data.indices.length; t += 3) {
+      const ia = data.indices[t]!;
+      const a = at(ia); const b = at(data.indices[t + 1]!); const c = at(data.indices[t + 2]!);
+      const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]] as const;
+      const v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]] as const;
+      const cross = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+      ] as const;
+      const n = [
+        data.normals[ia * 3]!, data.normals[ia * 3 + 1]!, data.normals[ia * 3 + 2]!,
+      ] as const;
+      const dot = cross[0] * n[0] + cross[1] * n[1] + cross[2] * n[2];
+      expect(dot).toBeGreaterThan(0);
+      checked++;
+    }
+    expect(checked).toBeGreaterThan(100);
+  });
+
+  it('dishes the walls back into the soil, never out into the cavity', () => {
+    /*
+     * The socket is rounded by pushing each wall's waist AWAY from the air.
+     * Targeting is a ray march against the grid and collision is a grid query,
+     * so the true surface is the flat prism — drawn geometry that stood in
+     * FRONT of it would be rock you can walk your face through.
+     */
+    const world = new HexWorld(1, 4, 0);
+    world.dig(0, 0, -1);
+    const data = meshHexWorld(world, () => 1);
+    const apothem = (HEX_RADIUS * Math.sqrt(3)) / 2;
+
+    // Every vertex of the dug cell's own wall must be at least an apothem from
+    // that cell's axis: on the flat plane, or behind it.
+    const centre = hexCentre(0, 0, -1);
+    let waist = 0;
+    for (let i = 0; i < data.positions.length; i += 3) {
+      const y = data.positions[i + 1]!;
+      if (Math.abs(y - centre.y) > HEX_HEIGHT / 2 - 1e-6) continue; // cap ring
+      const d = Math.hypot(data.positions[i]! - centre.x, data.positions[i + 2]! - centre.z);
+      if (d > HEX_RADIUS + HEX_BULGE + 1e-6) continue; // a neighbour's far wall
+      expect(d).toBeGreaterThanOrEqual(apothem - 1e-6);
+      waist = Math.max(waist, d);
+    }
+    // And it really does reach the circle through the corners at the waist,
+    // rather than staying a prism with rounded corners.
+    expect(waist).toBeCloseTo(HEX_RADIUS, 2);
+  });
+
+  it('pinches back to the full hexagon at every cell boundary', () => {
+    /*
+     * The dish MUST fall to zero at the ends. Carry it into the cap and the
+     * wall's top edge sits inset from the cap's rim, over a solid neighbour's
+     * footprint where nothing is meshed — a hairline slit at every floor and
+     * ceiling that you can see straight through.
+     */
+    const world = new HexWorld(1, 4, 0);
+    world.dig(0, 0, -1);
+    const data = meshHexWorld(world, () => 1);
+    const centre = hexCentre(0, 0, -1);
+    const half = HEX_HEIGHT / 2;
+
+    // Outward normals of the six sides. A point sits exactly ON the hexagon
+    // boundary when its furthest projection onto one of them is the apothem;
+    // anything less is inset, and inset is what opens the slit.
+    const corners = hexCorners();
+    const apothem = (HEX_RADIUS * Math.sqrt(3)) / 2;
+    const normals = corners.map((c, i) => {
+      const d = corners[(i + 1) % 6]!;
+      const mx = (c.x + d.x) / 2;
+      const mz = (c.z + d.z) / 2;
+      const len = Math.hypot(mx, mz);
+      return { x: mx / len, z: mz / len };
+    });
+
+    let seen = 0;
+    for (let i = 0; i < data.positions.length; i += 3) {
+      const y = data.positions[i + 1]!;
+      if (Math.abs(Math.abs(y - centre.y) - half) > 1e-6) continue;
+      const ox = data.positions[i]! - centre.x;
+      const oz = data.positions[i + 2]! - centre.z;
+      if (Math.hypot(ox, oz) > HEX_RADIUS + 1e-6) continue;
+      const reach = Math.max(...normals.map((n) => ox * n.x + oz * n.z));
+      expect(reach).toBeCloseTo(apothem, 6);
+      seen++;
+    }
+    expect(seen).toBeGreaterThan(0);
   });
 });

@@ -131,6 +131,31 @@ export class HexWorld {
 }
 
 /**
+ * How far a wall dishes back into the soil at its waist.
+ *
+ * Not a tuned number: it is exactly the gap between a hexagon's apothem and its
+ * radius. Push the middle of each side back by that much and the six walls of a
+ * dug pocket pass through the circle that touches all six corners — so the
+ * socket is a hexagon where it meets the floor and the ceiling, and a CIRCLE
+ * across its waist. That is the whole appeal of a hex in one number: it is
+ * already most of the way to round, and this closes the rest of the gap.
+ */
+export const HEX_BULGE = HEX_RADIUS - (HEX_RADIUS * Math.sqrt(3)) / 2;
+
+/**
+ * Rows a side face is split into so the dish reads as a curve.
+ *
+ * The dish has to fall to ZERO at both ends. Carrying it into the cap would
+ * leave the wall's top edge inset from the cap's rim, over the neighbouring
+ * cell's footprint — where nothing is meshed, because that neighbour is solid.
+ * The result is a hairline slit at every floor and ceiling you can see straight
+ * through. Pinching at the cell boundary is what keeps the shell closed.
+ */
+const SIDE_ROWS = 4;
+/** Columns across a side face, so the dish can pin the vertical edges too. */
+const SIDE_COLS = 3;
+
+/**
  * Mesh the whole world, culling faces that touch a solid neighbour.
  *
  * Same idea as the cube mesher, and the reason a hex grid is affordable at all:
@@ -158,8 +183,19 @@ export function meshHexWorld(world: HexWorld, tint: (q: number, r: number, y: nu
       normals.push(nx, ny, nz);
       colors.push(shade, shade, shade);
     }
-    // Fan from the first vertex; every face here is convex.
-    for (let i = 1; i < verts.length - 1; i++) indices.push(first, first + i, first + i + 1);
+    /*
+     * Fan from the first vertex; every face here is convex.
+     *
+     * Wound so the front face points the way the declared normal does. It used
+     * to be `first + i, first + i + 1`, which is the other way round: with the
+     * corner ring running counter-clockwise in the (x, z) angle sense, that
+     * cross product comes out ANTI-parallel to the normal being declared, on
+     * the sides and on both caps alike. The material is FrontSide, so every
+     * face was culled from outside and drawn from within — stand in the room
+     * and the walls around you vanish while you see the inside of the far ones
+     * through them, which reads as floating in a bowl with no walls at all.
+     */
+    for (let i = 1; i < verts.length - 1; i++) indices.push(first, first + i + 1, first + i);
     faceCount++;
   };
 
@@ -168,7 +204,18 @@ export function meshHexWorld(world: HexWorld, tint: (q: number, r: number, y: nu
     const centre = hexCentre(q, r, y);
     const shade = tint(q, r, y);
 
-    // Six sides.
+    /*
+     * Six sides, each dished back into the soil across its middle.
+     *
+     * A flat-sided prism gives a dug cell six hard panels and six vertical
+     * creases. Dishing the waist by HEX_BULGE opens the pocket out to the
+     * circle through its own corners, so the wall you are looking at curves all
+     * the way round and the cell reads as a socket rather than a shaft. The
+     * dish goes AWAY from the cavity, into the solid, which is the only safe
+     * direction: targeting is a ray march against the grid and collision is a
+     * grid query, so the true surface stays the flat prism and the drawn one
+     * must never stand in front of it.
+     */
     for (let i = 0; i < 6; i++) {
       const [dq, dr] = HEX_NEIGHBOURS[i]!;
       if (world.get(q + dq, r + dr, y) !== HEX_AIR) continue;
@@ -178,12 +225,38 @@ export function meshHexWorld(world: HexWorld, tint: (q: number, r: number, y: nu
       const mx = (a.x + b.x) / 2;
       const mz = (a.z + b.z) / 2;
       const len = Math.hypot(mx, mz) || 1;
-      push([
-        { x: centre.x + a.x, y: centre.y - half, z: centre.z + a.z },
-        { x: centre.x + b.x, y: centre.y - half, z: centre.z + b.z },
-        { x: centre.x + b.x, y: centre.y + half, z: centre.z + b.z },
-        { x: centre.x + a.x, y: centre.y + half, z: centre.z + a.z },
-      ], mx / len, 0, mz / len, shade * 0.82);
+      const nx = mx / len;
+      const nz = mz / len;
+      /*
+       * Dish in BOTH directions: zero along the vertical edges as well as at
+       * the cap. Displacing the whole panel outward instead only translates it,
+       * which scales the hexagon up rather than rounding it — the waist comes
+       * out as a bigger hexagon with its corners further out than the circle,
+       * not as a circle. Pinning the corners and pushing only the middle is
+       * what turns six flats into one curve.
+       */
+      const dish = (s: number, t: number) => (
+        HEX_BULGE * Math.sin(Math.PI * s) * Math.sin(Math.PI * t)
+      );
+      const vertex = (s: number, t: number) => {
+        const d = dish(s, t);
+        return {
+          x: centre.x + a.x + (b.x - a.x) * s - nx * d,
+          y: centre.y - half + t * HEX_HEIGHT,
+          z: centre.z + a.z + (b.z - a.z) * s - nz * d,
+        };
+      };
+      for (let row = 0; row < SIDE_ROWS; row++) {
+        for (let col = 0; col < SIDE_COLS; col++) {
+          const s0 = col / SIDE_COLS;
+          const s1 = (col + 1) / SIDE_COLS;
+          const t0 = row / SIDE_ROWS;
+          const t1 = (row + 1) / SIDE_ROWS;
+          push([
+            vertex(s0, t0), vertex(s1, t0), vertex(s1, t1), vertex(s0, t1),
+          ], nx, 0, nz, shade * 0.82);
+        }
+      }
     }
 
     // Cap and floor.

@@ -30,9 +30,27 @@ import { voxelTint } from '../voxel/mesher';
 import { DEFAULT_BANDS, approach, clampStickOrigin, speedForStick, stickVector } from '../voxel/locomotion';
 import { DIG_START } from '../voxel/DigSession';
 
-const ROOM_RADIUS = 10;
-const ROOM_DEPTH = 12;
+/**
+ * ONE LARGE HEX, not a plain.
+ *
+ * The cube room is an open field cut off by the draw distance, which tells you
+ * nothing about the grid you are standing on — and a hex field read exactly the
+ * same way, because from eye level a tiling of any shape is just ground. So the
+ * room is a hexagonal CHAMBER: a pit carved out of the plot, with six soil
+ * walls rising around you. The grid announces itself before you have dug
+ * anything, and there is something to stand against.
+ *
+ * The rim is deliberately thick. Thin enough to see daylight through and the
+ * walls stop reading as soil and start reading as a fence.
+ */
+const ROOM_RADIUS = 11;
+const CHAMBER_RADIUS = 6;
+const CHAMBER_HEIGHT = 4;
+const ROOM_DEPTH = 15;
 const SURFACE = 0;
+/** Top of the chamber floor — where she stands, and where digging starts. */
+const FLOOR_Y = SURFACE - CHAMBER_HEIGHT;
+const FLOOR_TOP = FLOOR_Y + HEX_HEIGHT / 2;
 
 const EYE_HEIGHT = 0.7;
 const BODY_RADIUS = 0.28;
@@ -62,7 +80,7 @@ export class HexScene {
   private readonly targetMesh: THREE.Mesh;
   private readonly targetMaterial: THREE.MeshStandardMaterial;
 
-  private readonly position = new THREE.Vector3(0, SURFACE + 1.4, 0);
+  private readonly position = new THREE.Vector3(0, FLOOR_TOP + 0.4, 0);
   private velocityY = 0;
   private planarSpeed = 0;
   private grounded = false;
@@ -136,6 +154,7 @@ export class HexScene {
     this.stickKnob = document.createElement('div');
     this.buildOverlay();
 
+    this.carveChamber();
     this.rebuild();
     this.bindInput();
     this.resize();
@@ -150,6 +169,25 @@ export class HexScene {
   private solidAt(x: number, y: number, z: number): boolean {
     const cell = hexAt(x, y, z);
     return this.world.get(cell.q, cell.r, cell.y) !== HEX_AIR;
+  }
+
+  /**
+   * Hollow the chamber out of the plot, leaving a thick hexagonal rim.
+   *
+   * Done by digging rather than by teaching the generator about chambers: `dig`
+   * is already the one way a cell becomes air, so the room starts in a state
+   * the rest of the scene can reach by playing, and there is no second notion
+   * of emptiness to keep in step with the first.
+   */
+  private carveChamber(): void {
+    for (let y = SURFACE; y > FLOOR_Y; y--) {
+      for (let q = -CHAMBER_RADIUS; q <= CHAMBER_RADIUS; q++) {
+        for (let r = -CHAMBER_RADIUS; r <= CHAMBER_RADIUS; r++) {
+          const distance = (Math.abs(q) + Math.abs(r) + Math.abs(q + r)) / 2;
+          if (distance <= CHAMBER_RADIUS) this.world.dig(q, r, y);
+        }
+      }
+    }
   }
 
   /**
@@ -293,13 +331,16 @@ export class HexScene {
       ];
     });
 
+    // Wound outward, same handedness the room mesh uses. Normals below are
+    // derived FROM the winding, so getting this backwards lights the lump from
+    // the inside as well as culling the side you are looking at.
     const faces: number[][] = [];
     for (let i = 0; i < 6; i++) {
       const j = (i + 1) % 6;
-      faces.push([i, j, j + 6], [i, j + 6, i + 6]); // sides
+      faces.push([i, j + 6, j], [i, i + 6, j + 6]); // sides
     }
-    for (let i = 1; i < 5; i++) faces.push([6, 6 + i, 7 + i]); // cap
-    for (let i = 1; i < 5; i++) faces.push([0, i + 1, i]);     // floor
+    for (let i = 1; i < 5; i++) faces.push([6, 7 + i, 6 + i]); // cap
+    for (let i = 1; i < 5; i++) faces.push([0, i, i + 1]);     // floor
 
     // Flat shaded, so the facets read as broken soil rather than a smooth pebble.
     const positions = new Float32Array(faces.length * 9);
@@ -440,7 +481,7 @@ export class HexScene {
       ? ` ${'▮'.repeat(Math.round(this.progress * 8)).padEnd(8, '▯')}`
       : '';
     readout.innerHTML = `
-      <b>Hex room</b> &nbsp; <b>Dug</b> ${this.dug} &nbsp; <b>Depth</b> ${Math.max(0, Math.round(SURFACE - this.position.y))}<br>
+      <b>Hex room</b> &nbsp; <b>Dug</b> ${this.dug} &nbsp; <b>Depth</b> ${Math.max(0, Math.round(FLOOR_TOP - this.position.y))}<br>
       <span class="dim">v${__APP_VERSION__} · ${__BUILD_TIME__} · experiment · Target: ${name}${bar}</span>
     `;
     const label = this.digging ? '✕ CANCEL' : '⛏ DIG';
