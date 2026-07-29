@@ -17,8 +17,8 @@ never load each other's bundle.
 | Cancel a dig | tap it again, or tap **CANCEL** | click again, or `F` |
 | Put the load down | tap **DROP** | `E` or `Tab` |
 | Jump | tap **JUMP** | `Space` |
-| Grip / release wall | **CLIMB / RELEASE** button | `G` |
-| Stick to a wall underground | automatic — just walk into it | automatic |
+| Stick to a wall | automatic — just walk into it | automatic |
+| Let go of a wall | tap **JUMP** | `Space` or `G` |
 | Step up | automatic | automatic |
 
 ## Scale
@@ -70,7 +70,7 @@ call. The crosshair path stays for three jobs a world-tap can't do:
 - the cube underfoot, which is mostly hidden behind the HUD
 
 So the action button is context-sensitive: **DIG** while idle, **CANCEL** while
-working, the same way JUMP becomes CLIMB.
+working, the same way it does for any other paired action.
 
 A tap is a press under 250 ms that travels under 10 px. Both thresholds are
 generous, because the failure is asymmetric: a stray tap starts a dig that
@@ -81,6 +81,19 @@ There is no dig/place mode. Capacity is one cube, so "place" only ever means
 "put down the one thing I'm carrying" — a mode toggle for a state you can read
 off the load was a button and a failure mode (*I tapped and nothing happened*)
 in exchange for nothing. **DROP** replaces it.
+
+**DROP doesn't require aim.** It prefers the cell the crosshair faces, but falls
+back to the best neighbouring one. At one-cube reach the aim window on flat
+ground is genuinely narrow — pitch too shallow and the ground you're looking at
+is two cubes out, too steep and the placement cell is your own body — so
+insisting on the crosshair made DROP silently do nothing at a lot of perfectly
+reasonable angles. That's the same silent failure the mode toggle was deleted
+for, so it had to go too. An ant putting down a grain doesn't aim; she puts it
+down.
+
+The fallback is scored rather than first-match, so spoil lands somewhere that
+reads as deliberate: braced against something solid rather than hanging in
+mid-air, low rather than overhead, in front of her rather than behind.
 
 ## Reach
 
@@ -172,7 +185,7 @@ Two properties keep an ant-scale world cheap:
 ## Verifying
 
 ```bash
-npm test          # 76 tests: voxel rules + the existing colony tests
+npm test          # 82 tests: voxel rules + the existing colony tests
 npm run typecheck
 npm run build
 npm run preview   # then, in another shell:
@@ -214,6 +227,19 @@ three discrete gears.
 
 Keyboard has no analogue axis, so it selects the walk band (`Shift` for run).
 
+Two multipliers stack on top: **×0.75 underground** (close work, braced against
+tunnel walls in the dark) and **×0.85 while carrying**. Being straight about the
+second one: a real ant hauls many times its own body weight, so one grain would
+barely slow it. That number is there so the trip out reads as work — it's a feel
+choice, not a biology one.
+
+Speed also needs a **direction**, not just a magnitude. `magnitude` comes from
+the stick throw, and for keyboard it stays pinned at `KEY_MAGNITUDE` for as long
+as `keyboardDriving` is set — which outlives the keypress. So releasing `W` used
+to leave the target speed at walking pace indefinitely: the ant stood still (the
+wish vector is zero, so the step is zero) while reporting 3.4 voxels/s and
+swaying as though mid-stride.
+
 Movement accelerates (14 voxels/s²) and decelerates (22) rather than snapping
 to velocity, which is what gives the ant any sense of mass.
 
@@ -231,7 +257,7 @@ lower-left region so it can't spawn beside the HUD or halfway up the screen.
 `?debug=1` appends live position, orientation and speed to the readout, which is
 how those numbers get measured rather than eyeballed.
 
-The HUD always shows a **version and build time** (`v0.6.0 · 07-29 02:31`), so
+The HUD always shows a **version and build time** (`v0.7.0 · 07-29 03:47`), so
 "is this the new code or a cached build?" is answerable at a glance from a
 phone.
 
@@ -245,16 +271,21 @@ problem class rather than mitigating it. Above that line — the surface and
 anything piled on it — gravity behaves normally, so the world above is still
 somewhere you can fall off.
 
-Weightless does not mean motionless, and the distinction cost one iteration:
-zeroing velocity outright left the ant hovering over the hole it had just dug
-beneath itself, so digging downward stopped lowering you at all. The rule is:
+Weightless does not mean motionless. She **settles** at a constant 2 voxels/s
+(1 cm/s) — constant, not accelerating, so no speed builds up and it stays a
+controlled descent rather than a fall.
 
-- something underfoot → hold still
-- nothing underfoot → **settle** at a constant 2 voxels/s (1 cm/s)
-
-Constant, not accelerating. No speed builds up, so it is a controlled descent
-rather than a fall, and there is still no way to get trapped at the bottom of
-anything.
+> **The hover bug, because it is worth not repeating.** This branch used to ask
+> `supportBelow()` whether something was underfoot and zero the velocity if so.
+> That is a *grid* query — it floors the position to a cube and checks the cube
+> below **that** — being used to decide a *continuous* position. Settling from
+> y 97.0 into a one-deep pit, the instant she crossed to 96.99 the cube below
+> (95) read solid, the velocity was zeroed, and she stopped **0.99 voxels** above
+> a floor she is only 0.7 tall.
+>
+> The gravity branch never had this problem because it never asks: it moves and
+> lets `collides()` stop it, which is sub-voxel accurate. Now this one does the
+> same. A smoke test measures the actual drop and fails under 0.8 voxels.
 
 The **touching test** is the safety valve: weightlessness requires at least one
 solid face in contact. Dig the floor out from under yourself with nothing else in
@@ -269,8 +300,8 @@ Getting back *up* has three mechanics, none of which need sloped geometry:
   floor. Gated on committed movement (`INPUT_COMMIT_THRESHOLD`) and on the
   hysteresis lock, so brushing a wall while lining up a dig can't flip you and a
   corner can't ping-pong between two faces.
-- **Grip** — the manual CLIMB button (or `G`) still works, and RELEASE returns
-  you to world up.
+- **Jump** — the only way OFF a surface. There is no release button, because
+  "am I gripping?" was a mode the player had to track for no benefit.
 - **Step-up** — walking into a one-voxel rise lifts you over it, so a dug
   staircase works as a ramp.
 
@@ -409,17 +440,47 @@ Two rules keep corners from misbehaving:
 Fully unit tested, including that no code path can produce a non-axis
 orientation.
 
-**Wired in.** Underground, walking into a wall mounts it automatically; walking
-across an edge makes the new face your floor. Either way gravity, the collision
-box, the movement plane and the camera all rotate into that face's frame. The
-manual path is still there — walk into a wall and the button changes from JUMP
-to CLIMB; press it (or `G`) to grip, press again to RELEASE. One
-context-sensitive button rather than three, because screen space is the scarce
-resource on a phone.
+**She always clings.** Walking into a wall mounts it; walking across an edge
+makes the new face your floor. Either way gravity, the collision box, the
+movement plane and the camera all rotate into that face's frame. There is no
+grip button and no release button — "am I gripping?" was a mode the player had
+to track for no benefit. **Jumping is the only way off**, which makes letting go
+a deliberate act with a cost, and is also how an ant behaves.
 
-The camera **slerps** into the new frame and swings slightly outward mid-turn,
-so it reads as the body crawling around the edge rather than the world spinning
-about a stationary head. Physics still snaps between the six discrete frames.
+Sticking used to be gated on being underground. It isn't any more: a wall
+behaving differently depending on which side of an invisible line it stood on
+was arbitrary. Mounting still needs *committed* movement into the wall
+(`INPUT_COMMIT_THRESHOLD`) and still respects the hysteresis lock, and step-up
+runs first — so `blocked` only means a rise she genuinely cannot walk over, and
+brushing a wall while lining up a dig can't flip you.
+
+Underground, jumping has to suspend weightlessness too, or the leap would be
+cancelled by the very rule it exists to escape. An `airborne` flag holds gravity
+on until she lands.
+
+### The camera must not move
+
+This was the thing that made surface walking feel wrong, and it took a while to
+name. `yaw` and `pitch` are measured **inside** a frame, so the same numbers
+mean a different world direction once `up` changes. Nothing re-solved them — so
+you could be looking straight down a shaft, mount its wall, and end up facing
+sideways. The slerp smoothed the *journey* while the *destination* was
+arbitrary. Mounting was a teleport of your head.
+
+`lookVector` and `reframeLook` in `SurfaceFrame.ts` fix it: capture the
+world-space look direction before reorienting, then solve for the yaw and pitch
+that reproduce it in the new frame. Only "which way is down" changes.
+
+A unit test round-trips every one of the 36 frame pairs at several yaw/pitch
+values and asserts the direction survives. It isn't asserted as *exact*, because
+it can't be: a frame cannot express looking precisely along its own up — yaw
+stops meaning anything at the pole — so pitch clamps at `MAX_PITCH` and the
+error is bounded by exactly that clipped wedge (about 4°). The test asserts that
+bound, and separately that the result is exact everywhere the clamp doesn't bite.
+
+The camera still **slerps** into the new frame and swings slightly outward
+mid-turn, so it reads as the body crawling around the edge rather than the world
+spinning about a stationary head. Physics still snaps between the six frames.
 
 **All six directions are live, ceilings included.** They were locked behind a
 `CEILING_UP` guard while walls were being tuned; with the underground frame now

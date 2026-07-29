@@ -9,7 +9,7 @@ import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSess
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
 import { DEN_MIN_CHAMBER, DEN_MIN_DEPTH, QueenFounding, countChamberAir } from '../src/voxel/QueenFounding';
 import { BAND_EDGES, DEFAULT_BANDS, STICK_DEADZONE, approach, clampStickOrigin, speedForStick, stickVector } from '../src/voxel/locomotion';
-import { ALL_AXES, INPUT_COMMIT_THRESHOLD, ORIENTATION_LOCK_MS, WORLD_UP, applyOrientation, attachableWall, axisFromVector, canChangeOrientation, createSurfaceState, evaluateEdge, isPerpendicular, opposite, rankSurfaces, supportBelow, tickLock } from '../src/voxel/SurfaceFrame';
+import { ALL_AXES, INPUT_COMMIT_THRESHOLD, MAX_PITCH, ORIENTATION_LOCK_MS, WORLD_UP, applyOrientation, attachableWall, axisFromVector, axisVector, canChangeOrientation, createSurfaceState, evaluateEdge, isPerpendicular, lookVector, opposite, rankSurfaces, referenceRight, reframeLook, supportBelow, tickLock, type Vec3 } from '../src/voxel/SurfaceFrame';
 
 const SURFACE = 96;
 const makeWorld = () => new VoxelWorld(128, 128, 128, layeredGenerator(SURFACE));
@@ -720,5 +720,86 @@ describe('SurfaceFrame', () => {
       const d = evaluateEdge(world, { x: 64, y: S, z: 64 }, state, dir, 1);
       if (d.up) expect(ALL_AXES).toContain(d.up);
     }
+  });
+
+  describe('look reframing', () => {
+    // yaw and pitch are measured INSIDE a frame, so carrying the same numbers
+    // across a reorientation points the camera somewhere unrelated — which is
+    // what made mounting a wall feel like the world spun 90 degrees under you.
+    const dot = (a: Vec3, b: Vec3) => a.x * b.x + a.y * b.y + a.z * b.z;
+
+    it('preserves the world look direction across every pair of frames', () => {
+      // A frame cannot express looking exactly along its own up — yaw stops
+      // meaning anything at the pole — so pitch clamps at MAX_PITCH. That caps
+      // the error at precisely the clipped wedge and nothing more, which is the
+      // real guarantee: assert THAT rather than perfect equality.
+      const worstCase = Math.PI / 2 - MAX_PITCH;
+      let worstSeen = 0;
+      for (const from of ALL_AXES) {
+        for (const to of ALL_AXES) {
+          for (const yaw of [0, 0.7, -2.2, 3.0]) {
+            for (const pitch of [0, 0.6, -1.1, -1.4]) {
+              const before = lookVector(from, yaw, pitch);
+              const solved = reframeLook(before, to, yaw);
+              const after = lookVector(to, solved.yaw, solved.pitch);
+              const error = Math.acos(Math.min(1, Math.max(-1, dot(before, after))));
+              expect(error).toBeLessThanOrEqual(worstCase + 1e-9);
+              worstSeen = Math.max(worstSeen, error);
+            }
+          }
+        }
+      }
+      // And the clamp is the ONLY thing costing anything — if this ever drifts
+      // far below, the cases that exercise the pole have stopped running.
+      expect(worstSeen).toBeGreaterThan(0);
+    });
+
+    it('is exact whenever the new frame can express the direction', () => {
+      for (const from of ALL_AXES) {
+        for (const to of ALL_AXES) {
+          for (const yaw of [0, 0.7, -2.2]) {
+            for (const pitch of [0, 0.4, -0.9]) {
+              const before = lookVector(from, yaw, pitch);
+              const solved = reframeLook(before, to, yaw);
+              if (Math.abs(solved.pitch) >= MAX_PITCH - 1e-9) continue; // clamped
+              const after = lookVector(to, solved.yaw, solved.pitch);
+              expect(dot(before, after)).toBeCloseTo(1, 9);
+            }
+          }
+        }
+      }
+    });
+
+    it('looking straight down a shaft still looks down it after mounting a wall', () => {
+      // The exact case that felt broken: pitched hard down, walk into the wall,
+      // and end up facing sideways.
+      const down = lookVector(WORLD_UP, 0, -MAX_PITCH);
+      expect(down.y).toBeLessThan(-0.99);
+      const solved = reframeLook(down, 'pos_z');
+      const after = lookVector('pos_z', solved.yaw, solved.pitch);
+      expect(after.y).toBeLessThan(-0.99);
+    });
+
+    it('keeps the old yaw at the singularity instead of snapping', () => {
+      // Looking exactly along the new up, every yaw gives the same view, so
+      // there is nothing to solve — inventing one would spin the camera.
+      const straightUp = { x: 0, y: 1, z: 0 };
+      expect(reframeLook(straightUp, WORLD_UP, 1.234).yaw).toBeCloseTo(1.234);
+    });
+
+    it('never produces a pitch that can escape the frame', () => {
+      for (const axis of ALL_AXES) {
+        for (const target of [{ x: 0, y: 1, z: 0 }, { x: 0, y: -1, z: 0 }, { x: 1, y: 0, z: 0 }]) {
+          const solved = reframeLook(target, axis);
+          expect(Math.abs(solved.pitch)).toBeLessThanOrEqual(MAX_PITCH + 1e-9);
+        }
+      }
+    });
+
+    it('reference right is always perpendicular to its own up', () => {
+      for (const axis of ALL_AXES) {
+        expect(dot(referenceRight(axis), axisVector(axis))).toBe(0);
+      }
+    });
   });
 });

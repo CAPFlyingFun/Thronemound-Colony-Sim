@@ -21,9 +21,10 @@ import { createVoxelMaterial, type VoxelMaterialBundle } from '../voxel/voxelMat
 import { DEN_MIN_CHAMBER, DEN_MIN_DEPTH, QueenFounding } from '../voxel/QueenFounding';
 import { DEFAULT_BANDS, approach, clampStickOrigin, speedForStick, stickVector } from '../voxel/locomotion';
 import {
-  WORLD_UP, applyOrientation, attachableWall, axisVector, createSurfaceState,
+  WORLD_UP, applyOrientation, axisVector, createSurfaceState,
   INPUT_COMMIT_THRESHOLD, axisFromVector, canChangeOrientation,
-  evaluateEdge, rankSurfaces, supportBelow, tickLock, type AxisDirection,
+  evaluateEdge, lookVector, rankSurfaces, referenceRight, reframeLook,
+  supportBelow, tickLock, type AxisDirection,
 } from '../voxel/SurfaceFrame';
 
 const WORLD_SIZE = 128;
@@ -101,6 +102,17 @@ const EDGE_ARC = 0.55;
 const UNDERGROUND_Y = SURFACE_Y + 0.9;
 /** Constant descent when nothing is underfoot below ground. 1 cm/s. */
 const SETTLE_SPEED = 2;
+/**
+ * Underground is close work — braced against tunnel walls in the dark, not
+ * striding across open ground.
+ */
+const UNDERGROUND_SPEED = 0.75;
+/**
+ * Hauling. Honest caveat: a real ant carries many times its own body weight, so
+ * one grain of soil would barely slow it — this is a feel number, there so the
+ * trip out reads as work, not a biology number.
+ */
+const CARRY_SPEED = 0.85;
 /** Shown in the HUD so it's obvious at a glance whether a build is current. */
 const BUILD_LABEL = `v${__APP_VERSION__} \u00b7 ${__BUILD_TIME__}`;
 /**
@@ -173,6 +185,8 @@ export class DigScene {
   private keyboardDriving = false;
   private sprinting = false;
   private jumpQueued = false;
+  /** Jumped and not yet landed — suspends weightlessness so the leap survives. */
+  private airborne = false;
 
   private readonly hud: HTMLDivElement;
   private readonly dropButton: HTMLButtonElement;
@@ -369,7 +383,7 @@ export class DigScene {
 
     const jumpDown = (event: Event) => {
       event.preventDefault();
-      this.toggleGrip();
+      this.jumpQueued = true;
     };
     this.jumpButton.addEventListener('pointerdown', jumpDown);
     this.cleanups.push(() => this.jumpButton.removeEventListener('pointerdown', jumpDown));
@@ -424,20 +438,85 @@ export class DigScene {
     this.cleanups.push(() => this.actionButton.removeEventListener('pointerdown', actionDown));
   }
 
-  /** Put the carried cube into the cell the crosshair faces. */
+  /** Would a grain placed here end up inside the ant? */
+  private overlapsSelf(x: number, y: number, z: number): boolean {
+    const dx = Math.abs(x + 0.5 - this.position.x);
+    const dz = Math.abs(z + 0.5 - this.position.z);
+    return dx < BODY_RADIUS + 0.5 && dz < BODY_RADIUS + 0.5
+      && y + 1 > this.position.y && y < this.position.y + EYE_HEIGHT;
+  }
+
+  private canDropAt(x: number, y: number, z: number): boolean {
+    return this.world.get(x, y, z) === AIR
+      && this.withinReach(x, y, z)
+      && !this.overlapsSelf(x, y, z);
+  }
+
+  /**
+   * Put the carried grain down.
+   *
+   * Prefers the cell the crosshair faces, but does NOT insist on it. At
+   * one-cube reach the aim window on flat ground is genuinely narrow — pitch
+   * too shallow and the ground you are looking at is two cubes out, too steep
+   * and the placement cell is your own body — so insisting made DROP silently
+   * do nothing at a lot of perfectly reasonable angles. That is the same
+   * "I pressed it and nothing happened" failure the mode toggle was deleted for.
+   *
+   * An ant putting down a grain does not aim. She puts it down.
+   */
   private dropCarried(): void {
+    if (this.session.carried === 0) return;
+
     const hit = this.currentTarget();
-    if (!hit) return;
-    const px = hit.x + hit.nx;
-    const py = hit.y + hit.ny;
-    const pz = hit.z + hit.nz;
-    // Don't brick yourself inside the ant's own body.
-    const dx = Math.abs(px + 0.5 - this.position.x);
-    const dz = Math.abs(pz + 0.5 - this.position.z);
-    const overlapsSelf = dx < BODY_RADIUS + 0.5 && dz < BODY_RADIUS + 0.5
-      && py + 1 > this.position.y && py < this.position.y + EYE_HEIGHT;
-    if (overlapsSelf) return;
-    this.session.place(px, py, pz);
+    if (hit && this.canDropAt(hit.x + hit.nx, hit.y + hit.ny, hit.z + hit.nz)) {
+      this.session.place(hit.x + hit.nx, hit.y + hit.ny, hit.z + hit.nz);
+      return;
+    }
+
+    const cell = this.fallbackDropCell();
+    if (cell) this.session.place(cell.x, cell.y, cell.z);
+  }
+
+  /**
+   * The best neighbouring cell to set a grain down in.
+   *
+   * Scored rather than first-match, so the spoil lands somewhere that reads as
+   * deliberate: resting against something solid rather than hanging in the air,
+   * low rather than overhead, and in front of her rather than behind.
+   */
+  private fallbackDropCell(): { x: number; y: number; z: number } | null {
+    const eye = this.camera.position;
+    const base = { x: Math.floor(eye.x), y: Math.floor(eye.y), z: Math.floor(eye.z) };
+    const { forward } = this.surfaceBasis();
+    const up = this.upVec();
+
+    let best: { x: number; y: number; z: number } | null = null;
+    let bestScore = -Infinity;
+    for (let dy = -REACH_CUBES; dy <= REACH_CUBES; dy++) {
+      for (let dz = -REACH_CUBES; dz <= REACH_CUBES; dz++) {
+        for (let dx = -REACH_CUBES; dx <= REACH_CUBES; dx++) {
+          const x = base.x + dx;
+          const y = base.y + dy;
+          const z = base.z + dz;
+          if (!this.canDropAt(x, y, z)) continue;
+
+          // Resting against something beats floating in mid-air.
+          const braced = isSolid(this.world.get(x + 1, y, z)) || isSolid(this.world.get(x - 1, y, z))
+            || isSolid(this.world.get(x, y + 1, z)) || isSolid(this.world.get(x, y - 1, z))
+            || isSolid(this.world.get(x, y, z + 1)) || isSolid(this.world.get(x, y, z - 1));
+
+          const to = new THREE.Vector3(x + 0.5 - eye.x, y + 0.5 - eye.y, z + 0.5 - eye.z).normalize();
+          const score = (braced ? 100 : 0)
+            + 10 * to.dot(forward)   // in front of her
+            - 8 * to.dot(up);        // and down rather than overhead
+          if (score > bestScore) {
+            bestScore = score;
+            best = { x, y, z };
+          }
+        }
+      }
+    }
+    return best;
   }
 
   /** Start (or cancel) a dig on a specific cube, if it's within reach. */
@@ -456,21 +535,6 @@ export class DigScene {
     this.stick.style.top = `${this.moveOrigin.y}px`;
     this.stickKnob.style.transform =
       `translate(-50%, -50%) translate(${this.moveX * STICK_RADIUS}px, ${this.moveZ * STICK_RADIUS}px)`;
-  }
-
-  /**
-   * One button rather than three. Screen space is the scarce resource on a
-   * phone, especially in landscape, so the label changes with context instead
-   * of the layout changing under the thumb.
-   */
-  private refreshGripButton(): void {
-    if (this.colonyView) return;
-    const attached = this.surface.mode === 'attached';
-    const { forward } = this.surfaceBasis();
-    const wall = attached ? null : attachableWall(this.world, this.position, this.surface, forward);
-    const label = attached ? '\u2934 RELEASE' : wall ? '\u{1F9D7} CLIMB' : '\u2191 JUMP';
-    if (this.jumpButton.textContent !== label) this.jumpButton.textContent = label;
-    this.jumpButton.classList.toggle('is-grip', attached || wall !== null);
   }
 
   /**
@@ -657,7 +721,7 @@ export class DigScene {
         case 'KeyD': case 'ArrowRight': this.moveX = 1; this.keyboardDriving = true; break;
         case 'ShiftLeft': case 'ShiftRight': this.sprinting = true; break;
         case 'Space': this.jumpQueued = true; event.preventDefault(); break;
-        case 'KeyG': this.toggleGrip(); event.preventDefault(); break;
+        case 'KeyG': this.jumpQueued = true; event.preventDefault(); break;
         case 'KeyE': case 'Tab': this.dropCarried(); event.preventDefault(); break;
         case 'KeyF': {
           if (this.session.digging) this.session.cancelDig();
@@ -717,28 +781,35 @@ export class DigScene {
     return new THREE.Vector3(v.x, v.y, v.z);
   }
 
-  /**
-   * A deterministic reference right-vector for each `up`, so yaw means the same
-   * thing every time you attach to a given face. Forward falls out as up x
-   * right, which keeps the basis right-handed in all six frames.
-   */
-  private referenceRight(): THREE.Vector3 {
-    const axis = this.upAxis();
-    return axis === 'y' ? new THREE.Vector3(1, 0, 0)
-      : axis === 'x' ? new THREE.Vector3(0, 1, 0)
-        : new THREE.Vector3(1, 0, 0);
-  }
-
   /** Movement basis in the plane perpendicular to `up`, rotated by yaw. */
   private surfaceBasis(): { forward: THREE.Vector3; right: THREE.Vector3 } {
     const up = this.upVec();
-    const r0 = this.referenceRight();
+    const rr = referenceRight(this.surface.up);
+    const r0 = new THREE.Vector3(rr.x, rr.y, rr.z);
     const f0 = up.clone().cross(r0).normalize();
     const cos = Math.cos(this.yaw);
     const sin = Math.sin(this.yaw);
     const forward = f0.clone().multiplyScalar(cos).addScaledVector(r0, -sin).normalize();
     const right = r0.clone().multiplyScalar(cos).addScaledVector(f0, sin).normalize();
     return { forward, right };
+  }
+
+  /**
+   * Change `up` without moving the view.
+   *
+   * yaw and pitch are measured inside a frame, so carrying the same numbers
+   * across a reorientation points the camera somewhere unrelated — you look
+   * down a shaft, mount its wall, and end up facing sideways. Solving them
+   * again for the world direction you were already looking makes mounting
+   * change only which way is down.
+   */
+  private reorient(up: AxisDirection, support: { x: number; y: number; z: number } | null): void {
+    const look = lookVector(this.surface.up, this.yaw, this.pitch);
+    applyOrientation(this.surface, up, support);
+    const solved = reframeLook(look, up, this.yaw);
+    this.yaw = solved.yaw;
+    this.pitch = solved.pitch;
+    this.beginCameraTurn();
   }
 
   /**
@@ -813,31 +884,26 @@ export class DigScene {
     return false;
   }
 
-  /** Grip the wall in front, or let go of the one we're on. */
-  private toggleGrip(): void {
+  /**
+   * Jump — and jumping is the ONLY way off a surface.
+   *
+   * The ant clings to whatever she is on and crosses edges onto neighbouring
+   * faces automatically; there is no release button, because "am I gripping?"
+   * was a mode the player had to track for no benefit. Letting go is a
+   * deliberate act with a cost, which is also how an ant behaves.
+   *
+   * Underground she is weightless, so a jump has to suspend that too or the
+   * leap would be cancelled by the very rule it is meant to escape. `airborne`
+   * holds gravity on until she lands again.
+   */
+  private jump(): void {
     if (this.surface.mode === 'attached') {
-      applyOrientation(this.surface, WORLD_UP, null);
-      this.upVelocity = 0;
-      this.beginCameraTurn();
-      return;
+      this.reorient(WORLD_UP, null);
     }
-    const { forward } = this.surfaceBasis();
-    const wall = attachableWall(this.world, this.position, this.surface, forward);
-    if (!wall) {
-      if (this.grounded) {
-        this.upVelocity = JUMP_SPEED;
-        this.grounded = false;
-      }
-      return;
-    }
-    const support = supportBelow(this.world, this.position, wall);
-    const contact = support ? this.surfaceContact(wall, support) : null;
-    if (!contact) return; // no room on that face — better to refuse than embed
-    this.position.copy(contact);
-    applyOrientation(this.surface, wall, support);
-    this.upVelocity = 0;
-    this.planarSpeed = 0;
-    this.beginCameraTurn();
+    if (!this.grounded && !this.weightless) return;
+    this.upVelocity = JUMP_SPEED;
+    this.grounded = false;
+    this.airborne = true;
   }
 
   private beginCameraTurn(): void {
@@ -893,17 +959,29 @@ export class DigScene {
     const magnitude = this.keyboardDriving
       ? (this.sprinting ? 1 : KEY_MAGNITUDE)
       : Math.min(1, this.stickMagnitude);
-    if (wish.lengthSq() > 0) wish.normalize();
-    const targetSpeed = speedForStick(magnitude, DEFAULT_BANDS);
+    /*
+     * Speed needs a DIRECTION, not just a magnitude.
+     *
+     * `magnitude` comes from the stick throw, and for keyboard it is pinned at
+     * KEY_MAGNITUDE for as long as keyboardDriving is set — which outlives the
+     * keypress. So releasing W left targetSpeed at walking pace forever: the
+     * ant stood still (wish is the zero vector, so the step is zero) while
+     * reporting 3.4 voxels/s and swaying as though mid-stride.
+     */
+    const moving = wish.lengthSq() > 1e-6;
+    if (moving) wish.normalize();
+    // Underground is close work, and a loaded ant is a working ant. Keyed off
+    // depth rather than `weightless`, so speed depends on where she is and not
+    // on what she happens to be brushing against.
+    const load = this.position.y < UNDERGROUND_Y ? UNDERGROUND_SPEED : 1;
+    const haul = this.session.carried > 0 ? CARRY_SPEED : 1;
+    const targetSpeed = moving ? speedForStick(magnitude, DEFAULT_BANDS) * load * haul : 0;
 
     this.planarSpeed = approach(this.planarSpeed, targetSpeed, WALK_ACCEL, WALK_DECEL, dt);
     const step = wish.clone().multiplyScalar(this.planarSpeed * dt);
     const pressing = targetSpeed > 0.01;
 
-    if (this.jumpQueued && this.grounded && !this.weightless) {
-      this.upVelocity = JUMP_SPEED;
-      this.grounded = false;
-    }
+    if (this.jumpQueued) this.jump();
     this.jumpQueued = false;
 
     const upAxis = this.upAxis();
@@ -935,22 +1013,28 @@ export class DigScene {
      * gravity then presses the ant INTO the wall rather than down it.
      */
     const touching = rankSurfaces(this.world, this.position, this.surface, wish).length > 0;
-    this.weightless = this.position.y < UNDERGROUND_Y && touching;
+    // `airborne` is what makes "jump releases you" true underground: without
+    // it the leap would be cancelled by the weightlessness it is escaping.
+    this.weightless = !this.airborne && this.position.y < UNDERGROUND_Y && touching;
     if (this.weightless) {
       /*
-       * Weightless does not mean motionless. Zeroing velocity outright meant
-       * the ant hovered over the hole it had just dug beneath itself, so
-       * digging downward stopped lowering you at all.
+       * Always settle, and let COLLISION decide when she has landed.
        *
-       * Instead: supported -> hold still; unsupported -> settle at a constant
-       * slow rate until something is underfoot. Constant, so it is a controlled
-       * descent rather than a fall — no acceleration means no speed to build
-       * up, and therefore still no way to get trapped at the bottom of
-       * anything.
+       * This used to ask supportBelow() whether something was underfoot and
+       * zero the velocity if so. That is a grid query — it floors the position
+       * to a cube and looks at the cube below THAT — being used to decide a
+       * continuous position, and it left the ant hovering. Settling from 97.0
+       * into a one-deep pit, the moment she crossed to 96.99 the cube below
+       * (95) read solid, velocity was zeroed, and she stopped a full 0.99
+       * voxels above a floor she is only 0.7 tall.
+       *
+       * The gravity branch never had this bug because it never asks: it moves
+       * and lets collides() stop it, which is sub-voxel accurate. So does this
+       * now. Constant speed rather than acceleration, so it stays a controlled
+       * descent with no way to build up momentum — the only thing the original
+       * design actually needed.
        */
-      const supported = supportBelow(this.world, this.position, this.surface.up) !== null;
-      this.upVelocity = supported ? 0 : -SETTLE_SPEED;
-      this.grounded = supported;
+      this.upVelocity = -SETTLE_SPEED;
     } else {
       this.upVelocity -= GRAVITY * dt;
       this.upVelocity = Math.max(this.upVelocity, TERMINAL_VELOCITY);
@@ -959,21 +1043,30 @@ export class DigScene {
 
     this.grounded = false;
     this.tryAxis(upAxis, this.upVelocity * dt * this.upSign());
+    // Landed: gravity hands back to weightlessness, and sticking resumes.
+    if (this.grounded) this.airborne = false;
 
     // Crossing onto an adjacent face. Proximity alone never commits — movement
     // has to point across the edge too, which is what lets you stand still low
     // on a wall without being yanked onto the floor.
     /*
-     * Underground, walking INTO a wall mounts it — the concave case.
+     * Walking INTO a wall mounts it — the concave case.
      *
      * evaluateEdge only fires when support runs out, which handles crawling
      * over a lip but never happens while standing on a shaft floor. Without
-     * this, "walk up the wall" simply did nothing in the one place it matters
-     * most. It is gated on committed movement and on the hysteresis lock, so
-     * brushing a wall while positioning to dig can't flip you, and a corner
-     * can't ping-pong between two faces.
+     * this, "walk up the wall" did nothing in the one place it matters most.
+     *
+     * No longer gated on being weightless: the ant clings to whatever she
+     * touches everywhere, above ground as well as below, and jumping is the
+     * only way off. Excluding the surface made a wall behave differently
+     * depending on which side of an invisible line it stood on.
+     *
+     * Still gated on committed movement and the hysteresis lock, so brushing a
+     * wall while lining up a dig can't flip you and a corner can't ping-pong
+     * between two faces. Step-up runs first, so `blocked` only means a rise the
+     * ant genuinely cannot walk over.
      */
-    if (this.weightless && wallAhead && this.hasWall
+    if (wallAhead && this.hasWall && !this.airborne
       && magnitude >= INPUT_COMMIT_THRESHOLD && canChangeOrientation(this.surface)) {
       const mount = axisFromVector(this.wallNormal);
       if (mount !== this.surface.up) {
@@ -981,9 +1074,8 @@ export class DigScene {
         const contact = mountSupport ? this.surfaceContact(mount, mountSupport) : null;
         if (contact) {
           this.position.copy(contact);
-          applyOrientation(this.surface, mount, mountSupport);
+          this.reorient(mount, mountSupport);
           this.upVelocity = 0;
-          this.beginCameraTurn();
         }
       }
     }
@@ -996,9 +1088,8 @@ export class DigScene {
         const contact = nextSupport ? this.surfaceContact(decision.up, nextSupport) : null;
         if (contact) {
           this.position.copy(contact);
-          applyOrientation(this.surface, decision.up, nextSupport);
+          this.reorient(decision.up, nextSupport);
           this.upVelocity = 0;
-          this.beginCameraTurn();
         }
       }
     }
@@ -1282,7 +1373,6 @@ export class DigScene {
     this.drainDirty();
     if (++this.hudCounter % 6 === 0) {
       this.updateHud();
-      this.refreshGripButton();
       this.refreshActionButton();
     }
 

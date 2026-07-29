@@ -238,6 +238,100 @@ export function applyOrientation(state: SurfaceState, up: AxisDirection, support
 }
 
 /**
+ * Yaw and pitch are measured INSIDE a frame, so the same numbers mean different
+ * world directions once `up` changes. Reorienting without re-solving them
+ * teleports your head: you look down a shaft, mount its wall, and end up facing
+ * sideways for no reason you can see.
+ *
+ * These three functions are the fix. `lookVector` turns a frame plus yaw/pitch
+ * into a world direction; `reframeLook` runs it backwards, finding the yaw and
+ * pitch that reproduce a given world direction in a NEW frame. Reorient through
+ * them and only "which way is down" changes — the view stays put.
+ *
+ * The maximum pitch a frame can express. Straight along `up` is a singularity
+ * (yaw stops meaning anything there), so stop just short of it.
+ */
+export const MAX_PITCH = 1.5;
+
+/**
+ * A deterministic reference right-vector per axis, so yaw means the same thing
+ * every time you attach to a given face. Depends only on the axis letter, never
+ * the sign, and is always perpendicular to it.
+ */
+export function referenceRight(up: AxisDirection): Vec3 {
+  return up.endsWith('_y') ? { x: 1, y: 0, z: 0 }
+    : up.endsWith('_x') ? { x: 0, y: 1, z: 0 }
+      : { x: 1, y: 0, z: 0 };
+}
+
+function cross(a: Vec3, b: Vec3): Vec3 {
+  return {
+    x: a.y * b.z - a.z * b.y,
+    y: a.z * b.x - a.x * b.z,
+    z: a.x * b.y - a.y * b.x,
+  };
+}
+
+function dot(a: Vec3, b: Vec3): number {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+function normalize(v: Vec3): Vec3 {
+  const length = Math.hypot(v.x, v.y, v.z);
+  return length === 0 ? { x: 0, y: 0, z: 0 } : { x: v.x / length, y: v.y / length, z: v.z / length };
+}
+
+/** The movement-plane forward for a frame at this yaw. */
+export function surfaceForward(up: AxisDirection, yaw: number): Vec3 {
+  const u = axisVector(up);
+  const r0 = referenceRight(up);
+  const f0 = normalize(cross(u, r0));
+  const cos = Math.cos(yaw);
+  const sin = Math.sin(yaw);
+  return normalize({
+    x: f0.x * cos - r0.x * sin,
+    y: f0.y * cos - r0.y * sin,
+    z: f0.z * cos - r0.z * sin,
+  });
+}
+
+/** Where the camera points, in world space, for a frame at this yaw and pitch. */
+export function lookVector(up: AxisDirection, yaw: number, pitch: number): Vec3 {
+  const forward = surfaceForward(up, yaw);
+  const u = axisVector(up);
+  const cos = Math.cos(pitch);
+  const sin = Math.sin(pitch);
+  return normalize({
+    x: forward.x * cos + u.x * sin,
+    y: forward.y * cos + u.y * sin,
+    z: forward.z * cos + u.z * sin,
+  });
+}
+
+/**
+ * The yaw and pitch that reproduce a world-space look direction in `up`'s
+ * frame — `lookVector` run backwards.
+ *
+ * `fallbackYaw` covers the singularity: looking exactly along the new up, every
+ * yaw gives the same view, so there is nothing to solve and the old one is kept.
+ */
+export function reframeLook(look: Vec3, up: AxisDirection, fallbackYaw = 0): { yaw: number; pitch: number } {
+  const u = axisVector(up);
+  const alongUp = Math.min(1, Math.max(-1, dot(normalize(look), u)));
+  const pitch = Math.min(MAX_PITCH, Math.max(-MAX_PITCH, Math.asin(alongUp)));
+
+  const n = normalize(look);
+  const planar = { x: n.x - u.x * alongUp, y: n.y - u.y * alongUp, z: n.z - u.z * alongUp };
+  if (planar.x * planar.x + planar.y * planar.y + planar.z * planar.z < 1e-8) {
+    return { yaw: fallbackYaw, pitch };
+  }
+  const p = normalize(planar);
+  const r0 = referenceRight(up);
+  const f0 = normalize(cross(u, r0));
+  return { yaw: Math.atan2(-dot(p, r0), dot(p, f0)), pitch };
+}
+
+/**
  * The wall an unattached ant could grip: solid, perpendicular to world up, and
  * touching the ant. Returns the `up` that gripping it would produce.
  */

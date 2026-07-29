@@ -88,6 +88,8 @@ const ok = (m) => console.log(`  ok  ${m}`);
       mound: Number(/Mound (\d+)/.exec(t)?.[1] ?? '0'),
       target: /Target: ([^ ·]+)/.exec(t)?.[1] ?? '',
       seconds: Number(/([\d.]+)s\/cube/.exec(t)?.[1] ?? '0'),
+      y: Number((/pos [-\d.]+,([-\d.]+),/.exec(t) ?? [])[1] ?? 'NaN'),
+      speed: Number(/spd ([\d.]+)/.exec(t)?.[1] ?? '0'),
     };
   };
   // The HUD repaints every 6th frame — about 770 ms under software rendering —
@@ -135,10 +137,29 @@ const ok = (m) => console.log(`  ok  ${m}`);
   if ((await page.textContent('.dig-action')).includes('CANCEL')) fail('a look-drag started a dig');
   else ok('dragging to look does not dig');
 
+  const standing = await hud();
   await tap(450, 700);
   const first = await until('the first cube', (s) => s.dug >= 1);
   if (first.dug !== 1 || first.carrying !== 1) fail(`expected exactly one cube dug, got ${JSON.stringify(first)}`);
   else ok('digs exactly one cube, then stops because it is full');
+
+  /*
+   * Dig the floor out from under yourself and you must end up ON the new floor,
+   * not hovering over it.
+   *
+   * This pins a real bug. The weightless branch used to ask supportBelow() —
+   * a GRID query, which floors the position to a cube and checks the cube below
+   * THAT — whether something was underfoot, and zeroed the velocity if so.
+   * Settling from 97.0 into a one-deep pit, the instant she crossed to 96.99
+   * the cube below (95) read solid and she stopped a full 0.99 voxels above a
+   * floor she is only 0.7 tall. Collision is sub-voxel accurate; the grid query
+   * was not, and was deciding a continuous position.
+   */
+  const settled = await until('the ant to settle into her own hole',
+    (s) => Number.isFinite(s.y) && standing.y - s.y > 0.8, 12000);
+  const drop = standing.y - settled.y;
+  if (!(drop > 0.8)) fail(`hovering: dug one voxel down but only fell ${drop.toFixed(2)} (${standing.y} -> ${settled.y})`);
+  else ok(`settles onto the new floor, fell ${drop.toFixed(2)} voxels`);
 
   // Tapping again while loaded must not start a second dig.
   await tap(450, 700);
@@ -149,9 +170,26 @@ const ok = (m) => console.log(`  ok  ${m}`);
   if ((await page.textContent('.dig-action')).includes('CANCEL')) fail('a refused dig still armed CANCEL');
   else ok('a refused dig does not pretend to have started');
 
-  // Drop it, then the ant is free again.
-  await look(1180, 960);
-  await page.waitForTimeout(400);
+  /*
+   * Climb out, then dump. She is standing IN the hole she just dug, and a
+   * one-cube pit has nowhere to backfill from the inside — the placement cell
+   * would be her own body, which is refused on purpose. Walking out is the real
+   * loop, and step-up handles a one-voxel rise without a jump.
+   *
+   * This used to "pass" from inside the pit only because the hover put her eye
+   * above the rim. Fixing the hover is what exposed it.
+   */
+  await page.keyboard.down('KeyW');
+  await page.waitForTimeout(2000);
+  await page.keyboard.up('KeyW');
+  const out = await until('the ant to climb out of her hole', (s) => s.y > 96.9, 10000);
+  if (!(out.y > 96.9)) fail(`could not walk out of a one-voxel pit (y ${out.y})`);
+  else ok(`steps out of the pit unaided (y ${out.y})`);
+
+  // No aiming. DROP prefers the crosshair cell but falls back to the best
+  // neighbouring one, so putting a grain down never depends on threading the
+  // narrow window one-cube reach leaves on flat ground.
+  await until('the ant to stop walking', (s) => s.speed < 0.2, 12000);
   await page.click('.dig-drop');
   const dropped = await until('the load to reach the mound', (s) => s.mound >= 1, 8000);
   if (dropped.carrying !== 0 || dropped.mound !== 1) fail(`dropping failed: ${JSON.stringify(dropped)}`);
@@ -226,16 +264,22 @@ const ok = (m) => console.log(`  ok  ${m}`);
 
   await page.screenshot({ path: `${OUT}-4-mounted.png` });
 
-  // Release restores world up. Poll rather than sampling once: the HUD repaints
-  // every 6th frame, so a fixed wait can land on a frame painted before the key.
-  await page.keyboard.press('KeyG');
+  /*
+   * Jumping is the ONLY way off a surface — there is no release button. The ant
+   * clings to whatever she touches and crosses edges automatically, so letting
+   * go has to be a deliberate act with a cost.
+   *
+   * Poll rather than sampling once: the HUD repaints every 6th frame, so a
+   * fixed wait can land on a frame painted before the key was handled.
+   */
+  await page.keyboard.press('Space');
   let released = await state();
   for (let i = 0; i < 12 && released.up !== 'pos_y'; i++) {
     await page.waitForTimeout(250);
     released = await state();
   }
-  if (released.up !== 'pos_y') fail(`release should restore world up, got ${released.up}`);
-  else ok('release restores world up');
+  if (released.up !== 'pos_y') fail(`jumping should let go of the wall, got up ${released.up}`);
+  else ok('jumping is what lets go of a wall');
 
   if (errors.length) fail(`page errors: ${errors.join(' | ')}`);
   else ok('no page errors');

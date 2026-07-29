@@ -76,6 +76,8 @@ const hud = async () => {
     carrying: Number(/Carrying (\d+)/.exec(t)?.[1] ?? '0'),
     mound: Number(/Mound (\d+)/.exec(t)?.[1] ?? '0'),
     seconds: Number(/([\d.]+)s\/cube/.exec(t)?.[1] ?? '0'),
+    speed: Number(/spd ([\d.]+)/.exec(t)?.[1] ?? '0'),
+    target: /Target: ([^ ·]+)/.exec(t)?.[1] ?? '',
   };
 };
 /**
@@ -142,10 +144,25 @@ const dugShot = await shot('2-dug');
 if (Buffer.compare(surfaceShot, dugShot) === 0) fail('frame did not change after digging');
 else ok('rendered frame changed after digging');
 
-// 6. DROP puts it back. Pitch up first so the placement cell is an adjacent
-// cube's face rather than the one the ant is standing in, which is refused.
-await swipeLook(1180, 960);
-await page.waitForTimeout(400);
+// 6. Climb out, then DROP puts it back.
+//
+// She is standing IN the hole she just dug, and a one-cube pit has nowhere to
+// backfill from the inside — the placement cell would be her own body, which is
+// refused on purpose. Walking out is the real loop, and step-up clears a
+// one-voxel rise without a jump. (This step used to be unnecessary only because
+// a hover bug left her eye above the rim.)
+await page.keyboard.down('KeyW');
+await page.waitForTimeout(2000);
+await page.keyboard.up('KeyW');
+// Wait for her to actually come to rest. Deceleration is 22 voxels/s^2 but the
+// sim runs at ~0.39x wall clock here, so a fixed pause is a coin flip — aiming
+// while still walking is what made this step flaky.
+await until('the ant to stop walking', (s) => s.speed < 0.2, 12000);
+
+// Deliberately do NOT fuss over the aim. DROP prefers the cell the crosshair
+// faces but falls back to the best neighbouring one, precisely so a player
+// doesn't have to thread the narrow window that one-cube reach leaves on flat
+// ground. If this needs a perfect pitch to pass, the fallback has regressed.
 await page.click('.dig-drop');
 const placed = await until('the load to reach the mound', (s) => s.mound >= 1, 8000);
 if (placed.mound < 1) fail(`DROP placed nothing — "${placed.text}"`);
