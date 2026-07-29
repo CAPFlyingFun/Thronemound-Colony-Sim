@@ -7,7 +7,7 @@ import { FACES, meshChunk } from '../src/voxel/mesher';
 import { MAX_LOOSE_CLODS, LooseSoil } from '../src/voxel/LooseSoil';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_NEIGHBOURS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
-import { CELL_COUNT, CHIP_CELLS, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
+import { CELL_COUNT, CHIP_CELLS, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, crumbAt, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
@@ -1136,6 +1136,61 @@ describe('fracture', () => {
       worst = Math.max(worst, data?.quadCount ?? 0);
     }
     expect(worst).toBeLessThanOrEqual(CELL_COUNT * 6);
+  });
+
+  describe('support under the buried clod', () => {
+    // crumbAt is the query that gives the clod weight: the scene probes points
+    // around the lump and lets it fall into whatever the chipping has opened.
+    const pattern = buildFracture(4, S, 6, TOPSOIL);
+
+    it('agrees with cellSurvives, so the thing you can see is the thing you land on', () => {
+      for (let cell = 0; cell < CELL_COUNT; cell++) {
+        if (pattern.core.has(cell)) continue;
+        const c = cellCentre(cell);
+        for (const p of [0, 0.25, 0.5, 0.75, 1]) {
+          expect(crumbAt(pattern, p, c.x, c.y, c.z)).toBe(cellSurvives(pattern, cell, p));
+        }
+      }
+    });
+
+    it('never lets the clod rest on itself', () => {
+      // Core cells ARE the clod. Reporting them solid would wedge it in place
+      // forever, which is exactly the floating look this exists to fix.
+      for (const cell of pattern.core) {
+        const c = cellCentre(cell);
+        expect(crumbAt(pattern, 0, c.x, c.y, c.z)).toBe(false);
+      }
+    });
+
+    it('speaks only for its own voxel', () => {
+      for (const [x, y, z] of [[-0.1, 0.5, 0.5], [0.5, 1.2, 0.5], [0.5, 0.5, -3]]) {
+        expect(crumbAt(pattern, 1, x!, y!, z!)).toBe(false);
+      }
+    });
+
+    it('only ever loses support, so the clod cannot be pushed back up', () => {
+      const c = cellCentre(pattern.order[0]!);
+      let seenGone = false;
+      for (let p = 0; p <= 1.0001; p += 0.01) {
+        const solid = crumbAt(pattern, p, c.x, c.y, c.z);
+        if (!solid) seenGone = true;
+        else expect(seenGone).toBe(false);
+      }
+      expect(seenGone).toBe(true);
+    });
+
+    it('starts held and ends with nothing under it', () => {
+      // At rest the clod is packed in soil — there is footing on every side but
+      // its own cavity. By the end every crumb has gone, so it has fallen as
+      // far as the voxel allows rather than hanging where it was buried.
+      const c = pattern.clodCentre;
+      const below = { x: c.x, y: c.y - 0.3, z: c.z };
+      expect(crumbAt(pattern, 0, below.x, below.y, below.z)).toBe(true);
+      for (let cell = 0; cell < CELL_COUNT; cell++) {
+        const at = cellCentre(cell);
+        expect(crumbAt(pattern, 1, at.x, at.y, at.z)).toBe(false);
+      }
+    });
   });
 
   it('cannot be started on bedrock, so bedrock never gets a visual', () => {

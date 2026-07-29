@@ -80,6 +80,7 @@ const hud = async () => {
     target: /Target: ([^ ·]+)/.exec(t)?.[1] ?? '',
     chip: Number(/chip (\d+)\/\d+/.exec(t)?.[1] ?? 'NaN'),
     chipTotal: Number(/chip \d+\/(\d+)/.exec(t)?.[1] ?? 'NaN'),
+    clodY: Number(/clod ([-\d.]+)/.exec(t)?.[1] ?? 'NaN'),
   };
 };
 /**
@@ -95,11 +96,18 @@ const untilLabel = async (want, timeoutMs = 20000) => {
     await page.waitForTimeout(250);
   }
 };
-/** Poll until a predicate holds; the HUD only repaints every 6th frame. */
-const until = async (label, check, timeoutMs = 300000) => {
+/**
+ * Poll until a predicate holds; the HUD only repaints every 6th frame.
+ *
+ * `watch` sees every sample, which is how a value that moves DURING the wait
+ * can be asserted on — the state that finally satisfies `check` has usually
+ * moved on from whatever the interesting moment was.
+ */
+const until = async (label, check, timeoutMs = 300000, watch = null) => {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const state = await hud();
+    if (watch) watch(state);
     if (check(state)) return state;
     if (Date.now() > deadline) { fail(`timed out waiting for ${label} — "${state.text}"`); return state; }
     await page.waitForTimeout(400);
@@ -149,13 +157,27 @@ else ok('a cancelled dig credits no practice');
 // wall-clock wait: dt is clamped to 50 ms and software rendering manages ~3 fps
 // once the sky is drawn, so the sim advances at roughly 0.15x real time.
 await tap(450, 800);
-const dug = await until('the first cube to pop', (s) => s.dug >= 1);
+/*
+ * The buried clod has weight: as the soil under it is chipped away it settles
+ * into the hole instead of hanging where the pattern buried it. Sampled from
+ * the moment the visual exists, and again once the crumbs are mostly gone.
+ */
+const clodStart = await until('the buried clod to appear', (s) => !Number.isNaN(s.clodY), 30000);
+let clodLowest = Infinity;
+const dug = await until('the first cube to pop', (s) => s.dug >= 1, 300000, (s) => {
+  if (!Number.isNaN(s.clodY)) clodLowest = Math.min(clodLowest, s.clodY);
+});
 if (dug.dug < 1) fail(`nothing was excavated — "${dug.text}"`);
 else ok(`excavated ${dug.dug}, carrying ${dug.carrying}`);
 // Digging FREES the soil, it does not load her. The spoil is lying in the hole
 // and picking it up is a separate, deliberate act.
 if (dug.carrying !== 0) fail(`digging silently loaded the ant: carrying ${dug.carrying}`);
 else ok('digging leaves the spoil on the ground, not in her mandibles');
+if (!(clodLowest < clodStart.clodY - 0.02)) {
+  fail(`the buried clod never settled: started ${clodStart.clodY}, lowest ${clodLowest}`);
+} else {
+  ok(`the buried clod sank as the soil went (${clodStart.clodY} -> ${clodLowest.toFixed(2)})`);
+}
 const spilled = await until('the freed cube to become a clod', (s) => s.loose >= 1, 25000);
 if (spilled.loose !== 1) fail(`expected one loose clod, got ${spilled.loose}`);
 else ok('the freed cube is lying there as a clod');

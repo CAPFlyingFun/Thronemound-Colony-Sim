@@ -16,7 +16,7 @@ import {
 } from '../voxel/VoxelWorld';
 import { meshChunk } from '../voxel/mesher';
 import {
-  buildFracture, chipMeshData, eventsBetween, hashVoxel, removedAt, wobbleAt,
+  buildFracture, chipMeshData, crumbAt, eventsBetween, hashVoxel, loosenessAt, removedAt, wobbleAt,
   CELL_COUNT, type DigEvent, type DigEventKind, type FracturePattern,
 } from '../voxel/fracture';
 import {
@@ -185,6 +185,36 @@ const CLOD_FLIGHT = 0.22;
  * this low. It still represents exactly one voxel of soil.
  */
 const CLOD_SIZE = 0.42;
+/**
+ * Gravity on the clod while it is still buried, and its half-width for
+ * collision against the crumbs around it.
+ *
+ * Deliberately far gentler than the world's 12 — this is not a rock falling
+ * through air, it is a lump wedged in packed soil, easing down into whatever
+ * space opens beneath it. At world gravity it snaps to the floor of the hole
+ * the instant one crumb goes, which reads as a bug rather than as settling.
+ *
+ * The half-width is a shade under CLOD_CORE so the lump can move through the
+ * cavity its own core carved without immediately colliding with the walls of it.
+ */
+const CLOD_GRAVITY = 3.5;
+const CLOD_HALF = 0.17;
+/** Sideways nudge when the ground goes out from under one side. */
+const CLOD_LEAN = 0.5;
+/**
+ * How far the clod presses down into the soil holding it up, at full erosion.
+ *
+ * Without this the lump is perfectly still and then drops the moment the crumb
+ * beneath it pops — and when she digs straight down the clod is buried near the
+ * floor, so that is ONE plop right at the end and nothing before it. Loaded
+ * soil gives before it fails; letting the lump ride the loosening means it is
+ * always creeping, whichever way the shaft runs.
+ */
+const CLOD_SAG = 0.09;
+/** Centre plus the six face centres of the clod, in units of CLOD_HALF. */
+const CLOD_PROBES: readonly (readonly [number, number, number])[] = [
+  [0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+];
 const CLOD_AHEAD = 0.34;
 const CLOD_DROP = 0.2;
 /** Instances per variant batch. Twelve of these covers the heap cap. */
@@ -225,6 +255,14 @@ interface ActiveDigVisual {
   /** Crumb count the current geometry was built for; -1 means never built. */
   builtRemoved: number;
   mesh: THREE.Mesh | null;
+  /**
+   * Where the clod actually is, in voxel-local space. Starts at the pattern's
+   * buried centre and then falls — the soil holding it up is being chipped
+   * away, and a lump that hangs in the middle of a growing hole is the exact
+   * tell that it is a decoration rather than a thing.
+   */
+  clodPos: { x: number; y: number; z: number };
+  clodVel: { x: number; y: number; z: number };
 }
 
 /**
@@ -706,13 +744,16 @@ export class DigScene {
     const voxel = this.world.get(x, y, z);
     if (!isSolid(voxel) || !materialOf(voxel).diggable) return;
 
+    const pattern = buildFracture(x, y, z, voxel, this.strikeFace);
     this.chip = {
       voxel: { x, y, z },
-      pattern: buildFracture(x, y, z, voxel, this.strikeFace),
+      pattern,
       progress: 0,
       lastProgress: 0,
       builtRemoved: -1,
       mesh: null,
+      clodPos: { ...pattern.clodCentre },
+      clodVel: { x: 0, y: 0, z: 0 },
     };
     this.rebuildChunkAt(x, y, z);
     this.refreshChipMesh();
@@ -864,7 +905,105 @@ export class DigScene {
      * the end no longer needs a hand-off: what she picks up is the thing that
      * has been sitting in the hole getting bigger the whole time.
      */
+    this.settleBuriedClod(chip, dt);
     this.showBuriedClod(chip, wobble);
+  }
+
+  /**
+   * Let the buried clod fall into the hole being opened under it.
+   *
+   * It has weight. As crumbs go it loses whatever was holding it up and eases
+   * down, so by the end it is lying at the bottom of the pit it was uncovered
+   * in rather than hanging where the pattern happened to bury it. Local to the
+   * one voxel on purpose: the moment it comes free, LooseSoil owns it, and two
+   * physics systems overlapping on one lump is how you get it in two places.
+   */
+  private settleBuriedClod(chip: ActiveDigVisual, dt: number): void {
+    const p = chip.clodPos;
+    const v = chip.clodVel;
+
+    /*
+     * Which way the floor has gone. Four probes just under the lump; the
+     * unsupported ones sum to a direction to lean, so when a crumb is chipped
+     * out from one side it tips that way and slides into the gap instead of
+     * balancing on the corner it has left.
+     */
+    const under = CLOD_HALF + 0.02;
+    let leanX = 0;
+    let leanZ = 0;
+    let footing = 0;
+    let loosest = 0;
+    const feet = [[-CLOD_HALF, 0], [CLOD_HALF, 0], [0, -CLOD_HALF], [0, CLOD_HALF]] as const;
+    for (const [ox, oz] of feet) {
+      if (this.chipSolid(chip, p.x + ox, p.y - under, p.z + oz)) footing++;
+      else { leanX += ox; leanZ += oz; }
+      loosest = Math.max(
+        loosest,
+        loosenessAt(chip.pattern, chip.progress, p.x + ox, p.y - under, p.z + oz),
+      );
+    }
+    // How far it may press into whatever is still holding it. Grows with the
+    // erosion of that soil, so the descent is continuous rather than a plop.
+    const sag = loosest * CLOD_SAG;
+    // Only when it is PART supported. Fully held, there is nowhere to lean;
+    // fully unsupported, it should drop straight rather than veer.
+    if (footing > 0 && footing < feet.length) {
+      const len = Math.hypot(leanX, leanZ) || 1;
+      v.x += (leanX / len) * CLOD_LEAN * dt;
+      v.z += (leanZ / len) * CLOD_LEAN * dt;
+    }
+
+    v.y -= CLOD_GRAVITY * dt;
+    // Soil is not air. Sideways drift bleeds off hard so the lump creeps into
+    // place and stops, rather than skating around the cavity.
+    const damp = Math.max(0, 1 - 6 * dt);
+    v.x *= damp;
+    v.z *= damp;
+
+    // Axis-separated, so being stopped in one direction never cancels motion in
+    // the others — the lump slides along a wall instead of sticking to it.
+    for (const axis of ['y', 'x', 'z'] as const) {
+      const delta = v[axis] * dt;
+      if (delta === 0) continue;
+      const next = { x: p.x, y: p.y, z: p.z };
+      next[axis] += delta;
+      if (this.clodBlocked(chip, next, sag)) {
+        v[axis] = 0;
+        continue;
+      }
+      p[axis] = next[axis];
+    }
+  }
+
+  /** Would the clod overlap standing soil, or leave the voxel, at this position? */
+  private clodBlocked(
+    chip: ActiveDigVisual,
+    at: { x: number; y: number; z: number },
+    sag: number,
+  ): boolean {
+    for (const [ox, oy, oz] of CLOD_PROBES) {
+      const px = at.x + ox * CLOD_HALF;
+      const py = at.y + oy * CLOD_HALF;
+      const pz = at.z + oz * CLOD_HALF;
+      // The voxel's own shell is hard. Sag is soil giving under weight, not a
+      // licence to sink through the floor of the cube into the world below.
+      if (px < 0 || px >= 1 || py < 0 || py >= 1 || pz < 0 || pz >= 1) return true;
+      // Only the underside sinks in; the sides and top meet soil square on.
+      const sy = oy < 0 ? at.y - (CLOD_HALF - sag) : py;
+      if (crumbAt(chip.pattern, chip.progress, px, sy, pz)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Standing soil at this point inside the voxel being dug?
+   *
+   * Outside the cube counts as solid: this voxel's own shell is the floor and
+   * walls of the clod's little world, and it stays in there until the dig ends.
+   */
+  private chipSolid(chip: ActiveDigVisual, lx: number, ly: number, lz: number): boolean {
+    if (lx < 0 || lx >= 1 || ly < 0 || ly >= 1 || lz < 0 || lz >= 1) return true;
+    return crumbAt(chip.pattern, chip.progress, lx, ly, lz);
   }
 
   /** Draw the clod that is waiting inside the cube being dug. */
@@ -877,7 +1016,7 @@ export class DigScene {
     if (!this.clodStyle || this.clodStyle.seed !== style.seed) {
       this.applyClodStyle(style);
     }
-    const c = chip.pattern.clodCentre;
+    const c = chip.clodPos;
     const axis = chip.pattern.wobbleAxis;
     this.clodMesh.position.set(
       x + c.x + axis.x * wobble,
@@ -1252,7 +1391,7 @@ export class DigScene {
     if (!unit) return;
     // Drop it exactly where it was uncovered, so the lump does not jump at the
     // instant the last crumb goes. It falls from there like anything else.
-    const c = this.chip?.pattern.clodCentre ?? { x: 0.5, y: 0.5, z: 0.5 };
+    const c = this.chip?.clodPos ?? { x: 0.5, y: 0.5, z: 0.5 };
     const placed = this.soil.drop(
       { x: cell.x + c.x, y: cell.y + c.y, z: cell.z + c.z },
       unit.material,
@@ -2267,8 +2406,12 @@ export class DigScene {
       : '';
     // Crumbs left on the voxel being chipped. Debug-only, but it is the one
     // piece of the effect a headless test can actually assert on.
+    // Crumbs left, and how far the clod has settled into the hole under it.
+    // Both debug-only, and the clod's height is the only handle a headless test
+    // has on whether it has weight or is just hanging there.
     const chipping = this.debug && this.chip
       ? ` \u00B7 chip ${CELL_COUNT - removedAt(this.chip.pattern, this.chip.progress)}/${CELL_COUNT}`
+        + ` \u00B7 clod ${this.chip.clodPos.y.toFixed(2)}`
       : '';
     const chamber = status.depthMet ? ` \u00b7 Chamber ${status.chamber}/${DEN_MIN_CHAMBER}` : '';
     readout.innerHTML = `

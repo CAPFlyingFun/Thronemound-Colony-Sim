@@ -73,7 +73,7 @@ const LAST_BREAK = 0.99;
  * solid — a pickaxe biting one spot instead of the whole face crumbling.
  */
 const EROSION_LEAD = 0.13;
-const EROSION_MAX = 0.55;
+export const EROSION_MAX = 0.55;
 
 /** Progress past which the remaining soil is loose enough to move. */
 const WOBBLE_FROM = 0.7;
@@ -368,6 +368,39 @@ export function cellSurvives(pattern: FracturePattern, cell: number, progress: n
 }
 
 /**
+ * Is there standing soil at this point inside the voxel?
+ *
+ * A point query rather than a cell query, so the clod can be given weight: it
+ * asks "can I move here" of arbitrary positions as it settles into the hole
+ * being opened under it, without the caller needing to know the lattice.
+ *
+ * Core cells answer FALSE. They are the clod itself, and a body cannot rest on
+ * its own volume — treating them as solid would wedge it in place forever,
+ * which is precisely the floating-in-mid-air look this exists to fix.
+ *
+ * Outside the unit cube is also false: this function speaks only for one
+ * voxel, and what lies beyond it is the world's business.
+ */
+export function crumbAt(
+  pattern: FracturePattern,
+  progress: number,
+  lx: number,
+  ly: number,
+  lz: number,
+): boolean {
+  if (lx < 0 || lx >= 1 || ly < 0 || ly >= 1 || lz < 0 || lz >= 1) return false;
+  const cx = Math.min(CHIP_CELLS - 1, Math.floor(lx * CHIP_CELLS));
+  const cy = Math.min(CHIP_CELLS - 1, Math.floor(ly * CHIP_CELLS));
+  const cz = Math.min(CHIP_CELLS - 1, Math.floor(lz * CHIP_CELLS));
+  const cell = cx + cy * CHIP_CELLS + cz * CHIP_CELLS * CHIP_CELLS;
+  if (pattern.core.has(cell)) return false;
+  // rank is the crumb's place in the removal queue, and core crumbs were filled
+  // with `breakable`, so this is the same monotonic answer cellSurvives gives —
+  // in constant time, because it is called several times per frame.
+  return pattern.rank[cell]! >= removedAt(pattern, progress);
+}
+
+/**
  * Shrink and drift of the surviving crumbs.
  *
  * Exactly 0 at rest so an untouched voxel is a perfect cube; jumps to
@@ -384,6 +417,30 @@ export function erosionFor(pattern: FracturePattern, cell: number, progress: num
   const t = (progress - (due - EROSION_LEAD)) / EROSION_LEAD;
   if (t <= 0) return 0;
   return Math.min(1, t) * EROSION_MAX * pattern.feel.crumble;
+}
+
+/**
+ * Erosion at a point, as a fraction of EROSION_MAX.
+ *
+ * The point-query twin of `crumbAt`, and the reason the buried clod sinks
+ * steadily instead of sitting perfectly still and then dropping the instant the
+ * crumb beneath it pops. Soil under load does not hold at full strength right
+ * up to the moment it fails — it gives.
+ */
+export function loosenessAt(
+  pattern: FracturePattern,
+  progress: number,
+  lx: number,
+  ly: number,
+  lz: number,
+): number {
+  if (lx < 0 || lx >= 1 || ly < 0 || ly >= 1 || lz < 0 || lz >= 1) return 0;
+  const cx = Math.min(CHIP_CELLS - 1, Math.floor(lx * CHIP_CELLS));
+  const cy = Math.min(CHIP_CELLS - 1, Math.floor(ly * CHIP_CELLS));
+  const cz = Math.min(CHIP_CELLS - 1, Math.floor(lz * CHIP_CELLS));
+  const cell = cx + cy * CHIP_CELLS + cz * CHIP_CELLS * CHIP_CELLS;
+  if (pattern.core.has(cell)) return 0;
+  return Math.min(1, erosionFor(pattern, cell, progress) / EROSION_MAX);
 }
 
 /** The worst erosion anywhere on the voxel — how chewed it looks overall. */
