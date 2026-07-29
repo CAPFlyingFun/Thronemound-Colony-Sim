@@ -847,15 +847,60 @@ export class DigScene {
       this.refreshChipMesh();
     }
 
+    this.chipClock += dt;
+    const wobble = wobbleAt(chip.pattern, chip.progress, this.chipClock);
+    const axis = chip.pattern.wobbleAxis;
     if (chip.mesh) {
       // Loosened soil rocks slightly once it is nearly free. A transform, so it
       // costs nothing and never touches the geometry.
-      this.chipClock += dt;
-      const wobble = wobbleAt(chip.pattern, chip.progress, this.chipClock);
-      const axis = chip.pattern.wobbleAxis;
       chip.mesh.position.set(axis.x * wobble, axis.y * wobble, axis.z * wobble);
       chip.mesh.rotation.set(axis.x * wobble, axis.y * wobble, axis.z * wobble);
     }
+
+    /*
+     * The clod is buried in there from the first tap and gets UNCOVERED, rather
+     * than appearing once the last crumb pops. It sits on the far side from
+     * where she is working, so chipping inward reveals it — which is also why
+     * the end no longer needs a hand-off: what she picks up is the thing that
+     * has been sitting in the hole getting bigger the whole time.
+     */
+    this.showBuriedClod(chip, wobble);
+  }
+
+  /** Draw the clod that is waiting inside the cube being dug. */
+  private showBuriedClod(chip: ActiveDigVisual, wobble: number): void {
+    const { x, y, z } = chip.voxel;
+    const voxel = this.world.get(x, y, z);
+    if (!isSolid(voxel)) return;
+    const style = styleForVoxel(x, y, z, voxel);
+
+    if (!this.clodStyle || this.clodStyle.seed !== style.seed) {
+      this.applyClodStyle(style);
+    }
+    const c = chip.pattern.clodCentre;
+    const axis = chip.pattern.wobbleAxis;
+    this.clodMesh.position.set(
+      x + c.x + axis.x * wobble,
+      y + c.y + axis.y * wobble,
+      z + c.z + axis.z * wobble,
+    );
+    this.clodMesh.visible = true;
+  }
+
+  /** Point the shared clod mesh at one style. */
+  private applyClodStyle(style: SoilLoadStyle): void {
+    this.clodStyle = style;
+    this.clodMesh.geometry = this.clodGeometry(style.material, style.variant);
+    const base = materialOf(style.material).color;
+    this.clodMaterial.color.setRGB(
+      base[0] * style.tint, base[1] * style.tint, base[2] * style.tint,
+    );
+    this.clodMesh.scale.set(
+      CLOD_SIZE * style.axisScale[0],
+      CLOD_SIZE * style.axisScale[1],
+      CLOD_SIZE * style.axisScale[2],
+    );
+    this.clodMesh.rotation.set(style.spin[0], style.spin[1], style.spin[2]);
   }
 
   /**
@@ -922,6 +967,10 @@ export class DigScene {
       return;
     }
 
+    // While digging, showBuriedClod owns the mesh — it is the clod being
+    // uncovered, not one being carried.
+    if (this.chip) return;
+
     const load = this.session.topLoad;
     if (!load || !load.source) {
       this.clodMesh.visible = false;
@@ -930,20 +979,7 @@ export class DigScene {
     }
 
     const style = styleForVoxel(load.source.x, load.source.y, load.source.z, load.material);
-    if (!this.clodStyle || this.clodStyle.seed !== style.seed) {
-      this.clodStyle = style;
-      this.clodMesh.geometry = this.clodGeometry(style.material, style.variant);
-      const base = materialOf(style.material).color;
-      this.clodMaterial.color.setRGB(
-        base[0] * style.tint, base[1] * style.tint, base[2] * style.tint,
-      );
-      this.clodMesh.scale.set(
-        CLOD_SIZE * style.axisScale[0],
-        CLOD_SIZE * style.axisScale[1],
-        CLOD_SIZE * style.axisScale[2],
-      );
-      this.clodMesh.rotation.set(style.spin[0], style.spin[1], style.spin[2]);
-    }
+    if (!this.clodStyle || this.clodStyle.seed !== style.seed) this.applyClodStyle(style);
     this.clodMesh.visible = true;
     this.clodMesh.position.copy(this.mandiblePoint());
   }
@@ -1214,8 +1250,11 @@ export class DigScene {
   private spillDug(cell: { x: number; y: number; z: number }): void {
     const unit = this.session.release();
     if (!unit) return;
+    // Drop it exactly where it was uncovered, so the lump does not jump at the
+    // instant the last crumb goes. It falls from there like anything else.
+    const c = this.chip?.pattern.clodCentre ?? { x: 0.5, y: 0.5, z: 0.5 };
     const placed = this.soil.drop(
-      { x: cell.x + 0.5, y: cell.y + 0.5, z: cell.z + 0.5 },
+      { x: cell.x + c.x, y: cell.y + c.y, z: cell.z + c.z },
       unit.material,
       unit.source ?? cell,
     );

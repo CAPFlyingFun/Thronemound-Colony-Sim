@@ -998,7 +998,7 @@ describe('fracture', () => {
       // Crumbs go in roughly distance order from that point, so the damage
       // reads as one growing hole rather than as patches of rot.
       const first = cellCentre(pattern.order[0]!);
-      const last = cellCentre(pattern.order[CELL_COUNT - 1]!);
+      const last = cellCentre(pattern.order[pattern.breakable - 1]!);
       const near = Math.hypot(
         first.x - pattern.strike.x, first.y - pattern.strike.y, first.z - pattern.strike.z,
       );
@@ -1078,13 +1078,36 @@ describe('fracture', () => {
     }
   });
 
-  it('always leaves a crumb for the dig logic to finish', () => {
-    // The visual must never make the voxel vanish on its own — removing it is
-    // DigSession's call, not the renderer's.
+  it('buries the clod inside the cube instead of conjuring it', () => {
+    /*
+     * The clod is in there from the first tap and gets UNCOVERED. Without this
+     * the last crumb pops and a lump appears from nowhere, which reads as a
+     * swap rather than as the soil she has been working loose.
+     */
     for (const [x, z] of [[1, 1], [9, 14], [33, 7]] as const) {
-      const pattern = buildFracture(x, S, z, TOPSOIL);
-      expect(removedAt(pattern, 1)).toBeLessThanOrEqual(MAX_REMOVED);
-      expect(chipMeshData(pattern, x, S, z, 1)).not.toBeNull();
+      const pattern = buildFracture(x, S, z, TOPSOIL, { x: 0, y: 1, z: 0 });
+      // Core crumbs exist, are never queued for removal, and are never drawn
+      // as crumbs — the clod mesh occupies that space instead.
+      expect(pattern.core.size).toBeGreaterThan(0);
+      expect(pattern.breakable).toBe(CELL_COUNT - pattern.core.size);
+      for (const cell of pattern.core) {
+        expect(Array.from(pattern.order)).not.toContain(cell);
+      }
+      // Everything breakable can go; what remains standing IS the clod.
+      expect(removedAt(pattern, 1)).toBe(pattern.breakable);
+    }
+  });
+
+  it('buries it on the far side from where she is working', () => {
+    // So chipping inward reveals it, rather than her digging straight past it.
+    const pattern = buildFracture(4, S, 4, TOPSOIL, { x: 0, y: 1, z: 0 });
+    expect(pattern.strike.y).toBe(1);
+    expect(pattern.clodCentre.y).toBeLessThan(0.45);
+    // ...but never so far that the core breaks the surface: a core crumb on
+    // the outer layer would leave a hole in an untouched voxel's shell.
+    for (const axis of ['x', 'y', 'z'] as const) {
+      expect(pattern.clodCentre[axis]).toBeGreaterThanOrEqual(0.35);
+      expect(pattern.clodCentre[axis]).toBeLessThanOrEqual(0.65);
     }
   });
 

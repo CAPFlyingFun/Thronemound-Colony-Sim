@@ -37,10 +37,20 @@ export const CHIP_CELLS = 5;
 export const CELL_COUNT = CHIP_CELLS * CHIP_CELLS * CHIP_CELLS;
 
 /**
- * The last crumb never breaks on its own. Removal is capped one short of the
- * full set so the voxel cannot disappear before the dig logic completes — the
- * scene is a view of the dig, never the thing that decides it is over.
+ * How much of the voxel IS the clod, as a radius in voxel units.
+ *
+ * The clod is not conjured at the end — it is in there from the first tap,
+ * buried on the far side from where she is working, and digging is the act of
+ * chipping away everything that is not it. Crumbs inside this radius are clod
+ * material: never removed, never drawn as crumbs, because the clod mesh is
+ * drawn there instead.
+ *
+ * Matched to the rendered clod's radius, so the hole left behind is the size of
+ * the thing that came out of it.
  */
+export const CLOD_CORE = 0.24;
+
+/** Kept for callers that still ask; the real cap is `pattern.breakable`. */
 export const MAX_REMOVED = CELL_COUNT - 1;
 
 /** Crumbs start breaking here, and the last one is due by here. */
@@ -170,6 +180,12 @@ export interface FracturePattern {
   spin: Float32Array;
   /** Where the first blow landed — the centre of the crater. */
   strike: Vec3;
+  /** Where the clod is buried, in voxel-local space. */
+  clodCentre: Vec3;
+  /** Crumbs that ARE the clod. Never removed, never drawn as crumbs. */
+  core: Set<number>;
+  /** Crumbs that can be chipped away — everything but the core. */
+  breakable: number;
   /** Axis the loosened soil rocks about once it is nearly free. */
   wobbleAxis: Vec3;
   wobblePhase: number;
@@ -234,6 +250,31 @@ export function buildFracture(
     else strike.z = positive ? 1 : 0;
   }
 
+  /*
+   * The clod sits on the FAR side from the strike, so she chips inward and
+   * uncovers it rather than having it appear once the last crumb pops. Nudged
+   * off dead centre by a seeded amount so it is not always in the same place.
+   */
+  /*
+   * Clamped so the core stays STRICTLY interior. Let it drift far enough and a
+   * core crumb lands on the cube's outer layer — and because core crumbs are
+   * never drawn as crumbs, its outward face is never emitted either, leaving a
+   * hole in the shell of an untouched voxel.
+   */
+  const inset = (v: number) => Math.min(0.65, Math.max(0.35, v));
+  const clodCentre: Vec3 = {
+    x: inset(0.5 + (0.5 - strike.x) * 0.42 + (rand() - 0.5) * 0.1),
+    y: inset(0.5 + (0.5 - strike.y) * 0.42 + (rand() - 0.5) * 0.1),
+    z: inset(0.5 + (0.5 - strike.z) * 0.42 + (rand() - 0.5) * 0.1),
+  };
+  const core = new Set<number>();
+  for (let cell = 0; cell < CELL_COUNT; cell++) {
+    const c = cellCentre(cell);
+    if (Math.hypot(c.x - clodCentre.x, c.y - clodCentre.y, c.z - clodCentre.z) <= CLOD_CORE) {
+      core.add(cell);
+    }
+  }
+
   const scores = new Float64Array(CELL_COUNT);
   for (let cell = 0; cell < CELL_COUNT; cell++) {
     const c = cellCentre(cell);
@@ -247,11 +288,16 @@ export function buildFracture(
     scores[cell] = d + (rand() - 0.5) * 0.12;
   }
 
+  // Only breakable crumbs are queued. What is left standing when they have all
+  // gone is the core, which is exactly the clod.
   const order = Int32Array.from(
-    Array.from({ length: CELL_COUNT }, (_, i) => i).sort((a, b) => scores[a]! - scores[b]!),
+    Array.from({ length: CELL_COUNT }, (_, i) => i)
+      .filter((i) => !core.has(i))
+      .sort((a, b) => scores[a]! - scores[b]!),
   );
-  const rank = new Int32Array(CELL_COUNT);
-  for (let i = 0; i < CELL_COUNT; i++) rank[order[i]!] = i;
+  const breakable = order.length;
+  const rank = new Int32Array(CELL_COUNT).fill(breakable);
+  for (let i = 0; i < breakable; i++) rank[order[i]!] = i;
 
   /*
    * Thresholds. Evenly spaced across the breaking window, then nudged and
@@ -260,15 +306,15 @@ export function buildFracture(
    * slabs and sand trickle.
    */
   const span = LAST_BREAK - FIRST_BREAK;
-  const raw = new Float32Array(MAX_REMOVED);
-  for (let i = 0; i < MAX_REMOVED; i++) {
-    const base = FIRST_BREAK + (span * (i + 0.5)) / MAX_REMOVED;
-    raw[i] = base + (rand() - 0.5) * (span / MAX_REMOVED) * 1.6;
+  const raw = new Float32Array(breakable);
+  for (let i = 0; i < breakable; i++) {
+    const base = FIRST_BREAK + (span * (i + 0.5)) / breakable;
+    raw[i] = base + (rand() - 0.5) * (span / breakable) * 1.6;
   }
   raw.sort();
-  const thresholds = new Float32Array(MAX_REMOVED);
+  const thresholds = new Float32Array(breakable);
   const group = Math.max(1, Math.round(feel.clumping));
-  for (let i = 0; i < MAX_REMOVED; i++) {
+  for (let i = 0; i < breakable; i++) {
     // Snap to the head of each group so clumped crumbs let go together.
     thresholds[i] = raw[Math.floor(i / group) * group]!;
   }
@@ -295,6 +341,9 @@ export function buildFracture(
     order,
     rank,
     thresholds,
+    clodCentre,
+    core,
+    breakable,
     jitter,
     spin,
     strike,
@@ -307,7 +356,7 @@ export function buildFracture(
 export function removedAt(pattern: FracturePattern, progress: number): number {
   if (progress <= 0) return 0;
   let n = 0;
-  while (n < MAX_REMOVED && pattern.thresholds[n]! <= progress) n++;
+  while (n < pattern.breakable && pattern.thresholds[n]! <= progress) n++;
   return n;
 }
 
@@ -331,7 +380,7 @@ export function erosionFor(pattern: FracturePattern, cell: number, progress: num
   const rank = pattern.rank[cell]!;
   // The crumb that never breaks has no moment of its own; peg it to the last
   // one so the final remnant still looks worked rather than factory-fresh.
-  const due = pattern.thresholds[Math.min(rank, MAX_REMOVED - 1)]!;
+  const due = pattern.thresholds[Math.min(rank, pattern.breakable - 1)]!;
   const t = (progress - (due - EROSION_LEAD)) / EROSION_LEAD;
   if (t <= 0) return 0;
   return Math.min(1, t) * EROSION_MAX * pattern.feel.crumble;
@@ -429,6 +478,8 @@ export function chipMeshData(
 
   for (let cell = 0; cell < CELL_COUNT; cell++) {
     if (gone.has(cell)) continue;
+    // The core is drawn as the clod itself, not as crumbs.
+    if (pattern.core.has(cell)) continue;
 
     const cx = cell % CHIP_CELLS;
     const cy = Math.floor(cell / CHIP_CELLS) % CHIP_CELLS;
@@ -535,6 +586,8 @@ export function chipMeshData(
         && az >= 0 && az < CHIP_CELLS;
       if (inside) {
         const neighbour = ax + ay * CHIP_CELLS + az * CHIP_CELLS * CHIP_CELLS;
+        // A core neighbour counts as solid: the clod fills that space, so the
+        // face between them is hidden and emitting it is pure waste.
         if (!gone.has(neighbour) && erosion <= 0 && erosionOf[neighbour]! <= 0) continue;
       }
 
