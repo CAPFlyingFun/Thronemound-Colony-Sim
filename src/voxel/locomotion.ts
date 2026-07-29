@@ -20,7 +20,18 @@ export interface SpeedBands {
   run: number;
 }
 
-export const DEFAULT_BANDS: SpeedBands = { crawl: 3.5, walk: 9, run: 16 };
+/**
+ * Anchored to measured fire-ant locomotion rather than picked by feel.
+ * Solenopsis invicta running speed averages ~1.96 cm/s in foraging tunnels,
+ * and ants generally move at roughly 9 body lengths per second. At 5 mm per
+ * voxel that puts a real ant's run at about 4 voxels/s — the previous "run" of
+ * 16 was roughly four times an actual ant.
+ *
+ *   crawl 2.0 voxels/s = 1.0 cm/s   deliberate placement
+ *   walk  4.5           = 2.25 cm/s  measured foraging pace
+ *   run   7.5           = 3.75 cm/s  a sprint, above average but plausible
+ */
+export const DEFAULT_BANDS: SpeedBands = { crawl: 2, walk: 4.5, run: 7.5 };
 
 /** Stick magnitudes at which each band is reached. */
 export const BAND_EDGES = { crawl: 0.35, walk: 0.75 } as const;

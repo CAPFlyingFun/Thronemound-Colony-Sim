@@ -28,8 +28,13 @@ const VOXEL_MM = 5;
 const EYE_HEIGHT = 1.6;
 const BODY_RADIUS = 0.45;
 /** Speeds now come from the stick curve (locomotion.ts); these are its anchors. */
-const WALK_ACCEL = 32;
-const WALK_DECEL = 40;
+/**
+ * Scaled down with the speeds. Acceleration is about the RATIO to top speed —
+ * keeping 32 against a 7.5 top speed would reach full pace in 0.23 s and lose
+ * the sense of mass the acceleration was added for.
+ */
+const WALK_ACCEL = 14;
+const WALK_DECEL = 22;
 /** Keyboard has no analogue axis, so it picks a band rather than full tilt. */
 const KEY_MAGNITUDE = 0.7;
 const STICK_RADIUS = 70;
@@ -50,8 +55,8 @@ const TERMINAL_VELOCITY = -60;
 const JUMP_SPEED = 23;
 /** Rise the ant steps over without jumping — one voxel plus a hair. */
 const STEP_HEIGHT = 1.05;
-/** A crawl, about two body lengths per second. */
-const CLIMB_SPEED = 4.5;
+/** Climbing runs a little under walking pace, as it does for real ants. */
+const CLIMB_SPEED = 3.5;
 /** Seconds to reach full climb speed. Snapping to it read as levitating. */
 const CLIMB_RAMP = 0.15;
 /** Radians of lean toward a wall you're gripping. */
@@ -96,6 +101,8 @@ export class DigScene {
   private colonyView = false;
   private orbit = { yaw: 0.7, pitch: 0.55, distance: 26 };
   private pinchStart: { distance: number; orbit: number } | null = null;
+  /** Every live touch, so a second finger can be recognised as a pinch. */
+  private readonly pointers = new Map<number, { x: number; y: number }>();
 
   private mode: Mode = 'dig';
   private acting = false;
@@ -377,7 +384,27 @@ export class DigScene {
     // camera would also count as a dig, and you excavate whatever you look at.
     const locked = () => document.pointerLockElement === canvas;
 
+    /** Distance between the two live touches, or 0. */
+    const pinchSpan = (): number => {
+      const pts = [...this.pointers.values()];
+      const a = pts[0];
+      const b = pts[1];
+      if (!a || !b) return 0;
+      return Math.hypot(a.x - b.x, a.y - b.y);
+    };
+
     const down = (event: PointerEvent) => {
+      if (event.pointerType !== 'mouse') {
+        this.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        // A second finger in colony view starts a pinch rather than an orbit.
+        if (this.colonyView && this.pointers.size === 2) {
+          this.pinchStart = { distance: pinchSpan(), orbit: this.orbit.distance };
+          this.lookPointer = null;
+          this.movePointer = null;
+          this.showStick(false);
+          return;
+        }
+      }
       if (event.pointerType === 'mouse') {
         if (!locked()) {
           void canvas.requestPointerLock();
@@ -430,6 +457,19 @@ export class DigScene {
 
     const move = (event: PointerEvent) => {
       if (event.pointerType === 'mouse') return;
+      if (this.pointers.has(event.pointerId)) {
+        this.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      }
+      // Pinch wins over orbit while two fingers are down.
+      if (this.colonyView && this.pinchStart && this.pointers.size >= 2) {
+        const span = pinchSpan();
+        if (span > 8 && this.pinchStart.distance > 8) {
+          // Fingers apart -> zoom in, so distance scales by the INVERSE ratio.
+          const ratio = this.pinchStart.distance / span;
+          this.orbit.distance = THREE.MathUtils.clamp(this.pinchStart.orbit * ratio, 6, 90);
+        }
+        return;
+      }
       if (event.pointerId === this.lookPointer) {
         const dx = event.clientX - this.lookLast.x;
         const dy = event.clientY - this.lookLast.y;
@@ -452,6 +492,8 @@ export class DigScene {
     };
 
     const up = (event: PointerEvent) => {
+      this.pointers.delete(event.pointerId);
+      if (this.pointers.size < 2) this.pinchStart = null;
       if (event.pointerType === 'mouse') {
         this.acting = false;
         this.session.cancelDig();
@@ -825,7 +867,7 @@ export class DigScene {
         <b>Queen\u2019s den</b> ${den.depth * VOXEL_MM} mm down &nbsp;
         <b>Excavated</b> ${this.world.excavated} &nbsp;
         <b>Mound</b> ${this.world.deposited}<br>
-        <span class="dim">Colony view \u00b7 drag to orbit \u00b7 pinch or scroll to zoom</span>
+        <span class="dim">${this.debug ? `dist ${this.orbit.distance.toFixed(1)} \u00b7 ` : ''}Colony view \u00b7 drag to orbit \u00b7 pinch or scroll to zoom</span>
       `;
       return;
     }
