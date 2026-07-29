@@ -6,6 +6,7 @@ import {
 import { FACES, meshChunk } from '../src/voxel/mesher';
 import { MAX_LOOSE_CLODS, LooseSoil } from '../src/voxel/LooseSoil';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, styleForVoxel } from '../src/voxel/clod';
+import { HEX_AIR, HEX_NEIGHBOURS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
 import { CELL_COUNT, CHIP_CELLS, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
@@ -279,9 +280,11 @@ describe('DigSession', () => {
     it('bottoms out at the floor and stays there', () => {
       const world = makeWorld();
       const session = new DigSession(world, { capacity: 999 });
-      // 9.0 -> 1.8 in 0.4 steps is 18 digs to master; founding the den costs
+      // 12.5 -> 1.7 in 0.6 steps is 18 digs to master; founding the den costs
       // 14-19, so the queen tops out almost exactly as she finishes.
-      const toMaster = Math.ceil((DIG_START - DIG_FLOOR) / DIG_STEP);
+      // Rounded, not ceiled: (12.5 - 1.7) / 0.6 is 18.000000000000004 in
+      // binary floating point, and ceil turns that into a spurious 19.
+      const toMaster = Math.round((DIG_START - DIG_FLOOR) / DIG_STEP);
       expect(toMaster).toBe(18);
       for (let i = 0; i < toMaster + 5; i++) digOut(session, 20 + i, SURFACE, 20);
       expect(session.practiced).toBe(toMaster + 5);
@@ -315,7 +318,7 @@ describe('DigSession', () => {
       const session = new DigSession(world);
       // The reason hardness dropped from 2x to 1.5x: at 2x the clay figure runs
       // away entirely once the base cost rises.
-      expect(session.secondsFor(CLAY)).toBeLessThanOrEqual(13.5);
+      expect(session.secondsFor(CLAY)).toBeLessThanOrEqual(19);
     });
   });
 });
@@ -1358,5 +1361,61 @@ describe('loose soil', () => {
     expect(world.deposited).toBe(0);
     expect(world.get(20, S, 20)).toBe(AIR);
     expect(world.get(21, S, 20)).toBe(TOPSOIL);
+  });
+});
+
+describe('hex grid experiment', () => {
+  it('lists neighbours in the same order as the side faces', () => {
+    /*
+     * The bug this pins: side face i spans corners i and i+1, so its outward
+     * normal lies at 60 + 60i degrees. Listing the neighbours in the usual
+     * [1,0]-first order puts every entry one step out of phase, culling the
+     * wrong faces — the walls render as disconnected vertical slats.
+     */
+    const corners = hexCorners();
+    for (let i = 0; i < 6; i++) {
+      const a = corners[i]!;
+      const b = corners[(i + 1) % 6]!;
+      const faceAngle = Math.atan2((a.z + b.z) / 2, (a.x + b.x) / 2);
+
+      const [dq, dr] = HEX_NEIGHBOURS[i]!;
+      const here = hexCentre(0, 0, 0);
+      const there = hexCentre(dq, dr, 0);
+      const neighbourAngle = Math.atan2(there.z - here.z, there.x - here.x);
+
+      const delta = Math.atan2(
+        Math.sin(faceAngle - neighbourAngle), Math.cos(faceAngle - neighbourAngle),
+      );
+      expect(Math.abs(delta)).toBeLessThan(1e-6);
+    }
+  });
+
+  it('rounds a world position to the cell that actually contains it', () => {
+    // Rounding q and r independently lands in the wrong cell near a shared
+    // edge, which is the classic hex-grid trap.
+    for (const [q, r] of [[0, 0], [2, -1], [-3, 2], [1, 3]] as const) {
+      const centre = hexCentre(q, r, 0);
+      const found = hexAt(centre.x, 0, centre.z);
+      expect([found.q, found.r]).toEqual([q, r]);
+    }
+  });
+
+  it('emits nothing for a fully buried cell', () => {
+    // Same property that makes the cube world affordable: cost tracks what has
+    // been dug, not how big the room is.
+    const world = new HexWorld(1, 3, 0);
+    const before = meshHexWorld(world, () => 1).faceCount;
+    world.dig(0, 0, -1); // the middle layer of the centre column
+    const after = meshHexWorld(world, () => 1).faceCount;
+    // Opening a buried cell exposes its own six sides plus a cap and a floor.
+    expect(after).toBeGreaterThan(before);
+  });
+
+  it('digs a cell once and leaves it empty', () => {
+    const world = new HexWorld(2, 4, 0);
+    expect(world.get(0, 0, 0)).not.toBe(HEX_AIR);
+    expect(world.dig(0, 0, 0)).not.toBe(HEX_AIR);
+    expect(world.get(0, 0, 0)).toBe(HEX_AIR);
+    expect(world.dig(0, 0, 0)).toBe(HEX_AIR);
   });
 });

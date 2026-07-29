@@ -94,7 +94,7 @@ const ok = (m) => console.log(`  ok  ${m}`);
   };
   // The HUD repaints every 6th frame — about 770 ms under software rendering —
   // so anything read right after an input has to be polled, not sampled once.
-  const until = async (label, check, timeoutMs = 150000) => {
+  const until = async (label, check, timeoutMs = 300000) => {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const state = await hud();

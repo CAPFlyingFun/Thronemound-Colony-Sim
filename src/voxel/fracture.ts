@@ -44,8 +44,13 @@ export const CELL_COUNT = CHIP_CELLS * CHIP_CELLS * CHIP_CELLS;
 export const MAX_REMOVED = CELL_COUNT - 1;
 
 /** Crumbs start breaking here, and the last one is due by here. */
-const FIRST_BREAK = 0.15;
-const LAST_BREAK = 0.95;
+/*
+ * Crumbs break across almost the whole dig, so the rate is roughly even: 124
+ * pieces over ~0.93 of a 12.5 second cube is about ten a second, which is what
+ * a steady chipping-away should look like.
+ */
+const FIRST_BREAK = 0.06;
+const LAST_BREAK = 0.99;
 
 /**
  * How far ahead of its own turn a crumb starts to loosen, in progress.
@@ -453,7 +458,18 @@ export function chipMeshData(
       return [a, b, c];
     };
 
-    const shrink = 1 - erosion * (0.35 + 0.55 * js);
+    /*
+     * Barely shrink. This was `0.35 + 0.55 * js`, which halved an eroding crumb
+     * — and with ~20 eroding at once that is a band of half-size crumbs with
+     * gaps between them, so within a couple of seconds you could see straight
+     * through the cube to the far side. The block appeared to dissolve rather
+     * than to lose pieces.
+     *
+     * Shrink now does exactly one job: keep the newly exposed interior faces
+     * out of z-fight range. At a 0.2 cell that is a ~26 micron gap, invisible
+     * as a hole but decisive for the depth buffer. Removal is what you see.
+     */
+    const shrink = 1 - erosion * (0.1 + 0.14 * js);
     const half = (size * shrink) / 2;
     const drift = erosion * size * 0.22;
     let midX = (cx + 0.5) * size + jx * drift;

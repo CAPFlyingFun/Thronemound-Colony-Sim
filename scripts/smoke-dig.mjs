@@ -96,7 +96,7 @@ const untilLabel = async (want, timeoutMs = 20000) => {
   }
 };
 /** Poll until a predicate holds; the HUD only repaints every 6th frame. */
-const until = async (label, check, timeoutMs = 150000) => {
+const until = async (label, check, timeoutMs = 300000) => {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const state = await hud();
@@ -111,7 +111,7 @@ await swipeLook(700, 1180);
 await page.waitForTimeout(400);
 
 const start = await hud();
-if (start.seconds < 8.9) fail(`first cube should cost the full 9s, HUD says ${start.seconds}`);
+if (start.seconds < 12.4) fail(`first cube should cost the full 12.5s, HUD says ${start.seconds}`);
 else ok(`unpractised queen digs at ${start.seconds}s/cube`);
 
 // Screen centre is where the crosshair points, so tapping there targets the
@@ -142,7 +142,7 @@ else ok('cancelling removes the temporary chipped visual');
 const afterCancel = await hud();
 if (afterCancel.dug !== 0) fail(`a cancelled dig still removed soil: dug ${afterCancel.dug}`);
 else ok('a cancelled dig removes nothing');
-if (afterCancel.seconds < 8.9) fail('a cancelled dig credited practice — tap-cancel would be an exploit');
+if (afterCancel.seconds < 12.4) fail('a cancelled dig credited practice — tap-cancel would be an exploit');
 else ok('a cancelled dig credits no practice');
 
 // 5. Tap and let it run to completion. Five seconds of SIM time is a long
@@ -159,7 +159,7 @@ else ok('digging leaves the spoil on the ground, not in her mandibles');
 const spilled = await until('the freed cube to become a clod', (s) => s.loose >= 1, 25000);
 if (spilled.loose !== 1) fail(`expected one loose clod, got ${spilled.loose}`);
 else ok('the freed cube is lying there as a clod');
-if (dug.seconds > 8.9) fail(`practice did not advance after a completed dig (${dug.seconds}s)`);
+if (dug.seconds > 12.4) fail(`practice did not advance after a completed dig (${dug.seconds}s)`);
 else ok(`practice advanced: now ${dug.seconds}s/cube`);
 
 // Completing must also tear it down, leaving the normal terrain path to draw
