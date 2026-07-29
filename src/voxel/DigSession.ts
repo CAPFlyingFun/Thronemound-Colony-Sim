@@ -16,14 +16,18 @@ import { AIR, isSolid, materialOf, type VoxelId, type VoxelWorld } from './Voxel
  * the first hatched worker will want her own curve — she should start clumsy
  * too, but probably not from as far back as a queen who has never dug at all.
  *
- * The endpoints are load-bearing: 5.0 to 1.5 in steps of 0.2 is eighteen digs
+ * The endpoints are load-bearing: 9.0 to 1.8 in steps of 0.4 is eighteen digs
  * to mastery, and founding the den costs fourteen to nineteen. The queen tops
  * out almost exactly as she finishes, so the whole arc of getting good at it is
  * the tutorial.
+ *
+ * Nine seconds rather than five because the voxel is now visibly chipped apart
+ * the whole way down, and that is worth watching. Auto-dig means nothing is
+ * being held, so a longer cube costs patience rather than thumb strain.
  */
-export const DIG_START = 5;
-export const DIG_STEP = 0.2;
-export const DIG_FLOOR = 1.5;
+export const DIG_START = 9;
+export const DIG_STEP = 0.4;
+export const DIG_FLOOR = 1.8;
 
 export interface DigSessionOptions {
   /** How many voxels of spoil the ant can carry at once. */

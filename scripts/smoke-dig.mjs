@@ -79,6 +79,7 @@ const hud = async () => {
     speed: Number(/spd ([\d.]+)/.exec(t)?.[1] ?? '0'),
     target: /Target: ([^ ·]+)/.exec(t)?.[1] ?? '',
     chip: Number(/chip (\d+)\/\d+/.exec(t)?.[1] ?? 'NaN'),
+    chipTotal: Number(/chip \d+\/(\d+)/.exec(t)?.[1] ?? 'NaN'),
   };
 };
 /**
@@ -110,7 +111,7 @@ await swipeLook(700, 1180);
 await page.waitForTimeout(400);
 
 const start = await hud();
-if (start.seconds < 4.9) fail(`first cube should cost the full 5s, HUD says ${start.seconds}`);
+if (start.seconds < 8.9) fail(`first cube should cost the full 9s, HUD says ${start.seconds}`);
 else ok(`unpractised queen digs at ${start.seconds}s/cube`);
 
 // Screen centre is where the crosshair points, so tapping there targets the
@@ -125,9 +126,9 @@ else ok('tap starts a dig and the button offers CANCEL');
  * exists while something is being chipped, so it doubles as proof the
  * temporary visual is created and later destroyed.
  */
-const chipping = await until('the target to start crumbling', (s) => s.chip < 27, 60000);
-if (!(chipping.chip < 27)) fail(`target never lost a crumb — "${chipping.text}"`);
-else ok(`target is visibly chipping (${chipping.chip}/27 crumbs left)`);
+const chipping = await until('the target to start crumbling', (s) => s.chip < s.chipTotal, 90000);
+if (!(chipping.chip < chipping.chipTotal)) fail(`target never lost a crumb — "${chipping.text}"`);
+else ok(`target is visibly chipping (${chipping.chip}/${chipping.chipTotal} crumbs left)`);
 
 // 4. Tapping the same cube again cancels it, discarding progress.
 await tap(450, 800);
@@ -141,7 +142,7 @@ else ok('cancelling removes the temporary chipped visual');
 const afterCancel = await hud();
 if (afterCancel.dug !== 0) fail(`a cancelled dig still removed soil: dug ${afterCancel.dug}`);
 else ok('a cancelled dig removes nothing');
-if (afterCancel.seconds < 4.9) fail('a cancelled dig credited practice — tap-cancel would be an exploit');
+if (afterCancel.seconds < 8.9) fail('a cancelled dig credited practice — tap-cancel would be an exploit');
 else ok('a cancelled dig credits no practice');
 
 // 5. Tap and let it run to completion. Five seconds of SIM time is a long
@@ -153,7 +154,7 @@ if (dug.dug < 1) fail(`nothing was excavated — "${dug.text}"`);
 else ok(`excavated ${dug.dug}, carrying ${dug.carrying}`);
 if (dug.carrying !== dug.dug) fail(`spoil not conserved: dug ${dug.dug}, carrying ${dug.carrying}`);
 else ok('soil conserved: everything dug is being carried');
-if (dug.seconds > 4.9) fail(`practice did not advance after a completed dig (${dug.seconds}s)`);
+if (dug.seconds > 8.9) fail(`practice did not advance after a completed dig (${dug.seconds}s)`);
 else ok(`practice advanced: now ${dug.seconds}s/cube`);
 
 // Completing must also tear it down, leaving the normal terrain path to draw

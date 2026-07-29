@@ -24,8 +24,15 @@ import { FACES, tangentAxes, voxelTint, type MeshData } from './mesher';
 import { TILE_VOXELS } from './tileTextures';
 import { CLAY, SAND, type VoxelId } from './VoxelWorld';
 
-/** Crumbs per axis. 3 gives 27 pieces — at 5 mm a voxel that is 1.7 mm each. */
-export const CHIP_CELLS = 3;
+/**
+ * Crumbs per axis. 4 gives 64 pieces — at 5 mm a voxel, 1.25 mm each.
+ *
+ * Three was too coarse: 27 pieces means every chip takes a visible ninth of a
+ * face off, and the lattice reads as a grid the instant anything separates.
+ * Finer crumbs cost almost nothing now that damage is local, because undamaged
+ * regions stay fused and emit no interior geometry at all.
+ */
+export const CHIP_CELLS = 4;
 export const CELL_COUNT = CHIP_CELLS * CHIP_CELLS * CHIP_CELLS;
 
 /**
@@ -40,17 +47,17 @@ const FIRST_BREAK = 0.15;
 const LAST_BREAK = 0.95;
 
 /**
- * How much a surviving crumb shrinks and drifts, 0..1.
+ * How far ahead of its own turn a crumb starts to loosen, in progress.
  *
- * At exactly zero progress this is 0 and the crumbs tile perfectly back into
- * the original cube, which is what makes an untouched voxel indistinguishable
- * from ordinary terrain. The moment digging starts it jumps to EROSION_MIN
- * rather than easing from zero: coincident faces z-fight, and a floor of 0.1
- * separates them by ~75 microns, which is invisible as a gap but decisive for
- * the depth buffer.
+ * This is the most important number in the file. Erosion used to be GLOBAL:
+ * every crumb shrank and tilted by the same amount at once, so the whole cube
+ * loosened evenly, the lattice showed up as a grid, and it read as a block
+ * dissolving rather than as something being chipped. Local erosion means only
+ * the crumbs about to go are visibly chewed while the rest stays fused and
+ * solid — a pickaxe biting one spot instead of the whole face crumbling.
  */
-const EROSION_MIN = 0.1;
-const EROSION_MAX = 0.42;
+const EROSION_LEAD = 0.13;
+const EROSION_MAX = 0.55;
 
 /** Progress past which the remaining soil is loose enough to move. */
 const WOBBLE_FROM = 0.7;
@@ -127,6 +134,8 @@ export interface FracturePattern {
   feel: MaterialFeel;
   /** Crumb indices in the order they break away. */
   order: Int32Array;
+  /** Reverse of `order`: where each crumb sits in the queue. */
+  rank: Int32Array;
   /** Progress at which order[i] disappears. Ascending, so removal is monotonic. */
   thresholds: Float32Array;
   /** Per-crumb drift and shrink: 4 floats each (dx, dy, dz, shrink). */
@@ -180,14 +189,22 @@ export function buildFracture(x: number, y: number, z: number, voxel: VoxelId): 
       const d = Math.hypot(c.x - a.x, c.y - a.y, c.z - a.z);
       if (d < nearest) nearest = d;
     }
-    // Noise wide enough to interleave the two regions, narrow enough that the
-    // damage still reads as spreading rather than as random speckle.
-    scores[cell] = nearest + (rand() - 0.5) * 0.55;
+    /*
+     * Noise deliberately SMALL against the distances it perturbs.
+     *
+     * At 0.55 it swamped the distance term, so crumbs came off all over the
+     * cube in what looked like random order rather than damage eating outward
+     * from where she is working. This is just enough to keep the edge of the
+     * damage ragged.
+     */
+    scores[cell] = nearest + (rand() - 0.5) * 0.14;
   }
 
   const order = Int32Array.from(
     Array.from({ length: CELL_COUNT }, (_, i) => i).sort((a, b) => scores[a]! - scores[b]!),
   );
+  const rank = new Int32Array(CELL_COUNT);
+  for (let i = 0; i < CELL_COUNT; i++) rank[order[i]!] = i;
 
   /*
    * Thresholds. Evenly spaced across the breaking window, then nudged and
@@ -229,6 +246,7 @@ export function buildFracture(x: number, y: number, z: number, voxel: VoxelId): 
     voxel,
     feel,
     order,
+    rank,
     thresholds,
     jitter,
     spin,
@@ -260,10 +278,24 @@ export function cellSurvives(pattern: FracturePattern, cell: number, progress: n
  * scratched up and keeps the newly separate internal faces out of z-fight
  * range.
  */
-export function erosionAt(pattern: FracturePattern, progress: number): number {
+export function erosionFor(pattern: FracturePattern, cell: number, progress: number): number {
   if (progress <= 0) return 0;
-  const t = Math.min(1, progress);
-  return (EROSION_MIN + (EROSION_MAX - EROSION_MIN) * t) * pattern.feel.crumble;
+  const rank = pattern.rank[cell]!;
+  // The crumb that never breaks has no moment of its own; peg it to the last
+  // one so the final remnant still looks worked rather than factory-fresh.
+  const due = pattern.thresholds[Math.min(rank, MAX_REMOVED - 1)]!;
+  const t = (progress - (due - EROSION_LEAD)) / EROSION_LEAD;
+  if (t <= 0) return 0;
+  return Math.min(1, t) * EROSION_MAX * pattern.feel.crumble;
+}
+
+/** The worst erosion anywhere on the voxel — how chewed it looks overall. */
+export function erosionAt(pattern: FracturePattern, progress: number): number {
+  let worst = 0;
+  for (let cell = 0; cell < CELL_COUNT; cell++) {
+    worst = Math.max(worst, erosionFor(pattern, cell, progress));
+  }
+  return worst;
 }
 
 /**
@@ -336,8 +368,12 @@ export function chipMeshData(
   const gone = new Set<number>();
   for (let i = 0; i < removed; i++) gone.add(pattern.order[i]!);
 
-  const erosion = erosionAt(pattern, progress);
-  const sealed = erosion <= 0;
+  // Per-crumb erosion, computed once. A crumb with none is still fused to its
+  // neighbours and contributes no interior faces at all.
+  const erosionOf = new Float32Array(CELL_COUNT);
+  for (let cell = 0; cell < CELL_COUNT; cell++) {
+    erosionOf[cell] = erosionFor(pattern, cell, progress);
+  }
   const size = 1 / CHIP_CELLS;
 
   for (let cell = 0; cell < CELL_COUNT; cell++) {
@@ -347,6 +383,7 @@ export function chipMeshData(
     const cy = Math.floor(cell / CHIP_CELLS) % CHIP_CELLS;
     const cz = Math.floor(cell / (CHIP_CELLS * CHIP_CELLS));
 
+    const erosion = erosionOf[cell]!;
     const jx = pattern.jitter[cell * 4 + 0]!;
     const jy = pattern.jitter[cell * 4 + 1]!;
     const jz = pattern.jitter[cell * 4 + 2]!;
@@ -402,18 +439,24 @@ export function chipMeshData(
 
     for (const face of FACES) {
       const [nx, ny, nz] = face.normal;
-      if (sealed) {
-        // Only while perfectly tiled: skip the face shared with a neighbour
-        // that is also still there, or it z-fights against it.
-        const ax = cx + nx;
-        const ay = cy + ny;
-        const az = cz + nz;
-        const inside = ax >= 0 && ax < CHIP_CELLS && ay >= 0 && ay < CHIP_CELLS
-          && az >= 0 && az < CHIP_CELLS;
-        if (inside) {
-          const neighbour = ax + ay * CHIP_CELLS + az * CHIP_CELLS * CHIP_CELLS;
-          if (!gone.has(neighbour)) continue;
-        }
+      /*
+       * Fuse with an untouched neighbour.
+       *
+       * Two crumbs that have BOTH eroded nothing are still perfectly tiled, so
+       * the face between them is coincident and must be culled — that is what
+       * keeps the undamaged part of the voxel reading as one solid mass rather
+       * than as a stack of blocks. As soon as either one starts to loosen they
+       * have separated, and the face has to be drawn or you would see into a
+       * hollow shell.
+       */
+      const ax = cx + nx;
+      const ay = cy + ny;
+      const az = cz + nz;
+      const inside = ax >= 0 && ax < CHIP_CELLS && ay >= 0 && ay < CHIP_CELLS
+        && az >= 0 && az < CHIP_CELLS;
+      if (inside) {
+        const neighbour = ax + ay * CHIP_CELLS + az * CHIP_CELLS * CHIP_CELLS;
+        if (!gone.has(neighbour) && erosion <= 0 && erosionOf[neighbour]! <= 0) continue;
       }
 
       const [axisA, axisB] = tangentAxes(face.normal);

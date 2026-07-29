@@ -6,7 +6,7 @@ import {
 import { FACES, meshChunk } from '../src/voxel/mesher';
 import { MAX_LOOSE_CLODS, LooseSoil } from '../src/voxel/LooseSoil';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, styleForVoxel } from '../src/voxel/clod';
-import { CELL_COUNT, CHIP_CELLS, MAX_REMOVED, buildFracture, chipMeshData, erosionAt, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
+import { CELL_COUNT, CHIP_CELLS, MAX_REMOVED, buildFracture, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
@@ -279,7 +279,7 @@ describe('DigSession', () => {
     it('bottoms out at the floor and stays there', () => {
       const world = makeWorld();
       const session = new DigSession(world, { capacity: 999 });
-      // 5.0 -> 1.5 in 0.2 steps is 18 digs to master; founding the den costs
+      // 9.0 -> 1.8 in 0.4 steps is 18 digs to master; founding the den costs
       // 14-19, so the queen tops out almost exactly as she finishes.
       const toMaster = Math.ceil((DIG_START - DIG_FLOOR) / DIG_STEP);
       expect(toMaster).toBe(18);
@@ -313,9 +313,9 @@ describe('DigSession', () => {
     it('a mastered ant never faces the ten-second clay cube', () => {
       const world = makeWorld();
       const session = new DigSession(world);
-      // The reason hardness dropped from 2x to 1.5x: at 2x an unpractised ant
-      // pays 10s for one cube of clay, which stops describing strata.
-      expect(session.secondsFor(CLAY)).toBeLessThanOrEqual(7.5);
+      // The reason hardness dropped from 2x to 1.5x: at 2x the clay figure runs
+      // away entirely once the base cost rises.
+      expect(session.secondsFor(CLAY)).toBeLessThanOrEqual(13.5);
     });
   });
 });
@@ -945,6 +945,41 @@ describe('fracture', () => {
         goneBefore = gone;
       }
     }
+  });
+
+  it('damages one region at a time instead of the whole cube evenly', () => {
+    /*
+     * The complaint this fixes: erosion used to be global, so every crumb
+     * loosened by the same amount at once and the lattice read as an evenly
+     * dissolving grid. Damage has to be LOCAL — most of the voxel untouched,
+     * a minority visibly chewed.
+     */
+    const pattern = buildFracture(11, S, 23, TOPSOIL);
+    // Checked across the body of the dig, not the very end: once only a few
+    // crumbs remain it is right that most of them are being worked at once.
+    for (const progress of [0.25, 0.4, 0.55]) {
+      let touched = 0;
+      let pristine = 0;
+      for (let cell = 0; cell < CELL_COUNT; cell++) {
+        if (removedAt(pattern, progress) > 0 && !cellSurvives(pattern, cell, progress)) continue;
+        if (erosionFor(pattern, cell, progress) > 0) touched++;
+        else pristine++;
+      }
+      // Some soil is always being worked...
+      expect(touched).toBeGreaterThan(0);
+      // ...and most of what is left is still solid, fused, untouched rock.
+      expect(pristine).toBeGreaterThan(touched);
+    }
+  });
+
+  it('keeps untouched neighbours fused, so no grid shows through', () => {
+    const pattern = buildFracture(11, S, 23, TOPSOIL);
+    // Interior faces only appear where soil has actually started to loosen. If
+    // every crumb emitted all six faces the cube would read as a stack of
+    // blocks even before anything broke.
+    const early = chipMeshData(pattern, 11, S, 23, 0.2)!;
+    const worst = CELL_COUNT * 6;
+    expect(early.quadCount).toBeLessThan(worst * 0.5);
   });
 
   it('is a perfect intact cube at zero progress', () => {

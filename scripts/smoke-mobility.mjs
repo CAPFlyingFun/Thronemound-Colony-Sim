@@ -198,7 +198,7 @@ const ok = (m) => console.log(`  ok  ${m}`);
   else ok(`soil conserved: dug ${dropped.dug} = carried ${dropped.carrying} + loose ${dropped.loose}`);
 
   // Practice: one completed dig, one step faster. Cancels must not count.
-  if (Math.abs(dropped.seconds - 4.8) > 0.01) fail(`expected 4.8s/cube after one dig, got ${dropped.seconds}`);
+  if (Math.abs(dropped.seconds - 8.6) > 0.01) fail(`expected 8.6s/cube after one dig, got ${dropped.seconds}`);
   else ok(`practice advanced one step: ${dropped.seconds}s/cube`);
 
   if (errors.length) fail(`page errors: ${errors.join(' | ')}`);
