@@ -25,14 +25,15 @@ import { TILE_VOXELS } from './tileTextures';
 import { CLAY, SAND, type VoxelId } from './VoxelWorld';
 
 /**
- * Crumbs per axis. 4 gives 64 pieces — at 5 mm a voxel, 1.25 mm each.
+ * Crumbs per axis. Five, because it is ODD.
  *
- * Three was too coarse: 27 pieces means every chip takes a visible ninth of a
- * face off, and the lattice reads as a grid the instant anything separates.
- * Finer crumbs cost almost nothing now that damage is local, because undamaged
- * regions stay fused and emit no interior geometry at all.
+ * An even grid has no middle cell, so a crater has nothing to open from and
+ * always starts off-centre against a seam. Five gives a single centre crumb on
+ * every face for the first strike to bite into, and 125 pieces is fine enough
+ * that the lattice never reads as a grid. It costs almost nothing, because
+ * damage is local and undamaged regions emit no interior geometry at all.
  */
-export const CHIP_CELLS = 4;
+export const CHIP_CELLS = 5;
 export const CELL_COUNT = CHIP_CELLS * CHIP_CELLS * CHIP_CELLS;
 
 /**
@@ -147,6 +148,8 @@ export interface FracturePattern {
    * broken soil — this is the single thing that makes it look crumbly.
    */
   spin: Float32Array;
+  /** Where the first blow landed — the centre of the crater. */
+  strike: Vec3;
   /** Axis the loosened soil rocks about once it is nearly free. */
   wobbleAxis: Vec3;
   wobblePhase: number;
@@ -173,31 +176,36 @@ export function buildFracture(x: number, y: number, z: number, voxel: VoxelId): 
   const rand = rng(seed);
   const feel = feelFor(voxel);
 
-  // Two attack points, biased outward. Squaring pushes the value toward the
-  // faces without ever landing dead centre.
-  const attack: Vec3[] = [];
-  for (let i = 0; i < 2; i++) {
-    const edge = (v: number) => (v < 0.5 ? v * v * 1.4 : 1 - (1 - v) * (1 - v) * 1.4);
-    attack.push({ x: edge(rand()), y: edge(rand()), z: edge(rand()) });
-  }
+  /*
+   * ONE strike point, at the centre of one seeded face.
+   *
+   * Crumbs then break in order of distance from it, so the damage is a crater
+   * that opens in the middle of a face and grows outward in a rough circle,
+   * deepening as it widens — a pickaxe biting the same spot repeatedly.
+   *
+   * Two scattered attack points read as the cube rotting in patches. Putting
+   * the point in the middle of the VOLUME is worse still: the voxel hollows
+   * from the inside while the shell stays intact, so nothing visible happens
+   * until it suddenly caves.
+   */
+  const axis = Math.floor(rand() * 3);
+  const positive = rand() < 0.5;
+  const strike: Vec3 = { x: 0.5, y: 0.5, z: 0.5 };
+  if (axis === 0) strike.x = positive ? 1 : 0;
+  else if (axis === 1) strike.y = positive ? 1 : 0;
+  else strike.z = positive ? 1 : 0;
 
   const scores = new Float64Array(CELL_COUNT);
   for (let cell = 0; cell < CELL_COUNT; cell++) {
     const c = cellCentre(cell);
-    let nearest = Infinity;
-    for (const a of attack) {
-      const d = Math.hypot(c.x - a.x, c.y - a.y, c.z - a.z);
-      if (d < nearest) nearest = d;
-    }
+    const d = Math.hypot(c.x - strike.x, c.y - strike.y, c.z - strike.z);
     /*
-     * Noise deliberately SMALL against the distances it perturbs.
-     *
-     * At 0.55 it swamped the distance term, so crumbs came off all over the
-     * cube in what looked like random order rather than damage eating outward
-     * from where she is working. This is just enough to keep the edge of the
-     * damage ragged.
+     * Noise deliberately SMALL against the distances it perturbs. Large noise
+     * swamps the distance term and crumbs come off all over the cube in what
+     * looks like random order; this is just enough to keep the rim of the
+     * crater ragged rather than a machined circle.
      */
-    scores[cell] = nearest + (rand() - 0.5) * 0.14;
+    scores[cell] = d + (rand() - 0.5) * 0.12;
   }
 
   const order = Int32Array.from(
@@ -250,6 +258,7 @@ export function buildFracture(x: number, y: number, z: number, voxel: VoxelId): 
     thresholds,
     jitter,
     spin,
+    strike,
     wobbleAxis: { x: wa.x / len, y: wa.y / len, z: wa.z / len },
     wobblePhase: rand() * Math.PI * 2,
   };

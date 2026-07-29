@@ -140,8 +140,15 @@ const ok = (m) => console.log(`  ok  ${m}`);
   const standing = await hud();
   await tap(450, 700);
   const first = await until('the first cube', (s) => s.dug >= 1);
-  if (first.dug !== 1 || first.carrying !== 1) fail(`expected exactly one cube dug, got ${JSON.stringify(first)}`);
-  else ok('digs exactly one cube, then stops because it is full');
+  if (first.dug !== 1) fail(`expected exactly one cube dug, got ${JSON.stringify(first)}`);
+  else ok('digs exactly one cube');
+
+  // Digging FREES the soil rather than loading her, so she is empty-handed and
+  // the spoil is lying in the hole.
+  const spilled = await until('the freed cube to become a clod', (s) => s.loose >= 1, 40000);
+  if (spilled.carrying !== 0 || spilled.loose !== 1) {
+    fail(`digging should leave one loose clod and empty hands: ${JSON.stringify(spilled)}`);
+  } else ok('the freed cube lies loose and her mandibles are empty');
 
   /*
    * Dig the floor out from under yourself and you must end up ON the new floor,
@@ -158,48 +165,29 @@ const ok = (m) => console.log(`  ok  ${m}`);
   const settled = await until('the ant to settle into her own hole',
     (s) => Number.isFinite(s.y) && standing.y - s.y > 0.8, 40000);
   const drop = standing.y - settled.y;
-  if (!(drop > 0.8)) fail(`hovering: dug one voxel down but only fell ${drop.toFixed(2)} (${standing.y} -> ${settled.y})`);
+  if (!(drop > 0.8)) fail(`hovering: dug one voxel down but only fell ${drop.toFixed(2)}`);
   else ok(`settles onto the new floor, fell ${drop.toFixed(2)} voxels`);
 
-  // Tapping again while loaded must not start a second dig.
-  await tap(450, 700);
-  await page.waitForTimeout(1500);
-  const stillFull = await hud();
-  if (stillFull.dug !== 1) fail(`dug ${stillFull.dug} cubes while already carrying one`);
-  else ok('cannot dig again until the load is dropped');
-  if ((await page.textContent('.dig-action')).includes('CANCEL')) fail('a refused dig still armed CANCEL');
-  else ok('a refused dig does not pretend to have started');
-
-  /*
-   * Climb out, then dump. She is standing IN the hole she just dug, and a
-   * one-cube pit has nowhere to backfill from the inside — the placement cell
-   * would be her own body, which is refused on purpose. Walking out is the real
-   * loop, and step-up handles a one-voxel rise without a jump.
-   *
-   * This used to "pass" from inside the pit only because the hover put her eye
-   * above the rim. Fixing the hover is what exposed it.
-   */
+  // Clods ignore the ant entirely — she walks through her own spoil, which is
+  // what lets a heap be stood on and built up rather than shoving her around.
+  const beforeWalk = await hud();
   await page.keyboard.down('KeyW');
-  await page.waitForTimeout(2000);
+  await page.waitForTimeout(1500);
   await page.keyboard.up('KeyW');
-  const out = await until('the ant to climb out of her hole', (s) => s.y > 96.9, 30000);
-  if (!(out.y > 96.9)) fail(`could not walk out of a one-voxel pit (y ${out.y})`);
-  else ok(`steps out of the pit unaided (y ${out.y})`);
-
-  // No aiming. DROP prefers the crosshair cell but falls back to the best
-  // neighbouring one, so putting a grain down never depends on threading the
-  // narrow window one-cube reach leaves on flat ground.
   await until('the ant to stop walking', (s) => s.speed < 0.2, 40000);
-  await page.click('.dig-drop');
-  const dropped = await until('the load to become loose spoil', (s) => s.loose >= 1, 25000);
-  if (dropped.carrying !== 0 || dropped.loose !== 1) fail(`dropping failed: ${JSON.stringify(dropped)}`);
-  else ok('dropping the load frees the ant to dig again');
-  if (dropped.dug !== dropped.carrying + dropped.loose) fail('soil not conserved');
-  else ok(`soil conserved: dug ${dropped.dug} = carried ${dropped.carrying} + loose ${dropped.loose}`);
+  const afterWalk = await hud();
+  if (afterWalk.loose !== beforeWalk.loose) fail('walking changed the loose count');
+  else ok('walking through spoil neither destroys nor duplicates it');
 
-  // Practice: one completed dig, one step faster. Cancels must not count.
-  if (Math.abs(dropped.seconds - 8.6) > 0.01) fail(`expected 8.6s/cube after one dig, got ${dropped.seconds}`);
-  else ok(`practice advanced one step: ${dropped.seconds}s/cube`);
+  // Carry it, then put it down: soil conserved across the whole round trip.
+  const back = await until('the clod to be carryable', (s) => s.loose >= 1, 25000);
+  if (back.loose < 1) fail('lost the clod');
+  await page.click('.dig-action');
+  await page.waitForTimeout(1500);
+  await page.click('.dig-action');
+  const done = await until('the round trip to settle', (s) => s.loose >= 1, 40000);
+  if (done.dug !== done.carrying + done.loose) fail(`soil not conserved: ${JSON.stringify(done)}`);
+  else ok(`soil conserved: dug ${done.dug} = carried ${done.carrying} + loose ${done.loose}`);
 
   if (errors.length) fail(`page errors: ${errors.join(' | ')}`);
   else ok('no page errors');

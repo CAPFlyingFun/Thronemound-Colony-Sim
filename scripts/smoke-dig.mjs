@@ -152,8 +152,13 @@ await tap(450, 800);
 const dug = await until('the first cube to pop', (s) => s.dug >= 1);
 if (dug.dug < 1) fail(`nothing was excavated — "${dug.text}"`);
 else ok(`excavated ${dug.dug}, carrying ${dug.carrying}`);
-if (dug.carrying !== dug.dug) fail(`spoil not conserved: dug ${dug.dug}, carrying ${dug.carrying}`);
-else ok('soil conserved: everything dug is being carried');
+// Digging FREES the soil, it does not load her. The spoil is lying in the hole
+// and picking it up is a separate, deliberate act.
+if (dug.carrying !== 0) fail(`digging silently loaded the ant: carrying ${dug.carrying}`);
+else ok('digging leaves the spoil on the ground, not in her mandibles');
+const spilled = await until('the freed cube to become a clod', (s) => s.loose >= 1, 25000);
+if (spilled.loose !== 1) fail(`expected one loose clod, got ${spilled.loose}`);
+else ok('the freed cube is lying there as a clod');
 if (dug.seconds > 8.9) fail(`practice did not advance after a completed dig (${dug.seconds}s)`);
 else ok(`practice advanced: now ${dug.seconds}s/cube`);
 
@@ -168,29 +173,32 @@ const dugShot = await shot('2-dug');
 if (Buffer.compare(surfaceShot, dugShot) === 0) fail('frame did not change after digging');
 else ok('rendered frame changed after digging');
 
-// 6. Climb out, then DROP puts it back.
+// 6. The three-mode action button: CARRY, then DROP.
 //
-// She is standing IN the hole she just dug, and a one-cube pit has nowhere to
-// backfill from the inside — the placement cell would be her own body, which is
-// refused on purpose. Walking out is the real loop, and step-up clears a
-// one-voxel rise without a jump. (This step used to be unnecessary only because
-// a hover bug left her eye above the rim.)
+// With nothing held and a clod at her feet the button offers CARRY; once she is
+// holding it, and only then, it offers DROP. A standing DROP button was what
+// let soil get thrown by accident.
+const carryLabel = await untilLabel('CARRY');
+if (!carryLabel) fail('standing over a loose clod did not offer CARRY');
+else ok('a clod within reach offers CARRY');
+
+await page.click('.dig-action');
+const held = await until('the clod to be picked up', (s) => s.carrying >= 1, 25000);
+if (held.carrying !== 1 || held.loose !== 0) fail(`carry failed: ${JSON.stringify(held)}`);
+else ok('CARRY picks the clod back up');
+if (!await untilLabel('DROP')) fail('holding a clod did not offer DROP');
+else ok('holding a clod offers DROP, and only then');
+
+// Climb out and put it down on the surface.
 await page.keyboard.down('KeyW');
 await page.waitForTimeout(2000);
 await page.keyboard.up('KeyW');
-// Wait for her to actually come to rest. Deceleration is 22 voxels/s^2 but the
-// sim runs at ~0.15x wall clock here, so a fixed pause is a coin flip — aiming
-// while still walking is what made this step flaky.
 await until('the ant to stop walking', (s) => s.speed < 0.2, 40000);
 
-// Deliberately do NOT fuss over the aim. DROP prefers the cell the crosshair
-// faces but falls back to the best neighbouring one, precisely so a player
-// doesn't have to thread the narrow window that one-cube reach leaves on flat
-// ground. If this needs a perfect pitch to pass, the fallback has regressed.
-await page.click('.dig-drop');
+await page.click('.dig-action');
 const placed = await until('the load to become loose spoil', (s) => s.loose >= 1, 25000);
 if (placed.loose < 1) fail(`DROP placed nothing — "${placed.text}"`);
-else ok(`dropped ${placed.loose} voxel(s), now carrying ${placed.carrying}`);
+else ok(`dropped ${placed.loose} clod(s), now carrying ${placed.carrying}`);
 if (placed.dug !== placed.carrying + placed.loose) {
   fail(`soil not conserved: dug ${placed.dug} != carried ${placed.carrying} + loose ${placed.loose}`);
 } else ok(`soil conserved end to end: dug ${placed.dug} = carried ${placed.carrying} + loose ${placed.loose}`);

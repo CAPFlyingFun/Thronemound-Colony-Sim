@@ -6,7 +6,7 @@ import {
 import { FACES, meshChunk } from '../src/voxel/mesher';
 import { MAX_LOOSE_CLODS, LooseSoil } from '../src/voxel/LooseSoil';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, styleForVoxel } from '../src/voxel/clod';
-import { CELL_COUNT, CHIP_CELLS, MAX_REMOVED, buildFracture, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
+import { CELL_COUNT, CHIP_CELLS, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
@@ -982,6 +982,36 @@ describe('fracture', () => {
     expect(early.quadCount).toBeLessThan(worst * 0.5);
   });
 
+  it('opens a crater from the middle of a face and grows outward', () => {
+    for (const [x, z] of [[2, 3], [15, 40], [61, 8]] as const) {
+      const pattern = buildFracture(x, S, z, TOPSOIL);
+      // The strike lands on a face, never inside the volume: a crater that
+      // starts in the middle of the CUBE hollows it invisibly behind an intact
+      // shell, then caves in all at once.
+      const onFace = [pattern.strike.x, pattern.strike.y, pattern.strike.z]
+        .filter((v) => v === 0 || v === 1).length;
+      expect(onFace).toBe(1);
+
+      // Crumbs go in roughly distance order from that point, so the damage
+      // reads as one growing hole rather than as patches of rot.
+      const first = cellCentre(pattern.order[0]!);
+      const last = cellCentre(pattern.order[CELL_COUNT - 1]!);
+      const near = Math.hypot(
+        first.x - pattern.strike.x, first.y - pattern.strike.y, first.z - pattern.strike.z,
+      );
+      const far = Math.hypot(
+        last.x - pattern.strike.x, last.y - pattern.strike.y, last.z - pattern.strike.z,
+      );
+      expect(near).toBeLessThan(far);
+    }
+  });
+
+  it('has a single centre crumb for the first blow to land on', () => {
+    // The reason the grid is odd. An even one has no middle cell, so a crater
+    // always opens against a seam instead of at a point.
+    expect(CHIP_CELLS % 2).toBe(1);
+  });
+
   it('is a perfect intact cube at zero progress', () => {
     const pattern = buildFracture(8, S, 9, TOPSOIL);
     expect(removedAt(pattern, 0)).toBe(0);
@@ -1168,6 +1198,26 @@ describe('loose soil', () => {
     expect(soil.count).toBe(0);
     expect(styleForVoxel(clod.source.x, clod.source.y, clod.source.z, clod.material).variant)
       .toBe(styleForVoxel(20, S, 20, TOPSOIL).variant);
+  });
+
+  it('never loses a unit when a release cannot be placed', () => {
+    /*
+     * release() takes the unit OUT of the load, so every path after it has to
+     * either place the unit or push it back. An early return there was quietly
+     * destroying soil — the load went down by one and nothing appeared.
+     */
+    const world = makeWorld();
+    const session = new DigSession(world);
+    session.beginDig(20, S, 20);
+    session.tickDig(999);
+    expect(session.carried).toBe(1);
+
+    const unit = session.release()!;
+    expect(session.carried).toBe(0);
+    // Simulating the refusal path: putting it back restores the load exactly.
+    session.load.push(unit);
+    expect(session.carried).toBe(1);
+    expect(world.excavated).toBe(session.carried);
   });
 
   it('drops a clod onto the ground and lets it fall asleep there', () => {

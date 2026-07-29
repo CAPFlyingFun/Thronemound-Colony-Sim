@@ -333,7 +333,6 @@ export class DigScene {
   private airborne = false;
 
   private readonly hud: HTMLDivElement;
-  private readonly dropButton: HTMLButtonElement;
   private readonly actionButton: HTMLButtonElement;
   private readonly foundButton: HTMLButtonElement;
   private readonly jumpButton: HTMLButtonElement;
@@ -450,7 +449,6 @@ export class DigScene {
     }
 
     this.hud = document.createElement('div');
-    this.dropButton = document.createElement('button');
     this.actionButton = document.createElement('button');
     this.foundButton = document.createElement('button');
     this.jumpButton = document.createElement('button');
@@ -586,16 +584,13 @@ export class DigScene {
       <div class="dig-readout" id="dig-readout"></div>
       <div class="dig-crosshair"></div>
       <div class="dig-controls"></div>
-      <div class="dig-hint">Left half: walk &nbsp;·&nbsp; Right half: look &nbsp;·&nbsp; Tap soil to dig it</div>
+      <div class="dig-hint">Left half: walk &nbsp;·&nbsp; Right half: look &nbsp;·&nbsp; Tap soil to dig, tap a clod to carry</div>
     `;
     const controls = this.hud.querySelector('.dig-controls')!;
-    this.dropButton.className = 'dig-btn dig-drop';
-    this.dropButton.textContent = '▦ DROP';
     this.actionButton.className = 'dig-btn dig-action';
     this.actionButton.textContent = '⛏ DIG';
     this.jumpButton.className = 'dig-btn dig-jump';
     this.jumpButton.textContent = '\u2191 JUMP';
-    controls.appendChild(this.dropButton);
     controls.appendChild(this.jumpButton);
     controls.appendChild(this.actionButton);
 
@@ -628,13 +623,6 @@ export class DigScene {
     this.foundButton.addEventListener('pointerdown', foundDown);
     this.cleanups.push(() => this.foundButton.removeEventListener('pointerdown', foundDown));
 
-    const dropDown = (event: Event) => {
-      event.preventDefault();
-      this.dropCarried();
-    };
-    this.dropButton.addEventListener('pointerdown', dropDown);
-    this.cleanups.push(() => this.dropButton.removeEventListener('pointerdown', dropDown));
-
     /*
      * The crosshair path, kept for two reasons the world-tap can't cover.
      *
@@ -645,12 +633,7 @@ export class DigScene {
      */
     const actionDown = (event: Event) => {
       event.preventDefault();
-      if (this.session.digging) {
-        this.session.cancelDig();
-        return;
-      }
-      const hit = this.currentTarget();
-      if (hit) this.startDig(hit.x, hit.y, hit.z);
+      this.doAction();
     };
     this.actionButton.addEventListener('pointerdown', actionDown);
     this.cleanups.push(() => this.actionButton.removeEventListener('pointerdown', actionDown));
@@ -1023,26 +1006,17 @@ export class DigScene {
     this.soil.step(this.world, dt, GRAVITY);
 
     /*
-     * Walking into spoil shoves it aside — the ant needs no special code, she
-     * simply displaces what she runs into.
+     * Clods deliberately ignore the ant, and she walks straight through them.
      *
-     * This runs at ANY speed, not just while moving. Gating it on movement left
-     * a clod she had just set down free to sit inside her, and standing still
-     * is exactly when you would expect a lump against your legs to be nudged
-     * clear. Strength still scales with how fast she is going, so a stationary
-     * ant separates from a clod rather than kicking it away.
+     * She is the one piling the heap up, so a mound that shoved her around
+     * would fight the thing it exists to let you build — you could never stand
+     * on your own anthill. Spoil still falls, settles and stacks; it just does
+     * not treat the digger as an obstacle.
+     *
+     * `LooseSoil.displace` stays for the things that SHOULD move it: other
+     * insects, and weather once that exists. It is unwired for the player on
+     * purpose, not by omission.
      */
-    const motion = this.lastStep;
-    const shove = CLOD_PUSH * dt * (0.5 + Math.min(1, this.planarSpeed / DEFAULT_BANDS.walk));
-    const pushed = this.soil.displace(
-      { x: this.position.x, y: this.position.y + EYE_HEIGHT * 0.5, z: this.position.z },
-      BODY_RADIUS,
-      { x: motion.x, y: 0, z: motion.z },
-      shove,
-    );
-    if (pushed.length > 0 && this.planarSpeed > 1) {
-      this.digAudio?.('DIG_CHIP_SMALL', this.position.clone());
-    }
 
     for (const batch of this.soilBatches.values()) batch.count = 0;
     for (const clod of this.soil.clods) {
@@ -1156,19 +1130,23 @@ export class DigScene {
     // stays put, and from then on it can be shoved, knocked down a tunnel, or
     // picked up again — none of which terrain could be.
     const unit = this.session.release();
-    if (!unit || !unit.source) return;
+    // release() has ALREADY taken the unit out of the load, so every path from
+    // here has to either place it or put it back. Returning early here was
+    // silently destroying soil.
+    if (!unit) return;
+    if (!unit.source) {
+      this.session.load.push(unit);
+      return;
+    }
+    const at = this.dropSpot();
     const { forward } = this.surfaceBasis();
-    // Start it clear of her own body. Dropping at the mandibles put the clod
-    // inside the camera, because she is 0.7 voxels tall and the lump is 0.6 —
-    // an ant sets a grain down in front of herself, not on her own feet.
-    const at = this.mandiblePoint().addScaledVector(forward, BODY_RADIUS + CLOD_RADIUS + 0.15);
     const dropped = this.soil.drop(
       { x: at.x, y: at.y, z: at.z },
       unit.material,
       unit.source,
-      // A gentle toss forward, so it clears her own feet instead of landing on
-      // them. The old self-overlap guard is gone: a clod at your feet rolls.
-      { x: forward.x * 1.4, y: 0.6, z: forward.z * 1.4 },
+      // Barely a toss. It used to be flung forward hard enough to skitter over
+      // the lip of the shaft she had just climbed out of and fall back in.
+      { x: forward.x * 0.35, y: 0.15, z: forward.z * 0.35 },
     );
     if (!dropped) {
       // Heap full — put it straight back rather than destroying soil.
@@ -1177,6 +1155,64 @@ export class DigScene {
     }
     this.clodStyle = null;
     this.digAudio?.('DIG_RELEASE', at.clone());
+  }
+
+  /**
+   * Somewhere to set the clod down that it will not immediately roll away from.
+   *
+   * Dropping a fixed distance ahead pitched the clod straight down the shaft
+   * she had just hauled it out of — you would carry a load to the surface, put
+   * it down, and watch it fall back in. An ant tipping spoil onto a mound picks
+   * a spot with ground under it, so this walks outward from her feet and takes
+   * the first one that is actually supported.
+   */
+  private dropSpot(): THREE.Vector3 {
+    const { forward, right } = this.surfaceBasis();
+    const base = this.mandiblePoint();
+    const down = this.upVec().negate();
+
+    const clear = BODY_RADIUS + CLOD_RADIUS + 0.15;
+    let fallback: THREE.Vector3 | null = null;
+    // Straight ahead first, then fanned to either side — she will step around
+    // a hole rather than tip the load into it.
+    for (const side of [0, -0.5, 0.5, -0.9, 0.9]) {
+      for (const ahead of [clear, clear + 0.5, clear + 1]) {
+        const at = base.clone().addScaledVector(forward, ahead).addScaledVector(right, side);
+        if (this.solidAt(at.x, at.y, at.z)) continue; // inside rock
+        fallback ??= at;
+        const below = at.clone().addScaledVector(down, CLOD_RADIUS + 0.4);
+        if (this.solidAt(below.x, below.y, below.z)) return at;
+      }
+    }
+    // Nothing supported within reach — put it down in front anyway and let it
+    // fall. Better than refusing the drop and stranding her with a full load.
+    return fallback ?? base.clone().addScaledVector(forward, clear);
+  }
+
+  /**
+   * Turn the cube she has just freed into a clod lying in the hole.
+   *
+   * tickDig() puts the unit in the load first and this hands it straight out
+   * again, which looks roundabout but is what keeps conservation airtight: the
+   * soil is never in limbo, and if the heap is somehow full it simply stays in
+   * the load rather than evaporating.
+   */
+  private spillDug(cell: { x: number; y: number; z: number }): void {
+    const unit = this.session.release();
+    if (!unit) return;
+    const placed = this.soil.drop(
+      { x: cell.x + 0.5, y: cell.y + 0.5, z: cell.z + 0.5 },
+      unit.material,
+      unit.source ?? cell,
+    );
+    if (!placed) this.session.load.push(unit);
+  }
+
+  /** The loose clod she could pick up right now, if any. */
+  private clodInReach(): Clod | null {
+    if (this.session.isFull) return null;
+    const eye = this.camera.position;
+    return this.soil.nearest({ x: eye.x, y: eye.y, z: eye.z }, REACH);
   }
 
   /** Pick a loose clod back up, if a hand is free. */
@@ -1235,21 +1271,6 @@ export class DigScene {
     this.session.toggleDig(x, y, z);
   }
 
-  /**
-   * A tap on nearby spoil picks it up instead of digging.
-   *
-   * Checked before the voxel target, because a clod sitting against a wall is
-   * in front of that wall — the thing you meant was the loose lump. Reach is
-   * the same rule as digging: what she can touch.
-   */
-  private tryTakeNearbyClod(): boolean {
-    if (this.session.isFull) return false;
-    const eye = this.camera.position;
-    const clod = this.soil.nearest({ x: eye.x, y: eye.y, z: eye.z }, REACH);
-    if (!clod) return false;
-    return this.takeClod(clod);
-  }
-
   private showStick(visible: boolean): void {
     if (!visible) {
       this.stick.classList.remove('is-live');
@@ -1267,12 +1288,52 @@ export class DigScene {
    * both available and screen space is the scarce resource on a phone — the
    * same reasoning that made JUMP/CLIMB a single button.
    */
+  /**
+   * What the one action button does right now.
+   *
+   * Four states on a single button rather than two buttons that are each wrong
+   * most of the time. DROP in particular only exists while she is actually
+   * holding something — a standing DROP button is an invitation to throw soil
+   * you did not know you had picked up, which is exactly what happened.
+   */
+  private actionMode(): 'cancel' | 'drop' | 'carry' | 'dig' {
+    if (this.session.digging) return 'cancel';
+    if (this.session.carried > 0) return 'drop';
+    if (this.clodInReach()) return 'carry';
+    return 'dig';
+  }
+
   private refreshActionButton(): void {
-    const digging = this.session.digging !== null;
-    const label = digging ? '✕ CANCEL' : '⛏ DIG';
+    const mode = this.actionMode();
+    const label = mode === 'cancel' ? '\u2715 CANCEL'
+      : mode === 'drop' ? '\u2935 DROP'
+        : mode === 'carry' ? '\u2934 CARRY'
+          : '\u26cf DIG';
     if (this.actionButton.textContent !== label) this.actionButton.textContent = label;
-    this.actionButton.classList.toggle('is-cancel', digging);
-    this.dropButton.disabled = this.session.carried === 0;
+    this.actionButton.classList.toggle('is-cancel', mode === 'cancel');
+    this.actionButton.classList.toggle('is-carry', mode === 'carry');
+    this.actionButton.classList.toggle('is-drop', mode === 'drop');
+  }
+
+  /** The one action, whatever it happens to be. Button, click and key share it. */
+  private doAction(): void {
+    switch (this.actionMode()) {
+      case 'cancel':
+        this.session.cancelDig();
+        return;
+      case 'drop':
+        this.dropCarried();
+        return;
+      case 'carry': {
+        const clod = this.clodInReach();
+        if (clod) this.takeClod(clod);
+        return;
+      }
+      default: {
+        const hit = this.currentTarget();
+        if (hit) this.startDig(hit.x, hit.y, hit.z);
+      }
+    }
   }
 
   private bindInput(): void {
@@ -1313,12 +1374,8 @@ export class DigScene {
           return; // this click only captures the cursor
         }
         // Locked, so there is no cursor to aim with — the crosshair is the
-        // pointer. Click starts a dig on whatever it is on; click again cancels.
-        if (this.session.digging) this.session.cancelDig();
-        else {
-          const hit = this.currentTarget();
-          if (hit) this.startDig(hit.x, hit.y, hit.z);
-        }
+        // pointer, and click does whatever the action button would.
+        this.doAction();
         return;
       }
       // Left 42% is the stick's activation zone; the rest looks.
@@ -1445,16 +1502,8 @@ export class DigScene {
         case 'ShiftLeft': case 'ShiftRight': this.sprinting = true; break;
         case 'Space': this.jumpQueued = true; event.preventDefault(); break;
         case 'KeyG': this.jumpQueued = true; event.preventDefault(); break;
-        case 'KeyE': case 'Tab': this.dropCarried(); event.preventDefault(); break;
-        case 'KeyF': {
-          if (this.session.digging) this.session.cancelDig();
-          else {
-            const hit = this.currentTarget();
-            if (hit) this.startDig(hit.x, hit.y, hit.z);
-          }
-          event.preventDefault();
-          break;
-        }
+        case 'KeyE': case 'Tab': this.doAction(); event.preventDefault(); break;
+        case 'KeyF': this.doAction(); event.preventDefault(); break;
       }
     };
     const keyUp = (event: KeyboardEvent) => {
@@ -1992,7 +2041,10 @@ export class DigScene {
       .unproject(this.camera)
       .sub(this.camera.position)
       .normalize();
-    if (this.tryTakeNearbyClod()) return;
+    // A clod sitting against a wall is in front of that wall, so a tap there
+    // means the loose lump, not the soil behind it.
+    const clod = this.clodInReach();
+    if (clod && this.takeClod(clod)) return;
     const hit = this.targetAlong(dir);
     if (hit) this.startDig(hit.x, hit.y, hit.z);
   }
@@ -2003,8 +2055,14 @@ export class DigScene {
     // the session: walk out of range and she stops working.
     const digging = this.session.digging;
     if (digging) {
-      if (this.withinReach(digging.x, digging.y, digging.z)) this.session.tickDig(dt);
-      else this.session.cancelDig();
+      if (this.withinReach(digging.x, digging.y, digging.z)) {
+        const outcome = this.session.tickDig(dt);
+        // Freeing a cube leaves the spoil ON THE GROUND. Digging used to load
+        // the ant silently, so DROP appeared without being asked for and the
+        // next tap threw soil she did not know she was holding. Picking it up
+        // is now its own deliberate act.
+        if (outcome.kind === 'dug') this.spillDug(digging);
+      } else this.session.cancelDig();
     }
     this.syncChip();
     this.updateChip(dt);
@@ -2062,7 +2120,6 @@ export class DigScene {
     this.session.cancelDig();
     this.highlight.visible = false;
     this.foundButton.hidden = true;
-    this.dropButton.hidden = true;
     this.actionButton.hidden = true;
     this.jumpButton.hidden = true;
     this.showStick(false);

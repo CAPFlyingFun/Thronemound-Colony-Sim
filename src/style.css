@@ -116,17 +116,6 @@ canvas {
   -webkit-tap-highlight-color: transparent;
 }
 
-.dig-drop {
-  padding: 11px 16px;
-  background: #7fc4a0;
-}
-
-/* Nothing to put down. Dimmed rather than hidden, so the control row doesn't
-   reflow under the thumb every time a load is picked up or dropped. */
-.dig-drop:disabled {
-  opacity: 0.35;
-}
-
 .dig-action {
   width: 96px;
   height: 96px;
@@ -139,12 +128,20 @@ canvas {
   transform: scale(0.96);
 }
 
-/* A dig is running, so the button's job has flipped from starting to stopping.
-   Colour rather than only the label, because at arm's length on a phone the
-   label is the slower read. */
+/* The action button carries four jobs, so it is colour-coded as well as
+   labelled — at arm's length on a phone the colour is the faster read, and
+   pressing the wrong one is how soil got thrown by accident. */
 .dig-action.is-cancel {
   background: #d9755d;
   color: #fff5ec;
+}
+
+.dig-action.is-carry {
+  background: #7fc4a0;
+}
+
+.dig-action.is-drop {
+  background: #e6b95c;
 }
 
 .dig-hint {
@@ -279,7 +276,6 @@ canvas {
 }
 
 .dig-hud.is-short .dig-action { width: 74px; height: 74px; font-size: 12px; }
-.dig-hud.is-short .dig-drop,
 .dig-hud.is-short .dig-jump { padding: 9px 12px; font-size: 12px; }
 .dig-hud.is-short .dig-hint { display: none; }
 .dig-hud.is-short .dig-found { bottom: max(96px, calc(env(safe-area-inset-bottom) + 96px)); }
