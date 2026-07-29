@@ -114,7 +114,15 @@ const BUILD_LABEL = `v${__APP_VERSION__} \u00b7 ${__BUILD_TIME__}`;
 const REACH = 2.2;
 const REACH_CUBES = 1;
 
-type Mode = 'dig' | 'place';
+/**
+ * Telling a dig-tap apart from a look-drag. The right half of the screen turns
+ * the camera, so a tap has to be a press that goes nowhere and ends quickly.
+ * Generous on both counts, because the failure is cheap in one direction only:
+ * a stray tap starts a dig that another tap cancels, whereas a dig that refuses
+ * to register reads as the game being broken.
+ */
+const TAP_MAX_MS = 250;
+const TAP_MAX_PX = 10;
 
 export class DigScene {
   private readonly host: HTMLElement;
@@ -159,8 +167,6 @@ export class DigScene {
   /** Every live touch, so a second finger can be recognised as a pinch. */
   private readonly pointers = new Map<number, { x: number; y: number }>();
 
-  private mode: Mode = 'dig';
-  private acting = false;
   private moveX = 0;
   private moveZ = 0;
   private stickMagnitude = 0;
@@ -169,7 +175,7 @@ export class DigScene {
   private jumpQueued = false;
 
   private readonly hud: HTMLDivElement;
-  private readonly modeButton: HTMLButtonElement;
+  private readonly dropButton: HTMLButtonElement;
   private readonly actionButton: HTMLButtonElement;
   private readonly foundButton: HTMLButtonElement;
   private readonly jumpButton: HTMLButtonElement;
@@ -178,6 +184,8 @@ export class DigScene {
   private readonly stickKnob: HTMLDivElement;
 
   private lookPointer: number | null = null;
+  /** Where and when the look pointer went down, so a tap can be told from a drag. */
+  private lookDown = { x: 0, y: 0, at: 0 };
   private movePointer: number | null = null;
   private lookLast = { x: 0, y: 0 };
   private moveOrigin = { x: 0, y: 0 };
@@ -241,7 +249,7 @@ export class DigScene {
     }
 
     this.hud = document.createElement('div');
-    this.modeButton = document.createElement('button');
+    this.dropButton = document.createElement('button');
     this.actionButton = document.createElement('button');
     this.foundButton = document.createElement('button');
     this.jumpButton = document.createElement('button');
@@ -346,16 +354,16 @@ export class DigScene {
       <div class="dig-readout" id="dig-readout"></div>
       <div class="dig-crosshair"></div>
       <div class="dig-controls"></div>
-      <div class="dig-hint">Left half: walk &nbsp;·&nbsp; Right half: look &nbsp;·&nbsp; Hold ACTION to dig</div>
+      <div class="dig-hint">Left half: walk &nbsp;·&nbsp; Right half: look &nbsp;·&nbsp; Tap soil to dig it</div>
     `;
     const controls = this.hud.querySelector('.dig-controls')!;
-    this.modeButton.className = 'dig-btn dig-mode';
-    this.modeButton.textContent = '⛏ REMOVE';
+    this.dropButton.className = 'dig-btn dig-drop';
+    this.dropButton.textContent = '▦ DROP';
     this.actionButton.className = 'dig-btn dig-action';
-    this.actionButton.textContent = 'ACTION';
+    this.actionButton.textContent = '⛏ DIG';
     this.jumpButton.className = 'dig-btn dig-jump';
     this.jumpButton.textContent = '\u2191 JUMP';
-    controls.appendChild(this.modeButton);
+    controls.appendChild(this.dropButton);
     controls.appendChild(this.jumpButton);
     controls.appendChild(this.actionButton);
 
@@ -388,30 +396,54 @@ export class DigScene {
     this.foundButton.addEventListener('pointerdown', foundDown);
     this.cleanups.push(() => this.foundButton.removeEventListener('pointerdown', foundDown));
 
-    const toggle = (event: Event) => {
+    const dropDown = (event: Event) => {
       event.preventDefault();
-      this.setMode(this.mode === 'dig' ? 'place' : 'dig');
+      this.dropCarried();
     };
-    this.modeButton.addEventListener('pointerdown', toggle);
-    this.cleanups.push(() => this.modeButton.removeEventListener('pointerdown', toggle));
+    this.dropButton.addEventListener('pointerdown', dropDown);
+    this.cleanups.push(() => this.dropButton.removeEventListener('pointerdown', dropDown));
 
-    const actionDown = (event: PointerEvent) => {
+    /*
+     * The crosshair path, kept for two reasons the world-tap can't cover.
+     *
+     * CANCEL has to live somewhere fixed: once a dig is running the camera is
+     * free to look away, and "tap the cube again" is no help if you can no
+     * longer see it. And the cube underfoot is mostly hidden behind the HUD, so
+     * looking down and pressing DIG beats trying to tap it.
+     */
+    const actionDown = (event: Event) => {
       event.preventDefault();
-      this.acting = true;
-      try { this.actionButton.setPointerCapture(event.pointerId); } catch { /* ignore */ }
-    };
-    const actionUp = () => {
-      this.acting = false;
-      this.session.cancelDig();
+      if (this.session.digging) {
+        this.session.cancelDig();
+        return;
+      }
+      const hit = this.currentTarget();
+      if (hit) this.startDig(hit.x, hit.y, hit.z);
     };
     this.actionButton.addEventListener('pointerdown', actionDown);
-    this.actionButton.addEventListener('pointerup', actionUp);
-    this.actionButton.addEventListener('pointercancel', actionUp);
-    this.cleanups.push(() => {
-      this.actionButton.removeEventListener('pointerdown', actionDown);
-      this.actionButton.removeEventListener('pointerup', actionUp);
-      this.actionButton.removeEventListener('pointercancel', actionUp);
-    });
+    this.cleanups.push(() => this.actionButton.removeEventListener('pointerdown', actionDown));
+  }
+
+  /** Put the carried cube into the cell the crosshair faces. */
+  private dropCarried(): void {
+    const hit = this.currentTarget();
+    if (!hit) return;
+    const px = hit.x + hit.nx;
+    const py = hit.y + hit.ny;
+    const pz = hit.z + hit.nz;
+    // Don't brick yourself inside the ant's own body.
+    const dx = Math.abs(px + 0.5 - this.position.x);
+    const dz = Math.abs(pz + 0.5 - this.position.z);
+    const overlapsSelf = dx < BODY_RADIUS + 0.5 && dz < BODY_RADIUS + 0.5
+      && py + 1 > this.position.y && py < this.position.y + EYE_HEIGHT;
+    if (overlapsSelf) return;
+    this.session.place(px, py, pz);
+  }
+
+  /** Start (or cancel) a dig on a specific cube, if it's within reach. */
+  private startDig(x: number, y: number, z: number): void {
+    if (!this.withinReach(x, y, z)) return;
+    this.session.toggleDig(x, y, z);
   }
 
   private showStick(visible: boolean): void {
@@ -441,11 +473,17 @@ export class DigScene {
     this.jumpButton.classList.toggle('is-grip', attached || wall !== null);
   }
 
-  private setMode(mode: Mode): void {
-    this.mode = mode;
-    this.session.cancelDig();
-    this.modeButton.textContent = mode === 'dig' ? '⛏ REMOVE' : '▦ ADD';
-    this.modeButton.classList.toggle('is-place', mode === 'place');
+  /**
+   * DIG while idle, CANCEL while working. One button, because the two are never
+   * both available and screen space is the scarce resource on a phone — the
+   * same reasoning that made JUMP/CLIMB a single button.
+   */
+  private refreshActionButton(): void {
+    const digging = this.session.digging !== null;
+    const label = digging ? '✕ CANCEL' : '⛏ DIG';
+    if (this.actionButton.textContent !== label) this.actionButton.textContent = label;
+    this.actionButton.classList.toggle('is-cancel', digging);
+    this.dropButton.disabled = this.session.carried === 0;
   }
 
   private bindInput(): void {
@@ -485,7 +523,13 @@ export class DigScene {
           void canvas.requestPointerLock();
           return; // this click only captures the cursor
         }
-        this.acting = true;
+        // Locked, so there is no cursor to aim with — the crosshair is the
+        // pointer. Click starts a dig on whatever it is on; click again cancels.
+        if (this.session.digging) this.session.cancelDig();
+        else {
+          const hit = this.currentTarget();
+          if (hit) this.startDig(hit.x, hit.y, hit.z);
+        }
         return;
       }
       // Left 42% is the stick's activation zone; the rest looks.
@@ -505,6 +549,7 @@ export class DigScene {
       } else if (this.lookPointer === null) {
         this.lookPointer = event.pointerId;
         this.lookLast = { x: event.clientX, y: event.clientY };
+        this.lookDown = { x: event.clientX, y: event.clientY, at: performance.now() };
       }
       // Throws if the pointer is already gone (fast taps, synthetic events);
       // capture is a nicety here, not something worth breaking the frame over.
@@ -523,7 +568,6 @@ export class DigScene {
     };
     const lockChange = () => {
       if (!locked()) {
-        this.acting = false;
         this.session.cancelDig();
       }
     };
@@ -569,13 +613,18 @@ export class DigScene {
     const up = (event: PointerEvent) => {
       this.pointers.delete(event.pointerId);
       if (this.pointers.size < 2) this.pinchStart = null;
-      if (event.pointerType === 'mouse') {
-        this.acting = false;
-        this.session.cancelDig();
-        return;
-      }
+      // Mouse digging is driven entirely by pointerdown now; releasing the
+      // button must NOT cancel, or a click could never start a dig at all.
+      if (event.pointerType === 'mouse') return;
       if (event.pointerId === this.lookPointer) {
         this.lookPointer = null;
+        // A press that went nowhere and ended quickly was a tap at a cube, not
+        // a look-drag. Colony view has nothing to dig, so it only ever looks.
+        const travel = Math.hypot(event.clientX - this.lookDown.x, event.clientY - this.lookDown.y);
+        const held = performance.now() - this.lookDown.at;
+        if (!this.colonyView && travel <= TAP_MAX_PX && held <= TAP_MAX_MS) {
+          this.tapAt(event.clientX, event.clientY);
+        }
       }
       if (event.pointerId === this.movePointer) {
         this.movePointer = null;
@@ -609,10 +658,16 @@ export class DigScene {
         case 'ShiftLeft': case 'ShiftRight': this.sprinting = true; break;
         case 'Space': this.jumpQueued = true; event.preventDefault(); break;
         case 'KeyG': this.toggleGrip(); event.preventDefault(); break;
-        case 'KeyE': case 'Tab':
-          this.setMode(this.mode === 'dig' ? 'place' : 'dig');
+        case 'KeyE': case 'Tab': this.dropCarried(); event.preventDefault(); break;
+        case 'KeyF': {
+          if (this.session.digging) this.session.cancelDig();
+          else {
+            const hit = this.currentTarget();
+            if (hit) this.startDig(hit.x, hit.y, hit.z);
+          }
           event.preventDefault();
           break;
+        }
       }
     };
     const keyUp = (event: KeyboardEvent) => {
@@ -994,8 +1049,19 @@ export class DigScene {
     this.headlamp.position.copy(this.camera.position);
   }
 
-  private currentTarget() {
-    const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+  /**
+   * Chebyshev distance from the cube the eye is in — only the 3x3x3 shell of
+   * cubes immediately around the ant is workable.
+   */
+  private withinReach(x: number, y: number, z: number): boolean {
+    const ex = Math.floor(this.camera.position.x);
+    const ey = Math.floor(this.camera.position.y);
+    const ez = Math.floor(this.camera.position.z);
+    return Math.max(Math.abs(x - ex), Math.abs(y - ey), Math.abs(z - ez)) <= REACH_CUBES;
+  }
+
+  /** Cast into the world along an arbitrary direction and clamp to reach. */
+  private targetAlong(dir: THREE.Vector3) {
     const hit = raycastVoxel(
       this.world,
       this.camera.position.x, this.camera.position.y, this.camera.position.z,
@@ -1003,45 +1069,55 @@ export class DigScene {
       REACH,
     );
     if (!hit) return null;
-    // Chebyshev distance from the cube the eye is in: only the shell of cubes
-    // immediately around the ant is workable.
-    const ex = Math.floor(this.camera.position.x);
-    const ey = Math.floor(this.camera.position.y);
-    const ez = Math.floor(this.camera.position.z);
-    const cubes = Math.max(Math.abs(hit.x - ex), Math.abs(hit.y - ey), Math.abs(hit.z - ez));
-    return cubes <= REACH_CUBES ? hit : null;
+    return this.withinReach(hit.x, hit.y, hit.z) ? hit : null;
+  }
+
+  /** What the crosshair is on. */
+  private currentTarget() {
+    return this.targetAlong(new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion));
+  }
+
+  /**
+   * Dig the cube under a screen point.
+   *
+   * Same ray as the crosshair, just unprojected through the touch position
+   * instead of screen centre — everything downstream is identical, which is why
+   * tap-targeting and crosshair-targeting are one mechanic rather than two.
+   */
+  private tapAt(clientX: number, clientY: number): void {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    const ndc = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    const dir = new THREE.Vector3(ndc.x, ndc.y, 0.5)
+      .unproject(this.camera)
+      .sub(this.camera.position)
+      .normalize();
+    const hit = this.targetAlong(dir);
+    if (hit) this.startDig(hit.x, hit.y, hit.z);
   }
 
   private updateAction(dt: number): void {
-    const hit = this.currentTarget();
-    if (!hit) {
-      this.highlight.visible = false;
-      this.session.cancelDig();
-      return;
-    }
-
-    if (this.mode === 'dig') {
-      this.highlight.position.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
-      this.highlight.visible = true;
-      if (this.acting) this.session.digTick(hit.x, hit.y, hit.z, dt);
+    // The dig runs against its LOCKED cube, so looking away doesn't interrupt
+    // it. Reach is the scene's business, so it is enforced here rather than in
+    // the session: walk out of range and she stops working.
+    const digging = this.session.digging;
+    if (digging) {
+      if (this.withinReach(digging.x, digging.y, digging.z)) this.session.tickDig(dt);
       else this.session.cancelDig();
-      return;
     }
 
-    // Place mode targets the empty cell against the face being looked at.
-    const px = hit.x + hit.nx;
-    const py = hit.y + hit.ny;
-    const pz = hit.z + hit.nz;
-    this.highlight.position.set(px + 0.5, py + 0.5, pz + 0.5);
+    // The highlight shows the locked cube while working, and whatever the
+    // crosshair is on otherwise.
+    const shown = this.session.digging ?? this.currentTarget();
+    if (!shown) {
+      this.highlight.visible = false;
+      return;
+    }
+    this.highlight.position.set(shown.x + 0.5, shown.y + 0.5, shown.z + 0.5);
     this.highlight.visible = true;
-    if (!this.acting) return;
-    // Don't brick yourself inside the ant's own body.
-    const dx = Math.abs(px + 0.5 - this.position.x);
-    const dz = Math.abs(pz + 0.5 - this.position.z);
-    const overlapsSelf = dx < BODY_RADIUS + 0.5 && dz < BODY_RADIUS + 0.5
-      && py + 1 > this.position.y && py < this.position.y + EYE_HEIGHT;
-    if (overlapsSelf) return;
-    if (this.session.place(px, py, pz).kind === 'placed') this.acting = false;
   }
 
   /**
@@ -1075,7 +1151,6 @@ export class DigScene {
     const site = this.founding.found(this.world, this.position.x, this.position.y, this.position.z);
     if (!site) return;
     this.colonyView = true;
-    this.acting = false;
     // Orbiting from inside a solid volume means back-face culling shows you
     // straight through the soil, leaving the nest hanging in the sky colour.
     // That cutaway is genuinely the clearest way to read a burrow — it's what
@@ -1086,7 +1161,7 @@ export class DigScene {
     this.session.cancelDig();
     this.highlight.visible = false;
     this.foundButton.hidden = true;
-    this.modeButton.hidden = true;
+    this.dropButton.hidden = true;
     this.actionButton.hidden = true;
     this.jumpButton.hidden = true;
     this.showStick(false);
@@ -1151,17 +1226,27 @@ export class DigScene {
       return;
     }
 
-    const hit = this.currentTarget();
+    // While digging, the readout follows the locked cube \u2014 the crosshair may be
+    // pointing anywhere by then, and reporting what it sees would be a lie.
+    const working = this.session.digging;
+    const hit = working
+      ? { voxel: this.world.get(working.x, working.y, working.z) }
+      : this.currentTarget();
     const targetName = hit ? materialOf(hit.voxel).name : '\u2014';
     const chew = this.session.chewRatio;
     const bar = chew > 0 ? ` ${'\u25AE'.repeat(Math.round(chew * 8)).padEnd(8, '\u25AF')}` : '';
+    // Practice is deliberately debug-only: she should just get better and you
+    // should feel it, rather than watching a stat bar fill.
+    const skill = this.debug
+      ? ` \u00B7 ${this.session.secondsPerCube.toFixed(1)}s/cube after ${this.session.practiced}`
+      : '';
     const chamber = status.depthMet ? ` \u00b7 Chamber ${status.chamber}/${DEN_MIN_CHAMBER}` : '';
     readout.innerHTML = `
       <b>Depth</b> ${status.depth > 0 ? `${status.depthMm} mm` : 'surface'} &nbsp;
       <b>Carrying</b> ${this.session.carried}/${this.session.capacity} &nbsp;
       <b>Mound</b> ${this.world.deposited} &nbsp;
       <b>Dug</b> ${this.world.excavated}<br>
-      <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 ` : ''}${this.weightless ? '\u{1FAB5} weightless \u00b7 ' : this.surface.mode === 'attached' ? '\u{1F9D7} gripping \u00b7 ' : ''}Target: ${targetName}${bar}${chamber} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
+      <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 ` : ''}${this.weightless ? '\u{1FAB5} weightless \u00b7 ' : this.surface.mode === 'attached' ? '\u{1F9D7} gripping \u00b7 ' : ''}Target: ${targetName}${bar}${chamber}${skill} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
     `;
   }
 
@@ -1195,7 +1280,11 @@ export class DigScene {
       this.updateAction(dt);
     }
     this.drainDirty();
-    if (++this.hudCounter % 6 === 0) { this.updateHud(); this.refreshGripButton(); }
+    if (++this.hudCounter % 6 === 0) {
+      this.updateHud();
+      this.refreshGripButton();
+      this.refreshActionButton();
+    }
 
     this.renderer.render(this.scene, this.camera);
   };

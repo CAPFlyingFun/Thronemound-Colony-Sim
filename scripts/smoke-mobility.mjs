@@ -81,12 +81,25 @@ const ok = (m) => console.log(`  ok  ${m}`);
   const hud = async () => {
     const t = (await page.textContent('#dig-readout'))?.replace(/\s+/g, ' ') ?? '';
     return {
+      text: t.trim(),
       carrying: Number(/Carrying (\d+)/.exec(t)?.[1] ?? '0'),
       capacity: Number(/Carrying \d+\/(\d+)/.exec(t)?.[1] ?? '0'),
       dug: Number(/Dug (\d+)/.exec(t)?.[1] ?? '0'),
       mound: Number(/Mound (\d+)/.exec(t)?.[1] ?? '0'),
       target: /Target: ([^ ·]+)/.exec(t)?.[1] ?? '',
+      seconds: Number(/([\d.]+)s\/cube/.exec(t)?.[1] ?? '0'),
     };
+  };
+  // The HUD repaints every 6th frame — about 770 ms under software rendering —
+  // so anything read right after an input has to be polled, not sampled once.
+  const until = async (label, check, timeoutMs = 45000) => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const state = await hud();
+      if (check(state)) return state;
+      if (Date.now() > deadline) { fail(`timed out waiting for ${label} — "${state.text}"`); return state; }
+      await page.waitForTimeout(400);
+    }
   };
   const look = (from, to) => page.evaluate(([a, z]) => {
     const c = document.querySelector('canvas');
@@ -97,6 +110,14 @@ const ok = (m) => console.log(`  ok  ${m}`);
     for (let i = 1; i <= 10; i++) ev('pointermove', a + ((z - a) * i) / 10);
     ev('pointerup', z);
   }, [from, to]);
+  const tap = (x, y) => page.evaluate(([cx, cy]) => {
+    const c = document.querySelector('canvas');
+    const ev = (t) => c.dispatchEvent(new PointerEvent(t, {
+      pointerId: 9, pointerType: 'touch', isPrimary: true, bubbles: true, clientX: cx, clientY: cy,
+    }));
+    ev('pointerdown');
+    ev('pointerup');
+  }, [x, y]);
 
   if ((await hud()).capacity !== 1) fail(`capacity should be 1, got ${(await hud()).capacity}`);
   else ok('carries one cube at a time');
@@ -105,41 +126,42 @@ const ok = (m) => console.log(`  ok  ${m}`);
   if ((await hud()).target !== '—') fail(`flat ahead should be out of reach, got "${(await hud()).target}"`);
   else ok('soil beyond the neighbouring cubes is out of reach');
   await look(700, 1180);
-  await page.waitForTimeout(400);
-  if ((await hud()).target === '—') fail('the cube underfoot should be workable');
-  else ok(`the cube underfoot is workable (${(await hud()).target})`);
+  const underfoot = await until('the ground to come into range', (s) => s.target !== '—', 8000);
+  if (underfoot.target === '—') fail('the cube underfoot should be workable');
+  else ok(`the cube underfoot is workable (${underfoot.target})`);
 
-  const action = await page.$('.dig-action');
-  const box = await action.boundingBox();
-  const hold = async (ms) => {
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-    await page.mouse.down();
-    await page.waitForTimeout(ms);
-    await page.mouse.up();
-    await page.waitForTimeout(600);
-  };
+  // A look-DRAG must never dig, or the camera becomes unusable. It travelled
+  // far past the tap threshold above, so nothing should have started.
+  if ((await page.textContent('.dig-action')).includes('CANCEL')) fail('a look-drag started a dig');
+  else ok('dragging to look does not dig');
 
-  await hold(3000);
-  const first = await hud();
+  await tap(450, 700);
+  const first = await until('the first cube', (s) => s.dug >= 1);
   if (first.dug !== 1 || first.carrying !== 1) fail(`expected exactly one cube dug, got ${JSON.stringify(first)}`);
   else ok('digs exactly one cube, then stops because it is full');
 
-  // Holding longer must not dig a second while loaded.
-  await hold(3000);
+  // Tapping again while loaded must not start a second dig.
+  await tap(450, 700);
+  await page.waitForTimeout(1500);
   const stillFull = await hud();
   if (stillFull.dug !== 1) fail(`dug ${stillFull.dug} cubes while already carrying one`);
   else ok('cannot dig again until the load is dropped');
+  if ((await page.textContent('.dig-action')).includes('CANCEL')) fail('a refused dig still armed CANCEL');
+  else ok('a refused dig does not pretend to have started');
 
-  // Drop it, then dig again.
+  // Drop it, then the ant is free again.
   await look(1180, 960);
   await page.waitForTimeout(400);
-  await page.click('.dig-mode');
-  await hold(300);
-  const dropped = await hud();
+  await page.click('.dig-drop');
+  const dropped = await until('the load to reach the mound', (s) => s.mound >= 1, 8000);
   if (dropped.carrying !== 0 || dropped.mound !== 1) fail(`dropping failed: ${JSON.stringify(dropped)}`);
   else ok('dropping the load frees the ant to dig again');
   if (dropped.dug !== dropped.carrying + dropped.mound) fail('soil not conserved');
   else ok(`soil conserved: dug ${dropped.dug} = carried ${dropped.carrying} + mound ${dropped.mound}`);
+
+  // Practice: one completed dig, one step faster. Cancels must not count.
+  if (Math.abs(dropped.seconds - 4.8) > 0.01) fail(`expected 4.8s/cube after one dig, got ${dropped.seconds}`);
+  else ok(`practice advanced one step: ${dropped.seconds}s/cube`);
 
   if (errors.length) fail(`page errors: ${errors.join(' | ')}`);
   else ok('no page errors');
@@ -204,10 +226,14 @@ const ok = (m) => console.log(`  ok  ${m}`);
 
   await page.screenshot({ path: `${OUT}-4-mounted.png` });
 
-  // Release restores world up.
+  // Release restores world up. Poll rather than sampling once: the HUD repaints
+  // every 6th frame, so a fixed wait can land on a frame painted before the key.
   await page.keyboard.press('KeyG');
-  await page.waitForTimeout(900);
-  const released = await state();
+  let released = await state();
+  for (let i = 0; i < 12 && released.up !== 'pos_y'; i++) {
+    await page.waitForTimeout(250);
+    released = await state();
+  }
   if (released.up !== 'pos_y') fail(`release should restore world up, got ${released.up}`);
   else ok('release restores world up');
 

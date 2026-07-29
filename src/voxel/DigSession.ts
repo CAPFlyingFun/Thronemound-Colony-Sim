@@ -8,11 +8,39 @@
 
 import { AIR, isSolid, materialOf, type VoxelId, type VoxelWorld } from './VoxelWorld';
 
+/**
+ * Digging gets easier with practice.
+ *
+ * Seconds per cube of topsoil, falling by DIG_STEP for every cube actually
+ * removed, floored at DIG_FLOOR. Named constants rather than literals because
+ * the first hatched worker will want her own curve — she should start clumsy
+ * too, but probably not from as far back as a queen who has never dug at all.
+ *
+ * The endpoints are load-bearing: 5.0 to 1.5 in steps of 0.2 is eighteen digs
+ * to mastery, and founding the den costs fourteen to nineteen. The queen tops
+ * out almost exactly as she finishes, so the whole arc of getting good at it is
+ * the tutorial.
+ */
+export const DIG_START = 5;
+export const DIG_STEP = 0.2;
+export const DIG_FLOOR = 1.5;
+
 export interface DigSessionOptions {
   /** How many voxels of spoil the ant can carry at once. */
   capacity?: number;
-  /** Multiplier on every material's dig time. */
-  digSpeed?: number;
+  /** Seconds for the first cube of topsoil, before any practice. */
+  digStart?: number;
+  /** Seconds shaved off per completed dig. */
+  digStep?: number;
+  /** Fastest this ant will ever get. */
+  digFloor?: number;
+}
+
+/** A cube being worked on, held across frames so the camera can look away. */
+export interface DigTarget {
+  x: number;
+  y: number;
+  z: number;
 }
 
 export interface CarryLoad {
@@ -24,6 +52,7 @@ export type DigOutcome =
   | { kind: 'none' }
   | { kind: 'progress'; ratio: number }
   | { kind: 'dug'; material: VoxelId }
+  | { kind: 'cancelled' }
   | { kind: 'full' }
   | { kind: 'bedrock' };
 
@@ -35,18 +64,48 @@ export type PlaceOutcome =
 export class DigSession {
   readonly world: VoxelWorld;
   readonly capacity: number;
-  readonly digSpeed: number;
+  readonly digStart: number;
+  readonly digStep: number;
+  readonly digFloor: number;
 
   /** Spoil held, newest last. Mixed materials stack separately. */
   readonly load: CarryLoad[] = [];
 
-  private targetKey = '';
+  /** Cubes actually removed. Drives the practice curve. */
+  private digsCompleted = 0;
+  private target: DigTarget | null = null;
   private progress = 0;
 
   constructor(world: VoxelWorld, options: DigSessionOptions = {}) {
     this.world = world;
     this.capacity = Math.max(1, options.capacity ?? 12);
-    this.digSpeed = options.digSpeed ?? 1;
+    this.digStart = options.digStart ?? DIG_START;
+    this.digStep = options.digStep ?? DIG_STEP;
+    this.digFloor = options.digFloor ?? DIG_FLOOR;
+  }
+
+  get practiced(): number {
+    return this.digsCompleted;
+  }
+
+  /** Seconds the next cube of topsoil will take at the current skill. */
+  get secondsPerCube(): number {
+    return Math.max(this.digFloor, this.digStart - this.digStep * this.digsCompleted);
+  }
+
+  /** Seconds a specific material would take right now. */
+  secondsFor(id: VoxelId): number {
+    return this.secondsPerCube * materialOf(id).hardness;
+  }
+
+  /** The cube currently being worked, if any. */
+  get digging(): DigTarget | null {
+    return this.target;
+  }
+
+  isDigging(x: number, y: number, z: number): boolean {
+    const t = this.target;
+    return t !== null && t.x === x && t.y === y && t.z === z;
   }
 
   get carried(): number {
@@ -63,46 +122,79 @@ export class DigSession {
   }
 
   cancelDig(): void {
-    this.targetKey = '';
+    this.target = null;
     this.progress = 0;
   }
 
   /**
-   * Hold-to-dig. Call every frame the player is digging a given voxel; the
-   * voxel pops once enough seconds have accumulated against it. Switching
-   * target resets progress, so you can't chip away at a whole wall at once.
+   * Start working a cube, or cancel it if it is already the one being worked.
+   *
+   * This is the whole input model: one tap starts, one tap stops. Because the
+   * target is *locked* here rather than re-read from a ray every frame, the
+   * camera is free to look elsewhere while she digs — which also removes the
+   * old failure where a few pixels of thumb drift silently reset the progress
+   * bar to zero.
    */
-  digTick(x: number, y: number, z: number, deltaSeconds: number): DigOutcome {
-    const voxel = this.world.get(x, y, z);
-    if (!isSolid(voxel)) {
+  toggleDig(x: number, y: number, z: number): DigOutcome {
+    if (this.isDigging(x, y, z)) {
       this.cancelDig();
-      return { kind: 'none' };
+      return { kind: 'cancelled' };
     }
-    const material = materialOf(voxel);
-    if (!material.diggable) {
+    return this.beginDig(x, y, z);
+  }
+
+  /** Lock a cube and start the timer. Refuses anything that can't be dug. */
+  beginDig(x: number, y: number, z: number): DigOutcome {
+    const refusal = this.refuse(x, y, z);
+    if (refusal) {
       this.cancelDig();
-      return { kind: 'bedrock' };
+      return refusal;
     }
-    if (this.isFull) {
+    this.target = { x, y, z };
+    this.progress = 0;
+    return { kind: 'progress', ratio: 0 };
+  }
+
+  /**
+   * Advance the locked dig. Call every frame; it does nothing when idle.
+   *
+   * The refusal check runs every tick rather than only at the start, because
+   * five seconds is long enough for the world to change underneath her — the
+   * cube can stop being solid, or a load can fill. Reach is checked by the
+   * caller, since how far an ant can lean is a scene concern.
+   */
+  tickDig(deltaSeconds: number): DigOutcome {
+    const target = this.target;
+    if (!target) return { kind: 'none' };
+
+    const { x, y, z } = target;
+    const refusal = this.refuse(x, y, z);
+    if (refusal) {
       this.cancelDig();
-      return { kind: 'full' };
+      return refusal;
     }
 
-    const key = `${x},${y},${z}`;
-    if (key !== this.targetKey) {
-      this.targetKey = key;
-      this.progress = 0;
-    }
-
-    const seconds = Math.max(0.01, material.digSeconds / this.digSpeed);
+    const seconds = Math.max(0.01, this.secondsFor(this.world.get(x, y, z)));
     this.progress += deltaSeconds / seconds;
     if (this.progress < 1) return { kind: 'progress', ratio: this.progress };
 
     const removed = this.world.dig(x, y, z);
     this.cancelDig();
     if (removed === AIR) return { kind: 'none' };
+    // Practice counts only completed cubes. Crediting it on beginDig instead
+    // would make tap-cancel-tap-cancel a way to reach top speed in seconds.
+    this.digsCompleted++;
     this.pickUp(removed);
     return { kind: 'dug', material: removed };
+  }
+
+  /** Why this cube can't be dug right now, or null if it can. */
+  private refuse(x: number, y: number, z: number): DigOutcome | null {
+    const voxel = this.world.get(x, y, z);
+    if (!isSolid(voxel)) return { kind: 'none' };
+    if (!materialOf(voxel).diggable) return { kind: 'bedrock' };
+    if (this.isFull) return { kind: 'full' };
+    return null;
   }
 
   /** Drop one voxel of spoil into an empty cell. Newest material goes first. */

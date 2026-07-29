@@ -3,12 +3,12 @@
  *
  * Unit tests cover the voxel rules; this proves the parts they can't touch —
  * that WebGL initialises, that geometry actually reaches the screen, and that
- * digging changes what is rendered.
+ * the tap-to-dig loop survives a real round trip through the UI.
  */
 import { chromium } from 'playwright';
 import { writeFileSync } from 'node:fs';
 
-const URL = process.env.SMOKE_URL ?? 'http://localhost:4173/Thronemound-Colony-Sim/?scene=dig';
+const URL = process.env.SMOKE_URL ?? 'http://localhost:4173/Thronemound-Colony-Sim/?scene=dig&debug=1';
 const OUT = process.env.SMOKE_OUT ?? '/tmp/dig-smoke';
 
 const browser = await chromium.launch({
@@ -39,10 +39,7 @@ if (!readout.includes('Depth')) fail(`HUD missing: "${readout}"`); else ok(`HUD:
 // though the frame rendered fine. Compare compressed screenshots instead: a
 // flat single-colour frame packs down to a couple of kB, detailed geometry
 // does not.
-const shot = async (name) => {
-  const buffer = await page.screenshot({ path: `${OUT}-${name}.png` });
-  return buffer;
-};
+const shot = async (name) => page.screenshot({ path: `${OUT}-${name}.png` });
 const surfaceShot = await shot('1-surface');
 if (surfaceShot.length < 8000) fail(`surface frame looks blank (${surfaceShot.length} B PNG)`);
 else ok(`surface frame has detail (${(surfaceShot.length / 1024).toFixed(0)} KB PNG)`);
@@ -51,9 +48,9 @@ else ok(`surface frame has detail (${(surfaceShot.length / 1024).toFixed(0)} KB 
 // and desktop now uses pointer lock which Playwright can't drive meaningfully.
 const swipeLook = (fromY, toY) => page.evaluate(([y0, y1]) => {
   const canvas = document.querySelector('canvas');
-  const send = (type, y, extra = {}) => canvas.dispatchEvent(new PointerEvent(type, {
+  const send = (type, y) => canvas.dispatchEvent(new PointerEvent(type, {
     pointerId: 7, pointerType: 'touch', isPrimary: true, bubbles: true,
-    clientX: 700, clientY: y, ...extra,
+    clientX: 700, clientY: y,
   }));
   send('pointerdown', y0);
   const steps = 12;
@@ -61,67 +58,110 @@ const swipeLook = (fromY, toY) => page.evaluate(([y0, y1]) => {
   send('pointerup', y1);
 }, [fromY, toY]);
 
-// 3. Look down, then hold the action button: the ground should be excavated.
-// Straight down. With reach clamped to the cubes immediately around the ant,
-// a shallow angle aims at ground two cubes out, which is now out of range.
-await swipeLook(700, 1180);
-await page.waitForTimeout(300);
+/** A press that goes nowhere and ends immediately — the dig gesture. */
+const tap = (x, y) => page.evaluate(([cx, cy]) => {
+  const canvas = document.querySelector('canvas');
+  const send = (type) => canvas.dispatchEvent(new PointerEvent(type, {
+    pointerId: 9, pointerType: 'touch', isPrimary: true, bubbles: true, clientX: cx, clientY: cy,
+  }));
+  send('pointerdown');
+  send('pointerup');
+}, [x, y]);
 
-const action = await page.$('.dig-action');
-if (!action) fail('action button missing');
-const box = await action.boundingBox();
-await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-await page.mouse.down();
-await page.waitForTimeout(3000);
-await page.mouse.up();
+const hud = async () => {
+  const t = (await page.textContent('#dig-readout'))?.replace(/\s+/g, ' ') ?? '';
+  return {
+    text: t.trim(),
+    dug: Number(/Dug (\d+)/.exec(t)?.[1] ?? '0'),
+    carrying: Number(/Carrying (\d+)/.exec(t)?.[1] ?? '0'),
+    mound: Number(/Mound (\d+)/.exec(t)?.[1] ?? '0'),
+    seconds: Number(/([\d.]+)s\/cube/.exec(t)?.[1] ?? '0'),
+  };
+};
+/**
+ * Poll the action button's label. Single-sampling it races the HUD, which only
+ * repaints every 6th frame — about 770 ms under software rendering.
+ */
+const untilLabel = async (want, timeoutMs = 6000) => {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const label = (await page.textContent('.dig-action')) ?? '';
+    if (label.includes(want)) return true;
+    if (Date.now() > deadline) return false;
+    await page.waitForTimeout(250);
+  }
+};
+/** Poll until a predicate holds; the HUD only repaints every 6th frame. */
+const until = async (label, check, timeoutMs = 45000) => {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const state = await hud();
+    if (check(state)) return state;
+    if (Date.now() > deadline) { fail(`timed out waiting for ${label} — "${state.text}"`); return state; }
+    await page.waitForTimeout(400);
+  }
+};
+
+// 3. Look down so the ground ahead is within the one-cube reach, then TAP it.
+await swipeLook(700, 1180);
 await page.waitForTimeout(400);
 
-const after = (await page.textContent('#dig-readout'))?.replace(/\s+/g, ' ').trim() ?? '';
-const dug = Number(/Dug (\d+)/.exec(after)?.[1] ?? '0');
-const carrying = Number(/Carrying (\d+)/.exec(after)?.[1] ?? '0');
-if (dug < 1) fail(`nothing was excavated after 3s of digging — "${after}"`);
-else ok(`excavated ${dug} voxels, carrying ${carrying}`);
-if (carrying !== dug) fail(`spoil not conserved: dug ${dug}, carrying ${carrying}`);
+const start = await hud();
+if (start.seconds < 4.9) fail(`first cube should cost the full 5s, HUD says ${start.seconds}`);
+else ok(`unpractised queen digs at ${start.seconds}s/cube`);
+
+// Screen centre is where the crosshair points, so tapping there targets the
+// same cube — which is the point: tap and crosshair are one mechanic.
+await tap(450, 800);
+if (!await untilLabel('CANCEL')) fail('tapping soil did not start a dig');
+else ok('tap starts a dig and the button offers CANCEL');
+
+// 4. Tapping the same cube again cancels it, discarding progress.
+await tap(450, 800);
+if (!await untilLabel('DIG')) fail('tapping the cube again did not cancel');
+else ok('tapping the same cube again cancels');
+const afterCancel = await hud();
+if (afterCancel.dug !== 0) fail(`a cancelled dig still removed soil: dug ${afterCancel.dug}`);
+else ok('a cancelled dig removes nothing');
+if (afterCancel.seconds < 4.9) fail('a cancelled dig credited practice — tap-cancel would be an exploit');
+else ok('a cancelled dig credits no practice');
+
+// 5. Tap and let it run to completion. Five seconds of sim time is ~13s here:
+// dt is clamped to 50 ms and software rendering manages ~8 fps, so the sim
+// advances at roughly 0.39x wall clock.
+await tap(450, 800);
+const dug = await until('the first cube to pop', (s) => s.dug >= 1);
+if (dug.dug < 1) fail(`nothing was excavated — "${dug.text}"`);
+else ok(`excavated ${dug.dug}, carrying ${dug.carrying}`);
+if (dug.carrying !== dug.dug) fail(`spoil not conserved: dug ${dug.dug}, carrying ${dug.carrying}`);
 else ok('soil conserved: everything dug is being carried');
+if (dug.seconds > 4.9) fail(`practice did not advance after a completed dig (${dug.seconds}s)`);
+else ok(`practice advanced: now ${dug.seconds}s/cube`);
 
 const dugShot = await shot('2-dug');
 if (Buffer.compare(surfaceShot, dugShot) === 0) fail('frame did not change after digging');
 else ok('rendered frame changed after digging');
 
-// 4. Switch to ADD and deposit. Pitch back up so the placement cell is the
-// face of an adjacent cube rather than the ant's own — aiming straight down
-// targets the cell it is standing in, which the scene refuses on purpose.
+// 6. DROP puts it back. Pitch up first so the placement cell is an adjacent
+// cube's face rather than the one the ant is standing in, which is refused.
 await swipeLook(1180, 960);
 await page.waitForTimeout(400);
-
-await page.click('.dig-mode');
-await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-await page.mouse.down();
-await page.waitForTimeout(250);
-await page.mouse.up();
-await page.waitForTimeout(400);
-// The HUD only repaints every 6th frame, so comparing readings taken at
-// different moments races it. Assert the conservation invariant on one settled
-// snapshot instead: everything dug is either still carried or now in the mound.
-await page.waitForTimeout(900);
-const placed = (await page.textContent('#dig-readout'))?.replace(/\s+/g, ' ').trim() ?? '';
-const mound = Number(/Mound (\d+)/.exec(placed)?.[1] ?? '0');
-const carryAfter = Number(/Carrying (\d+)/.exec(placed)?.[1] ?? '0');
-const dugFinal = Number(/Dug (\d+)/.exec(placed)?.[1] ?? '0');
-if (mound < 1) fail(`ADD mode placed nothing — "${placed}"`);
-else ok(`placed ${mound} voxel(s) back, now carrying ${carryAfter}`);
-if (dugFinal !== carryAfter + mound) {
-  fail(`soil not conserved: dug ${dugFinal} != carried ${carryAfter} + mound ${mound}`);
-} else ok(`soil conserved end to end: dug ${dugFinal} = carried ${carryAfter} + mound ${mound}`);
+await page.click('.dig-drop');
+const placed = await until('the load to reach the mound', (s) => s.mound >= 1, 8000);
+if (placed.mound < 1) fail(`DROP placed nothing — "${placed.text}"`);
+else ok(`dropped ${placed.mound} voxel(s), now carrying ${placed.carrying}`);
+if (placed.dug !== placed.carrying + placed.mound) {
+  fail(`soil not conserved: dug ${placed.dug} != carried ${placed.carrying} + mound ${placed.mound}`);
+} else ok(`soil conserved end to end: dug ${placed.dug} = carried ${placed.carrying} + mound ${placed.mound}`);
 
 await shot('3-placed');
 
-// 5. No console errors or failed requests at any point.
+// 7. No console errors or failed requests at any point.
 if (badResponses.length) fail(`failed requests:\n    ${badResponses.join('\n    ')}`);
 else ok('no failed requests');
 if (errors.length) fail(`console errors:\n    ${errors.join('\n    ')}`);
 else ok('no console errors');
 
-writeFileSync(`${OUT}-report.txt`, [readout, after, placed].join('\n'));
+writeFileSync(`${OUT}-report.txt`, [readout, dug.text, placed.text].join('\n'));
 await browser.close();
 console.log(process.exitCode ? '\nSMOKE FAILED' : '\nSMOKE PASSED');

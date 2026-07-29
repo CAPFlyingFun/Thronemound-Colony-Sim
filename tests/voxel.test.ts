@@ -5,7 +5,7 @@ import {
 } from '../src/voxel/VoxelWorld';
 import { FACES, meshChunk } from '../src/voxel/mesher';
 import { raycastVoxel } from '../src/voxel/raycast';
-import { DigSession } from '../src/voxel/DigSession';
+import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
 import { DEN_MIN_CHAMBER, DEN_MIN_DEPTH, QueenFounding, countChamberAir } from '../src/voxel/QueenFounding';
 import { BAND_EDGES, DEFAULT_BANDS, STICK_DEADZONE, approach, clampStickOrigin, speedForStick, stickVector } from '../src/voxel/locomotion';
@@ -168,30 +168,58 @@ describe('raycastVoxel', () => {
 });
 
 describe('DigSession', () => {
+  /** Start a dig and run it to completion in one call. */
+  const digOut = (session: DigSession, x: number, y: number, z: number) => {
+    session.beginDig(x, y, z);
+    return session.tickDig(999);
+  };
+
   it('needs the full dig time before a voxel pops', () => {
     const world = makeWorld();
     const session = new DigSession(world);
-    const seconds = materialOf(TOPSOIL).digSeconds;
-    expect(session.digTick(20, SURFACE, 20, seconds * 0.5).kind).toBe('progress');
+    const seconds = session.secondsFor(TOPSOIL);
+    session.beginDig(20, SURFACE, 20);
+    expect(session.tickDig(seconds * 0.5).kind).toBe('progress');
     expect(world.get(20, SURFACE, 20)).toBe(TOPSOIL);
-    expect(session.digTick(20, SURFACE, 20, seconds * 0.6).kind).toBe('dug');
+    expect(session.tickDig(seconds * 0.6).kind).toBe('dug');
     expect(world.get(20, SURFACE, 20)).toBe(AIR);
   });
 
-  it('resets progress when the player looks at a different voxel', () => {
+  it('holds its target so the camera can look away mid-dig', () => {
     const world = makeWorld();
     const session = new DigSession(world);
-    session.digTick(20, SURFACE, 20, 0.3);
-    session.digTick(21, SURFACE, 20, 0.05);
-    expect(session.chewRatio).toBeLessThan(0.5);
+    session.beginDig(20, SURFACE, 20);
+    session.tickDig(session.secondsFor(TOPSOIL) * 0.9);
+    // Nothing re-aims it — the locked cube is the only thing tickDig knows
+    // about, which is what removed the old thumb-drift progress reset.
+    expect(session.digging).toEqual({ x: 20, y: SURFACE, z: 20 });
+    expect(session.tickDig(session.secondsFor(TOPSOIL) * 0.2).kind).toBe('dug');
+  });
+
+  it('tapping the cube being dug cancels it and discards progress', () => {
+    const world = makeWorld();
+    const session = new DigSession(world);
+    session.toggleDig(20, SURFACE, 20);
+    session.tickDig(session.secondsFor(TOPSOIL) * 0.9);
+    expect(session.toggleDig(20, SURFACE, 20).kind).toBe('cancelled');
+    expect(session.digging).toBeNull();
+    expect(session.chewRatio).toBe(0);
     expect(world.get(20, SURFACE, 20)).toBe(TOPSOIL);
+  });
+
+  it('tapping a different cube switches target rather than cancelling', () => {
+    const world = makeWorld();
+    const session = new DigSession(world);
+    session.toggleDig(20, SURFACE, 20);
+    session.toggleDig(21, SURFACE, 20);
+    expect(session.digging).toEqual({ x: 21, y: SURFACE, z: 20 });
   });
 
   it('conserves soil — you can only place what you dug', () => {
     const world = makeWorld();
     const session = new DigSession(world);
     expect(session.place(20, SURFACE + 2, 20).kind).toBe('empty');
-    session.digTick(20, SURFACE, 20, 99);
+    digOut(session, 20, SURFACE, 20);
     expect(session.carried).toBe(1);
     expect(session.place(20, SURFACE + 2, 20).kind).toBe('placed');
     expect(session.carried).toBe(0);
@@ -201,27 +229,91 @@ describe('DigSession', () => {
   it('stops digging once the ant is carrying a full load', () => {
     const world = makeWorld();
     const session = new DigSession(world, { capacity: 2 });
-    session.digTick(20, SURFACE, 20, 99);
-    session.digTick(21, SURFACE, 20, 99);
+    digOut(session, 20, SURFACE, 20);
+    digOut(session, 21, SURFACE, 20);
     expect(session.isFull).toBe(true);
-    expect(session.digTick(22, SURFACE, 20, 99).kind).toBe('full');
+    expect(session.beginDig(22, SURFACE, 20).kind).toBe('full');
     expect(world.get(22, SURFACE, 20)).toBe(TOPSOIL);
+  });
+
+  it('abandons a running dig if the cube stops being there', () => {
+    const world = makeWorld();
+    const session = new DigSession(world);
+    session.beginDig(20, SURFACE, 20);
+    session.tickDig(0.1);
+    // Five seconds is long enough for the world to change under her, so the
+    // refusal check runs every tick and not only when the dig starts.
+    world.dig(20, SURFACE, 20);
+    expect(session.tickDig(0.1).kind).toBe('none');
+    expect(session.digging).toBeNull();
   });
 
   it('reports bedrock rather than silently doing nothing', () => {
     const world = makeWorld();
     const session = new DigSession(world);
-    expect(session.digTick(10, 2, 10, 99).kind).toBe('bedrock');
+    expect(session.beginDig(10, 2, 10).kind).toBe('bedrock');
   });
 
   it('keeps mixed spoil in separate stacks, newest out first', () => {
     const world = makeWorld();
     const session = new DigSession(world, { capacity: 8 });
-    session.digTick(30, SURFACE, 30, 99);      // topsoil
-    session.digTick(30, SURFACE - 10, 30, 99); // clay
+    digOut(session, 30, SURFACE, 30);      // topsoil
+    digOut(session, 30, SURFACE - 10, 30); // clay
     expect(session.load.map((l) => l.material)).toEqual([TOPSOIL, CLAY]);
     session.place(30, SURFACE + 3, 30);
     expect(world.get(30, SURFACE + 3, 30)).toBe(CLAY);
+  });
+
+  describe('practice curve', () => {
+    it('starts slow and improves by a step per completed dig', () => {
+      const world = makeWorld();
+      const session = new DigSession(world);
+      expect(session.secondsPerCube).toBeCloseTo(DIG_START);
+      digOut(session, 20, SURFACE, 20);
+      expect(session.secondsPerCube).toBeCloseTo(DIG_START - DIG_STEP);
+    });
+
+    it('bottoms out at the floor and stays there', () => {
+      const world = makeWorld();
+      const session = new DigSession(world, { capacity: 999 });
+      // 5.0 -> 1.5 in 0.2 steps is 18 digs to master; founding the den costs
+      // 14-19, so the queen tops out almost exactly as she finishes.
+      const toMaster = Math.ceil((DIG_START - DIG_FLOOR) / DIG_STEP);
+      expect(toMaster).toBe(18);
+      for (let i = 0; i < toMaster + 5; i++) digOut(session, 20 + i, SURFACE, 20);
+      expect(session.practiced).toBe(toMaster + 5);
+      expect(session.secondsPerCube).toBe(DIG_FLOOR);
+    });
+
+    it('does not credit practice for cancelled digs', () => {
+      const world = makeWorld();
+      const session = new DigSession(world);
+      // Otherwise tap-cancel-tap-cancel reaches top speed in a few seconds.
+      for (let i = 0; i < 30; i++) {
+        session.beginDig(20, SURFACE, 20);
+        session.tickDig(0.1);
+        session.cancelDig();
+      }
+      expect(session.practiced).toBe(0);
+      expect(session.secondsPerCube).toBeCloseTo(DIG_START);
+    });
+
+    it('scales with soil hardness, and clay is the slow one', () => {
+      const world = makeWorld();
+      const session = new DigSession(world);
+      expect(session.secondsFor(TOPSOIL)).toBeCloseTo(session.secondsPerCube);
+      expect(session.secondsFor(CLAY)).toBeCloseTo(session.secondsPerCube * 1.5);
+      expect(session.secondsFor(SAND)).toBeGreaterThan(session.secondsFor(TOPSOIL));
+      expect(session.secondsFor(SAND)).toBeLessThan(session.secondsFor(CLAY));
+    });
+
+    it('a mastered ant never faces the ten-second clay cube', () => {
+      const world = makeWorld();
+      const session = new DigSession(world);
+      // The reason hardness dropped from 2x to 1.5x: at 2x an unpractised ant
+      // pays 10s for one cube of clay, which stops describing strata.
+      expect(session.secondsFor(CLAY)).toBeLessThanOrEqual(7.5);
+    });
   });
 });
 

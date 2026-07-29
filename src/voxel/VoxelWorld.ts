@@ -26,17 +26,29 @@ export interface Material {
   readonly name: string;
   /** Base linear RGB, 0..1. Meshing jitters this per voxel so soil isn't flat. */
   readonly color: readonly [number, number, number];
-  /** Seconds of sustained digging to remove one voxel. */
-  readonly digSeconds: number;
+  /**
+   * How much longer this soil takes than topsoil, as a multiplier.
+   *
+   * Deliberately a ratio rather than a number of seconds. Absolute dig time is
+   * a property of the *ant* — she starts slow and improves with practice — and
+   * hardness is a property of the *dirt*. Storing seconds here conflated the
+   * two, so neither could be retuned without silently moving the other.
+   *
+   * The ratios are also gentler than the seconds they replaced (which implied
+   * 1 / 1.43 / 2). At 2x, clay costs an unpractised ant ten seconds a cube,
+   * which is the point where the number stops describing strata and starts
+   * describing waiting.
+   */
+  readonly hardness: number;
   readonly diggable: boolean;
 }
 
 export const MATERIALS: readonly Material[] = [
-  { id: AIR, name: 'Air', color: [0, 0, 0], digSeconds: 0, diggable: false },
-  { id: TOPSOIL, name: 'Topsoil', color: [0.28, 0.19, 0.11], digSeconds: 0.35, diggable: true },
-  { id: CLAY, name: 'Clay', color: [0.42, 0.21, 0.14], digSeconds: 0.7, diggable: true },
-  { id: SAND, name: 'Sand', color: [0.66, 0.56, 0.36], digSeconds: 0.5, diggable: true },
-  { id: STONE, name: 'Stone', color: [0.34, 0.34, 0.36], digSeconds: 0, diggable: false },
+  { id: AIR, name: 'Air', color: [0, 0, 0], hardness: 0, diggable: false },
+  { id: TOPSOIL, name: 'Topsoil', color: [0.28, 0.19, 0.11], hardness: 1, diggable: true },
+  { id: CLAY, name: 'Clay', color: [0.42, 0.21, 0.14], hardness: 1.5, diggable: true },
+  { id: SAND, name: 'Sand', color: [0.66, 0.56, 0.36], hardness: 1.25, diggable: true },
+  { id: STONE, name: 'Stone', color: [0.34, 0.34, 0.36], hardness: 0, diggable: false },
 ];
 
 export function materialOf(id: VoxelId): Material {

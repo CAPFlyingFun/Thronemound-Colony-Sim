@@ -13,8 +13,9 @@ never load each other's bundle.
 |---|---|---|
 | Walk | drag the **left half** of the screen | `WASD` / arrows, `Shift` to sprint |
 | Look | drag the **right half** | move the mouse (click once to capture the cursor, `Esc` to release) |
-| Dig / place | hold **ACTION** | hold left mouse button |
-| Toggle mode | tap **REMOVE / ADD** | `E` or `Tab` |
+| Dig a cube | **tap it** | click it (crosshair), or `F` |
+| Cancel a dig | tap it again, or tap **CANCEL** | click again, or `F` |
+| Put the load down | tap **DROP** | `E` or `Tab` |
 | Jump | tap **JUMP** | `Space` |
 | Grip / release wall | **CLIMB / RELEASE** button | `G` |
 | Stick to a wall underground | automatic — just walk into it | automatic |
@@ -46,6 +47,41 @@ the mound something you build rather than dump, and it means a single hold of
 ACTION can no longer sink you twelve cubes into a shaft. Dig with a full load and
 nothing happens until you drop it.
 
+## Digging
+
+**Tap a cube and she starts working it. Tap again and she stops.** No holding —
+a dig takes seconds, and holding a button through that on a phone is a cramp,
+not a mechanic.
+
+The tap **locks** the cube. That is the part that matters: the dig runs against
+its locked target rather than against whatever a ray currently hits, so you can
+look around while she works. It also deleted a bug rather than papering over
+one — progress used to reset the instant the targeted cube changed, so a few
+pixels of thumb drift silently sent the bar back to zero.
+
+Tap-targeting and the crosshair are **one mechanic with two ray origins** —
+screen centre or an unprojected touch point; everything downstream is the same
+call. The crosshair path stays for three jobs a world-tap can't do:
+
+- desktop, where pointer lock means there is no cursor to aim with
+- **CANCEL**, which needs to live somewhere fixed — once a dig is running the
+  camera is free to look away, and "tap the cube again" is no help if you can no
+  longer see it
+- the cube underfoot, which is mostly hidden behind the HUD
+
+So the action button is context-sensitive: **DIG** while idle, **CANCEL** while
+working, the same way JUMP becomes CLIMB.
+
+A tap is a press under 250 ms that travels under 10 px. Both thresholds are
+generous, because the failure is asymmetric: a stray tap starts a dig that
+another tap cancels, whereas a dig that refuses to register reads as the game
+being broken.
+
+There is no dig/place mode. Capacity is one cube, so "place" only ever means
+"put down the one thing I'm carrying" — a mode toggle for a state you can read
+off the load was a button and a failure mode (*I tapped and nothing happened*)
+in exchange for nothing. **DROP** replaces it.
+
 ## Reach
 
 An ant works the soil it is **touching**. Targeting is a 2.2-voxel ray *plus* a
@@ -55,10 +91,50 @@ in distance than a face at 1.9, yet further in cubes.
 
 This replaced a 5.5-voxel reach that let you carve a five-cube corridor without
 moving, which read as tunnels appearing out of nowhere. Aim at anything beyond
-the neighbouring cubes and the HUD target reads `—`.
+the neighbouring cubes and the HUD target reads `—`. Walking out of range mid-dig
+cancels it — reach is enforced by the scene each frame, not just at the tap.
 
-Strata dig at different speeds — topsoil 0.35 s, sand 0.5 s, clay 0.7 s — and
-the deepest band is bedrock, which can't be dug at all and forms the floor of
+## Digging gets easier
+
+Seconds per cube of topsoil, falling by 0.2 for every cube actually removed:
+
+```
+seconds = max(1.5, 5.0 - 0.2 × cubes dug) × hardness
+```
+
+Which is **18 digs to master**, against 14–19 to found the den — so the queen
+tops out almost exactly as she finishes. That fit isn't tuned; it falls out of
+the endpoints. The whole arc of getting good at it *is* the tutorial: the
+opening is heavy, and founding feels earned.
+
+Total chew time across those 18 digs is ~59 s, near-identical to a flat 3 s
+would cost. Same time budget, different shape.
+
+Practice is credited on the cube **popping**, never on the tap. Crediting it at
+the start would make tap-cancel-tap-cancel a way to reach top speed in four
+seconds.
+
+Hardness is a **ratio**, not a number of seconds — absolute time belongs to the
+ant, hardness to the dirt, and one field holding both meant neither could be
+retuned without silently moving the other:
+
+| | first dig (5.0 s) | mastered (1.5 s) |
+|---|---|---|
+| Topsoil ×1 | 5.0 | 1.5 |
+| Sand ×1.25 | 6.25 | 1.9 |
+| Clay ×1.5 | 7.5 | 2.25 |
+
+The ratios were 1 / 1.43 / 2. Clay at 2× costs an unpractised ant ten seconds a
+cube, which is where the number stops describing strata and starts describing
+waiting — and it matters most for a freshly hatched worker starting her own
+curve down in the clay band, not for the queen, who founds almost entirely in
+topsoil.
+
+`DIG_START` / `DIG_STEP` / `DIG_FLOOR` are named constants per session, so the
+first worker can be given her own curve. She should start clumsy too, but
+probably not from as far back as a queen who has never dug at all.
+
+The deepest band is bedrock, which can't be dug at all and forms the floor of
 the world. The sides and floor of the volume read as stone, so you can't tunnel
 out of bounds.
 
@@ -96,7 +172,7 @@ Two properties keep an ant-scale world cheap:
 ## Verifying
 
 ```bash
-npm test          # 68 tests: voxel rules + the existing colony tests
+npm test          # 76 tests: voxel rules + the existing colony tests
 npm run typecheck
 npm run build
 npm run preview   # then, in another shell:
@@ -155,7 +231,7 @@ lower-left region so it can't spawn beside the HUD or halfway up the screen.
 `?debug=1` appends live position, orientation and speed to the readout, which is
 how those numbers get measured rather than eyeballed.
 
-The HUD always shows a **version and build time** (`v0.5.0 · 07-29 01:12`), so
+The HUD always shows a **version and build time** (`v0.6.0 · 07-29 02:31`), so
 "is this the new code or a cached build?" is answerable at a glance from a
 phone.
 
@@ -349,6 +425,10 @@ about a stationary head. Physics still snaps between the six discrete frames.
 `CEILING_UP` guard while walls were being tuned; with the underground frame now
 weightless, "up" carries no special meaning down there, and excluding one of the
 six was the thing making a tunnel roof behave differently from its walls.
+
+`?debug=1` also reports the current dig speed (`4.8s/cube after 1`). That is
+debug-only on purpose: she should just get better and you should feel it, not
+watch a stat bar fill.
 
 `?debug=1` shows the live `up` alongside position and speed. The HUD also flags
 🪵 `weightless` or 🧗 `gripping` whenever either is in effect, so it is never a
