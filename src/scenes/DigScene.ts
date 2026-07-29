@@ -61,7 +61,7 @@ const STICK_RADIUS = 70;
  * are effectively harmless — ants drop off things constantly and walk away.
  * The old 400 / -260 pair modelled a human being and read as heavy.
  */
-const GRAVITY = 55;
+const GRAVITY = 12;
 /**
  * Small creatures hit terminal velocity almost instantly, so what you actually
  * see of an ant falling is a near-constant slow drift, not a build-up. Keeping
