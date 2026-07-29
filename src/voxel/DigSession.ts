@@ -17,19 +17,15 @@ import { AIR, isSolid, materialOf, type VoxelId, type VoxelWorld } from './Voxel
  * the first hatched worker will want her own curve — she should start clumsy
  * too, but probably not from as far back as a queen who has never dug at all.
  *
- * The endpoints are load-bearing: 12.5 to 1.7 in steps of 0.6 is eighteen digs
- * to mastery, and founding the den costs fourteen to nineteen. The queen tops
- * out almost exactly as she finishes, so the whole arc of getting good at it is
- * the tutorial.
- *
- * Twelve and a half seconds because the cube is 125 crumbs and they should come
- * away at a steady, readable rate — that works out at almost exactly ten a
- * second. Auto-dig means nothing is being held, so a longer cube costs patience
- * rather than thumb strain.
+ * The endpoints are load-bearing, and the floor is now the interesting one. A
+ * cube is four LAYERS, and 6.4 seconds is 1.6 a layer — the rate a practised
+ * ant works at. An unpractised queen takes twice that, and 12.5 down to 6.4 in
+ * steps of 0.34 is eighteen digs to master; founding the den costs fourteen to
+ * nineteen, so she tops out almost exactly as she finishes.
  */
 export const DIG_START = 12.5;
-export const DIG_STEP = 0.6;
-export const DIG_FLOOR = 1.7;
+export const DIG_STEP = 0.34;
+export const DIG_FLOOR = 6.4;
 
 export interface DigSessionOptions {
   /** How many voxels of spoil the ant can carry at once. */

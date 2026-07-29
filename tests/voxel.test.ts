@@ -954,28 +954,37 @@ describe('fracture', () => {
     }
   });
 
-  it('damages one region at a time instead of the whole cube evenly', () => {
+  it('loosens exactly one sheet at a time, never the whole cube', () => {
     /*
-     * The complaint this fixes: erosion used to be global, so every crumb
+     * The complaint this fixes: erosion used to be global, so every piece
      * loosened by the same amount at once and the lattice read as an evenly
-     * dissolving grid. Damage has to be LOCAL — most of the voxel untouched,
-     * a minority visibly chewed.
+     * dissolving grid. Damage has to be LOCAL — and under the layer model
+     * "local" has an exact meaning, so this asserts it exactly rather than by
+     * proportion: everything eroding at any moment belongs to ONE layer, the
+     * one under her mandibles.
      */
-    const pattern = buildFracture(11, S, 23, TOPSOIL);
-    // Checked across the body of the dig, not the very end: once only a few
-    // crumbs remain it is right that most of them are being worked at once.
-    for (const progress of [0.25, 0.4, 0.55]) {
+    const pattern = buildFracture(11, S, 23, TOPSOIL, { x: 0, y: 1, z: 0 });
+    for (let progress = 0.05; progress < 1; progress += 0.05) {
+      const working = new Set<number>();
       let touched = 0;
-      let pristine = 0;
       for (let cell = 0; cell < CELL_COUNT; cell++) {
-        if (removedAt(pattern, progress) > 0 && !cellSurvives(pattern, cell, progress)) continue;
-        if (erosionFor(pattern, cell, progress) > 0) touched++;
-        else pristine++;
+        if (!cellSurvives(pattern, cell, progress)) continue;
+        if (erosionFor(pattern, cell, progress) <= 0) continue;
+        working.add(pattern.layer[cell]!);
+        touched++;
       }
-      // Some soil is always being worked...
+      // Something is always being worked — no dead stretch between sheets.
       expect(touched).toBeGreaterThan(0);
-      // ...and most of what is left is still solid, fused, untouched rock.
-      expect(pristine).toBeGreaterThan(touched);
+      /*
+       * At most TWO sheets, and only ever adjacent ones. The second is the
+       * hand-over: the stagger that lets sand trickle means the next sheet
+       * begins to give as the last pieces of the current one drop, which is
+       * what keeps the dig continuous instead of stepping. Three sheets at
+       * once would be the whole cube dissolving again.
+       */
+      const sheets = [...working].sort((a, b) => a - b);
+      expect(sheets.length).toBeLessThanOrEqual(2);
+      if (sheets.length === 2) expect(sheets[1]! - sheets[0]!).toBe(1);
     }
   });
 

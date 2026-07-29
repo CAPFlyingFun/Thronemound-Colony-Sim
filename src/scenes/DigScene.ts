@@ -228,6 +228,17 @@ const CLOD_PROBES: readonly (readonly [number, number, number])[] = [
  * is that you can see the grains apart.
  */
 const PIECE_SIZE = 0.17;
+/**
+ * How hard a freed piece is kicked off the face, and how far the sheet fans.
+ *
+ * Enough to arc visibly and land somewhere slightly different each time. The
+ * fan was three times this to begin with, which flung the sheet clear of the
+ * hole entirely — sixteen pieces in four corner clumps, out of scooping range,
+ * and the pit left looking swept. Much less and the sheet lands where it stood
+ * and looks placed rather than shed.
+ */
+const PIECE_KICK = 0.9;
+const PIECE_FAN = 0.5;
 const CLOD_AHEAD = 0.34;
 const CLOD_DROP = 0.2;
 /** Instances per variant batch. Twelve of these covers the heap cap. */
@@ -974,13 +985,31 @@ export class DigScene {
       const out = strikeSign > 0 ? 1 + CLOD_RADIUS + 0.02 : -CLOD_RADIUS - 0.02;
       const local = [c.x, c.y, c.z];
       local[strikeAxis] = out;
+      /*
+       * Thrown clear, so you can SEE it fall.
+       *
+       * A sheet that appears at the face and settles in the same frame reads as
+       * spoil being spawned, not shed — the drop was about a tenth of a voxel
+       * and over before the next frame. Each piece now gets kicked off the face
+       * and OUTWARD from the middle of the sheet, so sixteen of them fan apart,
+       * arc, and land: the whole point of them being real bodies.
+       */
       const jx = chip.pattern.jitter[cell * 4 + 0]!;
+      const jy = chip.pattern.jitter[cell * 4 + 1]!;
       const jz = chip.pattern.jitter[cell * 4 + 2]!;
+      const spread = [c.x - 0.5, c.y - 0.5, c.z - 0.5];
+      spread[strikeAxis] = 0; // fan across the sheet, not through it
+      const kick = [jx * 0.4, jy * 0.4, jz * 0.4];
+      kick[strikeAxis]! += strikeSign * PIECE_KICK;
       const placed = this.soil.drop(
         { x: x + local[0]!, y: y + local[1]!, z: z + local[2]! },
         voxel,
         pieceSource(x, y, z, cell),
-        { x: jx * 0.5, y: 0.1, z: jz * 0.5 },
+        {
+          x: kick[0]! + spread[0]! * PIECE_FAN,
+          y: kick[1]! + spread[1]! * PIECE_FAN,
+          z: kick[2]! + spread[2]! * PIECE_FAN,
+        },
       );
       // Heap full: leave the rest in the lattice's ledger so completion hands
       // them to her jaws rather than losing them.

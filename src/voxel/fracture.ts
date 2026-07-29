@@ -56,16 +56,28 @@ const FIRST_BREAK = 0.06;
 const LAST_BREAK = 0.99;
 
 /**
- * How far ahead of its own turn a crumb starts to loosen, in progress.
+ * How far ahead of its own turn a piece starts to loosen — exactly one layer.
  *
- * This is the most important number in the file. Erosion used to be GLOBAL:
- * every crumb shrank and tilted by the same amount at once, so the whole cube
- * loosened evenly, the lattice showed up as a grid, and it read as a block
- * dissolving rather than as something being chipped. Local erosion means only
- * the crumbs about to go are visibly chewed while the rest stays fused and
- * solid — a pickaxe biting one spot instead of the whole face crumbling.
+ * Derived, not tuned. A sheet becomes the working face the instant the one
+ * above it goes, and it should be visibly chewed from that moment until it
+ * comes away: the green layer in the diagram is the layer being worked, the
+ * whole time. At the old 0.13 there was a dead stretch after each sheet left
+ * where nothing was loosening yet and the dig looked paused.
+ *
+ * It also keeps damage LOCAL, which was the original point: only the working
+ * sheet is ever eroding, so the rest of the cube stays fused and solid instead
+ * of dissolving evenly like a grid.
  */
-const EROSION_LEAD = 0.13;
+const EROSION_LEAD = (LAST_BREAK - FIRST_BREAK) / LAYER_COUNT;
+
+/**
+ * How long a sheet takes to let go, as a fraction of the whole dig.
+ *
+ * Divided by the material's clumping, so clay comes off as a slab and sand
+ * trickles. Kept well under a layer's quarter so one sheet is always clear
+ * before the next starts being worked.
+ */
+const LAYER_STAGGER = 0.05;
 export const EROSION_MAX = 0.55;
 
 /** How far a fully eroded crumb can tilt, in radians. */
@@ -260,17 +272,27 @@ export function buildFracture(
   for (let i = 0; i < CELL_COUNT; i++) rank[order[i]!] = i;
 
   /*
-   * Thresholds. Each layer owns its own quarter of the dig, so the four sheets
-   * come away at evenly spaced moments and the last piece of a sheet is gone
-   * before the next one starts. Clumping snaps groups onto a shared threshold,
-   * which is what makes clay come away in slabs and sand trickle.
+   * Thresholds, quantised to the LAYER.
+   *
+   * A sheet has to be off before the next one can be worked, so all sixteen of
+   * a layer come away at the end of that layer's quarter rather than trickling
+   * across the whole dig. Spreading them evenly over 64 slots — which is what
+   * this did — meant the cube was always half-eaten everywhere instead of
+   * being shaved down one face at a time, and there was no moment where a
+   * sheet was gone.
+   *
+   * Clumping survives as a small stagger INSIDE the sheet: clay's sixteen let
+   * go as one slab, sand's trickle over a fraction of a second. The stagger is
+   * far smaller than a layer window, so the ordering rule still holds.
    */
   const span = LAST_BREAK - FIRST_BREAK;
   const thresholds = new Float32Array(CELL_COUNT);
-  const group = Math.max(1, Math.round(feel.clumping));
+  const stagger = LAYER_STAGGER / Math.max(1, feel.clumping);
   for (let i = 0; i < CELL_COUNT; i++) {
-    const head = Math.floor(i / group) * group;
-    thresholds[i] = FIRST_BREAK + (span * (head + 1)) / CELL_COUNT;
+    const sheet = Math.floor(i / LAYER_CELLS);
+    const within = i % LAYER_CELLS;
+    const due = FIRST_BREAK + (span * (sheet + 1)) / LAYER_COUNT;
+    thresholds[i] = due - stagger * (1 - (within + 1) / LAYER_CELLS);
   }
 
   const jitter = new Float32Array(CELL_COUNT * 4);
