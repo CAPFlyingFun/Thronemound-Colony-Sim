@@ -9,7 +9,7 @@ import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSess
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
 import { DEN_MIN_CHAMBER, DEN_MIN_DEPTH, QueenFounding, countChamberAir } from '../src/voxel/QueenFounding';
 import { BAND_EDGES, DEFAULT_BANDS, STICK_DEADZONE, approach, clampStickOrigin, speedForStick, stickVector } from '../src/voxel/locomotion';
-import { ALL_AXES, INPUT_COMMIT_THRESHOLD, MAX_PITCH, ORIENTATION_LOCK_MS, WORLD_UP, applyOrientation, attachableWall, axisFromVector, axisVector, canChangeOrientation, createSurfaceState, evaluateEdge, isPerpendicular, lookVector, opposite, rankSurfaces, referenceRight, reframeLook, supportBelow, tickLock, type Vec3 } from '../src/voxel/SurfaceFrame';
+import { ALL_AXES, INPUT_COMMIT_THRESHOLD, MAX_PITCH, dragLook, rollBetween, ORIENTATION_LOCK_MS, WORLD_UP, applyOrientation, attachableWall, axisFromVector, axisVector, canChangeOrientation, createSurfaceState, evaluateEdge, isPerpendicular, lookVector, opposite, rankSurfaces, referenceRight, reframeLook, supportBelow, tickLock, type AxisDirection, type Vec3 } from '../src/voxel/SurfaceFrame';
 
 const SURFACE = 96;
 const makeWorld = () => new VoxelWorld(128, 128, 128, layeredGenerator(SURFACE));
@@ -800,6 +800,106 @@ describe('SurfaceFrame', () => {
       for (const axis of ALL_AXES) {
         expect(dot(referenceRight(axis), axisVector(axis))).toBe(0);
       }
+    });
+  });
+
+  describe('screen-relative look', () => {
+    const dot = (a: Vec3, b: Vec3) => a.x * b.x + a.y * b.y + a.z * b.z;
+    const angle = (a: Vec3, b: Vec3) => Math.acos(Math.min(1, Math.max(-1, dot(a, b))));
+    const camAxes = (look: Vec3, up: AxisDirection) => {
+      const u = axisVector(up);
+      const right = {
+        x: look.y * u.z - look.z * u.y,
+        y: look.z * u.x - look.x * u.z,
+        z: look.x * u.y - look.y * u.x,
+      };
+      const len = Math.hypot(right.x, right.y, right.z);
+      const r = { x: right.x / len, y: right.y / len, z: right.z / len };
+      return {
+        right: r,
+        camUp: { x: r.y * look.z - r.z * look.y, y: r.z * look.x - r.x * look.z, z: r.x * look.y - r.y * look.x },
+      };
+    };
+
+    it('moves the view by the drag amount, in every frame', () => {
+      // The whole point: a drag of a given size does the same thing on screen
+      // whichever surface the ant is standing on.
+      for (const up of ALL_AXES) {
+        for (const yaw of [0, 1.1, -2.4]) {
+          for (const pitch of [0, 0.5, -0.8]) {
+            const look = lookVector(up, yaw, pitch);
+            expect(angle(look, dragLook(look, up, 0.3, 0))).toBeCloseTo(0.3, 6);
+            expect(angle(look, dragLook(look, up, 0, 0.3))).toBeCloseTo(0.3, 6);
+          }
+        }
+      }
+    });
+
+    it('keeps the drag axes from swapping meaning', () => {
+      // A sideways drag must turn the view sideways ON SCREEN and not tilt it,
+      // and vice versa. Driving yaw and pitch directly failed this the moment
+      // `up` stopped being world up: sideways started running along the shaft.
+      for (const up of ALL_AXES) {
+        for (const pitch of [0, 0.6, -1.0]) {
+          const look = lookVector(up, 0.4, pitch);
+          const { right, camUp } = camAxes(look, up);
+
+          const sideways = dragLook(look, up, 0.25, 0);
+          expect(dot(sideways, camUp)).toBeCloseTo(0, 6);   // no vertical component
+          expect(Math.abs(dot(sideways, right))).toBeGreaterThan(0.2);
+
+          const vertical = dragLook(look, up, 0, 0.25);
+          expect(dot(vertical, right)).toBeCloseTo(0, 6);   // no sideways component
+          expect(Math.abs(dot(vertical, camUp))).toBeGreaterThan(0.2);
+        }
+      }
+    });
+
+    it('matches the old yaw behaviour on flat ground at level pitch', () => {
+      // Standing on the floor looking level is the case that always felt right,
+      // so it must not have changed.
+      const look = lookVector(WORLD_UP, 0.9, 0);
+      const dragged = reframeLook(dragLook(look, WORLD_UP, 0.2, 0), WORLD_UP);
+      expect(dragged.yaw).toBeCloseTo(0.9 - 0.2, 6);
+      expect(dragged.pitch).toBeCloseTo(0, 6);
+    });
+
+    it('still turns when looking straight along up, instead of freezing', () => {
+      // At the pole the camera right vector collapses; without a fallback the
+      // drag would produce NaN and the camera would lock.
+      const straightUp = { x: 0, y: 1, z: 0 };
+      const turned = dragLook(straightUp, WORLD_UP, 0.3, 0);
+      expect(Number.isFinite(turned.x + turned.y + turned.z)).toBe(true);
+      expect(Math.hypot(turned.x, turned.y, turned.z)).toBeCloseTo(1, 6);
+    });
+  });
+
+  describe('roll continuity', () => {
+    it('is zero when the frame does not change', () => {
+      for (const axis of ALL_AXES) {
+        expect(rollBetween(lookVector(axis, 0.6, 0.2), axis, axis)).toBeCloseTo(0, 9);
+      }
+    });
+
+    it('is antisymmetric, so the turn undoes itself', () => {
+      const look = lookVector(WORLD_UP, 0.4, 0);
+      for (const to of ALL_AXES) {
+        const there = rollBetween(look, WORLD_UP, to);
+        const back = rollBetween(look, to, WORLD_UP);
+        expect(there + back).toBeCloseTo(0, 9);
+      }
+    });
+
+    it('reports a real quarter turn when crawling onto a wall', () => {
+      // Screen-up goes from world up to the wall normal, so the picture rotates.
+      // It has to be measured, not assumed to be nothing — that snap was the
+      // half of the problem that preserving the look direction did not fix.
+      const look = lookVector(WORLD_UP, 0, 0);
+      expect(Math.abs(rollBetween(look, WORLD_UP, 'pos_x'))).toBeGreaterThan(1.4);
+    });
+
+    it('is finite even looking straight along an axis', () => {
+      expect(rollBetween({ x: 0, y: 1, z: 0 }, WORLD_UP, 'pos_z')).toBe(0);
     });
   });
 });

@@ -23,8 +23,8 @@ import { DEFAULT_BANDS, approach, clampStickOrigin, speedForStick, stickVector }
 import {
   WORLD_UP, applyOrientation, axisVector, createSurfaceState,
   INPUT_COMMIT_THRESHOLD, axisFromVector, canChangeOrientation,
-  evaluateEdge, lookVector, rankSurfaces, referenceRight, reframeLook,
-  supportBelow, tickLock, type AxisDirection,
+  dragLook, evaluateEdge, lookVector, rankSurfaces, referenceRight, reframeLook,
+  rollBetween, supportBelow, tickLock, type AxisDirection,
 } from '../voxel/SurfaceFrame';
 
 const WORLD_SIZE = 128;
@@ -136,6 +136,36 @@ const REACH_CUBES = 1;
 const TAP_MAX_MS = 250;
 const TAP_MAX_PX = 10;
 
+/**
+ * Mounting a wall has to be DELIBERATE.
+ *
+ * "Movement was blocked" is far too weak a signal on its own: in a one-cube
+ * tunnel the ant is boxed in on four sides, so moving diagonally leaves an axis
+ * blocked more or less permanently and she mounts whichever face she happened
+ * to graze. Two extra conditions fix it — push roughly at the wall rather than
+ * along it, and keep pushing for a moment rather than a single frame.
+ */
+const MOUNT_FACING = 0.55;
+const MOUNT_DWELL = 0.2;
+/** How long contact is remembered through the block/creep stutter. */
+const MOUNT_GRACE = 0.15;
+
+/**
+ * Equirectangular sky. Poly Haven's "Table Mountain 2 Pure Sky", CC0.
+ *
+ * A JPEG rather than a .hdr: at 180 KB it costs a fraction of the download and
+ * the true high dynamic range buys nothing here, because nothing in this scene
+ * is reflective enough to show it. The image is still the light source — three
+ * builds an irradiance map from it, so the soil is lit by this sky rather than
+ * by hand-placed lamps that only approximate one.
+ */
+const SKY_URL = `${import.meta.env.BASE_URL}sky/puresky_2k.jpg`;
+/** Sampled from the horizon band, so fog meets the sky instead of banding. */
+const SKY_HORIZON = 0xb9c7d4;
+/** How hard the sky lights the world, and what the hemisphere keeps once it does. */
+const SKY_LIGHT = 0.85;
+const HEMI_WITH_SKY = 0.35;
+
 export class DigScene {
   private readonly host: HTMLElement;
   private readonly renderer: THREE.WebGLRenderer;
@@ -149,6 +179,10 @@ export class DigScene {
   private readonly material: THREE.MeshStandardMaterial;
   private readonly highlight: THREE.LineSegments;
   private readonly headlamp: THREE.PointLight;
+  /** Equirectangular sky and the irradiance map derived from it. */
+  private sky: THREE.Texture | null = null;
+  private environment: THREE.Texture | null = null;
+  private readonly hemisphere: THREE.HemisphereLight;
 
   private readonly position = new THREE.Vector3();
   private readonly surface = createSurfaceState();
@@ -166,9 +200,15 @@ export class DigScene {
   private grounded = false;
   private climbPhase = 0;
   private cameraRoll = 0;
+  /** Roll carried over from a frame change, decaying to zero. */
+  private rollOffset = 0;
   /** Outward normal of the wall currently being pushed into, if any. */
   private readonly wallNormal = new THREE.Vector3();
   private hasWall = false;
+  /** Seconds spent pushing at the current wall, gating a deliberate mount. */
+  private mountDwell = 0;
+  /** Grace remaining on wall contact, so the block/creep stutter reads as continuous. */
+  private wallContact = 0;
 
   private readonly founding = new QueenFounding(SURFACE_Y, VOXEL_MM);
   /** After founding, the camera detaches from the queen and orbits the den. */
@@ -220,8 +260,12 @@ export class DigScene {
 
     this.camera = new THREE.PerspectiveCamera(78, 1, 0.05, 400);
 
-    this.scene.background = new THREE.Color(0x9fb98a);
-    this.scene.fog = new THREE.Fog(0x9fb98a, 40, 150);
+    // Flat fill until the sky decodes, so first paint never waits on a texture.
+    // Tinted to the HDRI's horizon rather than the old green, so the swap is a
+    // sharpening rather than a colour change.
+    this.scene.background = new THREE.Color(SKY_HORIZON);
+    this.scene.fog = new THREE.Fog(SKY_HORIZON, 40, 150);
+    this.loadSky();
 
     this.world = new VoxelWorld(WORLD_SIZE, WORLD_SIZE, WORLD_SIZE, layeredGenerator(SURFACE_Y));
     // One cube at a time. An ant carries a grain, not a wheelbarrow — and it
@@ -231,8 +275,11 @@ export class DigScene {
     this.materialBundle = createVoxelMaterial();
     this.material = this.materialBundle.material;
 
-    const hemisphere = new THREE.HemisphereLight(0xd8e8ff, 0x4a3a26, 1.15);
-    this.scene.add(hemisphere);
+    // Stands in for the sky until the real one decodes, then steps aside — an
+    // environment map does the same job properly, and running both double-counts
+    // the ambient term and washes the soil out.
+    this.hemisphere = new THREE.HemisphereLight(0xd8e8ff, 0x4a3a26, 1.15);
+    this.scene.add(this.hemisphere);
     const sun = new THREE.DirectionalLight(0xfff2d0, 1.5);
     sun.position.set(60, 120, 40);
     this.scene.add(sun);
@@ -309,6 +356,8 @@ export class DigScene {
     });
     this.meshes.clear();
     this.materialBundle.dispose();
+    this.sky?.dispose();
+    this.environment?.dispose();
     this.highlight.geometry.dispose();
     (this.highlight.material as THREE.Material).dispose();
     this.renderer.dispose();
@@ -436,6 +485,44 @@ export class DigScene {
     };
     this.actionButton.addEventListener('pointerdown', actionDown);
     this.cleanups.push(() => this.actionButton.removeEventListener('pointerdown', actionDown));
+  }
+
+  /**
+   * Swap the flat fill for the real sky once it decodes.
+   *
+   * Asynchronous and entirely optional: if the fetch fails the scene keeps the
+   * solid horizon colour and stays perfectly playable, which is why this does
+   * not block the constructor or the first frame.
+   *
+   * PMREM turns the equirectangular image into the pre-filtered mip chain that
+   * MeshStandardMaterial needs for image-based lighting. Skipping it and
+   * assigning the raw texture to `environment` produces a hard, sparkly result
+   * because there is no roughness-aware blur.
+   */
+  private loadSky(): void {
+    new THREE.TextureLoader().load(SKY_URL, (texture) => {
+      if (this.disposed) return;
+      texture.mapping = THREE.EquirectangularReflectionMapping;
+      texture.colorSpace = THREE.SRGBColorSpace;
+
+      const pmrem = new THREE.PMREMGenerator(this.renderer);
+      const environment = pmrem.fromEquirectangular(texture).texture;
+      pmrem.dispose();
+
+      this.sky = texture;
+      this.environment = environment;
+      this.scene.environment = environment;
+      this.scene.environmentIntensity = SKY_LIGHT;
+      // The stand-in hemisphere light hands over rather than stacking. A trace
+      // is kept because image-based lighting alone leaves deep tunnels, which
+      // the sky cannot see into, almost black.
+      this.hemisphere.intensity = HEMI_WITH_SKY;
+      // The colony view is a cutaway lit as underground; it must keep its dark
+      // earth background even if the sky arrives after founding.
+      if (!this.colonyView) this.scene.background = texture;
+    }, undefined, () => {
+      // Left on the flat colour deliberately — a missing sky is cosmetic.
+    });
   }
 
   /** Would a grain placed here end up inside the ant? */
@@ -627,8 +714,7 @@ export class DigScene {
         this.orbit.pitch = THREE.MathUtils.clamp(this.orbit.pitch + event.movementY * 0.003, -0.2, 1.4);
         return;
       }
-      this.yaw -= event.movementX * 0.0022;
-      this.pitch = THREE.MathUtils.clamp(this.pitch - event.movementY * 0.0022, -1.5, 1.5);
+      this.dragLook(event.movementX * 0.0022, event.movementY * 0.0022);
     };
     const lockChange = () => {
       if (!locked()) {
@@ -661,8 +747,7 @@ export class DigScene {
           this.orbit.yaw -= dx * 0.006;
           this.orbit.pitch = THREE.MathUtils.clamp(this.orbit.pitch + dy * 0.005, -0.2, 1.4);
         } else {
-          this.yaw -= dx * 0.0045;
-          this.pitch = THREE.MathUtils.clamp(this.pitch - dy * 0.0045, -1.5, 1.5);
+          this.dragLook(dx * 0.0045, dy * 0.0045);
         }
       } else if (event.pointerId === this.movePointer) {
         const v = stickVector(event.clientX - this.moveOrigin.x, event.clientY - this.moveOrigin.y, STICK_RADIUS);
@@ -804,12 +889,38 @@ export class DigScene {
    * change only which way is down.
    */
   private reorient(up: AxisDirection, support: { x: number; y: number; z: number } | null): void {
-    const look = lookVector(this.surface.up, this.yaw, this.pitch);
+    const from = this.surface.up;
+    const look = lookVector(from, this.yaw, this.pitch);
     applyOrientation(this.surface, up, support);
     const solved = reframeLook(look, up, this.yaw);
     this.yaw = solved.yaw;
     this.pitch = solved.pitch;
+    /*
+     * Screen-up is always the frame's up, so preserving the look direction is
+     * only half the job — the picture still spins about the centre of the
+     * screen in a single frame. Seed the discontinuity as an offset that
+     * cancels it exactly at the moment of the change and let it decay, so the
+     * world TURNS into the new frame instead of cutting to it.
+     */
+    this.rollOffset += rollBetween(look, from, up);
     this.beginCameraTurn();
+  }
+
+  /**
+   * Apply a screen drag to the look direction.
+   *
+   * Rotating the look vector about the camera's own axes and re-solving
+   * yaw/pitch, rather than nudging yaw and pitch directly. Those two are
+   * frame-relative, so driving them from a drag makes the controls change
+   * meaning the moment the ant mounts a wall: sideways starts running along the
+   * shaft and vertical starts moving toward and away from the rock.
+   */
+  private dragLook(dx: number, dy: number): void {
+    const look = lookVector(this.surface.up, this.yaw, this.pitch);
+    const turned = dragLook(look, this.surface.up, dx, dy);
+    const solved = reframeLook(turned, this.surface.up, this.yaw);
+    this.yaw = solved.yaw;
+    this.pitch = solved.pitch;
   }
 
   /**
@@ -898,7 +1009,32 @@ export class DigScene {
    */
   private jump(): void {
     if (this.surface.mode === 'attached') {
+      /*
+       * Releasing has to MOVE her, not just relabel which way is up.
+       *
+       * Every other frame change routes through surfaceContact() because the
+       * body's footprint changes shape when `up` does — lying against a wall it
+       * runs EYE_HEIGHT along Z and BODY_RADIUS along Y, and standing it is the
+       * other way round. Release skipped that, so she reoriented while still
+       * embedded in the wall and then launched from inside solid rock.
+       *
+       * There is no support voxel to stand on when letting go, so step out
+       * along the wall normal until the standing body fits.
+       */
+      const away = this.upVec();
+      const freed = this.position.clone();
+      let fits = false;
+      for (const step of [0, BODY_RADIUS + 0.05, 0.5, 1]) {
+        const at = this.position.clone().addScaledVector(away, step);
+        if (!this.collides(at, WORLD_UP)) { freed.copy(at); fits = true; break; }
+      }
+      if (!fits) return; // nowhere to let go into — better to keep hold
+      this.position.copy(freed);
       this.reorient(WORLD_UP, null);
+      this.upVelocity = JUMP_SPEED;
+      this.grounded = false;
+      this.airborne = true;
+      return;
     }
     if (!this.grounded && !this.weightless) return;
     this.upVelocity = JUMP_SPEED;
@@ -1066,7 +1202,27 @@ export class DigScene {
      * between two faces. Step-up runs first, so `blocked` only means a rise the
      * ant genuinely cannot walk over.
      */
-    if (wallAhead && this.hasWall && !this.airborne
+    // Pushing roughly AT the wall, not merely sliding along something that
+    // happens to block an axis. `wallNormal` points back out of the wall, so a
+    // head-on push gives a strongly negative dot.
+    /*
+     * Wall contact FLICKERS, and the dwell timer has to survive that.
+     *
+     * Being blocked zeroes planarSpeed, so the next frame she creeps forward
+     * unobstructed and the frame after is blocked again. Measured while she
+     * stood hard against a chamber wall: `blocked` alternated every frame, so a
+     * timer that reset on any unblocked frame sat at 0.10 s forever and the
+     * mount never fired at all. A short grace window reads that stutter as what
+     * it actually is — continuous contact.
+     */
+    if (wallAhead && this.hasWall) this.wallContact = MOUNT_GRACE;
+    else this.wallContact = Math.max(0, this.wallContact - dt);
+
+    const intoWall = this.wallContact > 0 && pressing
+      && wish.dot(this.wallNormal) <= -MOUNT_FACING;
+    this.mountDwell = intoWall ? this.mountDwell + dt : 0;
+
+    if (intoWall && !this.airborne && this.mountDwell >= MOUNT_DWELL
       && magnitude >= INPUT_COMMIT_THRESHOLD && canChangeOrientation(this.surface)) {
       const mount = axisFromVector(this.wallNormal);
       if (mount !== this.surface.up) {
@@ -1135,7 +1291,12 @@ export class DigScene {
       ? Math.sin((this.climbPhase += dt * CLIMB_SWAY_HZ * Math.PI * 2)) * CLIMB_SWAY
       : 0;
     this.cameraRoll = THREE.MathUtils.lerp(this.cameraRoll, swayTarget, 1 - Math.exp(-10 * dt));
-    if (Math.abs(this.cameraRoll) > 1e-4) this.camera.rotateZ(this.cameraRoll);
+    // Bleed off the roll inherited from the last frame change at the same rate
+    // the orientation itself eases, so the two read as one movement.
+    this.rollOffset *= Math.exp(-CAMERA_TURN_RATE * dt);
+    if (Math.abs(this.rollOffset) < 1e-4) this.rollOffset = 0;
+    const roll = this.cameraRoll + this.rollOffset;
+    if (Math.abs(roll) > 1e-4) this.camera.rotateZ(roll);
 
     this.headlamp.position.copy(this.camera.position);
   }

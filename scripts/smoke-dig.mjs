@@ -84,7 +84,7 @@ const hud = async () => {
  * Poll the action button's label. Single-sampling it races the HUD, which only
  * repaints every 6th frame — about 770 ms under software rendering.
  */
-const untilLabel = async (want, timeoutMs = 6000) => {
+const untilLabel = async (want, timeoutMs = 20000) => {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const label = (await page.textContent('.dig-action')) ?? '';
@@ -94,7 +94,7 @@ const untilLabel = async (want, timeoutMs = 6000) => {
   }
 };
 /** Poll until a predicate holds; the HUD only repaints every 6th frame. */
-const until = async (label, check, timeoutMs = 45000) => {
+const until = async (label, check, timeoutMs = 150000) => {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const state = await hud();
@@ -128,9 +128,9 @@ else ok('a cancelled dig removes nothing');
 if (afterCancel.seconds < 4.9) fail('a cancelled dig credited practice — tap-cancel would be an exploit');
 else ok('a cancelled dig credits no practice');
 
-// 5. Tap and let it run to completion. Five seconds of sim time is ~13s here:
-// dt is clamped to 50 ms and software rendering manages ~8 fps, so the sim
-// advances at roughly 0.39x wall clock.
+// 5. Tap and let it run to completion. Five seconds of SIM time is a long
+// wall-clock wait: dt is clamped to 50 ms and software rendering manages ~3 fps
+// once the sky is drawn, so the sim advances at roughly 0.15x real time.
 await tap(450, 800);
 const dug = await until('the first cube to pop', (s) => s.dug >= 1);
 if (dug.dug < 1) fail(`nothing was excavated — "${dug.text}"`);
@@ -155,16 +155,16 @@ await page.keyboard.down('KeyW');
 await page.waitForTimeout(2000);
 await page.keyboard.up('KeyW');
 // Wait for her to actually come to rest. Deceleration is 22 voxels/s^2 but the
-// sim runs at ~0.39x wall clock here, so a fixed pause is a coin flip — aiming
+// sim runs at ~0.15x wall clock here, so a fixed pause is a coin flip — aiming
 // while still walking is what made this step flaky.
-await until('the ant to stop walking', (s) => s.speed < 0.2, 12000);
+await until('the ant to stop walking', (s) => s.speed < 0.2, 40000);
 
 // Deliberately do NOT fuss over the aim. DROP prefers the cell the crosshair
 // faces but falls back to the best neighbouring one, precisely so a player
 // doesn't have to thread the narrow window that one-cube reach leaves on flat
 // ground. If this needs a perfect pitch to pass, the fallback has regressed.
 await page.click('.dig-drop');
-const placed = await until('the load to reach the mound', (s) => s.mound >= 1, 8000);
+const placed = await until('the load to reach the mound', (s) => s.mound >= 1, 25000);
 if (placed.mound < 1) fail(`DROP placed nothing — "${placed.text}"`);
 else ok(`dropped ${placed.mound} voxel(s), now carrying ${placed.carrying}`);
 if (placed.dug !== placed.carrying + placed.mound) {

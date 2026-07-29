@@ -332,6 +332,73 @@ export function reframeLook(look: Vec3, up: AxisDirection, fallbackYaw = 0): { y
 }
 
 /**
+ * Turn a screen drag into a new world look direction.
+ *
+ * Storing look as yaw-about-`up` plus pitch means the DRAG AXES change meaning
+ * whenever the frame does. Standing on the floor, dragging sideways turns you
+ * left and right; mount a wall and the same drag runs you along the shaft while
+ * dragging vertically moves you toward and away from the wall. The camera ends
+ * up pointing correctly and then the controls do something different from what
+ * they did a second ago.
+ *
+ * So rotate the LOOK VECTOR about the camera's own axes — sideways about its
+ * up, vertically about its right — and re-solve yaw and pitch from the result.
+ * A drag then means the same thing on screen in all six frames, and the frame
+ * keeps owning gravity, collision and the movement plane.
+ */
+export function dragLook(look: Vec3, up: AxisDirection, dx: number, dy: number): Vec3 {
+  const l = normalize(look);
+  const u = axisVector(up);
+  // The camera's own right and up, which is what the drag should feel relative
+  // to. Near the pole `l` and `u` are parallel and the cross collapses; fall
+  // back to the frame's reference right so a drag still does something sane.
+  let right = cross(l, u);
+  if (right.x * right.x + right.y * right.y + right.z * right.z < 1e-8) {
+    right = referenceRight(up);
+  }
+  right = normalize(right);
+  const camUp = normalize(cross(right, l));
+  return normalize(rotateAbout(rotateAbout(l, camUp, -dx), right, -dy));
+}
+
+/** Rodrigues rotation of `v` about a unit `axis` by `angle` radians. */
+export function rotateAbout(v: Vec3, axis: Vec3, angle: number): Vec3 {
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const k = normalize(axis);
+  const kv = cross(k, v);
+  const kd = dot(k, v) * (1 - cos);
+  return {
+    x: v.x * cos + kv.x * sin + k.x * kd,
+    y: v.y * cos + kv.y * sin + k.y * kd,
+    z: v.z * cos + kv.z * sin + k.z * kd,
+  };
+}
+
+/**
+ * The signed roll between two frames, measured about the look direction they
+ * share.
+ *
+ * Screen-up is always the frame's `up`, so reorienting rotates the whole
+ * picture about the centre of the screen in a single frame — the look direction
+ * stayed put but the image spun. Feeding this back as a decaying offset turns
+ * that cut into a turn.
+ */
+export function rollBetween(look: Vec3, from: AxisDirection, to: AxisDirection): number {
+  const l = normalize(look);
+  const screenUp = (axis: AxisDirection): Vec3 | null => {
+    const u = axisVector(axis);
+    const right = cross(l, u);
+    if (right.x * right.x + right.y * right.y + right.z * right.z < 1e-8) return null;
+    return normalize(cross(normalize(right), l));
+  };
+  const a = screenUp(from);
+  const b = screenUp(to);
+  if (!a || !b) return 0; // looking along one of the axes; roll is undefined
+  return Math.atan2(dot(cross(a, b), l), dot(a, b));
+}
+
+/**
  * The wall an unattached ant could grip: solid, perpendicular to world up, and
  * touching the ant. Returns the `up` that gripping it would produce.
  */

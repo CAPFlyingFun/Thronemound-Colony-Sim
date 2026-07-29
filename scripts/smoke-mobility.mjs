@@ -94,7 +94,7 @@ const ok = (m) => console.log(`  ok  ${m}`);
   };
   // The HUD repaints every 6th frame — about 770 ms under software rendering —
   // so anything read right after an input has to be polled, not sampled once.
-  const until = async (label, check, timeoutMs = 45000) => {
+  const until = async (label, check, timeoutMs = 150000) => {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const state = await hud();
@@ -128,7 +128,7 @@ const ok = (m) => console.log(`  ok  ${m}`);
   if ((await hud()).target !== '—') fail(`flat ahead should be out of reach, got "${(await hud()).target}"`);
   else ok('soil beyond the neighbouring cubes is out of reach');
   await look(700, 1180);
-  const underfoot = await until('the ground to come into range', (s) => s.target !== '—', 8000);
+  const underfoot = await until('the ground to come into range', (s) => s.target !== '—', 25000);
   if (underfoot.target === '—') fail('the cube underfoot should be workable');
   else ok(`the cube underfoot is workable (${underfoot.target})`);
 
@@ -156,7 +156,7 @@ const ok = (m) => console.log(`  ok  ${m}`);
    * was not, and was deciding a continuous position.
    */
   const settled = await until('the ant to settle into her own hole',
-    (s) => Number.isFinite(s.y) && standing.y - s.y > 0.8, 12000);
+    (s) => Number.isFinite(s.y) && standing.y - s.y > 0.8, 40000);
   const drop = standing.y - settled.y;
   if (!(drop > 0.8)) fail(`hovering: dug one voxel down but only fell ${drop.toFixed(2)} (${standing.y} -> ${settled.y})`);
   else ok(`settles onto the new floor, fell ${drop.toFixed(2)} voxels`);
@@ -182,16 +182,16 @@ const ok = (m) => console.log(`  ok  ${m}`);
   await page.keyboard.down('KeyW');
   await page.waitForTimeout(2000);
   await page.keyboard.up('KeyW');
-  const out = await until('the ant to climb out of her hole', (s) => s.y > 96.9, 10000);
+  const out = await until('the ant to climb out of her hole', (s) => s.y > 96.9, 30000);
   if (!(out.y > 96.9)) fail(`could not walk out of a one-voxel pit (y ${out.y})`);
   else ok(`steps out of the pit unaided (y ${out.y})`);
 
   // No aiming. DROP prefers the crosshair cell but falls back to the best
   // neighbouring one, so putting a grain down never depends on threading the
   // narrow window one-cube reach leaves on flat ground.
-  await until('the ant to stop walking', (s) => s.speed < 0.2, 12000);
+  await until('the ant to stop walking', (s) => s.speed < 0.2, 40000);
   await page.click('.dig-drop');
-  const dropped = await until('the load to reach the mound', (s) => s.mound >= 1, 8000);
+  const dropped = await until('the load to reach the mound', (s) => s.mound >= 1, 25000);
   if (dropped.carrying !== 0 || dropped.mound !== 1) fail(`dropping failed: ${JSON.stringify(dropped)}`);
   else ok('dropping the load frees the ant to dig again');
   if (dropped.dug !== dropped.carrying + dropped.mound) fail('soil not conserved');
@@ -280,6 +280,39 @@ const ok = (m) => console.log(`  ok  ${m}`);
   }
   if (released.up !== 'pos_y') fail(`jumping should let go of the wall, got up ${released.up}`);
   else ok('jumping is what lets go of a wall');
+
+  /*
+   * And letting go must not leave her inside the rock.
+   *
+   * Release used to relabel `up` without moving her. Every other frame change
+   * routes through surfaceContact() first, because the body's footprint changes
+   * shape when `up` does — lying against a wall it runs EYE_HEIGHT along Z, and
+   * standing it runs along Y. Skipping that reoriented her while still embedded,
+   * and she launched from inside solid dirt. Embedded, collision blocks every
+   * axis, so the tell is that she never comes to rest anywhere sane.
+   */
+  let restA = await state();
+  let settleDrift = Infinity;
+  for (let i = 0; i < 30 && settleDrift > 0.15; i++) {
+    await page.waitForTimeout(600);
+    const restB = await state();
+    settleDrift = Math.hypot(...restA.pos.map((v, i2) => v - restB.pos[i2]));
+    restA = restB;
+  }
+  if (!restA.pos.every(Number.isFinite) || settleDrift > 0.15) {
+    fail(`never came to rest after letting go (last drift ${settleDrift.toFixed(2)}, pos ${restA.pos})`);
+  } else ok(`comes to rest in open air after letting go (y ${restA.pos[1]})`);
+
+  // Walking PAST a wall must not mount it. Mounting needs a deliberate push:
+  // in a one-cube tunnel the ant is boxed in on four sides, so "movement was
+  // blocked" on its own had her grabbing whichever face she happened to graze.
+  await page.keyboard.down('KeyA');
+  await page.waitForTimeout(600);
+  await page.keyboard.up('KeyA');
+  await page.waitForTimeout(700);
+  const grazed = await state();
+  if (grazed.up !== 'pos_y') fail(`a glancing move mounted a wall (up ${grazed.up})`);
+  else ok('a glancing move does not mount a wall');
 
   if (errors.length) fail(`page errors: ${errors.join(' | ')}`);
   else ok('no page errors');

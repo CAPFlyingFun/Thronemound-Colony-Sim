@@ -185,7 +185,7 @@ Two properties keep an ant-scale world cheap:
 ## Verifying
 
 ```bash
-npm test          # 82 tests: voxel rules + the existing colony tests
+npm test          # 90 tests: voxel rules + the existing colony tests
 npm run typecheck
 npm run build
 npm run preview   # then, in another shell:
@@ -257,7 +257,7 @@ lower-left region so it can't spawn beside the HUD or halfway up the screen.
 `?debug=1` appends live position, orientation and speed to the readout, which is
 how those numbers get measured rather than eyeballed.
 
-The HUD always shows a **version and build time** (`v0.7.0 · 07-29 03:47`), so
+The HUD always shows a **version and build time** (`v0.8.0 · 07-29 05:12`), so
 "is this the new code or a cached build?" is answerable at a glance from a
 phone.
 
@@ -350,6 +350,36 @@ This is deliberately not literal 45° geometry. Real fire-ant nests are
 near-vertical shafts with chambers budding off them, so forcing everything to
 a ramp would make the nests look *less* like nests — and cost ~40% more digging
 for the same depth. Ants don't need ramps because ants climb.
+
+## Sky
+
+The world sits under a real equirectangular sky — Poly Haven's *Table Mountain 2
+Pure Sky*, CC0 — rather than a flat green fill.
+
+A JPEG rather than a `.hdr`. At 180 KB it costs a fraction of the download, and
+the true high dynamic range buys nothing here because nothing in the scene is
+reflective enough to show it. The image is still the **light source**: three
+builds a pre-filtered irradiance map from it with `PMREMGenerator`, so the soil
+is lit by this sky instead of by hand-placed lamps that only approximate one.
+Assigning the raw texture to `scene.environment` without PMREM looks hard and
+sparkly, because there is no roughness-aware blur.
+
+The hemisphere light **hands over** rather than stacking — running both
+double-counts the ambient term and washes the soil out. A trace of it is kept
+(0.35), because image-based lighting alone leaves deep tunnels, which the sky
+cannot see into, almost black.
+
+Loading is asynchronous and entirely optional. First paint uses a flat fill
+tinted to the HDRI's horizon, so the swap sharpens the image rather than
+changing its colour, and a failed fetch leaves a perfectly playable scene. The
+colony cutaway keeps its dark earth background even if the sky arrives after
+founding.
+
+> **On performance:** headless frame rate drops from ~8 fps to ~3 fps with the
+> sky in. That is *software* rasterisation, where a fullscreen skybox plus
+> per-fragment environment sampling is pathological; on a GPU both are ordinary
+> PBR costs. It does mean the smoke tests now run the sim at ~0.15x wall clock,
+> which every wait in them is sized for.
 
 ## Textures
 
@@ -458,6 +488,29 @@ Underground, jumping has to suspend weightlessness too, or the leap would be
 cancelled by the very rule it exists to escape. An `airborne` flag holds gravity
 on until she lands.
 
+### The drag axes must not swap meaning
+
+`yaw` (about `up`) and `pitch` (toward `up`) are both measured **inside** a
+frame, so driving them straight from a drag makes the controls change meaning
+the moment the ant mounts a wall:
+
+| | on the floor | after mounting a wall |
+|---|---|---|
+| drag ⇄ | turn left/right | run along the shaft |
+| drag ⇅ | look up/down | tilt toward/away from the wall |
+
+`dragLook` fixes it by rotating the **look vector** about the camera's own axes
+— sideways about its up, vertically about its right — and re-solving yaw and
+pitch from the result. A drag then does the same thing on screen in all six
+frames, while the frame keeps owning gravity, collision and the movement plane.
+At the pole the camera's right vector collapses, so it falls back to the frame's
+reference right rather than producing NaN and locking the camera.
+
+A test asserts the drag moves the view by exactly the drag amount in every
+frame, that a sideways drag adds no vertical component and vice versa, and that
+flat ground at level pitch still behaves exactly as it did before — that case
+always felt right and must not change.
+
 ### The camera must not move
 
 This was the thing that made surface walking feel wrong, and it took a while to
@@ -478,9 +531,46 @@ stops meaning anything at the pole — so pitch clamps at `MAX_PITCH` and the
 error is bounded by exactly that clipped wedge (about 4°). The test asserts that
 bound, and separately that the result is exact everywhere the clamp doesn't bite.
 
-The camera still **slerps** into the new frame and swings slightly outward
+Preserving the direction is only half of it, though. Screen-up is always the
+frame's `up`, so the picture still **rotated about the centre of the screen in a
+single frame** — direction continuous, roll not. `rollBetween` measures that
+discontinuity and it is seeded as an offset that cancels it exactly at the
+moment of the change, then decays at the same rate the orientation eases. The
+world still ends up rotated — she crawled onto a wall, it should — but it turns
+instead of cutting.
+
+The camera also **slerps** into the new frame and swings slightly outward
 mid-turn, so it reads as the body crawling around the edge rather than the world
 spinning about a stationary head. Physics still snaps between the six frames.
+
+### Mounting has to be deliberate
+
+"Movement was blocked" is far too weak a signal on its own. In a one-cube tunnel
+the ant is boxed in on four sides, so moving diagonally leaves an axis blocked
+more or less permanently and she grabs whichever face she happened to graze.
+Two further conditions:
+
+- movement must point substantially **into** the wall (`MOUNT_FACING`), not
+  merely along something that blocks an axis
+- and must persist for `MOUNT_DWELL` (0.2 s), not fire on a single frame
+
+The dwell needed one non-obvious piece. **Wall contact flickers by
+construction**: being blocked zeroes `planarSpeed`, so the next frame she creeps
+forward unobstructed and the frame after is blocked again. Measured while she
+stood hard against a chamber wall, `blocked` alternated *every frame* — so a
+timer that reset on any unblocked frame sat at 0.10 s forever and the mount never
+fired at all. `MOUNT_GRACE` remembers contact for 0.15 s, which reads that
+stutter as the continuous contact it actually is.
+
+### Letting go has to move her
+
+Release used to relabel `up` without repositioning. Every other frame change
+routes through `surfaceContact()` first, because the body's footprint changes
+shape when `up` does — lying against a wall it runs `EYE_HEIGHT` along Z and
+`BODY_RADIUS` along Y; standing, the other way round. Skipping that reoriented
+her while still embedded, and she launched from **inside solid rock**. Jumping
+off now steps out along the wall normal until the standing body fits, and
+refuses to let go at all if nothing fits — better to keep hold than to embed.
 
 **All six directions are live, ceilings included.** They were locked behind a
 `CEILING_UP` guard while walls were being tuned; with the underground frame now
