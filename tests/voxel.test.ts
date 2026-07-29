@@ -1253,6 +1253,44 @@ describe('loose soil', () => {
     expect(clod.position.z).toBeGreaterThan(before);
   });
 
+  it('only offers a clod the crosshair is actually pointing at', () => {
+    /*
+     * The bug this pins: pickup was a plain sphere around the eye, so a clod
+     * dropped a couple of cubes away kept claiming the action button while you
+     * were trying to dig something else. Proximity has no idea what you meant;
+     * aiming does.
+     */
+    const soil = new LooseSoil();
+    const eye = { x: 10, y: 10, z: 10 };
+    const ahead = { x: 0, y: 0, z: -1 };
+
+    const front = soil.drop({ x: 10, y: 10, z: 8.8 }, TOPSOIL, { x: 0, y: 0, z: 0 })!;
+    soil.drop({ x: 11.6, y: 10, z: 8.8 }, TOPSOIL, { x: 1, y: 0, z: 0 }); // off to one side
+    soil.drop({ x: 10, y: 10, z: 11.5 }, TOPSOIL, { x: 2, y: 0, z: 0 }); // behind her
+
+    // Straight ahead is offered; beside and behind are not.
+    expect(soil.alongRay(eye, ahead, 1.8, 0.55)).toBe(front);
+    // Look away and nothing is offered, even though all three are still close.
+    expect(soil.alongRay(eye, { x: 1, y: 0, z: 0 }, 1.8, 0.55)).toBeNull();
+    // Look down at the floor — which is what you do to dig — and still nothing.
+    expect(soil.alongRay(eye, { x: 0, y: -1, z: 0 }, 1.8, 0.55)).toBeNull();
+  });
+
+  it('offers the nearest clod when two line up', () => {
+    const soil = new LooseSoil();
+    const eye = { x: 0, y: 0, z: 0 };
+    const ahead = { x: 0, y: 0, z: -1 };
+    const near = soil.drop({ x: 0, y: 0, z: -0.8 }, TOPSOIL, { x: 0, y: 0, z: 0 })!;
+    soil.drop({ x: 0, y: 0, z: -1.6 }, TOPSOIL, { x: 1, y: 0, z: 0 });
+    expect(soil.alongRay(eye, ahead, 1.8, 0.55)).toBe(near);
+  });
+
+  it('will not offer a clod out past arm\'s length', () => {
+    const soil = new LooseSoil();
+    soil.drop({ x: 0, y: 0, z: -3 }, TOPSOIL, { x: 0, y: 0, z: 0 });
+    expect(soil.alongRay({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: -1 }, 1.8, 0.55)).toBeNull();
+  });
+
   it('refuses to drop past the cap rather than destroying soil', () => {
     const soil = new LooseSoil();
     for (let i = 0; i < MAX_LOOSE_CLODS; i++) {

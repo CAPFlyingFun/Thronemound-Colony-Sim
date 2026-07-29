@@ -119,6 +119,41 @@ export class LooseSoil {
     return best;
   }
 
+  /**
+   * The clod the crosshair is actually pointing at.
+   *
+   * A plain radius around the eye is not enough: it picks up clods behind you,
+   * below you, or off to one side, so CARRY kept claiming the action button
+   * while you were trying to dig something else entirely. Requiring the clod to
+   * sit near the aim ray makes "look at it to grab it" literal.
+   *
+   * `maxOffset` is how far the crosshair may miss the clod's centre and still
+   * count — generous enough to be easy on a phone, tight enough that spoil to
+   * one side is ignored. Nearest along the ray wins, so a clod in front of
+   * another is the one you get.
+   */
+  alongRay(origin: Vec3, direction: Vec3, maxDistance: number, maxOffset: number): Clod | null {
+    let best: Clod | null = null;
+    let bestDistance = Infinity;
+    for (const clod of this.clods) {
+      const vx = clod.position.x - origin.x;
+      const vy = clod.position.y - origin.y;
+      const vz = clod.position.z - origin.z;
+      const along = vx * direction.x + vy * direction.y + vz * direction.z;
+      // Behind the eye, or past arm's length.
+      if (along < 0 || along > maxDistance) continue;
+      const ox = vx - direction.x * along;
+      const oy = vy - direction.y * along;
+      const oz = vz - direction.z * along;
+      if (Math.hypot(ox, oy, oz) > maxOffset) continue;
+      if (along < bestDistance) {
+        bestDistance = along;
+        best = clod;
+      }
+    }
+    return best;
+  }
+
   /** Shove a clod, waking it. This is what walking into one does. */
   push(clod: Clod, impulse: Vec3): void {
     clod.velocity.x += impulse.x;

@@ -189,8 +189,18 @@ const CLOD_AHEAD = 0.34;
 const CLOD_DROP = 0.2;
 /** Instances per variant batch. Twelve of these covers the heap cap. */
 const SOIL_BATCH_CAPACITY = 24;
-/** How hard walking into a clod shoves it. */
+/** How hard walking into a clod shoves it. Unused by the player on purpose. */
 const CLOD_PUSH = 2.2;
+/**
+ * Picking a clod up needs the crosshair ON it, not merely near it.
+ *
+ * Reach is shorter than digging reach — a grain you can pick up is one you are
+ * standing over — and the aim tolerance is how far the crosshair may miss its
+ * centre. Generous enough to be easy with a thumb, tight enough that spoil to
+ * one side is ignored while you work.
+ */
+const CLOD_REACH = 1.8;
+const CLOD_AIM = 0.55;
 
 interface DigParticle {
   position: THREE.Vector3;
@@ -1208,11 +1218,24 @@ export class DigScene {
     if (!placed) this.session.load.push(unit);
   }
 
-  /** The loose clod she could pick up right now, if any. */
+  /**
+   * The loose clod she could pick up right now — the one she is LOOKING at.
+   *
+   * This used to be a plain 2.2-voxel sphere around the eye, which meant a clod
+   * dropped a couple of cubes away kept claiming the action button while you
+   * were trying to dig, because proximity alone has no idea what you meant.
+   * Aiming is the disambiguator, exactly as it is for digging.
+   */
   private clodInReach(): Clod | null {
     if (this.session.isFull) return null;
     const eye = this.camera.position;
-    return this.soil.nearest({ x: eye.x, y: eye.y, z: eye.z }, REACH);
+    const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    return this.soil.alongRay(
+      { x: eye.x, y: eye.y, z: eye.z },
+      { x: dir.x, y: dir.y, z: dir.z },
+      CLOD_REACH,
+      CLOD_AIM,
+    );
   }
 
   /** Pick a loose clod back up, if a hand is free. */
