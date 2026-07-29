@@ -74,7 +74,7 @@ const hud = async () => {
     text: t.trim(),
     dug: Number(/Dug (\d+)/.exec(t)?.[1] ?? '0'),
     carrying: Number(/Carrying (\d+)/.exec(t)?.[1] ?? '0'),
-    mound: Number(/Mound (\d+)/.exec(t)?.[1] ?? '0'),
+    loose: Number(/Loose (\d+)/.exec(t)?.[1] ?? '0'),
     seconds: Number(/([\d.]+)s\/cube/.exec(t)?.[1] ?? '0'),
     speed: Number(/spd ([\d.]+)/.exec(t)?.[1] ?? '0'),
     target: /Target: ([^ ·]+)/.exec(t)?.[1] ?? '',
@@ -187,12 +187,12 @@ await until('the ant to stop walking', (s) => s.speed < 0.2, 40000);
 // doesn't have to thread the narrow window that one-cube reach leaves on flat
 // ground. If this needs a perfect pitch to pass, the fallback has regressed.
 await page.click('.dig-drop');
-const placed = await until('the load to reach the mound', (s) => s.mound >= 1, 25000);
-if (placed.mound < 1) fail(`DROP placed nothing — "${placed.text}"`);
-else ok(`dropped ${placed.mound} voxel(s), now carrying ${placed.carrying}`);
-if (placed.dug !== placed.carrying + placed.mound) {
-  fail(`soil not conserved: dug ${placed.dug} != carried ${placed.carrying} + mound ${placed.mound}`);
-} else ok(`soil conserved end to end: dug ${placed.dug} = carried ${placed.carrying} + mound ${placed.mound}`);
+const placed = await until('the load to become loose spoil', (s) => s.loose >= 1, 25000);
+if (placed.loose < 1) fail(`DROP placed nothing — "${placed.text}"`);
+else ok(`dropped ${placed.loose} voxel(s), now carrying ${placed.carrying}`);
+if (placed.dug !== placed.carrying + placed.loose) {
+  fail(`soil not conserved: dug ${placed.dug} != carried ${placed.carrying} + loose ${placed.loose}`);
+} else ok(`soil conserved end to end: dug ${placed.dug} = carried ${placed.carrying} + loose ${placed.loose}`);
 
 await shot('3-placed');
 

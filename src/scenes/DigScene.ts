@@ -12,13 +12,18 @@
 import * as THREE from 'three';
 import {
   AIR, CHUNK, MATERIALS, TOPSOIL, VoxelWorld,
-  isSolid, layeredGenerator, materialOf,
+  isSolid, layeredGenerator, materialOf, type VoxelId,
 } from '../voxel/VoxelWorld';
 import { meshChunk } from '../voxel/mesher';
 import {
   buildFracture, chipMeshData, eventsBetween, hashVoxel, removedAt, wobbleAt,
   CELL_COUNT, type DigEvent, type DigEventKind, type FracturePattern,
 } from '../voxel/fracture';
+import {
+  SOIL_CLOD_VARIANT_COUNT, buildClodShape, clodFeel, clodRadius, styleForVoxel,
+  type ClodShape, type SoilLoadStyle,
+} from '../voxel/clod';
+import { CLOD_RADIUS, LooseSoil, type Clod } from '../voxel/LooseSoil';
 import { raycastVoxel } from '../voxel/raycast';
 import { DigSession } from '../voxel/DigSession';
 import { createVoxelMaterial, type VoxelMaterialBundle } from '../voxel/voxelMaterial';
@@ -161,6 +166,32 @@ const MOUNT_GRACE = 0.15;
  */
 export const MAX_DIG_PARTICLES = 24;
 
+/**
+ * How long the clod takes to travel from the mandibles to where it lands.
+ *
+ * Dropped soil re-enters the voxel grid — that is what keeps the mound walkable
+ * and `Dug = Carried + Mound` true — so the clod cannot stay a free object. It
+ * flies for this long and then hands over to the deposited voxel, which is the
+ * moment the terrain gains a cube.
+ */
+const CLOD_FLIGHT = 0.22;
+/**
+ * How the clod rides. It is one voxel of soil, but drawn a little under full
+ * size so it reads as held rather than as a boulder stuck to the lens.
+ *
+ * Under a full voxel on purpose. The ant's collision body was shrunk to 0.7
+ * voxels so she fits a one-cube tunnel, so a lump drawn at true voxel size is
+ * nearly as tall as she is and swallows the view from a first-person camera
+ * this low. It still represents exactly one voxel of soil.
+ */
+const CLOD_SIZE = 0.42;
+const CLOD_AHEAD = 0.34;
+const CLOD_DROP = 0.2;
+/** Instances per variant batch. Twelve of these covers the heap cap. */
+const SOIL_BATCH_CAPACITY = 24;
+/** How hard walking into a clod shoves it. */
+const CLOD_PUSH = 2.2;
+
 interface DigParticle {
   position: THREE.Vector3;
   velocity: THREE.Vector3;
@@ -232,6 +263,30 @@ export class DigScene {
    * chips happen.
    */
   digAudio: ((kind: DigEventKind, at: THREE.Vector3) => void) | null = null;
+
+  /* The carried soil, as an irregular clod rather than a cube. */
+  private readonly clodMesh: THREE.Mesh;
+  private readonly clodMaterial: THREE.MeshStandardMaterial;
+  /** Built once per (material, variant) and kept. Never regenerated in a frame. */
+  private readonly clodGeometries = new Map<string, THREE.BufferGeometry>();
+  private clodStyle: SoilLoadStyle | null = null;
+  /** Set while a dropped clod is flying to the cell it will become. */
+  private clodFlight: { from: THREE.Vector3; to: THREE.Vector3; t: number } | null = null;
+  private readonly clodAnchor = new THREE.Vector3();
+
+  /* Spoil lying around: real objects, shovable and re-carryable. */
+  private readonly soil = new LooseSoil();
+  /**
+   * One InstancedMesh per clod variant, so a whole nest of spoil costs twelve
+   * draw calls no matter how many clods there are. Per-instance colour carries
+   * the material and tint, so they all share a single material too.
+   */
+  private readonly soilBatches = new Map<string, THREE.InstancedMesh>();
+  private readonly soilMaterial: THREE.MeshStandardMaterial;
+  private readonly soilDummy = new THREE.Object3D();
+  private readonly soilColor = new THREE.Color();
+  /** Last frame's planar movement, so pushes go the way she is actually going. */
+  private readonly lastStep = new THREE.Vector3();
 
   private readonly position = new THREE.Vector3();
   private readonly surface = createSurfaceState();
@@ -358,6 +413,21 @@ export class DigScene {
       });
     }
 
+    /*
+     * The carried clod. One mesh and one material for the whole game — the
+     * geometry is swapped when a load is picked up, never rebuilt, and the
+     * colour is tinted per clod through the material rather than by cloning it.
+     */
+    this.clodMaterial = new THREE.MeshStandardMaterial({ roughness: 0.98, metalness: 0 });
+    this.clodMesh = new THREE.Mesh(new THREE.BufferGeometry(), this.clodMaterial);
+    this.clodMesh.frustumCulled = false;
+    this.clodMesh.visible = false;
+    this.scene.add(this.clodMesh);
+
+    // Batched spoil shares one material; per-instance colour carries the tint.
+    // White base, because instanceColor MULTIPLIES it.
+    this.soilMaterial = new THREE.MeshStandardMaterial({ roughness: 0.98, metalness: 0 });
+
     const box = new THREE.BoxGeometry(1.002, 1.002, 1.002);
     this.highlight = new THREE.LineSegments(
       new THREE.EdgesGeometry(box),
@@ -427,6 +497,12 @@ export class DigScene {
     this.meshes.clear();
     this.materialBundle.dispose();
     this.endChip();
+    for (const batch of this.soilBatches.values()) this.scene.remove(batch);
+    this.soilBatches.clear();
+    this.soilMaterial.dispose();
+    for (const geometry of this.clodGeometries.values()) geometry.dispose();
+    this.clodGeometries.clear();
+    this.clodMaterial.dispose();
     this.particleMesh.geometry.dispose();
     (this.particleMesh.material as THREE.Material).dispose();
     this.sky?.dispose();
@@ -812,6 +888,188 @@ export class DigScene {
     if (event.kind === 'DIG_RELEASE') this.cameraKick = Math.max(this.cameraKick, 0.03);
   }
 
+  /* --------------------------------------------------------- carried soil */
+
+  /**
+   * Geometry for one (material, variant), built on first use and kept forever.
+   *
+   * There are at most 12 variants x 4 materials of ~80 triangles, so the whole
+   * cache is trivial and nothing is ever generated during a frame.
+   */
+  private clodGeometry(material: VoxelId, variant: number): THREE.BufferGeometry {
+    const key = `${material}:${variant}`;
+    const cached = this.clodGeometries.get(key);
+    if (cached) return cached;
+
+    const shape: ClodShape = buildClodShape(variant, clodFeel(material));
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(shape.positions, 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(shape.normals, 3));
+    geometry.setIndex(new THREE.BufferAttribute(shape.indices, 1));
+    geometry.computeBoundingSphere();
+    geometry.userData.radius = clodRadius(shape);
+    this.clodGeometries.set(key, geometry);
+    return geometry;
+  }
+
+  /**
+   * Keep the carried clod in step with the load.
+   *
+   * The load's `source` cell is its identity: the shape is a pure function of
+   * where the soil came from, so the clod picked up is exactly the clod put
+   * down, and the same cell dug again yields the same lump.
+   */
+  private syncClod(dt: number): void {
+    if (this.clodFlight) {
+      this.advanceClodFlight(dt);
+      return;
+    }
+
+    const load = this.session.topLoad;
+    if (!load || !load.source) {
+      this.clodMesh.visible = false;
+      this.clodStyle = null;
+      return;
+    }
+
+    const style = styleForVoxel(load.source.x, load.source.y, load.source.z, load.material);
+    if (!this.clodStyle || this.clodStyle.seed !== style.seed) {
+      this.clodStyle = style;
+      this.clodMesh.geometry = this.clodGeometry(style.material, style.variant);
+      const base = materialOf(style.material).color;
+      this.clodMaterial.color.setRGB(
+        base[0] * style.tint, base[1] * style.tint, base[2] * style.tint,
+      );
+      this.clodMesh.scale.set(
+        CLOD_SIZE * style.axisScale[0],
+        CLOD_SIZE * style.axisScale[1],
+        CLOD_SIZE * style.axisScale[2],
+      );
+      this.clodMesh.rotation.set(style.spin[0], style.spin[1], style.spin[2]);
+    }
+    this.clodMesh.visible = true;
+    this.clodMesh.position.copy(this.mandiblePoint());
+  }
+
+  /**
+   * Where the clod rides: just below and ahead of the eye, in the CAMERA's
+   * frame, so it follows the head naturally and stays put on walls and
+   * ceilings without any special-casing per orientation.
+   */
+  private mandiblePoint(): THREE.Vector3 {
+    this.clodAnchor.set(0, -CLOD_DROP, -CLOD_AHEAD).applyQuaternion(this.camera.quaternion);
+    return this.clodAnchor.add(this.camera.position);
+  }
+
+  /**
+   * Throw the clod to the cell it is about to become.
+   *
+   * A short arc rather than an instant swap, so the player sees an irregular
+   * lump being set down instead of a cube blinking into existence. The voxel
+   * itself is deposited when the flight lands, so soil is in exactly one place
+   * at every instant.
+   */
+  private beginClodFlight(to: THREE.Vector3): void {
+    this.clodFlight = { from: this.mandiblePoint().clone(), to: to.clone(), t: 0 };
+  }
+
+  private advanceClodFlight(dt: number): void {
+    const flight = this.clodFlight;
+    if (!flight) return;
+    flight.t = Math.min(1, flight.t + dt / CLOD_FLIGHT);
+    const k = flight.t;
+    this.clodMesh.visible = true;
+    this.clodMesh.position.lerpVectors(flight.from, flight.to, k);
+    // A small hop over the middle of the throw, so it reads as tossed rather
+    // than slid along an invisible rail.
+    this.clodMesh.position.y += Math.sin(k * Math.PI) * 0.18;
+    this.clodMesh.rotation.x += dt * 5;
+    if (flight.t >= 1) {
+      this.clodFlight = null;
+      this.clodMesh.visible = false;
+      this.clodStyle = null;
+    }
+  }
+
+  /* ------------------------------------------------------------ loose soil */
+
+  /** The batch for one (material, variant), created on first sight of it. */
+  private soilBatch(material: VoxelId, variant: number): THREE.InstancedMesh {
+    const key = `${material}:${variant}`;
+    const found = this.soilBatches.get(key);
+    if (found) return found;
+    const batch = new THREE.InstancedMesh(
+      this.clodGeometry(material, variant), this.soilMaterial, SOIL_BATCH_CAPACITY,
+    );
+    batch.frustumCulled = false;
+    batch.count = 0;
+    batch.instanceColor = new THREE.InstancedBufferAttribute(
+      new Float32Array(SOIL_BATCH_CAPACITY * 3), 3,
+    );
+    this.scene.add(batch);
+    this.soilBatches.set(key, batch);
+    return batch;
+  }
+
+  /**
+   * Simulate and draw the spoil heap.
+   *
+   * Resting clods are asleep and cost nothing to simulate, so a nest full of
+   * dirt stays affordable; only what is actually moving integrates. Drawing is
+   * one pass that refills the instance matrices, which is cheap because there
+   * are at most a couple of hundred of them and no allocation happens here.
+   */
+  private updateLooseSoil(dt: number): void {
+    this.soil.step(this.world, dt, GRAVITY);
+
+    /*
+     * Walking into spoil shoves it aside — the ant needs no special code, she
+     * simply displaces what she runs into.
+     *
+     * This runs at ANY speed, not just while moving. Gating it on movement left
+     * a clod she had just set down free to sit inside her, and standing still
+     * is exactly when you would expect a lump against your legs to be nudged
+     * clear. Strength still scales with how fast she is going, so a stationary
+     * ant separates from a clod rather than kicking it away.
+     */
+    const motion = this.lastStep;
+    const shove = CLOD_PUSH * dt * (0.5 + Math.min(1, this.planarSpeed / DEFAULT_BANDS.walk));
+    const pushed = this.soil.displace(
+      { x: this.position.x, y: this.position.y + EYE_HEIGHT * 0.5, z: this.position.z },
+      BODY_RADIUS,
+      { x: motion.x, y: 0, z: motion.z },
+      shove,
+    );
+    if (pushed.length > 0 && this.planarSpeed > 1) {
+      this.digAudio?.('DIG_CHIP_SMALL', this.position.clone());
+    }
+
+    for (const batch of this.soilBatches.values()) batch.count = 0;
+    for (const clod of this.soil.clods) {
+      const style = styleForVoxel(clod.source.x, clod.source.y, clod.source.z, clod.material);
+      const batch = this.soilBatch(clod.material, style.variant);
+      if (batch.count >= SOIL_BATCH_CAPACITY) continue;
+      const slot = batch.count;
+      this.soilDummy.position.set(clod.position.x, clod.position.y, clod.position.z);
+      this.soilDummy.rotation.set(style.spin[0], style.spin[1], style.spin[2]);
+      this.soilDummy.scale.set(
+        CLOD_SIZE * style.axisScale[0],
+        CLOD_SIZE * style.axisScale[1],
+        CLOD_SIZE * style.axisScale[2],
+      );
+      this.soilDummy.updateMatrix();
+      batch.setMatrixAt(slot, this.soilDummy.matrix);
+      const base = materialOf(clod.material).color;
+      this.soilColor.setRGB(base[0] * style.tint, base[1] * style.tint, base[2] * style.tint);
+      batch.setColorAt(slot, this.soilColor);
+      batch.count = slot + 1;
+    }
+    for (const batch of this.soilBatches.values()) {
+      batch.instanceMatrix.needsUpdate = true;
+      if (batch.instanceColor) batch.instanceColor.needsUpdate = true;
+    }
+  }
+
   /* ---------------------------------------------------------- particles */
 
   /**
@@ -894,14 +1152,39 @@ export class DigScene {
   private dropCarried(): void {
     if (this.session.carried === 0) return;
 
-    const hit = this.currentTarget();
-    if (hit && this.canDropAt(hit.x + hit.nx, hit.y + hit.ny, hit.z + hit.nz)) {
-      this.session.place(hit.x + hit.nx, hit.y + hit.ny, hit.z + hit.nz);
+    // Release it as a LOOSE clod rather than depositing a voxel. It lands, it
+    // stays put, and from then on it can be shoved, knocked down a tunnel, or
+    // picked up again — none of which terrain could be.
+    const unit = this.session.release();
+    if (!unit || !unit.source) return;
+    const { forward } = this.surfaceBasis();
+    // Start it clear of her own body. Dropping at the mandibles put the clod
+    // inside the camera, because she is 0.7 voxels tall and the lump is 0.6 —
+    // an ant sets a grain down in front of herself, not on her own feet.
+    const at = this.mandiblePoint().addScaledVector(forward, BODY_RADIUS + CLOD_RADIUS + 0.15);
+    const dropped = this.soil.drop(
+      { x: at.x, y: at.y, z: at.z },
+      unit.material,
+      unit.source,
+      // A gentle toss forward, so it clears her own feet instead of landing on
+      // them. The old self-overlap guard is gone: a clod at your feet rolls.
+      { x: forward.x * 1.4, y: 0.6, z: forward.z * 1.4 },
+    );
+    if (!dropped) {
+      // Heap full — put it straight back rather than destroying soil.
+      this.session.load.push(unit);
       return;
     }
+    this.clodStyle = null;
+    this.digAudio?.('DIG_RELEASE', at.clone());
+  }
 
-    const cell = this.fallbackDropCell();
-    if (cell) this.session.place(cell.x, cell.y, cell.z);
+  /** Pick a loose clod back up, if a hand is free. */
+  private takeClod(clod: Clod): boolean {
+    if (this.session.isFull) return false;
+    if (!this.soil.remove(clod)) return false;
+    this.session.load.push({ material: clod.material, count: 1, source: { ...clod.source } });
+    return true;
   }
 
   /**
@@ -950,6 +1233,21 @@ export class DigScene {
   private startDig(x: number, y: number, z: number): void {
     if (!this.withinReach(x, y, z)) return;
     this.session.toggleDig(x, y, z);
+  }
+
+  /**
+   * A tap on nearby spoil picks it up instead of digging.
+   *
+   * Checked before the voxel target, because a clod sitting against a wall is
+   * in front of that wall — the thing you meant was the loose lump. Reach is
+   * the same rule as digging: what she can touch.
+   */
+  private tryTakeNearbyClod(): boolean {
+    if (this.session.isFull) return false;
+    const eye = this.camera.position;
+    const clod = this.soil.nearest({ x: eye.x, y: eye.y, z: eye.z }, REACH);
+    if (!clod) return false;
+    return this.takeClod(clod);
   }
 
   private showStick(visible: boolean): void {
@@ -1455,6 +1753,7 @@ export class DigScene {
 
     this.planarSpeed = approach(this.planarSpeed, targetSpeed, WALK_ACCEL, WALK_DECEL, dt);
     const step = wish.clone().multiplyScalar(this.planarSpeed * dt);
+    this.lastStep.copy(wish);
     const pressing = targetSpeed > 0.01;
 
     if (this.jumpQueued) this.jump();
@@ -1693,6 +1992,7 @@ export class DigScene {
       .unproject(this.camera)
       .sub(this.camera.position)
       .normalize();
+    if (this.tryTakeNearbyClod()) return;
     const hit = this.targetAlong(dir);
     if (hit) this.startDig(hit.x, hit.y, hit.z);
   }
@@ -1708,6 +2008,7 @@ export class DigScene {
     }
     this.syncChip();
     this.updateChip(dt);
+    this.syncClod(dt);
 
     // The highlight shows the locked cube while working, and whatever the
     // crosshair is on otherwise.
@@ -1849,7 +2150,7 @@ export class DigScene {
     readout.innerHTML = `
       <b>Depth</b> ${status.depth > 0 ? `${status.depthMm} mm` : 'surface'} &nbsp;
       <b>Carrying</b> ${this.session.carried}/${this.session.capacity} &nbsp;
-      <b>Mound</b> ${this.world.deposited} &nbsp;
+      <b>Loose</b> ${this.soil.count} &nbsp;
       <b>Dug</b> ${this.world.excavated}<br>
       <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 ` : ''}${this.weightless ? '\u{1FAB5} weightless \u00b7 ' : this.surface.mode === 'attached' ? '\u{1F9D7} gripping \u00b7 ' : ''}Target: ${targetName}${bar}${chamber}${skill}${chipping} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
     `;
@@ -1887,6 +2188,7 @@ export class DigScene {
     // Dirt keeps falling through the founding cutscene, so this runs in both
     // views. It is a no-op with nothing alive.
     this.updateDigParticles(dt);
+    if (!this.colonyView) this.updateLooseSoil(dt);
     this.drainDirty();
     if (++this.hudCounter % 6 === 0) {
       this.updateHud();

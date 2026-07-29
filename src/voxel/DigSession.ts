@@ -46,6 +46,15 @@ export interface DigTarget {
 export interface CarryLoad {
   material: VoxelId;
   count: number;
+  /**
+   * The cell this soil came out of.
+   *
+   * Carried purely so the visual can stay the same lump from excavation through
+   * to being put down — the clod's shape is a pure function of its origin, so
+   * this is the whole identity. It has no effect on quantity: a load is still
+   * `count` voxels of `material` and conservation never consults it.
+   */
+  source?: { x: number; y: number; z: number };
 }
 
 export type DigOutcome =
@@ -184,7 +193,7 @@ export class DigSession {
     // Practice counts only completed cubes. Crediting it on beginDig instead
     // would make tap-cancel-tap-cancel a way to reach top speed in seconds.
     this.digsCompleted++;
-    this.pickUp(removed);
+    this.pickUp(removed, { x, y, z });
     return { kind: 'dug', material: removed };
   }
 
@@ -197,6 +206,32 @@ export class DigSession {
     return null;
   }
 
+  /** The load the ant is about to put down, for the visual to follow. */
+  get topLoad(): CarryLoad | null {
+    return this.load[this.load.length - 1] ?? null;
+  }
+
+  /**
+   * Hand one unit of soil out of the load WITHOUT putting it in the world.
+   *
+   * This is how dropping works now: the scene turns the returned unit into a
+   * loose clod, which is a real object that can be shoved, knocked into a
+   * tunnel and picked up again — none of which a deposited voxel could ever be.
+   * Conservation is unchanged and still exact, because the unit is simply in a
+   * third place: `excavated === carried + loose + deposited`.
+   *
+   * `place()` is kept for the terrain path (and the day a deliberate "pack the
+   * soil down" action arrives), but the player's DROP no longer uses it.
+   */
+  release(): CarryLoad | null {
+    const top = this.load[this.load.length - 1];
+    if (!top) return null;
+    const unit: CarryLoad = { material: top.material, count: 1, source: top.source };
+    top.count--;
+    if (top.count <= 0) this.load.pop();
+    return unit;
+  }
+
   /** Drop one voxel of spoil into an empty cell. Newest material goes first. */
   place(x: number, y: number, z: number): PlaceOutcome {
     const top = this.load[this.load.length - 1];
@@ -207,12 +242,12 @@ export class DigSession {
     return { kind: 'placed', material: top.material };
   }
 
-  private pickUp(material: VoxelId): void {
+  private pickUp(material: VoxelId, source?: { x: number; y: number; z: number }): void {
     const top = this.load[this.load.length - 1];
     if (top && top.material === material) {
       top.count++;
       return;
     }
-    this.load.push({ material, count: 1 });
+    this.load.push({ material, count: 1, source });
   }
 }

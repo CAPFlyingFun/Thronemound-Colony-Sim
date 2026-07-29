@@ -4,6 +4,8 @@ import {
   isSolid, layeredGenerator, materialOf,
 } from '../src/voxel/VoxelWorld';
 import { FACES, meshChunk } from '../src/voxel/mesher';
+import { MAX_LOOSE_CLODS, LooseSoil } from '../src/voxel/LooseSoil';
+import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, styleForVoxel } from '../src/voxel/clod';
 import { CELL_COUNT, CHIP_CELLS, MAX_REMOVED, buildFracture, chipMeshData, erosionAt, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
@@ -1043,5 +1045,162 @@ describe('fracture', () => {
     expect(session.carried).toBe(1);
     session.place(20, SURFACE + 2, 20);
     expect(world.excavated).toBe(world.deposited);
+  });
+});
+
+describe('loose soil', () => {
+  const S = SURFACE;
+
+  it('gives the same voxel the same clod every time', () => {
+    const a = styleForVoxel(4, S, 9, TOPSOIL);
+    const b = styleForVoxel(4, S, 9, TOPSOIL);
+    expect(a.variant).toBe(b.variant);
+    expect(a.axisScale).toEqual(b.axisScale);
+    expect(a.variant).toBeGreaterThanOrEqual(0);
+    expect(a.variant).toBeLessThan(SOIL_CLOD_VARIANT_COUNT);
+  });
+
+  it('gives different cells different clods', () => {
+    const variants = new Set<number>();
+    for (let i = 0; i < 40; i++) variants.add(styleForVoxel(i, S, i * 3, TOPSOIL).variant);
+    expect(variants.size).toBeGreaterThan(5);
+  });
+
+  it('keeps every clod the same quantity of soil', () => {
+    // Proportions vary, volume must not: a clod that looked half the size of
+    // its neighbour would be a lie about how much dirt is in it.
+    for (let i = 0; i < 50; i++) {
+      const [sx, sy, sz] = styleForVoxel(i, S, i, TOPSOIL).axisScale;
+      expect(sx * sy * sz).toBeCloseTo(1, 6);
+      expect(sx).toBeGreaterThanOrEqual(MIN_CLOD_AXIS_SCALE - 1e-9);
+      expect(sx).toBeLessThanOrEqual(MAX_CLOD_AXIS_SCALE + 1e-9);
+    }
+  });
+
+  it('builds clods that are lumpy but not spiky', () => {
+    for (let variant = 0; variant < SOIL_CLOD_VARIANT_COUNT; variant++) {
+      const shape = buildClodShape(variant);
+      const radii: number[] = [];
+      for (let i = 0; i < shape.positions.length; i += 3) {
+        radii.push(Math.hypot(shape.positions[i]!, shape.positions[i + 1]!, shape.positions[i + 2]!));
+      }
+      const min = Math.min(...radii);
+      const max = Math.max(...radii);
+      // Irregular enough to read as broken soil...
+      expect(max - min).toBeGreaterThan(0.02);
+      // ...but never a spike. A ratio above ~2 is a starfish, not a clod.
+      expect(max / min).toBeLessThan(2);
+      expect(radii.every((r) => Number.isFinite(r))).toBe(true);
+    }
+  });
+
+  it('keeps variants roughly equal in volume', () => {
+    const means = Array.from({ length: SOIL_CLOD_VARIANT_COUNT }, (_, v) => {
+      const shape = buildClodShape(v);
+      let total = 0;
+      let n = 0;
+      for (let i = 0; i < shape.positions.length; i += 3) {
+        total += Math.hypot(shape.positions[i]!, shape.positions[i + 1]!, shape.positions[i + 2]!);
+        n++;
+      }
+      return total / n;
+    });
+    expect(Math.max(...means) / Math.min(...means)).toBeLessThan(1.12);
+  });
+
+  it('conserves soil across dig, drop and pick up again', () => {
+    const world = makeWorld();
+    const session = new DigSession(world);
+    const soil = new LooseSoil();
+
+    session.beginDig(20, S, 20);
+    session.tickDig(999);
+    expect(world.excavated).toBe(1);
+
+    const unit = session.release()!;
+    expect(unit.source).toEqual({ x: 20, y: S, z: 20 });
+    soil.drop({ x: 20.5, y: S + 2, z: 20.5 }, unit.material, unit.source!);
+    // The unit is in exactly one place at a time.
+    expect(session.carried).toBe(0);
+    expect(soil.count).toBe(1);
+    expect(world.excavated).toBe(session.carried + soil.count + world.deposited);
+
+    // Picking it back up returns the SAME soil, with the same identity.
+    const clod = soil.clods[0]!;
+    soil.remove(clod);
+    session.load.push({ material: clod.material, count: 1, source: clod.source });
+    expect(session.carried).toBe(1);
+    expect(soil.count).toBe(0);
+    expect(styleForVoxel(clod.source.x, clod.source.y, clod.source.z, clod.material).variant)
+      .toBe(styleForVoxel(20, S, 20, TOPSOIL).variant);
+  });
+
+  it('drops a clod onto the ground and lets it fall asleep there', () => {
+    const world = makeWorld();
+    const soil = new LooseSoil();
+    soil.drop({ x: 20.5, y: S + 4, z: 20.5 }, TOPSOIL, { x: 20, y: S, z: 20 });
+    for (let i = 0; i < 400; i++) soil.step(world, 1 / 60, 12);
+    const clod = soil.clods[0]!;
+    // Landed on the surface rather than sinking through it or hovering.
+    expect(clod.position.y).toBeGreaterThan(S);
+    expect(clod.position.y).toBeLessThan(S + 2.5);
+    // And resting clods stop costing anything.
+    expect(clod.asleep).toBe(true);
+    expect(soil.awake).toBe(0);
+  });
+
+  it('can be shoved, and wakes up when it is', () => {
+    const world = makeWorld();
+    const soil = new LooseSoil();
+    soil.drop({ x: 20.5, y: S + 1.4, z: 20.5 }, TOPSOIL, { x: 20, y: S, z: 20 });
+    for (let i = 0; i < 400; i++) soil.step(world, 1 / 60, 12);
+    const clod = soil.clods[0]!;
+    expect(clod.asleep).toBe(true);
+    const before = clod.position.z;
+
+    // Walking into it from -Z should send it along +Z.
+    const pushed = soil.displace(
+      { x: 20.5, y: clod.position.y, z: clod.position.z - 0.5 }, 0.3, { x: 0, y: 0, z: 1 }, 3,
+    );
+    expect(pushed).toContain(clod);
+    expect(clod.asleep).toBe(false);
+    for (let i = 0; i < 60; i++) soil.step(world, 1 / 60, 12);
+    expect(clod.position.z).toBeGreaterThan(before);
+  });
+
+  it('refuses to drop past the cap rather than destroying soil', () => {
+    const soil = new LooseSoil();
+    for (let i = 0; i < MAX_LOOSE_CLODS; i++) {
+      expect(soil.drop({ x: 0, y: 0, z: 0 }, TOPSOIL, { x: i, y: 0, z: 0 })).not.toBeNull();
+    }
+    expect(soil.drop({ x: 0, y: 0, z: 0 }, TOPSOIL, { x: 999, y: 0, z: 0 })).toBeNull();
+    expect(soil.count).toBe(MAX_LOOSE_CLODS);
+  });
+
+  it('survives a save round trip with the same shapes', () => {
+    const soil = new LooseSoil();
+    soil.drop({ x: 3.5, y: 9.5, z: 4.5 }, CLAY, { x: 3, y: 9, z: 4 });
+    const restored = LooseSoil.fromJSON(soil.toJSON());
+    expect(restored.count).toBe(1);
+    const a = soil.clods[0]!;
+    const b = restored.clods[0]!;
+    expect(b.source).toEqual(a.source);
+    expect(styleForVoxel(b.source.x, b.source.y, b.source.z, b.material).variant)
+      .toBe(styleForVoxel(a.source.x, a.source.y, a.source.z, a.material).variant);
+    // Reloaded spoil is already where it settled.
+    expect(b.asleep).toBe(true);
+  });
+
+  it('leaves the terrain grid cube-based', () => {
+    // The whole point of the change: only EXCAVATED soil stops being a cube.
+    const world = makeWorld();
+    const session = new DigSession(world);
+    session.beginDig(20, S, 20);
+    session.tickDig(999);
+    session.release();
+    // Nothing was deposited, and the world is still a plain voxel grid.
+    expect(world.deposited).toBe(0);
+    expect(world.get(20, S, 20)).toBe(AIR);
+    expect(world.get(21, S, 20)).toBe(TOPSOIL);
   });
 });

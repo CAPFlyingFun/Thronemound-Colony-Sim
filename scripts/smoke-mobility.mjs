@@ -85,7 +85,7 @@ const ok = (m) => console.log(`  ok  ${m}`);
       carrying: Number(/Carrying (\d+)/.exec(t)?.[1] ?? '0'),
       capacity: Number(/Carrying \d+\/(\d+)/.exec(t)?.[1] ?? '0'),
       dug: Number(/Dug (\d+)/.exec(t)?.[1] ?? '0'),
-      mound: Number(/Mound (\d+)/.exec(t)?.[1] ?? '0'),
+      loose: Number(/Loose (\d+)/.exec(t)?.[1] ?? '0'),
       target: /Target: ([^ ·]+)/.exec(t)?.[1] ?? '',
       seconds: Number(/([\d.]+)s\/cube/.exec(t)?.[1] ?? '0'),
       y: Number((/pos [-\d.]+,([-\d.]+),/.exec(t) ?? [])[1] ?? 'NaN'),
@@ -191,11 +191,11 @@ const ok = (m) => console.log(`  ok  ${m}`);
   // narrow window one-cube reach leaves on flat ground.
   await until('the ant to stop walking', (s) => s.speed < 0.2, 40000);
   await page.click('.dig-drop');
-  const dropped = await until('the load to reach the mound', (s) => s.mound >= 1, 25000);
-  if (dropped.carrying !== 0 || dropped.mound !== 1) fail(`dropping failed: ${JSON.stringify(dropped)}`);
+  const dropped = await until('the load to become loose spoil', (s) => s.loose >= 1, 25000);
+  if (dropped.carrying !== 0 || dropped.loose !== 1) fail(`dropping failed: ${JSON.stringify(dropped)}`);
   else ok('dropping the load frees the ant to dig again');
-  if (dropped.dug !== dropped.carrying + dropped.mound) fail('soil not conserved');
-  else ok(`soil conserved: dug ${dropped.dug} = carried ${dropped.carrying} + mound ${dropped.mound}`);
+  if (dropped.dug !== dropped.carrying + dropped.loose) fail('soil not conserved');
+  else ok(`soil conserved: dug ${dropped.dug} = carried ${dropped.carrying} + loose ${dropped.loose}`);
 
   // Practice: one completed dig, one step faster. Cancels must not count.
   if (Math.abs(dropped.seconds - 4.8) > 0.01) fail(`expected 4.8s/cube after one dig, got ${dropped.seconds}`);
