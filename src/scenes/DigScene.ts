@@ -22,7 +22,8 @@ import { DEN_MIN_CHAMBER, DEN_MIN_DEPTH, QueenFounding } from '../voxel/QueenFou
 import { DEFAULT_BANDS, approach, clampStickOrigin, speedForStick, stickVector } from '../voxel/locomotion';
 import {
   WORLD_UP, applyOrientation, attachableWall, axisVector, createSurfaceState,
-  evaluateEdge, supportBelow, tickLock, type AxisDirection,
+  INPUT_COMMIT_THRESHOLD, axisFromVector, canChangeOrientation,
+  evaluateEdge, rankSurfaces, supportBelow, tickLock, type AxisDirection,
 } from '../voxel/SurfaceFrame';
 
 const WORLD_SIZE = 128;
@@ -89,14 +90,29 @@ const CAMERA_TURN_RATE = 13;
 /** How far the eye swings out while rounding an edge, in voxels. */
 const EDGE_ARC = 0.55;
 /**
- * Ceilings are locked for now. The maths handles all six directions, but
- * inverted movement, input expectations and release behaviour all need their
- * own pass — walls should feel excellent first.
+ * Below this the ant is inside the ground column and weightless. Above it —
+ * the surface, and anything piled on top of it — gravity behaves normally, so
+ * the world above still feels like somewhere you can fall off.
+ *
+ * Deliberately as shallow as this: holding position the moment you break the
+ * surface is correct, because you are gripping the walls of the hole you are
+ * standing in.
  */
-const CEILING_UP: AxisDirection = 'neg_y';
+const UNDERGROUND_Y = SURFACE_Y + 0.9;
+/** Constant descent when nothing is underfoot below ground. 1 cm/s. */
+const SETTLE_SPEED = 2;
 /** Shown in the HUD so it's obvious at a glance whether a build is current. */
 const BUILD_LABEL = `v${__APP_VERSION__} \u00b7 ${__BUILD_TIME__}`;
-const REACH = 5.5;
+/**
+ * An ant works the soil it is TOUCHING. A 5.5 voxel reach let you carve a
+ * corridor five cubes deep without moving, which is both unrealistic and made
+ * tunnels appear from nowhere. The ray is short, and REACH_CUBES additionally
+ * clamps targets to the 3x3x3 shell around the ant's own cube — a hard limit
+ * that a radius alone can't express, since a diagonal at 1.7 is further away
+ * than a face at 1.9 yet much closer in cubes.
+ */
+const REACH = 2.2;
+const REACH_CUBES = 1;
 
 type Mode = 'dig' | 'place';
 
@@ -124,6 +140,7 @@ export class DigScene {
   /** 1 -> 0 while an edge turn plays out. */
   private cameraTurn = 0;
   private toastCooldown = 0;
+  private weightless = false;
   private yaw = 0;
   private pitch = 0;
   private grounded = false;
@@ -185,7 +202,9 @@ export class DigScene {
     this.scene.fog = new THREE.Fog(0x9fb98a, 40, 150);
 
     this.world = new VoxelWorld(WORLD_SIZE, WORLD_SIZE, WORLD_SIZE, layeredGenerator(SURFACE_Y));
-    this.session = new DigSession(this.world, { capacity: 12 });
+    // One cube at a time. An ant carries a grain, not a wheelbarrow — and it
+    // makes the mound something you actually build rather than dump.
+    this.session = new DigSession(this.world, { capacity: 1 });
 
     this.materialBundle = createVoxelMaterial();
     this.material = this.materialBundle.material;
@@ -826,7 +845,7 @@ export class DigScene {
     const step = wish.clone().multiplyScalar(this.planarSpeed * dt);
     const pressing = targetSpeed > 0.01;
 
-    if (this.jumpQueued && this.grounded) {
+    if (this.jumpQueued && this.grounded && !this.weightless) {
       this.upVelocity = JUMP_SPEED;
       this.grounded = false;
     }
@@ -844,19 +863,43 @@ export class DigScene {
     const wallAhead = pressing && blocked;
 
     /*
-     * Gravity always pulls along -up, and that single line is what makes wall
-     * walking work: attached, `up` is the wall's normal, so gravity presses the
-     * ant INTO the wall instead of down it. It grips rather than slides.
+     * Underground the ant is weightless.
      *
-     * The old push-into-a-wall auto-climb has been removed. It was a stopgap
-     * from before surface walking existed, it engaged silently when you only
-     * meant to walk into something, and it was measurably unreliable — it
-     * lifted an ant 1-2 voxels out of a 5-voxel shaft and sometimes zero, while
-     * GRIP climbs the same shaft smoothly and monotonically. Two mechanics for
-     * one job, one of which half-works, is worse than one that works.
+     * An ant in a tunnel is never really falling — it is inside a tube, in
+     * contact with something at every moment. Removing gravity below the
+     * surface deletes the whole "trapped at the bottom of a shaft" problem
+     * class outright rather than mitigating it, and it is closer to how ants
+     * actually move than any amount of floaty gravity tuning.
+     *
+     * The touching test is the safety valve: dig the floor out from under
+     * yourself with nothing else in reach and gravity comes back, so you settle
+     * onto something instead of hanging in a void forever.
+     *
+     * Above ground, gravity still pulls along -up as before — which is also
+     * what makes gripping work, since attached `up` is the wall's normal and
+     * gravity then presses the ant INTO the wall rather than down it.
      */
-    this.upVelocity -= GRAVITY * dt;
-    this.upVelocity = Math.max(this.upVelocity, TERMINAL_VELOCITY);
+    const touching = rankSurfaces(this.world, this.position, this.surface, wish).length > 0;
+    this.weightless = this.position.y < UNDERGROUND_Y && touching;
+    if (this.weightless) {
+      /*
+       * Weightless does not mean motionless. Zeroing velocity outright meant
+       * the ant hovered over the hole it had just dug beneath itself, so
+       * digging downward stopped lowering you at all.
+       *
+       * Instead: supported -> hold still; unsupported -> settle at a constant
+       * slow rate until something is underfoot. Constant, so it is a controlled
+       * descent rather than a fall — no acceleration means no speed to build
+       * up, and therefore still no way to get trapped at the bottom of
+       * anything.
+       */
+      const supported = supportBelow(this.world, this.position, this.surface.up) !== null;
+      this.upVelocity = supported ? 0 : -SETTLE_SPEED;
+      this.grounded = supported;
+    } else {
+      this.upVelocity -= GRAVITY * dt;
+      this.upVelocity = Math.max(this.upVelocity, TERMINAL_VELOCITY);
+    }
     if (!wallAhead) this.hasWall = false;
 
     this.grounded = false;
@@ -865,9 +908,35 @@ export class DigScene {
     // Crossing onto an adjacent face. Proximity alone never commits — movement
     // has to point across the edge too, which is what lets you stand still low
     // on a wall without being yanked onto the floor.
-    if (this.surface.mode === 'attached' || this.surface.up !== WORLD_UP) {
+    /*
+     * Underground, walking INTO a wall mounts it — the concave case.
+     *
+     * evaluateEdge only fires when support runs out, which handles crawling
+     * over a lip but never happens while standing on a shaft floor. Without
+     * this, "walk up the wall" simply did nothing in the one place it matters
+     * most. It is gated on committed movement and on the hysteresis lock, so
+     * brushing a wall while positioning to dig can't flip you, and a corner
+     * can't ping-pong between two faces.
+     */
+    if (this.weightless && wallAhead && this.hasWall
+      && magnitude >= INPUT_COMMIT_THRESHOLD && canChangeOrientation(this.surface)) {
+      const mount = axisFromVector(this.wallNormal);
+      if (mount !== this.surface.up) {
+        const mountSupport = supportBelow(this.world, this.position, mount);
+        const contact = mountSupport ? this.surfaceContact(mount, mountSupport) : null;
+        if (contact) {
+          this.position.copy(contact);
+          applyOrientation(this.surface, mount, mountSupport);
+          this.upVelocity = 0;
+          this.beginCameraTurn();
+        }
+      }
+    }
+
+    // Walking across an edge makes the new face your floor — the convex case.
+    if (this.weightless || this.surface.mode === 'attached' || this.surface.up !== WORLD_UP) {
       const decision = evaluateEdge(this.world, this.position, this.surface, wish, magnitude);
-      if (decision.commit && decision.up && decision.up !== CEILING_UP) {
+      if (decision.commit && decision.up) {
         const nextSupport = supportBelow(this.world, this.position, decision.up);
         const contact = nextSupport ? this.surfaceContact(decision.up, nextSupport) : null;
         if (contact) {
@@ -927,12 +996,20 @@ export class DigScene {
 
   private currentTarget() {
     const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
-    return raycastVoxel(
+    const hit = raycastVoxel(
       this.world,
       this.camera.position.x, this.camera.position.y, this.camera.position.z,
       dir.x, dir.y, dir.z,
       REACH,
     );
+    if (!hit) return null;
+    // Chebyshev distance from the cube the eye is in: only the shell of cubes
+    // immediately around the ant is workable.
+    const ex = Math.floor(this.camera.position.x);
+    const ey = Math.floor(this.camera.position.y);
+    const ez = Math.floor(this.camera.position.z);
+    const cubes = Math.max(Math.abs(hit.x - ex), Math.abs(hit.y - ey), Math.abs(hit.z - ez));
+    return cubes <= REACH_CUBES ? hit : null;
   }
 
   private updateAction(dt: number): void {
@@ -1084,7 +1161,7 @@ export class DigScene {
       <b>Carrying</b> ${this.session.carried}/${this.session.capacity} &nbsp;
       <b>Mound</b> ${this.world.deposited} &nbsp;
       <b>Dug</b> ${this.world.excavated}<br>
-      <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 ` : ''}${this.surface.mode === 'attached' ? '\u{1F9D7} gripping \u00b7 ' : ''}Target: ${targetName}${bar}${chamber} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
+      <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 ` : ''}${this.weightless ? '\u{1FAB5} weightless \u00b7 ' : this.surface.mode === 'attached' ? '\u{1F9D7} gripping \u00b7 ' : ''}Target: ${targetName}${bar}${chamber} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
     `;
   }
 

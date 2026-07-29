@@ -66,66 +66,81 @@ const ok = (m) => console.log(`  ok  ${m}`);
   await page.close();
 }
 
-// ------------------------------------------------------ escaping the hole
-// The reported bug exactly: dig straight down, fall in, and be unable to get
-// out. So reproduce it literally rather than using the pre-carved den, whose
-// chamber is wider than its shaft and therefore tests something else.
+// --------------------------------------------------- one cube at a time
+// Capacity is 1: an ant carries a grain, not a wheelbarrow. That makes the
+// mound something you build rather than dump, and it means you cannot sink
+// yourself into a shaft in one go any more.
 {
   const page = await browser.newPage({ viewport: { width: 900, height: 1400 }, deviceScaleFactor: 1 });
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
-  // debug=1 so the readout exposes `up`; the geometry is the plain surface.
   await page.goto(`${BASE}?scene=dig&debug=1`, { waitUntil: 'networkidle' });
   await page.waitForSelector('canvas');
-  await page.waitForTimeout(2200);
+  await page.waitForTimeout(2400);
 
-  const depth = async () => {
+  const hud = async () => {
     const t = (await page.textContent('#dig-readout'))?.replace(/\s+/g, ' ') ?? '';
-    return Number(/Depth (\d+) mm/.exec(t)?.[1] ?? '0');
+    return {
+      carrying: Number(/Carrying (\d+)/.exec(t)?.[1] ?? '0'),
+      capacity: Number(/Carrying \d+\/(\d+)/.exec(t)?.[1] ?? '0'),
+      dug: Number(/Dug (\d+)/.exec(t)?.[1] ?? '0'),
+      mound: Number(/Mound (\d+)/.exec(t)?.[1] ?? '0'),
+      target: /Target: ([^ ·]+)/.exec(t)?.[1] ?? '',
+    };
   };
-  const climbing = async () =>
-    ((await page.textContent('#dig-readout')) ?? '').includes('climbing');
-
-  // Look straight down and dig a shaft under our own feet.
-  await page.evaluate(() => {
-    const canvas = document.querySelector('canvas');
-    const send = (type, y) => canvas.dispatchEvent(new PointerEvent(type, {
-      pointerId: 4, pointerType: 'touch', isPrimary: true, bubbles: true, clientX: 700, clientY: y,
+  const look = (from, to) => page.evaluate(([a, z]) => {
+    const c = document.querySelector('canvas');
+    const ev = (t, y) => c.dispatchEvent(new PointerEvent(t, {
+      pointerId: 8, pointerType: 'touch', isPrimary: true, bubbles: true, clientX: 700, clientY: y,
     }));
-    send('pointerdown', 700);
-    for (let i = 1; i <= 12; i++) send('pointermove', 700 + i * 40);
-    send('pointerup', 1180);
-  });
+    ev('pointerdown', a);
+    for (let i = 1; i <= 10; i++) ev('pointermove', a + ((z - a) * i) / 10);
+    ev('pointerup', z);
+  }, [from, to]);
+
+  if ((await hud()).capacity !== 1) fail(`capacity should be 1, got ${(await hud()).capacity}`);
+  else ok('carries one cube at a time');
+
+  // Reach: distant soil must be unreachable, the cube underfoot must not be.
+  if ((await hud()).target !== '—') fail(`flat ahead should be out of reach, got "${(await hud()).target}"`);
+  else ok('soil beyond the neighbouring cubes is out of reach');
+  await look(700, 1180);
   await page.waitForTimeout(400);
+  if ((await hud()).target === '—') fail('the cube underfoot should be workable');
+  else ok(`the cube underfoot is workable (${(await hud()).target})`);
 
   const action = await page.$('.dig-action');
   const box = await action.boundingBox();
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  await page.mouse.down();
-  await page.waitForTimeout(9000); // sink several voxels
-  await page.mouse.up();
-  await page.waitForTimeout(800);
+  const hold = async (ms) => {
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.waitForTimeout(ms);
+    await page.mouse.up();
+    await page.waitForTimeout(600);
+  };
 
-  const trapped = await depth();
-  if (trapped < 15) fail(`expected to have sunk into a shaft, only ${trapped} mm down`);
-  else ok(`dug a shaft and fell in: ${trapped} mm down`);
-  await page.screenshot({ path: `${OUT}-2-in-hole.png` });
+  await hold(3000);
+  const first = await hud();
+  if (first.dug !== 1 || first.carrying !== 1) fail(`expected exactly one cube dug, got ${JSON.stringify(first)}`);
+  else ok('digs exactly one cube, then stops because it is full');
 
-  // Escape by GRIPPING the wall and walking up it. (The old push-into-a-wall
-  // auto-climb was removed: it lifted the ant 1-2 voxels out of a 5-voxel
-  // shaft and sometimes zero, while grip climbs the same shaft smoothly.)
-  await page.keyboard.press('KeyG');
-  await page.waitForTimeout(900);
-  const upAfterGrip = ((await page.textContent('#dig-readout')) ?? '').match(/up (\w+)/)?.[1];
-  if (!upAfterGrip || upAfterGrip === 'pos_y') fail(`grip failed inside the shaft (up = ${upAfterGrip})`);
-  else ok(`gripped the shaft wall in a 1-voxel tunnel, up = ${upAfterGrip}`);
+  // Holding longer must not dig a second while loaded.
+  await hold(3000);
+  const stillFull = await hud();
+  if (stillFull.dug !== 1) fail(`dug ${stillFull.dug} cubes while already carrying one`);
+  else ok('cannot dig again until the load is dropped');
 
-  await page.keyboard.down('KeyW');
-  await page.waitForTimeout(4000);
-  await page.keyboard.up('KeyW');
-  await page.waitForTimeout(600);
+  // Drop it, then dig again.
+  await look(1180, 960);
+  await page.waitForTimeout(400);
+  await page.click('.dig-mode');
+  await hold(300);
+  const dropped = await hud();
+  if (dropped.carrying !== 0 || dropped.mound !== 1) fail(`dropping failed: ${JSON.stringify(dropped)}`);
+  else ok('dropping the load frees the ant to dig again');
+  if (dropped.dug !== dropped.carrying + dropped.mound) fail('soil not conserved');
+  else ok(`soil conserved: dug ${dropped.dug} = carried ${dropped.carrying} + mound ${dropped.mound}`);
 
-  await page.screenshot({ path: `${OUT}-3-escaped.png` });
   if (errors.length) fail(`page errors: ${errors.join(' | ')}`);
   else ok('no page errors');
   await page.close();
@@ -145,51 +160,51 @@ const ok = (m) => console.log(`  ok  ${m}`);
     return {
       up: /up (\w+)/.exec(t)?.[1] ?? null,
       pos: (/pos ([-\d.]+),([-\d.]+),([-\d.]+)/.exec(t) ?? []).slice(1).map(Number),
+      weightless: /weightless/.test(t),
     };
   };
-  const button = async () => ((await page.textContent('.dig-jump')) ?? '').trim();
 
   const start = await state();
   if (start.up !== 'pos_y') fail(`should start world-up, got ${start.up}`);
-  else ok(`starts grounded, up = ${start.up}`);
-  if (!/JUMP/.test(await button())) fail(`button should offer JUMP in the open, got "${await button()}"`);
-  else ok('button offers JUMP with no wall in reach');
+  else ok(`starts world-up in the chamber, up = ${start.up}`);
+  if (!start.weightless) fail('should be weightless inside the nest');
+  else ok('weightless inside the nest');
 
-  // Walk into the chamber wall.
+  // No button press anywhere in this test — walking into the chamber wall
+  // should mount it on its own.
+  // Poll for the mount. The ant needs ~1 s to cross the chamber, and the HUD
+  // only repaints every 6th frame (~770 ms under software rendering), so a
+  // single read lands on a stale frame more often than not.
   await page.keyboard.down('KeyW');
-  await page.waitForTimeout(1400);
+  let mounted = start;
+  for (let i = 0; i < 20 && mounted.up === 'pos_y'; i++) {
+    await page.waitForTimeout(250);
+    mounted = await state();
+  }
   await page.keyboard.up('KeyW');
-  await page.waitForTimeout(600);
-  if (!/CLIMB/.test(await button())) fail(`button should offer CLIMB at a wall, got "${await button()}"`);
-  else ok('button switches to CLIMB when a wall is in reach');
-
-  await page.keyboard.press('KeyG');
   await page.waitForTimeout(900);
-  const gripped = await state();
-  if (gripped.up === 'pos_y') fail('grip did not change orientation');
-  else ok(`gripped the wall, up = ${gripped.up}`);
-  if (gripped.up === 'neg_y') fail('attached to a ceiling — those are meant to be locked');
-  else ok('did not attach to a ceiling');
-  if (!/RELEASE/.test(await button())) fail(`button should offer RELEASE while attached, got "${await button()}"`);
-  else ok('button offers RELEASE while attached');
 
-  // The regression that matters most: the ant must fit BOTH standing and lying
-  // inside one voxel, or a one-cube tunnel — which is what the whole game is
-  // made of — silently refuses every grip.
-  const span = 2 * 0.3; // BODY_RADIUS
-  if (span > 1 || 0.7 > 1) fail('body no longer fits within a single voxel in every orientation');
+  if (mounted.up === 'pos_y') fail('walking into the chamber wall did not mount it');
+  else ok(`auto-mounted the chamber wall, up = ${mounted.up}`);
+
+  // The body must fit inside a single voxel in every orientation, or a
+  // one-cube tunnel silently refuses every mount.
+  if (2 * 0.3 > 1 || 0.7 > 1) fail('body no longer fits within a single voxel');
   else ok('body fits a 1-voxel tunnel standing and lying');
 
-  await page.screenshot({ path: `${OUT}-4-gripped.png` });
+  // Mounted, it must not slide along the wall it is gripping. Let momentum
+  // bleed off first — deceleration is 22 voxels/s^2, so this is not instant.
+  await page.waitForTimeout(900);
+  const before = await state();
+  await page.waitForTimeout(1600);
+  const after = await state();
+  const drift = Math.hypot(...before.pos.map((v, i) => v - after.pos[i]));
+  if (drift > 0.3) fail(`slid ${drift.toFixed(2)} voxels while mounted and idle`);
+  else ok('holds still while mounted');
 
-  // Attached, gravity should act along the new -up, not world -Y.
-  const beforeDrift = await state();
-  await page.waitForTimeout(1200);
-  const afterDrift = await state();
-  if (Math.abs(afterDrift.pos[1] - beforeDrift.pos[1]) > 0.5) {
-    fail(`fell in world Y while attached to a wall (${beforeDrift.pos[1]} -> ${afterDrift.pos[1]})`);
-  } else ok('does not fall in world Y while wall-attached');
+  await page.screenshot({ path: `${OUT}-4-mounted.png` });
 
+  // Release restores world up.
   await page.keyboard.press('KeyG');
   await page.waitForTimeout(900);
   const released = await state();

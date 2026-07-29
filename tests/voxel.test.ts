@@ -352,10 +352,13 @@ describe('QueenFounding', () => {
   it('reports remaining depth in millimetres', () => {
     const world = makeWorld();
     const q = new QueenFounding(SURFACE, 5);
-    const status = q.evaluate(world, 64, SURFACE - 10, 64);
-    expect(status.depth).toBe(10);
-    expect(status.depthMm).toBe(50);
-    expect(status.objective).toContain(`${(DEN_MIN_DEPTH - 10) * 5} mm`);
+    // Must sit BELOW the minimum depth, or the objective has already moved on
+    // to hollowing the chamber.
+    const shallow = 2;
+    const status = q.evaluate(world, 64, SURFACE - shallow, 64);
+    expect(status.depth).toBe(shallow);
+    expect(status.depthMm).toBe(shallow * 5);
+    expect(status.objective).toContain(`${(DEN_MIN_DEPTH - shallow) * 5} mm`);
   });
 
   it('is not satisfied by a bare shaft at depth', () => {

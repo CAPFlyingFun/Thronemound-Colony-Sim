@@ -62,7 +62,9 @@ const swipeLook = (fromY, toY) => page.evaluate(([y0, y1]) => {
 }, [fromY, toY]);
 
 // 3. Look down, then hold the action button: the ground should be excavated.
-await swipeLook(800, 955); // pitch down ~40deg: dig a pit AHEAD, not under our feet
+// Straight down. With reach clamped to the cubes immediately around the ant,
+// a shallow angle aims at ground two cubes out, which is now out of range.
+await swipeLook(700, 1180);
 await page.waitForTimeout(300);
 
 const action = await page.$('.dig-action');
@@ -86,11 +88,11 @@ const dugShot = await shot('2-dug');
 if (Buffer.compare(surfaceShot, dugShot) === 0) fail('frame did not change after digging');
 else ok('rendered frame changed after digging');
 
-// 4. Switch to ADD and deposit against a shaft WALL. Aiming straight down puts
-// the placement cell inside the ant's own body, which the scene refuses on
-// purpose — so pitch back toward horizontal first.
-// Still looking into the pit we just dug a couple of voxels ahead.
-await page.waitForTimeout(300);
+// 4. Switch to ADD and deposit. Pitch back up so the placement cell is the
+// face of an adjacent cube rather than the ant's own — aiming straight down
+// targets the cell it is standing in, which the scene refuses on purpose.
+await swipeLook(1180, 960);
+await page.waitForTimeout(400);
 
 await page.click('.dig-mode');
 await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);

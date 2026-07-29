@@ -17,8 +17,14 @@
 
 import { isSolid, type VoxelWorld } from './VoxelWorld';
 
-/** How far below the surface the den must sit. 40 voxels x 5 mm = 20 cm. */
-export const DEN_MIN_DEPTH = 40;
+/**
+ * How far below the surface the den must sit. 4 voxels x 5 mm = 2 cm.
+ *
+ * This was 40 (20 cm), which is realistic for a real nest but meant carrying
+ * spoil up a forty-cube shaft one cube at a time before the game had properly
+ * begun. Depth can grow later as the colony does.
+ */
+export const DEN_MIN_DEPTH = 4;
 /**
  * Hollow space required around the den, counted as air voxels inside a radius-2
  * ball (33 cells, ignoring corners). A bare shaft yields about 5, so this can

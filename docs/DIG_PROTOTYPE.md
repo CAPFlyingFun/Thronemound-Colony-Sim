@@ -17,6 +17,7 @@ never load each other's bundle.
 | Toggle mode | tap **REMOVE / ADD** | `E` or `Tab` |
 | Jump | tap **JUMP** | `Space` |
 | Grip / release wall | **CLIMB / RELEASE** button | `G` |
+| Stick to a wall underground | automatic — just walk into it | automatic |
 | Step up | automatic | automatic |
 
 ## Scale
@@ -26,7 +27,8 @@ One world unit = one voxel = **5 mm**. The volume is 128³ voxels, so:
 - the ground patch is **64 cm × 64 cm**, about 128 ant-lengths across
 - there are **96 voxels of diggable soil** beneath the surface (~48 cm), which is
   a realistic depth for a founding nest
-- the ant stands ~1.6 voxels tall and reaches 5.5
+- the ant stands **0.7 voxels** tall (3.5 mm) and works only the cubes it is
+  touching
 
 Everything scales off `VOXEL_MM`, `WORLD_SIZE` and `SURFACE_Y` at the top of
 `src/scenes/DigScene.ts`. Growing the world is a constant change, not a rewrite.
@@ -34,10 +36,26 @@ Everything scales off `VOXEL_MM`, `WORLD_SIZE` and `SURFACE_Y` at the top of
 ## Soil is conserved
 
 The rule that makes this an ant game rather than Minecraft: **you cannot place a
-voxel you did not first excavate.** Digging fills your carry load (12 voxels);
-ADD mode drops one back. So the mound above ground is exactly the volume of the
-tunnels below it, and the HUD's `Dug` and `Mound` counters are two views of the
-same soil.
+voxel you did not first excavate.** So the mound above ground is exactly the
+volume of the tunnels below it, and the HUD's `Dug` and `Mound` counters are two
+views of the same soil.
+
+Carry capacity is **one voxel**. An ant carries a grain in its mandibles, not a
+wheelbarrow — so the loop is dig one, haul it out, drop it, come back. That makes
+the mound something you build rather than dump, and it means a single hold of
+ACTION can no longer sink you twelve cubes into a shaft. Dig with a full load and
+nothing happens until you drop it.
+
+## Reach
+
+An ant works the soil it is **touching**. Targeting is a 2.2-voxel ray *plus* a
+hard clamp to the 3×3×3 shell of cubes around the ant's own cube — both, because
+a radius alone can't express "one cube away": a diagonal at 1.7 voxels is nearer
+in distance than a face at 1.9, yet further in cubes.
+
+This replaced a 5.5-voxel reach that let you carve a five-cube corridor without
+moving, which read as tunnels appearing out of nowhere. Aim at anything beyond
+the neighbouring cubes and the HUD target reads `—`.
 
 Strata dig at different speeds — topsoil 0.35 s, sand 0.5 s, clay 0.7 s — and
 the deepest band is bedrock, which can't be dug at all and forms the floor of
@@ -53,7 +71,7 @@ src/voxel/mesher.ts       face-culling mesher with per-vertex ambient occlusion
 src/voxel/DigSession.ts   dig timing, carry load, place rules
 src/voxel/QueenFounding.ts  depth + chamber requirements, den lock
 src/voxel/locomotion.ts     stick speed curve + acceleration
-src/voxel/SurfaceFrame.ts   six-axis orientation for wall walking (not yet wired)
+src/voxel/SurfaceFrame.ts   six-axis orientation for wall walking
 src/voxel/tileTextures.ts   procedural ant-scale soil tiles
 src/voxel/voxelMaterial.ts  texture-array material (the only three.js file here)
 src/scenes/DigScene.ts    three.js renderer, camera, touch/desktop input, HUD
@@ -78,13 +96,13 @@ Two properties keep an ant-scale world cheap:
 ## Verifying
 
 ```bash
-npm test          # 40 voxel unit tests + the existing colony tests
+npm test          # 68 tests: voxel rules + the existing colony tests
 npm run typecheck
 npm run build
 npm run preview   # then, in another shell:
 npm run smoke:dig   # boots WebGL, digs, places, checks soil conservation
 npm run smoke:queen    # pre-carves a den, founds it, checks the colony handoff
-npm run smoke:mobility # rotation resize, and digging into a hole then climbing out
+npm run smoke:mobility # rotation resize, one-cube-at-a-time carry, auto-stick
 ```
 
 The smoke test drives the **touch** path, since that's what ships to a phone,
@@ -104,9 +122,14 @@ precise positioning while digging is possible:
 | Stick throw | Speed |
 |---|---|
 | 0 – 8% | dead zone |
-| 8 – 35% | crawl, up to 3.5 voxels/s |
-| 35 – 75% | walk, up to 9 |
-| 75 – 100% | run, up to 16 |
+| 8 – 35% | crawl, up to 2 voxels/s (1 cm/s) |
+| 35 – 75% | walk, up to 4.5 (2.25 cm/s) |
+| 75 – 100% | run, up to 7.5 (3.75 cm/s) |
+
+Those aren't picked by feel. *Solenopsis invicta* runs at about 1.96 cm/s, and
+ants generally cover ~9 body lengths per second, which at 5 mm per voxel puts a
+real ant's run near 4 voxels/s. The old "run" of 16 was roughly four times an
+actual ant, which is exactly why it felt like flying.
 
 The bands are landmarks for the thumb, but the response between them is
 continuous — a unit test asserts monotonicity and that no single 0.5% step of
@@ -115,7 +138,7 @@ three discrete gears.
 
 Keyboard has no analogue axis, so it selects the walk band (`Shift` for run).
 
-Movement accelerates (32 voxels/s²) and decelerates (40) rather than snapping
+Movement accelerates (14 voxels/s²) and decelerates (22) rather than snapping
 to velocity, which is what gives the ant any sense of mass.
 
 The touch stick is **constrained floating**: it appears under your thumb
@@ -132,35 +155,65 @@ lower-left region so it can't spawn beside the HUD or halfway up the screen.
 `?debug=1` appends live position, orientation and speed to the readout, which is
 how those numbers get measured rather than eyeballed.
 
-The HUD always shows a **version and build time** (`v0.3.0 · 07-29 00:43`), so
+The HUD always shows a **version and build time** (`v0.5.0 · 07-29 01:12`), so
 "is this the new code or a cached build?" is answerable at a glance from a
 phone.
 
 ## Getting out of holes
 
-A jump clears **1.44 voxels** (`JUMP_SPEED 34` against `GRAVITY 400`), so
-digging two voxels down used to trap you permanently. Two mechanics fix it
-without changing the geometry:
+**Underground the ant is weightless.** An ant in a tunnel is never really
+falling — it is inside a tube, touching something at every moment. Below
+`UNDERGROUND_Y` (one voxel under the surface) gravity is switched off entirely,
+which deletes the whole "trapped at the bottom of the shaft you just dug"
+problem class rather than mitigating it. Above that line — the surface and
+anything piled on it — gravity behaves normally, so the world above is still
+somewhere you can fall off.
 
+Weightless does not mean motionless, and the distinction cost one iteration:
+zeroing velocity outright left the ant hovering over the hole it had just dug
+beneath itself, so digging downward stopped lowering you at all. The rule is:
+
+- something underfoot → hold still
+- nothing underfoot → **settle** at a constant 2 voxels/s (1 cm/s)
+
+Constant, not accelerating. No speed builds up, so it is a controlled descent
+rather than a fall, and there is still no way to get trapped at the bottom of
+anything.
+
+The **touching test** is the safety valve: weightlessness requires at least one
+solid face in contact. Dig the floor out from under yourself with nothing else in
+reach and gravity comes straight back, so you settle onto something instead of
+hanging in a void.
+
+Getting back *up* has three mechanics, none of which need sloped geometry:
+
+- **Auto-stick** — walk into a wall underground and it becomes your floor. This
+  is the concave case, and it needs its own path because `evaluateEdge` only
+  fires when support runs out, which never happens while you stand on a shaft
+  floor. Gated on committed movement (`INPUT_COMMIT_THRESHOLD`) and on the
+  hysteresis lock, so brushing a wall while lining up a dig can't flip you and a
+  corner can't ping-pong between two faces.
+- **Grip** — the manual CLIMB button (or `G`) still works, and RELEASE returns
+  you to world up.
 - **Step-up** — walking into a one-voxel rise lifts you over it, so a dug
-  staircase works as a ramp with no sloped faces required.
-- **Grip** — press CLIMB and the wall becomes your floor; walk up it. Gravity
-  pulls along `-up`, which once attached points *into* the wall, so the ant
-  grips rather than slides.
+  staircase works as a ramp.
 
-An earlier push-into-a-wall auto-climb was removed. It engaged silently when
-you only meant to walk into something, and it was measurably unreliable —
-1–2 voxels out of a 5-voxel shaft, sometimes zero, where grip climbs the same
-shaft smoothly and monotonically. Two mechanics for one job, one of which
-half-works, is worse than one that works.
+An earlier push-into-a-wall auto-climb — a stopgap from before `SurfaceFrame`
+existed — was removed rather than patched. It *lifted* you up a wall at a fixed
+rate instead of reorienting you onto it, engaged silently when you only meant to
+walk into something, and was measurably unreliable: 1–2 voxels out of a 5-voxel
+shaft, sometimes zero. Auto-stick is the same intent done through the orientation
+state machine, so it inherits commitment and hysteresis for free.
 
-Movement is tuned for an ant rather than a person. By the square-cube law an
-ant has huge drag relative to its mass, so terminal velocity is low and falls
-are effectively harmless — ants drop off things constantly and walk away.
+Above ground, movement is still tuned for an ant rather than a person. By the
+square-cube law an ant has huge drag relative to its mass, so terminal velocity
+is low and falls are effectively harmless — ants drop off things constantly and
+walk away.
 
-| | before | after |
+| | originally | now |
 |---|---|---|
-| Gravity | 400 voxels/s² | 55 |
+| Gravity (above ground) | 400 voxels/s² | **12** (6 cm/s²) |
+| Gravity (below ground) | 400 | **0**, with a 2 voxels/s settle |
 | Terminal velocity | −1.30 m/s | −0.15 m/s |
 | Body size | 1.6 × 0.9 voxels | **0.7 × 0.6** (3.5 × 3 mm) |
 | Jump height | 1.45 voxels | 1.45 (derived, not tuned) |
@@ -220,7 +273,7 @@ about half as bright, which is a mistake worth only making once.
 
 You start as the queen. The objective line drives the whole sequence:
 
-1. **Dig down** — 40 voxels (200 mm) below the surface
+1. **Dig down** — 4 voxels (20 mm) below the surface
 2. **Hollow a chamber** — 14 air voxels within radius 2, which a bare shaft
    can't satisfy (~5) but a 3×3×3 pocket comfortably can (19)
 3. **Found the den** — the button appears *only* while the site qualifies, so
@@ -236,6 +289,12 @@ back-face culling shows you through the soil, leaving the burrow readable in
 cross-section like an ant farm. The background switches to dark earth so it
 reads as intentional rather than as a rendering fault.
 
+The depth was **200 mm** (40 voxels) until carry capacity dropped to one. Forty
+voxels of shaft at one cube per round trip is a lot of hauling before the game
+has properly begun, and depth is the requirement that scales worst against
+capacity — the chamber is a fixed 14 either way. It can grow again as the colony
+does.
+
 Threshold numbers were measured, not guessed — see the "den chamber threshold
 is achievable by hand" test, which asserts the requirement is satisfiable from
 where a player actually *stands* (the chamber floor), not from a theoretical
@@ -245,8 +304,8 @@ centre point. Measured from the floor of a **spherical** cavity you only get
 ## Debug entry point
 
 `?scene=dig&debug=den` pre-carves a qualifying shaft and chamber and drops the
-queen into it. Founding otherwise needs 40 voxels of hand-digging, which makes
-both manual iteration and the smoke test impractical.
+queen into it — otherwise every run of the smoke test would have to hand-dig the
+chamber one cube at a time.
 
 ## Surface walking
 
@@ -274,21 +333,26 @@ Two rules keep corners from misbehaving:
 Fully unit tested, including that no code path can produce a non-axis
 orientation.
 
-**Wired in as of now.** Walk into a wall and the button changes from JUMP to
-CLIMB; press it (or `G`) and the ant grips the wall — gravity, the collision
-box, the movement plane and the camera all rotate into that face's frame.
-Press again to RELEASE. One context-sensitive button rather than three,
-because screen space is the scarce resource on a phone.
+**Wired in.** Underground, walking into a wall mounts it automatically; walking
+across an edge makes the new face your floor. Either way gravity, the collision
+box, the movement plane and the camera all rotate into that face's frame. The
+manual path is still there — walk into a wall and the button changes from JUMP
+to CLIMB; press it (or `G`) to grip, press again to RELEASE. One
+context-sensitive button rather than three, because screen space is the scarce
+resource on a phone.
 
 The camera **slerps** into the new frame and swings slightly outward mid-turn,
 so it reads as the body crawling around the edge rather than the world spinning
 about a stationary head. Physics still snaps between the six discrete frames.
 
-**Ceilings are locked** (`CEILING_UP`). The maths handles all six directions,
-but inverted movement, input expectations and release behaviour each need their
-own pass — walls should feel excellent first.
+**All six directions are live, ceilings included.** They were locked behind a
+`CEILING_UP` guard while walls were being tuned; with the underground frame now
+weightless, "up" carries no special meaning down there, and excluding one of the
+six was the thing making a tunnel roof behave differently from its walls.
 
-`?debug=1` shows the live `up` alongside position and speed.
+`?debug=1` shows the live `up` alongside position and speed. The HUD also flags
+🪵 `weightless` or 🧗 `gripping` whenever either is in effect, so it is never a
+guess which frame the ant is in.
 
 ## Not yet
 
@@ -299,3 +363,9 @@ Known gaps: no ant model (you're a floating camera), no surface world beyond
 the soil block, no save, no eggs or brood in the den yet, and spoil can't be
 dropped into the cell you're standing in — which is correct, but means a
 one-voxel-wide shaft has nowhere to backfill from the inside.
+
+Open questions from the last tuning pass: concave wall-to-wall corners still
+aren't special-cased; there are no comfort settings for the camera turn
+(smooth / fast / snap, roll off, horizon assistance); and nothing cues the grip
+affordance except the button label — a contact indicator, a scraping sound, or a
+reticle icon would each carry it better.
