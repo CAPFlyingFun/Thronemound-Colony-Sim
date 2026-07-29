@@ -17,7 +17,6 @@ never load each other's bundle.
 | Toggle mode | tap **REMOVE / ADD** | `E` or `Tab` |
 | Jump | tap **JUMP** | `Space` |
 | Grip / release wall | **CLIMB / RELEASE** button | `G` |
-| Auto-climb | push into a wall | push into a wall |
 | Step up | automatic | automatic |
 
 ## Scale
@@ -130,8 +129,12 @@ lower-left region so it can't spawn beside the HUD or halfway up the screen.
 > (~8 fps under software rendering) measure ~0.39× real speed; compare ratios
 > there, not absolutes.
 
-`?debug=1` appends live position and speed to the readout, which is how those
-numbers get measured rather than eyeballed.
+`?debug=1` appends live position, orientation and speed to the readout, which is
+how those numbers get measured rather than eyeballed.
+
+The HUD always shows a **version and build time** (`v0.3.0 · 07-29 00:43`), so
+"is this the new code or a cached build?" is answerable at a glance from a
+phone.
 
 ## Getting out of holes
 
@@ -141,10 +144,15 @@ without changing the geometry:
 
 - **Step-up** — walking into a one-voxel rise lifts you over it, so a dug
   staircase works as a ramp with no sloped faces required.
-- **Wall climb** — pushing into a wall walks straight up it. This is what real
-  ants do, and it's what makes a vertical shaft survivable. It eases in over
-  ~150 ms and the camera leans into the wall with a slight crawl sway; without
-  those cues, ascending a sheer face is indistinguishable from levitating.
+- **Grip** — press CLIMB and the wall becomes your floor; walk up it. Gravity
+  pulls along `-up`, which once attached points *into* the wall, so the ant
+  grips rather than slides.
+
+An earlier push-into-a-wall auto-climb was removed. It engaged silently when
+you only meant to walk into something, and it was measurably unreliable —
+1–2 voxels out of a 5-voxel shaft, sometimes zero, where grip climbs the same
+shaft smoothly and monotonically. Two mechanics for one job, one of which
+half-works, is worse than one that works.
 
 Movement is tuned for an ant rather than a person. By the square-cube law an
 ant has huge drag relative to its mass, so terminal velocity is low and falls
@@ -152,10 +160,16 @@ are effectively harmless — ants drop off things constantly and walk away.
 
 | | before | after |
 |---|---|---|
-| Gravity | 400 voxels/s² | 90 |
+| Gravity | 400 voxels/s² | 55 |
 | Terminal velocity | −1.30 m/s | −0.15 m/s |
-| Climb speed | 4.0 cm/s | 2.25 cm/s (~1.1 body lengths/s) |
-| Jump height | 1.45 voxels | 1.47 voxels |
+| Body size | 1.6 × 0.9 voxels | **0.7 × 0.6** (3.5 × 3 mm) |
+| Jump height | 1.45 voxels | 1.45 (derived, not tuned) |
+
+The body size is a **gameplay requirement**, not a detail: at 1.6 × 0.9 the ant
+could not rotate inside a one-voxel tunnel — lying against a wall it needed 1.6
+of clearance along the wall normal and the tunnel only has 1 — so gripping
+silently failed in exactly the tunnels the game is made of. At 0.7 × 0.6 it
+fits both standing and lying in a single voxel.
 
 Jump is expressed as a **height** with the launch speed derived from it
 (`JUMP_SPEED = √(2·g·h)`), because the two are coupled and hand-tuning them

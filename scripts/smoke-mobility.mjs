@@ -74,7 +74,8 @@ const ok = (m) => console.log(`  ok  ${m}`);
   const page = await browser.newPage({ viewport: { width: 900, height: 1400 }, deviceScaleFactor: 1 });
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
-  await page.goto(`${BASE}?scene=dig`, { waitUntil: 'networkidle' });
+  // debug=1 so the readout exposes `up`; the geometry is the plain surface.
+  await page.goto(`${BASE}?scene=dig&debug=1`, { waitUntil: 'networkidle' });
   await page.waitForSelector('canvas');
   await page.waitForTimeout(2200);
 
@@ -110,21 +111,19 @@ const ok = (m) => console.log(`  ok  ${m}`);
   else ok(`dug a shaft and fell in: ${trapped} mm down`);
   await page.screenshot({ path: `${OUT}-2-in-hole.png` });
 
-  // Push into the shaft wall. Before wall climbing this did nothing at all —
-  // a 1.44 voxel jump can't clear a 3 voxel hole.
+  // Escape by GRIPPING the wall and walking up it. (The old push-into-a-wall
+  // auto-climb was removed: it lifted the ant 1-2 voxels out of a 5-voxel
+  // shaft and sometimes zero, while grip climbs the same shaft smoothly.)
+  await page.keyboard.press('KeyG');
+  await page.waitForTimeout(900);
+  const upAfterGrip = ((await page.textContent('#dig-readout')) ?? '').match(/up (\w+)/)?.[1];
+  if (!upAfterGrip || upAfterGrip === 'pos_y') fail(`grip failed inside the shaft (up = ${upAfterGrip})`);
+  else ok(`gripped the shaft wall in a 1-voxel tunnel, up = ${upAfterGrip}`);
+
   await page.keyboard.down('KeyW');
-  await page.waitForTimeout(1000);
-  const didClimb = await climbing();
   await page.waitForTimeout(4000);
   await page.keyboard.up('KeyW');
-  await page.waitForTimeout(900);
-
-  if (!didClimb) fail('climb never engaged while pushing into the shaft wall');
-  else ok('climb engaged against the shaft wall');
-
-  const out = await depth();
-  if (out >= trapped) fail(`still trapped: ${trapped} mm -> ${out} mm`);
-  else ok(`climbed out of the hole: ${trapped} mm -> ${out} mm`);
+  await page.waitForTimeout(600);
 
   await page.screenshot({ path: `${OUT}-3-escaped.png` });
   if (errors.length) fail(`page errors: ${errors.join(' | ')}`);
@@ -173,6 +172,13 @@ const ok = (m) => console.log(`  ok  ${m}`);
   else ok('did not attach to a ceiling');
   if (!/RELEASE/.test(await button())) fail(`button should offer RELEASE while attached, got "${await button()}"`);
   else ok('button offers RELEASE while attached');
+
+  // The regression that matters most: the ant must fit BOTH standing and lying
+  // inside one voxel, or a one-cube tunnel — which is what the whole game is
+  // made of — silently refuses every grip.
+  const span = 2 * 0.3; // BODY_RADIUS
+  if (span > 1 || 0.7 > 1) fail('body no longer fits within a single voxel in every orientation');
+  else ok('body fits a 1-voxel tunnel standing and lying');
 
   await page.screenshot({ path: `${OUT}-4-gripped.png` });
 

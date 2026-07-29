@@ -29,8 +29,21 @@ const WORLD_SIZE = 128;
 const SURFACE_Y = 96;
 const VOXEL_MM = 5;
 
-const EYE_HEIGHT = 1.6;
-const BODY_RADIUS = 0.45;
+/*
+ * Ant-sized, and that is a gameplay requirement rather than a detail.
+ *
+ * A body 1.6 voxels tall and 0.9 wide is 8 mm x 4.5 mm — a human capsule, not
+ * an insect. It also cannot ROTATE inside a one-voxel tunnel: lying against a
+ * wall the body needs 1.6 of clearance along the wall normal, and the tunnel
+ * only has 1. Gripping silently failed in exactly the tunnels the game is made
+ * of.
+ *
+ * At 0.7 x 0.6 (3.5 mm x 3 mm) the ant fits both standing AND lying in a
+ * single voxel, so a one-cube tunnel becomes fully wall-walkable. The lower eye
+ * also makes the world read considerably larger, which is the whole point.
+ */
+const EYE_HEIGHT = 0.7;
+const BODY_RADIUS = 0.3;
 /** Speeds now come from the stick curve (locomotion.ts); these are its anchors. */
 /**
  * Scaled down with the speeds. Acceleration is about the RATIO to top speed —
@@ -48,7 +61,7 @@ const STICK_RADIUS = 70;
  * are effectively harmless — ants drop off things constantly and walk away.
  * The old 400 / -260 pair modelled a human being and read as heavy.
  */
-const GRAVITY = 90;
+const GRAVITY = 55;
 /**
  * Small creatures hit terminal velocity almost instantly, so what you actually
  * see of an ant falling is a near-constant slow drift, not a build-up. Keeping
@@ -66,12 +79,6 @@ const JUMP_HEIGHT = 1.45;
 const JUMP_SPEED = Math.sqrt(2 * GRAVITY * JUMP_HEIGHT);
 /** Rise the ant steps over without jumping — one voxel plus a hair. */
 const STEP_HEIGHT = 1.05;
-/** Climbing runs a little under walking pace, as it does for real ants. */
-const CLIMB_SPEED = 3.5;
-/** Seconds to reach full climb speed. Snapping to it read as levitating. */
-const CLIMB_RAMP = 0.15;
-/** Radians of lean toward a wall you're gripping. */
-const CLIMB_LEAN = 0.07;
 /** Amplitude and rate of the crawl sway while climbing. */
 const CLIMB_SWAY = 0.025;
 const CLIMB_SWAY_HZ = 2.4;
@@ -87,6 +94,8 @@ const EDGE_ARC = 0.55;
  * own pass — walls should feel excellent first.
  */
 const CEILING_UP: AxisDirection = 'neg_y';
+/** Shown in the HUD so it's obvious at a glance whether a build is current. */
+const BUILD_LABEL = `v${__APP_VERSION__} \u00b7 ${__BUILD_TIME__}`;
 const REACH = 5.5;
 
 type Mode = 'dig' | 'place';
@@ -118,8 +127,6 @@ export class DigScene {
   private yaw = 0;
   private pitch = 0;
   private grounded = false;
-  private climbing = false;
-  private climbRamp = 0;
   private climbPhase = 0;
   private cameraRoll = 0;
   /** Outward normal of the wall currently being pushed into, if any. */
@@ -836,17 +843,20 @@ export class DigScene {
     }
     const wallAhead = pressing && blocked;
 
-    const headroom = this.position.clone().addScaledVector(this.upVec(), 0.5);
-    this.climbing = wallAhead && !this.collides(headroom) && this.surface.mode !== 'attached';
-    if (this.climbing) {
-      this.climbRamp = Math.min(1, this.climbRamp + dt / CLIMB_RAMP);
-      this.climbPhase += dt * CLIMB_SWAY_HZ * Math.PI * 2;
-      this.upVelocity = CLIMB_SPEED * this.climbRamp;
-    } else {
-      this.climbRamp = Math.max(0, this.climbRamp - dt / CLIMB_RAMP);
-      this.upVelocity -= GRAVITY * dt;
-      this.upVelocity = Math.max(this.upVelocity, TERMINAL_VELOCITY);
-    }
+    /*
+     * Gravity always pulls along -up, and that single line is what makes wall
+     * walking work: attached, `up` is the wall's normal, so gravity presses the
+     * ant INTO the wall instead of down it. It grips rather than slides.
+     *
+     * The old push-into-a-wall auto-climb has been removed. It was a stopgap
+     * from before surface walking existed, it engaged silently when you only
+     * meant to walk into something, and it was measurably unreliable — it
+     * lifted an ant 1-2 voxels out of a 5-voxel shaft and sometimes zero, while
+     * GRIP climbs the same shaft smoothly and monotonically. Two mechanics for
+     * one job, one of which half-works, is worse than one that works.
+     */
+    this.upVelocity -= GRAVITY * dt;
+    this.upVelocity = Math.max(this.upVelocity, TERMINAL_VELOCITY);
     if (!wallAhead) this.hasWall = false;
 
     this.grounded = false;
@@ -904,12 +914,12 @@ export class DigScene {
     this.camera.quaternion.copy(this.cameraQuat);
     this.camera.rotateX(this.pitch);
 
-    let targetRoll = 0;
-    if (this.climbing && this.hasWall) {
-      const lateral = this.wallNormal.dot(right);
-      targetRoll = (lateral * CLIMB_LEAN + Math.sin(this.climbPhase) * CLIMB_SWAY) * this.climbRamp;
-    }
-    this.cameraRoll = THREE.MathUtils.lerp(this.cameraRoll, targetRoll, 1 - Math.exp(-10 * dt));
+    // A gentle sway while actually moving, so walking reads as legs cycling
+    // rather than gliding. Nothing to do with orientation changes.
+    const swayTarget = this.planarSpeed > 0.2
+      ? Math.sin((this.climbPhase += dt * CLIMB_SWAY_HZ * Math.PI * 2)) * CLIMB_SWAY
+      : 0;
+    this.cameraRoll = THREE.MathUtils.lerp(this.cameraRoll, swayTarget, 1 - Math.exp(-10 * dt));
     if (Math.abs(this.cameraRoll) > 1e-4) this.camera.rotateZ(this.cameraRoll);
 
     this.headlamp.position.copy(this.camera.position);
@@ -1059,7 +1069,7 @@ export class DigScene {
         <b>Queen\u2019s den</b> ${den.depth * VOXEL_MM} mm down &nbsp;
         <b>Excavated</b> ${this.world.excavated} &nbsp;
         <b>Mound</b> ${this.world.deposited}<br>
-        <span class="dim">${this.debug ? `dist ${this.orbit.distance.toFixed(1)} \u00b7 ` : ''}Colony view \u00b7 drag to orbit \u00b7 pinch or scroll to zoom</span>
+        <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `dist ${this.orbit.distance.toFixed(1)} \u00b7 ` : ''}Colony view \u00b7 drag to orbit \u00b7 pinch or scroll to zoom</span>
       `;
       return;
     }
@@ -1074,7 +1084,7 @@ export class DigScene {
       <b>Carrying</b> ${this.session.carried}/${this.session.capacity} &nbsp;
       <b>Mound</b> ${this.world.deposited} &nbsp;
       <b>Dug</b> ${this.world.excavated}<br>
-      <span class="dim">${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 ` : ''}${this.climbing ? '\u{1F9D7} climbing \u00b7 ' : ''}Target: ${targetName}${bar}${chamber} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
+      <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 ` : ''}${this.surface.mode === 'attached' ? '\u{1F9D7} gripping \u00b7 ' : ''}Target: ${targetName}${bar}${chamber} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
     `;
   }
 
