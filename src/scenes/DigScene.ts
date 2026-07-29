@@ -16,14 +16,16 @@ import {
 } from '../voxel/VoxelWorld';
 import { meshChunk } from '../voxel/mesher';
 import {
-  buildFracture, chipMeshData, crumbAt, eventsBetween, hashVoxel, loosenessAt, removedAt, wobbleAt,
-  CELL_COUNT, type DigEvent, type DigEventKind, type FracturePattern,
+  buildFracture, cellCentre, chipMeshData, eventsBetween, hashVoxel, releasedBetween, removedAt,
+  CELL_COUNT, LAYER_CELLS, type DigEvent, type DigEventKind, type FracturePattern,
 } from '../voxel/fracture';
 import {
-  SOIL_CLOD_VARIANT_COUNT, buildClodShape, clodFeel, clodRadius, styleForVoxel,
+  SOIL_CLOD_VARIANT_COUNT, buildClodShape, clodFeel, clodRadius, pieceSource, styleForVoxel,
   type ClodShape, type SoilLoadStyle,
 } from '../voxel/clod';
-import { CLOD_RADIUS, LooseSoil, type Clod } from '../voxel/LooseSoil';
+import {
+  CLOD_RADIUS, LooseSoil, PIECES_PER_VOXEL, SCOOP_PIECES, type Clod,
+} from '../voxel/LooseSoil';
 import { raycastVoxel } from '../voxel/raycast';
 import { DigSession } from '../voxel/DigSession';
 import { createVoxelMaterial, type VoxelMaterialBundle } from '../voxel/voxelMaterial';
@@ -215,10 +217,29 @@ const CLOD_SAG = 0.09;
 const CLOD_PROBES: readonly (readonly [number, number, number])[] = [
   [0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
 ];
+/**
+ * How big one loose PIECE draws.
+ *
+ * Under the quarter-cube it represents, and deliberately. Pieces are spawned on
+ * the lattice at 0.25 spacing and nothing resolves piece-against-piece contact,
+ * so drawing them at their true size leaves every neighbour interpenetrating
+ * and a spilled cube reads as one brown mass rather than as 64 grains. Loose
+ * soil occupies more room than the rock it came from anyway; what matters here
+ * is that you can see the grains apart.
+ */
+const PIECE_SIZE = 0.17;
 const CLOD_AHEAD = 0.34;
 const CLOD_DROP = 0.2;
 /** Instances per variant batch. Twelve of these covers the heap cap. */
-const SOIL_BATCH_CAPACITY = 24;
+/**
+ * Instances per (material, variant) batch.
+ *
+ * A voxel now breaks into 64 pieces rather than becoming one clod, so 24 was
+ * about four cubes' worth before pieces started silently failing to DRAW while
+ * still being simulated and still counting toward conservation — spoil you
+ * could trip over but not see. Sized against the piece cap instead.
+ */
+const SOIL_BATCH_CAPACITY = 96;
 /** How hard walking into a clod shoves it. Unused by the player on purpose. */
 const CLOD_PUSH = 2.2;
 /**
@@ -231,6 +252,17 @@ const CLOD_PUSH = 2.2;
  */
 const CLOD_REACH = 1;
 const CLOD_AIM = 0.3;
+/**
+ * How wide a scoop gathers around the piece under the crosshair.
+ *
+ * Sixteen pieces at a quarter-voxel each occupy about one cube, so a scoop
+ * reaches roughly that far. Wider and one grab would strip a whole pile from
+ * across the room; narrower and a scoop taken from spread spoil would come up
+ * half empty.
+ */
+const SCOOP_RANGE = 1.1;
+/** How far a dropped scoop scatters around the aim point. */
+const SCOOP_SCATTER = 0.35;
 
 interface Vec3Like { x: number; y: number; z: number }
 
@@ -256,13 +288,16 @@ interface ActiveDigVisual {
   builtRemoved: number;
   mesh: THREE.Mesh | null;
   /**
-   * Where the clod actually is, in voxel-local space. Starts at the pattern's
-   * buried centre and then falls — the soil holding it up is being chipped
-   * away, and a lump that hangs in the middle of a growing hole is the exact
-   * tell that it is a decoration rather than a thing.
+   * Pieces already handed to LooseSoil.
+   *
+   * The dig frees them a sheet at a time, but DigSession only credits the whole
+   * voxel when the cube finally goes. This is the bridge: at completion the
+   * session hands back exactly this many pieces, which are already lying in the
+   * hole, and anything the heap refused stays in her jaws instead of vanishing.
    */
-  clodPos: { x: number; y: number; z: number };
-  clodVel: { x: number; y: number; z: number };
+  spilled: number;
+  /** The actual pieces handed over, so a cancelled dig can take them back. */
+  dropped: Clod[];
 }
 
 /**
@@ -425,7 +460,7 @@ export class DigScene {
     this.world = new VoxelWorld(WORLD_SIZE, WORLD_SIZE, WORLD_SIZE, layeredGenerator(SURFACE_Y));
     // One cube at a time. An ant carries a grain, not a wheelbarrow — and it
     // makes the mound something you actually build rather than dump.
-    this.session = new DigSession(this.world, { capacity: 1 });
+    this.session = new DigSession(this.world, { capacityVoxels: 1 });
 
     this.materialBundle = createVoxelMaterial();
     this.material = this.materialBundle.material;
@@ -752,8 +787,8 @@ export class DigScene {
       lastProgress: 0,
       builtRemoved: -1,
       mesh: null,
-      clodPos: { ...pattern.clodCentre },
-      clodVel: { x: 0, y: 0, z: 0 },
+      spilled: 0,
+      dropped: [],
     };
     this.rebuildChunkAt(x, y, z);
     this.refreshChipMesh();
@@ -763,6 +798,20 @@ export class DigScene {
   private endChip(): void {
     const chip = this.chip;
     if (!chip) return;
+    /*
+     * A CANCELLED dig takes its pieces back.
+     *
+     * Spoil is handed out a sheet at a time now, so stopping half way used to
+     * leave loose soil on the floor while the cube it came from was still
+     * standing in the grid — soil minted from nothing, and the one rule the
+     * whole design exists to keep. The voxel still being solid IS the test for
+     * cancelled: a completed dig has already removed it.
+     */
+    if (isSolid(this.world.get(chip.voxel.x, chip.voxel.y, chip.voxel.z))) {
+      for (const piece of chip.dropped) this.soil.remove(piece);
+      chip.dropped.length = 0;
+      chip.spilled = 0;
+    }
     if (chip.mesh) {
       this.scene.remove(chip.mesh);
       chip.mesh.geometry.dispose();
@@ -889,141 +938,56 @@ export class DigScene {
     }
 
     this.chipClock += dt;
-    const wobble = wobbleAt(chip.pattern, chip.progress, this.chipClock);
-    const axis = chip.pattern.wobbleAxis;
-    if (chip.mesh) {
-      // Loosened soil rocks slightly once it is nearly free. A transform, so it
-      // costs nothing and never touches the geometry.
-      chip.mesh.position.set(axis.x * wobble, axis.y * wobble, axis.z * wobble);
-      chip.mesh.rotation.set(axis.x * wobble, axis.y * wobble, axis.z * wobble);
-    }
 
     /*
-     * The clod is buried in there from the first tap and gets UNCOVERED, rather
-     * than appearing once the last crumb pops. It sits on the far side from
-     * where she is working, so chipping inward reveals it — which is also why
-     * the end no longer needs a hand-off: what she picks up is the thing that
-     * has been sitting in the hole getting bigger the whole time.
+     * The pieces that came away this frame become REAL soil, at the position
+     * they were sitting in. Nothing is deleted any more: a dig is 64 pieces
+     * leaving the lattice and landing in the hole, four sheets of sixteen.
      */
-    this.settleBuriedClod(chip, dt);
-    this.showBuriedClod(chip, wobble);
+    const freed = releasedBetween(chip.pattern, chip.lastProgress, chip.progress);
+    if (freed.length > 0) this.spillPieces(chip, freed);
   }
 
   /**
-   * Let the buried clod fall into the hole being opened under it.
+   * Turn freed pieces into loose soil where they stood.
    *
-   * It has weight. As crumbs go it loses whatever was holding it up and eases
-   * down, so by the end it is lying at the bottom of the pit it was uncovered
-   * in rather than hanging where the pattern happened to bury it. Local to the
-   * one voxel on purpose: the moment it comes free, LooseSoil owns it, and two
-   * physics systems overlapping on one lump is how you get it in two places.
+   * They inherit a little of the outward drift the crumb already had, so a
+   * sheet sloughs off the face rather than dropping as a neat slab.
    */
-  private settleBuriedClod(chip: ActiveDigVisual, dt: number): void {
-    const p = chip.clodPos;
-    const v = chip.clodVel;
-
-    /*
-     * Which way the floor has gone. Four probes just under the lump; the
-     * unsupported ones sum to a direction to lean, so when a crumb is chipped
-     * out from one side it tips that way and slides into the gap instead of
-     * balancing on the corner it has left.
-     */
-    const under = CLOD_HALF + 0.02;
-    let leanX = 0;
-    let leanZ = 0;
-    let footing = 0;
-    let loosest = 0;
-    const feet = [[-CLOD_HALF, 0], [CLOD_HALF, 0], [0, -CLOD_HALF], [0, CLOD_HALF]] as const;
-    for (const [ox, oz] of feet) {
-      if (this.chipSolid(chip, p.x + ox, p.y - under, p.z + oz)) footing++;
-      else { leanX += ox; leanZ += oz; }
-      loosest = Math.max(
-        loosest,
-        loosenessAt(chip.pattern, chip.progress, p.x + ox, p.y - under, p.z + oz),
-      );
-    }
-    // How far it may press into whatever is still holding it. Grows with the
-    // erosion of that soil, so the descent is continuous rather than a plop.
-    const sag = loosest * CLOD_SAG;
-    // Only when it is PART supported. Fully held, there is nowhere to lean;
-    // fully unsupported, it should drop straight rather than veer.
-    if (footing > 0 && footing < feet.length) {
-      const len = Math.hypot(leanX, leanZ) || 1;
-      v.x += (leanX / len) * CLOD_LEAN * dt;
-      v.z += (leanZ / len) * CLOD_LEAN * dt;
-    }
-
-    v.y -= CLOD_GRAVITY * dt;
-    // Soil is not air. Sideways drift bleeds off hard so the lump creeps into
-    // place and stops, rather than skating around the cavity.
-    const damp = Math.max(0, 1 - 6 * dt);
-    v.x *= damp;
-    v.z *= damp;
-
-    // Axis-separated, so being stopped in one direction never cancels motion in
-    // the others — the lump slides along a wall instead of sticking to it.
-    for (const axis of ['y', 'x', 'z'] as const) {
-      const delta = v[axis] * dt;
-      if (delta === 0) continue;
-      const next = { x: p.x, y: p.y, z: p.z };
-      next[axis] += delta;
-      if (this.clodBlocked(chip, next, sag)) {
-        v[axis] = 0;
-        continue;
-      }
-      p[axis] = next[axis];
-    }
-  }
-
-  /** Would the clod overlap standing soil, or leave the voxel, at this position? */
-  private clodBlocked(
-    chip: ActiveDigVisual,
-    at: { x: number; y: number; z: number },
-    sag: number,
-  ): boolean {
-    for (const [ox, oy, oz] of CLOD_PROBES) {
-      const px = at.x + ox * CLOD_HALF;
-      const py = at.y + oy * CLOD_HALF;
-      const pz = at.z + oz * CLOD_HALF;
-      // The voxel's own shell is hard. Sag is soil giving under weight, not a
-      // licence to sink through the floor of the cube into the world below.
-      if (px < 0 || px >= 1 || py < 0 || py >= 1 || pz < 0 || pz >= 1) return true;
-      // Only the underside sinks in; the sides and top meet soil square on.
-      const sy = oy < 0 ? at.y - (CLOD_HALF - sag) : py;
-      if (crumbAt(chip.pattern, chip.progress, px, sy, pz)) return true;
-    }
-    return false;
-  }
-
-  /**
-   * Standing soil at this point inside the voxel being dug?
-   *
-   * Outside the cube counts as solid: this voxel's own shell is the floor and
-   * walls of the clod's little world, and it stays in there until the dig ends.
-   */
-  private chipSolid(chip: ActiveDigVisual, lx: number, ly: number, lz: number): boolean {
-    if (lx < 0 || lx >= 1 || ly < 0 || ly >= 1 || lz < 0 || lz >= 1) return true;
-    return crumbAt(chip.pattern, chip.progress, lx, ly, lz);
-  }
-
-  /** Draw the clod that is waiting inside the cube being dug. */
-  private showBuriedClod(chip: ActiveDigVisual, wobble: number): void {
+  private spillPieces(chip: ActiveDigVisual, cells: number[]): void {
     const { x, y, z } = chip.voxel;
     const voxel = this.world.get(x, y, z);
     if (!isSolid(voxel)) return;
-    const style = styleForVoxel(x, y, z, voxel);
-
-    if (!this.clodStyle || this.clodStyle.seed !== style.seed) {
-      this.applyClodStyle(style);
+    const { strikeAxis, strikeSign } = chip.pattern;
+    for (const cell of cells) {
+      const c = cellCentre(cell);
+      /*
+       * Out through the FACE she is working, keeping its place in the sheet.
+       *
+       * Left at its lattice position a piece spawns inside a voxel the grid
+       * still calls solid — it has to, or she would fall through the cube she
+       * is standing on — so it either gets ejected somewhere absurd or, if the
+       * grid is masked for it, drops straight through the soil still standing
+       * and hides underneath. Emerging at the face is both true (this is where
+       * the sheet is being shaved off) and self-consistent: it starts in air.
+       */
+      const out = strikeSign > 0 ? 1 + CLOD_RADIUS + 0.02 : -CLOD_RADIUS - 0.02;
+      const local = [c.x, c.y, c.z];
+      local[strikeAxis] = out;
+      const jx = chip.pattern.jitter[cell * 4 + 0]!;
+      const jz = chip.pattern.jitter[cell * 4 + 2]!;
+      const placed = this.soil.drop(
+        { x: x + local[0]!, y: y + local[1]!, z: z + local[2]! },
+        voxel,
+        pieceSource(x, y, z, cell),
+        { x: jx * 0.5, y: 0.1, z: jz * 0.5 },
+      );
+      // Heap full: leave the rest in the lattice's ledger so completion hands
+      // them to her jaws rather than losing them.
+      if (!placed) return;
+      chip.dropped.push(placed);
+      chip.spilled++;
     }
-    const c = chip.clodPos;
-    const axis = chip.pattern.wobbleAxis;
-    this.clodMesh.position.set(
-      x + c.x + axis.x * wobble,
-      y + c.y + axis.y * wobble,
-      z + c.z + axis.z * wobble,
-    );
-    this.clodMesh.visible = true;
   }
 
   /** Point the shared clod mesh at one style. */
@@ -1215,10 +1179,12 @@ export class DigScene {
       const slot = batch.count;
       this.soilDummy.position.set(clod.position.x, clod.position.y, clod.position.z);
       this.soilDummy.rotation.set(style.spin[0], style.spin[1], style.spin[2]);
+      // Piece scale, not load scale: the lump in her jaws represents a whole
+      // scoop, but each thing lying on the ground is one 64th of a cube.
       this.soilDummy.scale.set(
-        CLOD_SIZE * style.axisScale[0],
-        CLOD_SIZE * style.axisScale[1],
-        CLOD_SIZE * style.axisScale[2],
+        PIECE_SIZE * style.axisScale[0],
+        PIECE_SIZE * style.axisScale[1],
+        PIECE_SIZE * style.axisScale[2],
       );
       this.soilDummy.updateMatrix();
       batch.setMatrixAt(slot, this.soilDummy.matrix);
@@ -1315,35 +1281,69 @@ export class DigScene {
   private dropCarried(): void {
     if (this.session.carried === 0) return;
 
-    // Release it as a LOOSE clod rather than depositing a voxel. It lands, it
-    // stays put, and from then on it can be shoved, knocked down a tunnel, or
-    // picked up again — none of which terrain could be.
-    const unit = this.session.release();
-    // release() has ALREADY taken the unit out of the load, so every path from
-    // here has to either place it or put it back. Returning early here was
-    // silently destroying soil.
+    /*
+     * A whole scoop at once, where the crosshair is pointing.
+     *
+     * release() has ALREADY taken the pieces out of the load, so every path
+     * from here has to place them or put them back — returning early was how
+     * soil used to get silently destroyed.
+     */
+    const unit = this.session.release(SCOOP_PIECES);
     if (!unit) return;
     if (!unit.source) {
       this.session.load.push(unit);
       return;
     }
-    const at = this.dropSpot();
+
+    const at = this.aimPoint() ?? this.dropSpot();
     const { forward } = this.surfaceBasis();
-    const dropped = this.soil.drop(
-      { x: at.x, y: at.y, z: at.z },
-      unit.material,
-      unit.source,
-      // Barely a toss. It used to be flung forward hard enough to skitter over
-      // the lip of the shaft she had just climbed out of and fall back in.
-      { x: forward.x * 0.35, y: 0.15, z: forward.z * 0.35 },
-    );
-    if (!dropped) {
-      // Heap full — put it straight back rather than destroying soil.
-      this.session.load.push(unit);
-      return;
+    let placed = 0;
+    for (let i = 0; i < unit.count; i++) {
+      // Scattered around the aim point rather than stacked on it, so they land
+      // as a heap and let their own physics and shapes sort out the rest.
+      const h = hashVoxel(unit.source.x + i, unit.source.y, unit.source.z + i * 7);
+      const a = ((h & 0xffff) / 0xffff) * Math.PI * 2;
+      const rr = (((h >>> 16) & 0xffff) / 0xffff) * SCOOP_SCATTER;
+      const dropped = this.soil.drop(
+        { x: at.x + Math.cos(a) * rr, y: at.y + 0.1 + (i % 4) * 0.06, z: at.z + Math.sin(a) * rr },
+        unit.material,
+        // Each piece keeps a shape of its own, so a tipped scoop is a mixed
+        // heap rather than sixteen copies of one lump.
+        { x: unit.source.x + i, y: unit.source.y + i * 3, z: unit.source.z + i * 11 },
+        // Barely a toss. Flung forward it used to skitter over the lip of the
+        // shaft she had just climbed out of and fall back in.
+        { x: forward.x * 0.2, y: 0.1, z: forward.z * 0.2 },
+      );
+      if (!dropped) break;
+      placed++;
     }
-    this.clodStyle = null;
-    this.digAudio?.('DIG_RELEASE', at.clone());
+    // Whatever the heap refused stays in her jaws.
+    if (placed < unit.count) {
+      this.session.load.push({ ...unit, count: unit.count - placed });
+    }
+    if (placed > 0) {
+      this.clodStyle = null;
+      this.digAudio?.('DIG_RELEASE', at.clone());
+    }
+  }
+
+  /**
+   * The world point the crosshair is on, if anything is in range.
+   *
+   * Dropping goes here rather than at her feet, because "it will drop wherever
+   * the crosshair is pointing" is the whole difference between tipping a load
+   * and placing one.
+   */
+  private aimPoint(): THREE.Vector3 | null {
+    const hit = this.currentTarget();
+    if (!hit) return null;
+    // Just off the face she is looking at, so the heap lands ON the surface
+    // rather than inside it.
+    return new THREE.Vector3(
+      hit.x + 0.5 + hit.nx * (0.5 + CLOD_RADIUS),
+      hit.y + 0.5 + hit.ny * (0.5 + CLOD_RADIUS),
+      hit.z + 0.5 + hit.nz * (0.5 + CLOD_RADIUS),
+    );
   }
 
   /**
@@ -1379,25 +1379,35 @@ export class DigScene {
   }
 
   /**
-   * Turn the cube she has just freed into a clod lying in the hole.
+   * Settle the books when a cube finally goes.
    *
-   * tickDig() puts the unit in the load first and this hands it straight out
-   * again, which looks roundabout but is what keeps conservation airtight: the
-   * soil is never in limbo, and if the heap is somehow full it simply stays in
-   * the load rather than evaporating.
+   * tickDig() credits her with a whole voxel at completion, but the pieces have
+   * ALREADY been lying in the hole for most of the dig — so this hands straight
+   * back exactly the number that made it out, leaving her holding only what the
+   * heap refused. Roundabout on purpose: the soil is never in limbo, and the
+   * ledger closes at the one instant the grid and the visual agree again.
    */
   private spillDug(cell: { x: number; y: number; z: number }): void {
-    const unit = this.session.release();
-    if (!unit) return;
-    // Drop it exactly where it was uncovered, so the lump does not jump at the
-    // instant the last crumb goes. It falls from there like anything else.
-    const c = this.chip?.clodPos ?? { x: 0.5, y: 0.5, z: 0.5 };
-    const placed = this.soil.drop(
-      { x: cell.x + c.x, y: cell.y + c.y, z: cell.z + c.z },
-      unit.material,
-      unit.source ?? cell,
-    );
-    if (!placed) this.session.load.push(unit);
+    /*
+     * Flush the tail FIRST.
+     *
+     * The last sheet is due at progress 1, which is the same frame the cube
+     * pops — so whether updateChip ever saw it depended on the order the two
+     * ran in, and the count came out 48 or 64 depending on the frame. Asking
+     * for everything still owed makes it 64 every time.
+     */
+    if (this.chip) {
+      const owed = releasedBetween(this.chip.pattern, this.chip.progress, 1);
+      if (owed.length > 0) this.spillPieces(this.chip, owed);
+    }
+    const spilled = this.chip?.spilled ?? 0;
+    if (spilled > 0) this.session.release(spilled);
+    const stranded = PIECES_PER_VOXEL - spilled;
+    if (stranded > 0) {
+      // The heap was full mid-dig. She keeps what would not fit rather than it
+      // evaporating, and can put it down once there is room.
+      this.digAudio?.('DIG_RELEASE', new THREE.Vector3(cell.x + 0.5, cell.y + 0.5, cell.z + 0.5));
+    }
   }
 
   /**
@@ -1420,12 +1430,38 @@ export class DigScene {
     );
   }
 
-  /** Pick a loose clod back up, if a hand is free. */
-  private takeClod(clod: Clod): boolean {
-    if (this.session.isFull) return false;
-    if (!this.soil.remove(clod)) return false;
-    this.session.load.push({ material: clod.material, count: 1, source: { ...clod.source } });
-    return true;
+  /**
+   * Gather a SCOOP — the nearest sixteen pieces, in one go.
+   *
+   * An ant does not pick grains up one at a time; it packs a mandible-load and
+   * walks. Sixteen is a quarter of a voxel, which is exactly one sheet off the
+   * face, so a scoop is the same quantity the dig hands you.
+   *
+   * Grouped by material, because a scoop taken where two strata meet is a
+   * mouthful of both and the load has to stay honest about that. The first
+   * piece of each group lends its shape to the whole group's visual — the load
+   * is drawn as one lump, so it needs one identity.
+   */
+  private takeScoop(around: Clod): number {
+    if (this.session.isFull) return 0;
+    const room = this.session.capacity - this.session.carried;
+    const want = Math.min(SCOOP_PIECES, room);
+    if (want <= 0) return 0;
+    const bundle = this.soil.scoop(around.position, want, SCOOP_RANGE);
+
+    const groups = new Map<number, { count: number; source: Clod['source'] }>();
+    for (const clod of bundle) {
+      if (!this.soil.remove(clod)) continue;
+      const group = groups.get(clod.material);
+      if (group) group.count++;
+      else groups.set(clod.material, { count: 1, source: { ...clod.source } });
+    }
+    let taken = 0;
+    for (const [material, group] of groups) {
+      this.session.load.push({ material, count: group.count, source: group.source });
+      taken += group.count;
+    }
+    return taken;
   }
 
   /**
@@ -1532,7 +1568,7 @@ export class DigScene {
         return;
       case 'carry': {
         const clod = this.clodInReach();
-        if (clod) this.takeClod(clod);
+        if (clod) this.takeScoop(clod);
         return;
       }
       default: {
@@ -2247,10 +2283,23 @@ export class DigScene {
       .unproject(this.camera)
       .sub(this.camera.position)
       .normalize();
-    // A clod sitting against a wall is in front of that wall, so a tap there
-    // means the loose lump, not the soil behind it.
+    /*
+     * A dig in progress owns the tap, and nothing else gets a look in.
+     *
+     * Spoil now lands IN the hole she is working, a sheet at a time, so from
+     * the second sheet onward there is always a piece under the crosshair —
+     * and tapping to cancel gathered a scoop instead. The button already
+     * ordered these correctly; the tap path did not, which is exactly the kind
+     * of same-question-two-answers that has to be one rule.
+     */
+    if (this.session.digging) {
+      this.session.cancelDig();
+      return;
+    }
+    // A piece sitting against a wall is in front of that wall, so a tap there
+    // means the loose soil, not the soil behind it.
     const clod = this.clodInReach();
-    if (clod && this.takeClod(clod)) return;
+    if (clod && this.takeScoop(clod) > 0) return;
     const hit = this.targetAlong(dir);
     if (hit) this.startDig(hit.x, hit.y, hit.z, { x: hit.nx, y: hit.ny, z: hit.nz });
   }
@@ -2404,22 +2453,22 @@ export class DigScene {
     const skill = this.debug
       ? ` \u00B7 ${this.session.secondsPerCube.toFixed(1)}s/cube after ${this.session.practiced}`
       : '';
-    // Crumbs left on the voxel being chipped. Debug-only, but it is the one
-    // piece of the effect a headless test can actually assert on.
-    // Crumbs left, and how far the clod has settled into the hole under it.
-    // Both debug-only, and the clod's height is the only handle a headless test
-    // has on whether it has weight or is just hanging there.
+    // Pieces still in the lattice, and how many have been spilled into the hole.
+    // Debug-only, and the one handle a headless test has on the peel.
+    // Pieces in her jaws. Conservation is counted in these, so a headless test
+    // needs to see them rather than the rounded scoop figure.
+    const held = this.debug ? ` \u00B7 pieces ${this.session.carried}` : '';
     const chipping = this.debug && this.chip
       ? ` \u00B7 chip ${CELL_COUNT - removedAt(this.chip.pattern, this.chip.progress)}/${CELL_COUNT}`
-        + ` \u00B7 clod ${this.chip.clodPos.y.toFixed(2)}`
+        + ` \u00B7 spill ${this.chip.spilled}`
       : '';
     const chamber = status.depthMet ? ` \u00b7 Chamber ${status.chamber}/${DEN_MIN_CHAMBER}` : '';
     readout.innerHTML = `
       <b>Depth</b> ${status.depth > 0 ? `${status.depthMm} mm` : 'surface'} &nbsp;
-      <b>Carrying</b> ${this.session.carried}/${this.session.capacity} &nbsp;
+      <b>Carrying</b> ${this.session.carriedScoops}/4 scoops &nbsp;
       <b>Loose</b> ${this.soil.count} &nbsp;
       <b>Dug</b> ${this.world.excavated}<br>
-      <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 ` : ''}${this.weightless ? '\u{1FAB5} weightless \u00b7 ' : this.surface.mode === 'attached' ? '\u{1F9D7} gripping \u00b7 ' : ''}Target: ${targetName}${bar}${chamber}${skill}${chipping} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
+      <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 ` : ''}${this.weightless ? '\u{1FAB5} weightless \u00b7 ' : this.surface.mode === 'attached' ? '\u{1F9D7} gripping \u00b7 ' : ''}Target: ${targetName}${bar}${chamber}${skill}${held}${chipping} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
     `;
   }
 

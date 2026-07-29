@@ -124,6 +124,73 @@ export function styleForVoxel(x: number, y: number, z: number, material: VoxelId
   };
 }
 
+/**
+ * Shape families. Soil that broke off a wall is not all pebbles: some of it
+ * splinters, some comes away as a block along its own bedding, some rolls.
+ * Four is enough to read as mixed rubble in a pile and few enough to stay
+ * inside one instanced batch per variant.
+ */
+export const CLOD_FORM_PEBBLE = 0;
+export const CLOD_FORM_BLOCK = 1;
+export const CLOD_FORM_PRISM = 2;
+export const CLOD_FORM_SHARD = 3;
+export const CLOD_FORM_COUNT = 4;
+
+/** How strongly a piece commits to its family. Full projection reads machined. */
+const FORM_STRENGTH = 0.62;
+
+/**
+ * Radius of the family's silhouette in a direction, relative to a ball.
+ *
+ * Each is the reciprocal of the shape's support function, blended back toward 1
+ * so the result is soil shaped LIKE a block rather than an actual block.
+ */
+function formSupport(form: number, x: number, y: number, z: number): number {
+  let support = 1;
+  if (form === CLOD_FORM_BLOCK) {
+    support = Math.max(Math.abs(x), Math.abs(y), Math.abs(z));
+  } else if (form === CLOD_FORM_PRISM) {
+    // Hexagonal cross-section, flat ends: a grain that split along two planes.
+    let hex = 0;
+    for (let i = 0; i < 3; i++) {
+      const a = (Math.PI / 3) * i;
+      hex = Math.max(hex, Math.abs(x * Math.cos(a) + z * Math.sin(a)));
+    }
+    support = Math.max(Math.abs(y) * 0.95, hex / (Math.sqrt(3) / 2));
+  } else if (form === CLOD_FORM_SHARD) {
+    // Tetrahedron: the four corner directions of a cube that share no face.
+    const s = 1 / Math.sqrt(3);
+    const dirs = [[s, s, s], [s, -s, -s], [-s, s, -s], [-s, -s, s]];
+    let far = 0;
+    for (const d of dirs) far = Math.max(far, x * d[0]! + y * d[1]! + z * d[2]!);
+    // Floored well off zero: a tetrahedron's support collapses in the
+    // directions between its corners, and 1/support there is a needle.
+    support = Math.max(0.5, far);
+  }
+  if (support <= 1e-6) return 1;
+  return 1 + (1 / support - 1) * FORM_STRENGTH;
+}
+
+/**
+ * Where one PIECE of a voxel gets its look from.
+ *
+ * The sixty-four pieces a voxel breaks into have to be sixty-four different
+ * lumps, and still the same sixty-four after a reload — so the piece index is
+ * folded into the coordinate the shape is hashed from.
+ */
+export function pieceSource(
+  x: number,
+  y: number,
+  z: number,
+  cell: number,
+): { x: number; y: number; z: number } {
+  // A COORDINATE, not a separate style function. Shape identity already travels
+  // with a clod as its source cell, through physics and through a save file, so
+  // spreading the piece index into that coordinate means everything downstream
+  // — styleForVoxel, the instanced batches, toJSON — keeps working untouched.
+  return { x: x * 73 + cell, y: y * 149 + cell * 7, z: z * 211 + cell * 13 };
+}
+
 /* ------------------------------------------------------------- geometry */
 
 const T = (1 + Math.sqrt(5)) / 2;
@@ -191,6 +258,14 @@ function icosphere(): { verts: number[][]; faces: number[][] } {
 export function buildClodShape(variant: number, feel: ClodFeel = DEFAULT_FEEL): ClodShape {
   const rand = rng(hashVoxel(variant + 1, 7919, 104729));
   const { verts, faces } = icosphere();
+  /*
+   * The form family is derived FROM the variant rather than being a second
+   * dimension. Sixty-four pieces come out of one voxel and each is drawn from a
+   * pooled instanced batch keyed by variant — crossing form with variant would
+   * multiply the batches by four and turn one draw call into four for no more
+   * variety than shuffling the same twelve already gives.
+   */
+  const form = positiveModulo(variant, CLOD_FORM_COUNT);
 
   // A few random directions, each pushing the surface out where it faces them.
   const lobes: { dir: number[]; amp: number; tight: number }[] = [];
@@ -222,7 +297,10 @@ export function buildClodShape(variant: number, feel: ClodFeel = DEFAULT_FEEL): 
       // dot to a power keeps the falloff broad instead of creasing.
       bulge += lobe.amp * Math.pow(Math.max(0, d), lobe.tight);
     }
-    let r = 1 + Math.min(bulge, bulgeCap);
+    // Pull toward the family's silhouette before the lumps go on, so a block
+    // reads as a broken cube and a shard as a splinter, rather than as the same
+    // pebble four times.
+    let r = (1 + Math.min(bulge, bulgeCap)) * formSupport(form, v[0]!, v[1]!, v[2]!);
     // Squash the underside. Moderate, so it reads as a resting face rather
     // than as a sliced plane.
     if (v[1]! < 0) r *= 1 - feel.flatten * (-v[1]!);

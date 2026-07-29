@@ -25,33 +25,26 @@ import { TILE_VOXELS } from './tileTextures';
 import { CLAY, SAND, type VoxelId } from './VoxelWorld';
 
 /**
- * Crumbs per axis. Five, because it is ODD.
+ * Pieces per axis. Four, because it divides.
  *
- * An even grid has no middle cell, so a crater has nothing to open from and
- * always starts off-centre against a seam. Five gives a single centre crumb on
- * every face for the first strike to bite into, and 125 pieces is fine enough
- * that the lattice never reads as a grid. It costs almost nothing, because
- * damage is local and undamaged regions emit no interior geometry at all.
+ * This used to be five, chosen ODD so a crater had a middle cell to open from.
+ * That reasoning died with the crater: a voxel is no longer eaten outward from
+ * a strike point, it is peeled off in LAYERS, and nothing is deleted — every
+ * piece becomes a real lump of soil lying in the hole. Four gives 64 pieces in
+ * four layers of sixteen, and sixteen is a scoop: what an ant carries in one
+ * trip. A quarter-voxel piece is 1.25mm at this scale, about the size of its
+ * head.
  */
-export const CHIP_CELLS = 5;
+export const CHIP_CELLS = 4;
 export const CELL_COUNT = CHIP_CELLS * CHIP_CELLS * CHIP_CELLS;
+/** One layer, and one scoop. The two are the same number on purpose. */
+export const LAYER_CELLS = CHIP_CELLS * CHIP_CELLS;
+export const LAYER_COUNT = CHIP_CELLS;
+/** Pieces a whole voxel is worth. Soil conservation counts in these. */
+export const PIECES_PER_VOXEL = CELL_COUNT;
 
-/**
- * How much of the voxel IS the clod, as a radius in voxel units.
- *
- * The clod is not conjured at the end — it is in there from the first tap,
- * buried on the far side from where she is working, and digging is the act of
- * chipping away everything that is not it. Crumbs inside this radius are clod
- * material: never removed, never drawn as crumbs, because the clod mesh is
- * drawn there instead.
- *
- * Matched to the rendered clod's radius, so the hole left behind is the size of
- * the thing that came out of it.
- */
-export const CLOD_CORE = 0.24;
-
-/** Kept for callers that still ask; the real cap is `pattern.breakable`. */
-export const MAX_REMOVED = CELL_COUNT - 1;
+/** Every piece comes away now — nothing is left standing to become a clod. */
+export const MAX_REMOVED = CELL_COUNT;
 
 /** Crumbs start breaking here, and the last one is due by here. */
 /*
@@ -75,26 +68,8 @@ const LAST_BREAK = 0.99;
 const EROSION_LEAD = 0.13;
 export const EROSION_MAX = 0.55;
 
-/** Progress past which the remaining soil is loose enough to move. */
-const WOBBLE_FROM = 0.7;
-
 /** How far a fully eroded crumb can tilt, in radians. */
 const MAX_TILT = 0.42;
-
-/**
- * How far the remnant rounds off toward the clod it is about to become.
- *
- * The last thing standing used to be a squared-off stub that vanished and was
- * replaced by a rounded lump, which reads as a swap rather than as the same
- * piece of soil. Pulling the surviving crumbs toward a ball as the dig
- * finishes makes the cube visibly chisel down INTO the clod — ice to egg —
- * so the thing she picks up is the thing you watched her free.
- *
- * Held to zero for most of the dig: rounding a barely-touched cube would make
- * intact terrain look sanded.
- */
-const ROUND_FROM = 0.55;
-const ROUND_MAX = 0.55;
 
 export interface Vec3 {
   x: number;
@@ -178,17 +153,13 @@ export interface FracturePattern {
    * broken soil — this is the single thing that makes it look crumbly.
    */
   spin: Float32Array;
-  /** Where the first blow landed — the centre of the crater. */
+  /** Where the first blow landed — the face she is working. */
   strike: Vec3;
-  /** Where the clod is buried, in voxel-local space. */
-  clodCentre: Vec3;
-  /** Crumbs that ARE the clod. Never removed, never drawn as crumbs. */
-  core: Set<number>;
-  /** Crumbs that can be chipped away — everything but the core. */
-  breakable: number;
-  /** Axis the loosened soil rocks about once it is nearly free. */
-  wobbleAxis: Vec3;
-  wobblePhase: number;
+  /** Which axis the layers stack along, and which end she is working from. */
+  strikeAxis: 0 | 1 | 2;
+  strikeSign: 1 | -1;
+  /** Layer each piece belongs to: 0 is the one under her mandibles. */
+  layer: Int32Array;
 }
 
 export function cellCentre(cell: number): Vec3 {
@@ -202,10 +173,12 @@ export function cellCentre(cell: number): Vec3 {
 /**
  * Build the fracture for one voxel.
  *
- * Crumbs are ranked by distance to two seeded attack points plus noise, so
- * damage eats outward from one or two irregular regions instead of dissolving
- * evenly or hollowing from the middle. Attack points are pulled toward the
- * surface, because soil gives way at an exposed face first.
+ * Pieces come away in LAYERS, nearest face first, sixteen at a time. Ranking
+ * by distance from a strike point — the old crater — is wrong for this: it
+ * takes bites out of the middle of a face and leaves a rim, when what an ant
+ * actually does is shave the surface off in sheets. Layers also make the dig
+ * legible, because each quarter of the bar is one visible sheet coming away,
+ * and each sheet is exactly one scoop.
  */
 export function buildFracture(
   x: number,
@@ -250,73 +223,54 @@ export function buildFracture(
     else strike.z = positive ? 1 : 0;
   }
 
+  // Which axis the layers stack along, and from which end.
+  const strikeAxis: 0 | 1 | 2 = strike.x !== 0.5 ? 0 : strike.y !== 0.5 ? 1 : 2;
+  const strikeSign: 1 | -1 = (
+    strikeAxis === 0 ? strike.x : strikeAxis === 1 ? strike.y : strike.z
+  ) > 0.5 ? 1 : -1;
+
   /*
-   * The clod sits on the FAR side from the strike, so she chips inward and
-   * uncovers it rather than having it appear once the last crumb pops. Nudged
-   * off dead centre by a seeded amount so it is not always in the same place.
+   * Layer index per piece: 0 is the sheet against the face she is working.
+   * Digging down, layer 0 is the top — which is also the one gravity would let
+   * go of first, so the visible order and the physical order agree.
    */
-  /*
-   * Clamped so the core stays STRICTLY interior. Let it drift far enough and a
-   * core crumb lands on the cube's outer layer — and because core crumbs are
-   * never drawn as crumbs, its outward face is never emitted either, leaving a
-   * hole in the shell of an untouched voxel.
-   */
-  const inset = (v: number) => Math.min(0.65, Math.max(0.35, v));
-  const clodCentre: Vec3 = {
-    x: inset(0.5 + (0.5 - strike.x) * 0.42 + (rand() - 0.5) * 0.1),
-    y: inset(0.5 + (0.5 - strike.y) * 0.42 + (rand() - 0.5) * 0.1),
-    z: inset(0.5 + (0.5 - strike.z) * 0.42 + (rand() - 0.5) * 0.1),
-  };
-  const core = new Set<number>();
+  const layer = new Int32Array(CELL_COUNT);
+  const noise = new Float64Array(CELL_COUNT);
   for (let cell = 0; cell < CELL_COUNT; cell++) {
-    const c = cellCentre(cell);
-    if (Math.hypot(c.x - clodCentre.x, c.y - clodCentre.y, c.z - clodCentre.z) <= CLOD_CORE) {
-      core.add(cell);
-    }
+    const cx = cell % CHIP_CELLS;
+    const cy = Math.floor(cell / CHIP_CELLS) % CHIP_CELLS;
+    const cz = Math.floor(cell / (CHIP_CELLS * CHIP_CELLS));
+    const along = strikeAxis === 0 ? cx : strikeAxis === 1 ? cy : cz;
+    layer[cell] = strikeSign > 0 ? CHIP_CELLS - 1 - along : along;
+    noise[cell] = rand();
   }
 
-  const scores = new Float64Array(CELL_COUNT);
-  for (let cell = 0; cell < CELL_COUNT; cell++) {
-    const c = cellCentre(cell);
-    const d = Math.hypot(c.x - strike.x, c.y - strike.y, c.z - strike.z);
-    /*
-     * Noise deliberately SMALL against the distances it perturbs. Large noise
-     * swamps the distance term and crumbs come off all over the cube in what
-     * looks like random order; this is just enough to keep the rim of the
-     * crater ragged rather than a machined circle.
-     */
-    scores[cell] = d + (rand() - 0.5) * 0.12;
-  }
-
-  // Only breakable crumbs are queued. What is left standing when they have all
-  // gone is the core, which is exactly the clod.
+  /*
+   * Ordered by layer, then shuffled WITHIN the layer. Sorting the whole cube by
+   * one score would let a piece from the second sheet come away before the
+   * first has finished, which reads as the block rotting rather than as being
+   * shaved. Inside a sheet the order is free, and randomising it is what stops
+   * sixteen pieces letting go in a readable raster.
+   */
   const order = Int32Array.from(
     Array.from({ length: CELL_COUNT }, (_, i) => i)
-      .filter((i) => !core.has(i))
-      .sort((a, b) => scores[a]! - scores[b]!),
+      .sort((a, b) => (layer[a]! - layer[b]!) || (noise[a]! - noise[b]!)),
   );
-  const breakable = order.length;
-  const rank = new Int32Array(CELL_COUNT).fill(breakable);
-  for (let i = 0; i < breakable; i++) rank[order[i]!] = i;
+  const rank = new Int32Array(CELL_COUNT);
+  for (let i = 0; i < CELL_COUNT; i++) rank[order[i]!] = i;
 
   /*
-   * Thresholds. Evenly spaced across the breaking window, then nudged and
-   * re-sorted so no two voxels chip on the same beat. Clumping snaps groups of
-   * crumbs onto a shared threshold, which is what makes clay come away in
-   * slabs and sand trickle.
+   * Thresholds. Each layer owns its own quarter of the dig, so the four sheets
+   * come away at evenly spaced moments and the last piece of a sheet is gone
+   * before the next one starts. Clumping snaps groups onto a shared threshold,
+   * which is what makes clay come away in slabs and sand trickle.
    */
   const span = LAST_BREAK - FIRST_BREAK;
-  const raw = new Float32Array(breakable);
-  for (let i = 0; i < breakable; i++) {
-    const base = FIRST_BREAK + (span * (i + 0.5)) / breakable;
-    raw[i] = base + (rand() - 0.5) * (span / breakable) * 1.6;
-  }
-  raw.sort();
-  const thresholds = new Float32Array(breakable);
+  const thresholds = new Float32Array(CELL_COUNT);
   const group = Math.max(1, Math.round(feel.clumping));
-  for (let i = 0; i < breakable; i++) {
-    // Snap to the head of each group so clumped crumbs let go together.
-    thresholds[i] = raw[Math.floor(i / group) * group]!;
+  for (let i = 0; i < CELL_COUNT; i++) {
+    const head = Math.floor(i / group) * group;
+    thresholds[i] = FIRST_BREAK + (span * (head + 1)) / CELL_COUNT;
   }
 
   const jitter = new Float32Array(CELL_COUNT * 4);
@@ -331,8 +285,6 @@ export function buildFracture(
     spin[cell * 3 + 2] = rand() - 0.5;
   }
 
-  const wa = { x: rand() - 0.5, y: rand() - 0.5, z: rand() - 0.5 };
-  const len = Math.hypot(wa.x, wa.y, wa.z) || 1;
 
   return {
     seed,
@@ -341,14 +293,12 @@ export function buildFracture(
     order,
     rank,
     thresholds,
-    clodCentre,
-    core,
-    breakable,
+    layer,
+    strikeAxis,
+    strikeSign,
     jitter,
     spin,
     strike,
-    wobbleAxis: { x: wa.x / len, y: wa.y / len, z: wa.z / len },
-    wobblePhase: rand() * Math.PI * 2,
   };
 }
 
@@ -356,7 +306,7 @@ export function buildFracture(
 export function removedAt(pattern: FracturePattern, progress: number): number {
   if (progress <= 0) return 0;
   let n = 0;
-  while (n < pattern.breakable && pattern.thresholds[n]! <= progress) n++;
+  while (n < CELL_COUNT && pattern.thresholds[n]! <= progress) n++;
   return n;
 }
 
@@ -365,39 +315,6 @@ export function cellSurvives(pattern: FracturePattern, cell: number, progress: n
   const removed = removedAt(pattern, progress);
   for (let i = 0; i < removed; i++) if (pattern.order[i] === cell) return false;
   return true;
-}
-
-/**
- * Is there standing soil at this point inside the voxel?
- *
- * A point query rather than a cell query, so the clod can be given weight: it
- * asks "can I move here" of arbitrary positions as it settles into the hole
- * being opened under it, without the caller needing to know the lattice.
- *
- * Core cells answer FALSE. They are the clod itself, and a body cannot rest on
- * its own volume — treating them as solid would wedge it in place forever,
- * which is precisely the floating-in-mid-air look this exists to fix.
- *
- * Outside the unit cube is also false: this function speaks only for one
- * voxel, and what lies beyond it is the world's business.
- */
-export function crumbAt(
-  pattern: FracturePattern,
-  progress: number,
-  lx: number,
-  ly: number,
-  lz: number,
-): boolean {
-  if (lx < 0 || lx >= 1 || ly < 0 || ly >= 1 || lz < 0 || lz >= 1) return false;
-  const cx = Math.min(CHIP_CELLS - 1, Math.floor(lx * CHIP_CELLS));
-  const cy = Math.min(CHIP_CELLS - 1, Math.floor(ly * CHIP_CELLS));
-  const cz = Math.min(CHIP_CELLS - 1, Math.floor(lz * CHIP_CELLS));
-  const cell = cx + cy * CHIP_CELLS + cz * CHIP_CELLS * CHIP_CELLS;
-  if (pattern.core.has(cell)) return false;
-  // rank is the crumb's place in the removal queue, and core crumbs were filled
-  // with `breakable`, so this is the same monotonic answer cellSurvives gives —
-  // in constant time, because it is called several times per frame.
-  return pattern.rank[cell]! >= removedAt(pattern, progress);
 }
 
 /**
@@ -413,34 +330,10 @@ export function erosionFor(pattern: FracturePattern, cell: number, progress: num
   const rank = pattern.rank[cell]!;
   // The crumb that never breaks has no moment of its own; peg it to the last
   // one so the final remnant still looks worked rather than factory-fresh.
-  const due = pattern.thresholds[Math.min(rank, pattern.breakable - 1)]!;
+  const due = pattern.thresholds[Math.min(rank, CELL_COUNT - 1)]!;
   const t = (progress - (due - EROSION_LEAD)) / EROSION_LEAD;
   if (t <= 0) return 0;
   return Math.min(1, t) * EROSION_MAX * pattern.feel.crumble;
-}
-
-/**
- * Erosion at a point, as a fraction of EROSION_MAX.
- *
- * The point-query twin of `crumbAt`, and the reason the buried clod sinks
- * steadily instead of sitting perfectly still and then dropping the instant the
- * crumb beneath it pops. Soil under load does not hold at full strength right
- * up to the moment it fails — it gives.
- */
-export function loosenessAt(
-  pattern: FracturePattern,
-  progress: number,
-  lx: number,
-  ly: number,
-  lz: number,
-): number {
-  if (lx < 0 || lx >= 1 || ly < 0 || ly >= 1 || lz < 0 || lz >= 1) return 0;
-  const cx = Math.min(CHIP_CELLS - 1, Math.floor(lx * CHIP_CELLS));
-  const cy = Math.min(CHIP_CELLS - 1, Math.floor(ly * CHIP_CELLS));
-  const cz = Math.min(CHIP_CELLS - 1, Math.floor(lz * CHIP_CELLS));
-  const cell = cx + cy * CHIP_CELLS + cz * CHIP_CELLS * CHIP_CELLS;
-  if (pattern.core.has(cell)) return 0;
-  return Math.min(1, erosionFor(pattern, cell, progress) / EROSION_MAX);
 }
 
 /** The worst erosion anywhere on the voxel — how chewed it looks overall. */
@@ -476,21 +369,39 @@ export function eventsBetween(
     events.push({ kind: crumbs >= 2 ? 'DIG_CHIP_LARGE' : 'DIG_CHIP_SMALL', at, crumbs });
   }
 
-  // One creak as the remaining soil goes slack, and the release at the end.
-  if (from < WOBBLE_FROM && to >= WOBBLE_FROM) {
-    events.push({ kind: 'DIG_CRACK', at: { x: 0.5, y: 0.5, z: 0.5 }, crumbs: 0 });
+  // A whole sheet finishing is its own beat — the moment a scoop's worth of
+  // soil is lying loose in the hole.
+  const layerBefore = Math.floor(before / LAYER_CELLS);
+  // Clamped, so the LAST sheet finishing does not fire a crack of its own —
+  // that moment is the cube coming free, and DIG_RELEASE already owns it.
+  const layerAfter = Math.min(Math.floor(after / LAYER_CELLS), LAYER_COUNT - 1);
+  if (layerAfter > layerBefore) {
+    events.push({ kind: 'DIG_CRACK', at: cellCentre(pattern.order[after - 1]!), crumbs: LAYER_CELLS });
   }
+
   if (from < 1 && to >= 1) {
     events.push({ kind: 'DIG_RELEASE', at: { x: 0.5, y: 0.5, z: 0.5 }, crumbs: 0 });
   }
   return events;
 }
 
-/** Loosened rocking near the end. Small on purpose — a creak, not a cartoon shake. */
-export function wobbleAt(pattern: FracturePattern, progress: number, seconds: number): number {
-  if (progress < WOBBLE_FROM) return 0;
-  const ramp = Math.min(1, (progress - WOBBLE_FROM) / (1 - WOBBLE_FROM));
-  return Math.sin(seconds * 11 + pattern.wobblePhase) * 0.02 * ramp;
+/**
+ * The pieces that came away between two progress readings.
+ *
+ * The whole point of the change: a piece that leaves the lattice is not
+ * deleted, it is handed to the scene to become a real lump of soil at the
+ * position it was sitting in. Returns cell indices, in the order they broke.
+ */
+export function releasedBetween(
+  pattern: FracturePattern,
+  from: number,
+  to: number,
+): number[] {
+  const first = removedAt(pattern, from);
+  const last = removedAt(pattern, to);
+  const cells: number[] = [];
+  for (let i = first; i < last; i++) cells.push(pattern.order[i]!);
+  return cells;
 }
 
 /**
@@ -529,14 +440,9 @@ export function chipMeshData(
     erosionOf[cell] = erosionFor(pattern, cell, progress);
   }
   const size = 1 / CHIP_CELLS;
-  const round = progress <= ROUND_FROM
-    ? 0
-    : ((progress - ROUND_FROM) / (1 - ROUND_FROM)) * ROUND_MAX;
 
   for (let cell = 0; cell < CELL_COUNT; cell++) {
     if (gone.has(cell)) continue;
-    // The core is drawn as the clod itself, not as crumbs.
-    if (pattern.core.has(cell)) continue;
 
     const cx = cell % CHIP_CELLS;
     const cy = Math.floor(cell / CHIP_CELLS) % CHIP_CELLS;
@@ -580,26 +486,10 @@ export function chipMeshData(
     const shrink = 1 - erosion * (0.1 + 0.14 * js);
     const half = (size * shrink) / 2;
     const drift = erosion * size * 0.22;
-    let midX = (cx + 0.5) * size + jx * drift;
-    let midY = (cy + 0.5) * size + jy * drift;
-    let midZ = (cz + 0.5) * size + jz * drift;
+    const midX = (cx + 0.5) * size + jx * drift;
+    const midY = (cy + 0.5) * size + jy * drift;
+    const midZ = (cz + 0.5) * size + jz * drift;
 
-    // Chisel the remnant toward the clod: pull each surviving crumb in from the
-    // corners toward a ball, so the block rounds off as it is worked rather
-    // than staying a stub that pops into a lump at the end.
-    if (round > 0) {
-      const ox = midX - 0.5;
-      const oy = midY - 0.5;
-      const oz = midZ - 0.5;
-      const d = Math.hypot(ox, oy, oz);
-      if (d > 1e-6) {
-        // 0.5 is the cube's half-width; a sphere of that radius is the target.
-        const k = (0.5 / d) * round + (1 - round);
-        midX = 0.5 + ox * k;
-        midY = 0.5 + oy * k;
-        midZ = 0.5 + oz * k;
-      }
-    }
 
     // Crumb-level brightness variation, so the cluster reads as loose grain
     // rather than one carved block.
@@ -643,8 +533,6 @@ export function chipMeshData(
         && az >= 0 && az < CHIP_CELLS;
       if (inside) {
         const neighbour = ax + ay * CHIP_CELLS + az * CHIP_CELLS * CHIP_CELLS;
-        // A core neighbour counts as solid: the clod fills that space, so the
-        // face between them is hidden and emitting it is pure waste.
         if (!gone.has(neighbour) && erosion <= 0 && erosionOf[neighbour]! <= 0) continue;
       }
 

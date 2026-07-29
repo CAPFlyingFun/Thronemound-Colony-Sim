@@ -73,14 +73,15 @@ const hud = async () => {
   return {
     text: t.trim(),
     dug: Number(/Dug (\d+)/.exec(t)?.[1] ?? '0'),
-    carrying: Number(/Carrying (\d+)/.exec(t)?.[1] ?? '0'),
+    scoops: Number(/Carrying (\d+)\/4 scoops/.exec(t)?.[1] ?? '0'),
+    pieces: Number(/pieces (\d+)/.exec(t)?.[1] ?? '0'),
     loose: Number(/Loose (\d+)/.exec(t)?.[1] ?? '0'),
     seconds: Number(/([\d.]+)s\/cube/.exec(t)?.[1] ?? '0'),
     speed: Number(/spd ([\d.]+)/.exec(t)?.[1] ?? '0'),
     target: /Target: ([^ ·]+)/.exec(t)?.[1] ?? '',
     chip: Number(/chip (\d+)\/\d+/.exec(t)?.[1] ?? 'NaN'),
     chipTotal: Number(/chip \d+\/(\d+)/.exec(t)?.[1] ?? 'NaN'),
-    clodY: Number(/clod ([-\d.]+)/.exec(t)?.[1] ?? 'NaN'),
+    spill: Number(/spill (\d+)/.exec(t)?.[1] ?? 'NaN'),
   };
 };
 /**
@@ -158,29 +159,32 @@ else ok('a cancelled dig credits no practice');
 // once the sky is drawn, so the sim advances at roughly 0.15x real time.
 await tap(450, 800);
 /*
- * The buried clod has weight: as the soil under it is chipped away it settles
- * into the hole instead of hanging where the pattern buried it. Sampled from
- * the moment the visual exists, and again once the crumbs are mostly gone.
+ * Pieces are not deleted, they are handed to the world a sheet at a time. So
+ * spoil should appear DURING the dig rather than all at the end — watch the
+ * loose count climb while the cube is still there.
  */
-const clodStart = await until('the buried clod to appear', (s) => !Number.isNaN(s.clodY), 30000);
-let clodLowest = Infinity;
+let looseDuringDig = 0;
+let spillSeen = 0;
 const dug = await until('the first cube to pop', (s) => s.dug >= 1, 300000, (s) => {
-  if (!Number.isNaN(s.clodY)) clodLowest = Math.min(clodLowest, s.clodY);
+  if (s.dug === 0) looseDuringDig = Math.max(looseDuringDig, s.loose);
+  if (!Number.isNaN(s.spill)) spillSeen = Math.max(spillSeen, s.spill);
 });
 if (dug.dug < 1) fail(`nothing was excavated — "${dug.text}"`);
-else ok(`excavated ${dug.dug}, carrying ${dug.carrying}`);
+else ok(`excavated ${dug.dug}, holding ${dug.pieces} pieces`);
 // Digging FREES the soil, it does not load her. The spoil is lying in the hole
 // and picking it up is a separate, deliberate act.
-if (dug.carrying !== 0) fail(`digging silently loaded the ant: carrying ${dug.carrying}`);
+if (dug.pieces !== 0) fail(`digging silently loaded the ant: ${dug.pieces} pieces`);
 else ok('digging leaves the spoil on the ground, not in her mandibles');
-if (!(clodLowest < clodStart.clodY - 0.02)) {
-  fail(`the buried clod never settled: started ${clodStart.clodY}, lowest ${clodLowest}`);
+if (looseDuringDig < 16) {
+  fail(`spoil only appeared at the end — loose peaked at ${looseDuringDig} mid-dig`);
 } else {
-  ok(`the buried clod sank as the soil went (${clodStart.clodY} -> ${clodLowest.toFixed(2)})`);
+  ok(`pieces came away during the dig, not after (${looseDuringDig} loose before it popped)`);
 }
-const spilled = await until('the freed cube to become a clod', (s) => s.loose >= 1, 25000);
-if (spilled.loose !== 1) fail(`expected one loose clod, got ${spilled.loose}`);
-else ok('the freed cube is lying there as a clod');
+if (spillSeen < 16) fail(`the peel never got a sheet out: spill peaked at ${spillSeen}`);
+else ok(`the cube peeled in sheets (spill reached ${spillSeen})`);
+const spilled = await until('the freed cube to become loose soil', (s) => s.loose >= 64, 25000);
+if (spilled.loose !== 64) fail(`expected 64 loose pieces, got ${spilled.loose}`);
+else ok(`the freed cube is lying there as ${spilled.loose} pieces`);
 if (dug.seconds > 12.4) fail(`practice did not advance after a completed dig (${dug.seconds}s)`);
 else ok(`practice advanced: now ${dug.seconds}s/cube`);
 
@@ -197,19 +201,44 @@ else ok('rendered frame changed after digging');
 
 // 6. The three-mode action button: CARRY, then DROP.
 //
-// With nothing held and a clod at her feet the button offers CARRY; once she is
-// holding it, and only then, it offers DROP. A standing DROP button was what
-// let soil get thrown by accident.
-const carryLabel = await untilLabel('CARRY');
-if (!carryLabel) fail('standing over a loose clod did not offer CARRY');
-else ok('a clod within reach offers CARRY');
+// With nothing held and spoil under the crosshair the button offers CARRY; once
+// she is holding it, and only then, it offers DROP. A standing DROP button was
+// what let soil get thrown by accident.
+//
+/*
+ * Find the pile. Pieces come away at the FACE she is working, so digging down
+ * heaps the spoil on the rim while she is standing in the shaft — the
+ * crosshair has to be on the pile, not on the floor under her feet. Sweep the
+ * pitch rather than guessing one angle, and cancel any dig a stray tap starts
+ * along the way, since a dig in progress owns the button.
+ */
+let carryLabel = false;
+for (const [from, to] of [[1000, 700], [700, 560], [560, 460], [460, 820]]) {
+  await swipeLook(from, to);
+  await page.waitForTimeout(1200);
+  if ((await hud()).chip > 0 || !Number.isNaN((await hud()).chip)) {
+    const label = (await page.textContent('.dig-action')) ?? '';
+    if (label.includes('CANCEL')) {
+      await page.click('.dig-action');
+      await page.waitForTimeout(600);
+    }
+  }
+  carryLabel = await untilLabel('CARRY', 4000);
+  if (carryLabel) break;
+}
+if (!carryLabel) fail('looking at the spoil pile did not offer CARRY');
+else ok('spoil under the crosshair offers CARRY');
 
 await page.click('.dig-action');
-const held = await until('the clod to be picked up', (s) => s.carrying >= 1, 25000);
-if (held.carrying !== 1 || held.loose !== 0) fail(`carry failed: ${JSON.stringify(held)}`);
-else ok('CARRY picks the clod back up');
-if (!await untilLabel('DROP')) fail('holding a clod did not offer DROP');
-else ok('holding a clod offers DROP, and only then');
+// A scoop is SIXTEEN pieces in one grab — the whole point of the change. She
+// should not be picking spoil up one grain at a time.
+const held = await until('the scoop to be gathered', (s) => s.pieces >= 1, 25000);
+if (held.pieces !== 16) fail(`carry took ${held.pieces} pieces, expected a scoop of 16`);
+else ok(`CARRY gathers a scoop of ${held.pieces} in one grab`);
+if (held.loose !== 48) fail(`scoop left ${held.loose} loose, expected 48`);
+else ok(`the rest of the pile stays where it is (${held.loose} loose)`);
+if (!await untilLabel('DROP')) fail('holding a scoop did not offer DROP');
+else ok('holding a scoop offers DROP, and only then');
 
 // Climb out and put it down on the surface.
 await page.keyboard.down('KeyW');
@@ -218,12 +247,14 @@ await page.keyboard.up('KeyW');
 await until('the ant to stop walking', (s) => s.speed < 0.2, 40000);
 
 await page.click('.dig-action');
-const placed = await until('the load to become loose spoil', (s) => s.loose >= 1, 25000);
-if (placed.loose < 1) fail(`DROP placed nothing — "${placed.text}"`);
-else ok(`dropped ${placed.loose} clod(s), now carrying ${placed.carrying}`);
-if (placed.dug !== placed.carrying + placed.loose) {
-  fail(`soil not conserved: dug ${placed.dug} != carried ${placed.carrying} + loose ${placed.loose}`);
-} else ok(`soil conserved end to end: dug ${placed.dug} = carried ${placed.carrying} + loose ${placed.loose}`);
+const placed = await until('the scoop to become loose spoil', (s) => s.pieces === 0, 25000);
+if (placed.pieces !== 0) fail(`DROP placed nothing — "${placed.text}"`);
+else ok(`dropped the scoop, now holding ${placed.pieces} pieces`);
+// Conservation is counted in PIECES now: one dug cube is 64 of them, and every
+// one is either in her jaws or lying on the ground.
+if (placed.dug * 64 !== placed.pieces + placed.loose) {
+  fail(`soil not conserved: dug ${placed.dug} x64 != held ${placed.pieces} + loose ${placed.loose}`);
+} else ok(`soil conserved end to end: ${placed.dug} cube = ${placed.pieces} held + ${placed.loose} loose`);
 
 await shot('3-placed');
 

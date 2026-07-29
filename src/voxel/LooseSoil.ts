@@ -19,15 +19,29 @@
 import { isSolid, type VoxelId } from './VoxelWorld';
 
 /**
- * How big a clod is for collision. Smaller than the voxel it came from, so a
- * one-cube tunnel does not jam solid the moment a single clod rolls into it —
- * an ant can still squeeze past one, which is what makes a blocked tunnel a
- * nuisance to clear rather than a dead end.
+ * How big one PIECE is for collision.
+ *
+ * A voxel breaks into 4x4x4 of these, so a piece is a quarter of a cube across
+ * — 1.25mm at this scale, about the size of an ant's head, which is roughly
+ * what a real one carries. Kept a shade under the true eighth-radius so a
+ * tunnel does not jam solid the moment a few roll into it: an ant can still
+ * squeeze past, which makes a blocked tunnel a nuisance rather than a dead end.
  */
-export const CLOD_RADIUS = 0.3;
+export const CLOD_RADIUS = 0.1;
 
-/** Hard ceiling. Well past a founding nest's worth of spoil. */
-export const MAX_LOOSE_CLODS = 256;
+/** How many pieces make one voxel of soil, and how many make one scoop. */
+export const PIECES_PER_VOXEL = 64;
+export const SCOOP_PIECES = 16;
+
+/**
+ * Hard ceiling, in pieces.
+ *
+ * Twelve voxels' worth. It used to be 256 whole clods, which under the new
+ * grid would be four dug cubes before spoil started refusing to appear.
+ * Settled pieces sleep and cost a matrix each, so the per-frame price is the
+ * handful still moving, not this number.
+ */
+export const MAX_LOOSE_CLODS = 768;
 
 /** Below this speed for REST_TIME seconds, a clod stops being simulated. */
 const SLEEP_SPEED = 0.35;
@@ -152,6 +166,28 @@ export class LooseSoil {
       }
     }
     return best;
+  }
+
+  /**
+   * The nearest `count` pieces to a point — one scoop.
+   *
+   * An ant does not pick grains up one at a time; it gathers a mandible-load.
+   * Nearest-first rather than a radius, so a scoop is always a full scoop where
+   * there is soil to fill it, and the pile is eaten from the near side instead
+   * of hollowing wherever the radius happened to fall.
+   */
+  scoop(point: Vec3, count: number, range: number): Clod[] {
+    const within: { clod: Clod; d: number }[] = [];
+    const limit = range * range;
+    for (const clod of this.clods) {
+      const dx = clod.position.x - point.x;
+      const dy = clod.position.y - point.y;
+      const dz = clod.position.z - point.z;
+      const d = dx * dx + dy * dy + dz * dz;
+      if (d <= limit) within.push({ clod, d });
+    }
+    within.sort((a, b) => a.d - b.d);
+    return within.slice(0, count).map((e) => e.clod);
   }
 
   /** Shove a clod, waking it. This is what walking into one does. */

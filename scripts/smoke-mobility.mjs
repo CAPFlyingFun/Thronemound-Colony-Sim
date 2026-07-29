@@ -82,8 +82,9 @@ const ok = (m) => console.log(`  ok  ${m}`);
     const t = (await page.textContent('#dig-readout'))?.replace(/\s+/g, ' ') ?? '';
     return {
       text: t.trim(),
-      carrying: Number(/Carrying (\d+)/.exec(t)?.[1] ?? '0'),
-      capacity: Number(/Carrying \d+\/(\d+)/.exec(t)?.[1] ?? '0'),
+      scoops: Number(/Carrying (\d+)\/4 scoops/.exec(t)?.[1] ?? '0'),
+      capacity: Number(/Carrying \d+\/(\d+) scoops/.exec(t)?.[1] ?? '0'),
+      pieces: Number(/pieces (\d+)/.exec(t)?.[1] ?? '0'),
       dug: Number(/Dug (\d+)/.exec(t)?.[1] ?? '0'),
       loose: Number(/Loose (\d+)/.exec(t)?.[1] ?? '0'),
       target: /Target: ([^ ·]+)/.exec(t)?.[1] ?? '',
@@ -121,7 +122,8 @@ const ok = (m) => console.log(`  ok  ${m}`);
     ev('pointerup');
   }, [x, y]);
 
-  if ((await hud()).capacity !== 1) fail(`capacity should be 1, got ${(await hud()).capacity}`);
+  // One voxel of soil, held as four scoops of sixteen pieces.
+  if ((await hud()).capacity !== 4) fail(`capacity should be 4 scoops, got ${(await hud()).capacity}`);
   else ok('carries one cube at a time');
 
   // Reach: distant soil must be unreachable, the cube underfoot must not be.
@@ -145,10 +147,10 @@ const ok = (m) => console.log(`  ok  ${m}`);
 
   // Digging FREES the soil rather than loading her, so she is empty-handed and
   // the spoil is lying in the hole.
-  const spilled = await until('the freed cube to become a clod', (s) => s.loose >= 1, 40000);
-  if (spilled.carrying !== 0 || spilled.loose !== 1) {
-    fail(`digging should leave one loose clod and empty hands: ${JSON.stringify(spilled)}`);
-  } else ok('the freed cube lies loose and her mandibles are empty');
+  const spilled = await until('the freed cube to become loose soil', (s) => s.loose >= 64, 40000);
+  if (spilled.pieces !== 0 || spilled.loose !== 64) {
+    fail(`digging should leave 64 loose pieces and empty hands: ${JSON.stringify(spilled)}`);
+  } else ok('the freed cube lies loose as 64 pieces and her mandibles are empty');
 
   /*
    * Dig the floor out from under yourself and you must end up ON the new floor,
@@ -180,14 +182,14 @@ const ok = (m) => console.log(`  ok  ${m}`);
   else ok('walking through spoil neither destroys nor duplicates it');
 
   // Carry it, then put it down: soil conserved across the whole round trip.
-  const back = await until('the clod to be carryable', (s) => s.loose >= 1, 25000);
-  if (back.loose < 1) fail('lost the clod');
+  const back = await until('the spoil to be carryable', (s) => s.loose >= 1, 25000);
+  if (back.loose < 1) fail('lost the spoil');
   await page.click('.dig-action');
   await page.waitForTimeout(1500);
   await page.click('.dig-action');
   const done = await until('the round trip to settle', (s) => s.loose >= 1, 40000);
-  if (done.dug !== done.carrying + done.loose) fail(`soil not conserved: ${JSON.stringify(done)}`);
-  else ok(`soil conserved: dug ${done.dug} = carried ${done.carrying} + loose ${done.loose}`);
+  if (done.dug * 64 !== done.pieces + done.loose) fail(`soil not conserved: ${JSON.stringify(done)}`);
+  else ok(`soil conserved: ${done.dug} cube = ${done.pieces} held + ${done.loose} loose`);
 
   if (errors.length) fail(`page errors: ${errors.join(' | ')}`);
   else ok('no page errors');

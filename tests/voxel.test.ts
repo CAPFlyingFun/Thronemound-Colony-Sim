@@ -4,10 +4,10 @@ import {
   isSolid, layeredGenerator, materialOf,
 } from '../src/voxel/VoxelWorld';
 import { FACES, meshChunk } from '../src/voxel/mesher';
-import { MAX_LOOSE_CLODS, LooseSoil } from '../src/voxel/LooseSoil';
-import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, styleForVoxel } from '../src/voxel/clod';
+import { MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES } from '../src/voxel/LooseSoil';
+import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
-import { CELL_COUNT, CHIP_CELLS, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, crumbAt, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
+import { CELL_COUNT, CHIP_CELLS, LAYER_CELLS, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
@@ -224,7 +224,11 @@ describe('DigSession', () => {
     const session = new DigSession(world);
     expect(session.place(20, SURFACE + 2, 20).kind).toBe('empty');
     digOut(session, 20, SURFACE, 20);
-    expect(session.carried).toBe(1);
+    // Counted in PIECES: one dug cube is a voxel's worth of them, and placing
+    // a cube spends the lot. A part load cannot place, which is what stops
+    // four scoops of nothing becoming a cube.
+    expect(session.carried).toBe(PIECES_PER_VOXEL);
+    expect(session.carriedVoxels).toBe(1);
     expect(session.place(20, SURFACE + 2, 20).kind).toBe('placed');
     expect(session.carried).toBe(0);
     expect(world.excavated).toBe(world.deposited);
@@ -232,7 +236,7 @@ describe('DigSession', () => {
 
   it('stops digging once the ant is carrying a full load', () => {
     const world = makeWorld();
-    const session = new DigSession(world, { capacity: 2 });
+    const session = new DigSession(world, { capacityVoxels: 2 });
     digOut(session, 20, SURFACE, 20);
     digOut(session, 21, SURFACE, 20);
     expect(session.isFull).toBe(true);
@@ -260,7 +264,7 @@ describe('DigSession', () => {
 
   it('keeps mixed spoil in separate stacks, newest out first', () => {
     const world = makeWorld();
-    const session = new DigSession(world, { capacity: 8 });
+    const session = new DigSession(world, { capacityVoxels: 8 });
     digOut(session, 30, SURFACE, 30);      // topsoil
     digOut(session, 30, SURFACE - 10, 30); // clay
     expect(session.load.map((l) => l.material)).toEqual([TOPSOIL, CLAY]);
@@ -279,7 +283,7 @@ describe('DigSession', () => {
 
     it('bottoms out at the floor and stays there', () => {
       const world = makeWorld();
-      const session = new DigSession(world, { capacity: 999 });
+      const session = new DigSession(world, { capacityVoxels: 999 });
       // 12.5 -> 1.7 in 0.6 steps is 18 digs to master; founding the den costs
       // 14-19, so the queen tops out almost exactly as she finishes.
       // Rounded, not ceiled: (12.5 - 1.7) / 0.6 is 18.000000000000004 in
@@ -985,130 +989,63 @@ describe('fracture', () => {
     expect(early.quadCount).toBeLessThan(worst * 0.5);
   });
 
-  it('opens a crater from the middle of a face and grows outward', () => {
-    for (const [x, z] of [[2, 3], [15, 40], [61, 8]] as const) {
-      const pattern = buildFracture(x, S, z, TOPSOIL);
-      // The strike lands on a face, never inside the volume: a crater that
-      // starts in the middle of the CUBE hollows it invisibly behind an intact
-      // shell, then caves in all at once.
-      const onFace = [pattern.strike.x, pattern.strike.y, pattern.strike.z]
-        .filter((v) => v === 0 || v === 1).length;
-      expect(onFace).toBe(1);
-
-      // Crumbs go in roughly distance order from that point, so the damage
-      // reads as one growing hole rather than as patches of rot.
-      const first = cellCentre(pattern.order[0]!);
-      const last = cellCentre(pattern.order[pattern.breakable - 1]!);
-      const near = Math.hypot(
-        first.x - pattern.strike.x, first.y - pattern.strike.y, first.z - pattern.strike.z,
-      );
-      const far = Math.hypot(
-        last.x - pattern.strike.x, last.y - pattern.strike.y, last.z - pattern.strike.z,
-      );
-      expect(near).toBeLessThan(far);
-    }
-  });
-
-  it('has a single centre crumb for the first blow to land on', () => {
-    // The reason the grid is odd. An even one has no middle cell, so a crater
-    // always opens against a seam instead of at a point.
-    expect(CHIP_CELLS % 2).toBe(1);
-  });
-
-  it('is a perfect intact cube at zero progress', () => {
-    const pattern = buildFracture(8, S, 9, TOPSOIL);
-    expect(removedAt(pattern, 0)).toBe(0);
-    expect(erosionAt(pattern, 0)).toBe(0);
-
-    const data = chipMeshData(pattern, 8, S, 9, 0)!;
-    expect(data).not.toBeNull();
-    // Every internal face culled: only the 9 cell-faces per side survive.
-    expect(data.quadCount).toBe(6 * CHIP_CELLS * CHIP_CELLS);
-    // And it occupies exactly the original voxel, so an untouched target is
-    // indistinguishable from ordinary terrain.
-    for (let i = 0; i < data.positions.length; i += 3) {
-      expect(data.positions[i]!).toBeGreaterThanOrEqual(8 - 1e-6);
-      expect(data.positions[i]!).toBeLessThanOrEqual(9 + 1e-6);
-      expect(data.positions[i + 1]!).toBeGreaterThanOrEqual(S - 1e-6);
-      expect(data.positions[i + 2]!).toBeLessThanOrEqual(10 + 1e-6);
-    }
-  });
-
-  it('visibly loses volume well before the dig finishes', () => {
-    // The whole point: no more sitting perfect and then vanishing.
-    const pattern = buildFracture(21, S, 5, TOPSOIL);
-    expect(removedAt(pattern, 0.5)).toBeGreaterThan(0);
-    const early = chipMeshData(pattern, 21, S, 5, 0.05)!;
-    const late = chipMeshData(pattern, 21, S, 5, 0.85)!;
-    // Fewer crumbs standing late on. Quad count rises as they separate, so
-    // compare the thing that actually matters — how much soil is left.
-    expect(removedAt(pattern, 0.85)).toBeGreaterThan(removedAt(pattern, 0.05));
-    expect(early.quadCount).toBeGreaterThan(0);
-    expect(late.quadCount).toBeGreaterThan(0);
-  });
-
-  it('rounds the remnant off toward the clod as it is worked', () => {
-    // Ice to egg: the last thing standing should already be lump-shaped, so the
-    // clod she picks up reads as the soil you watched her free rather than as a
-    // swap at the final instant.
-    const pattern = buildFracture(7, S, 12, TOPSOIL);
-    const spread = (progress: number) => {
-      const data = chipMeshData(pattern, 7, S, 12, progress)!;
-      let worst = 0;
-      for (let i = 0; i < data.positions.length; i += 3) {
-        worst = Math.max(worst, Math.hypot(
-          data.positions[i]! - 7.5, data.positions[i + 1]! - S - 0.5, data.positions[i + 2]! - 12.5,
-        ));
-      }
-      return worst;
-    };
-    // Early on it still fills the cube's corners (half-diagonal ~0.87).
-    expect(spread(0.3)).toBeGreaterThan(0.7);
-    // By the end nothing reaches that far out any more.
-    expect(spread(0.97)).toBeLessThan(spread(0.3));
-  });
-
-  it('leaves intact terrain unrounded', () => {
-    // Rounding a barely-touched cube would make ordinary soil look sanded.
-    const pattern = buildFracture(7, S, 12, TOPSOIL);
-    const data = chipMeshData(pattern, 7, S, 12, 0)!;
-    for (let i = 0; i < data.positions.length; i += 3) {
-      expect(data.positions[i]!).toBeGreaterThanOrEqual(7 - 1e-6);
-      expect(data.positions[i]!).toBeLessThanOrEqual(8 + 1e-6);
-    }
-  });
-
-  it('buries the clod inside the cube instead of conjuring it', () => {
+  it('peels sheet by sheet from the face she is working', () => {
     /*
-     * The clod is in there from the first tap and gets UNCOVERED. Without this
-     * the last crumb pops and a lump appears from nowhere, which reads as a
-     * swap rather than as the soil she has been working loose.
+     * Layers, not a crater. Ranking every piece by distance from one strike
+     * point takes a bite out of the middle of the face and leaves a rim; an
+     * ant shaves the surface off. It also makes each quarter of the progress
+     * bar exactly one visible sheet, which is exactly one scoop.
      */
-    for (const [x, z] of [[1, 1], [9, 14], [33, 7]] as const) {
-      const pattern = buildFracture(x, S, z, TOPSOIL, { x: 0, y: 1, z: 0 });
-      // Core crumbs exist, are never queued for removal, and are never drawn
-      // as crumbs — the clod mesh occupies that space instead.
-      expect(pattern.core.size).toBeGreaterThan(0);
-      expect(pattern.breakable).toBe(CELL_COUNT - pattern.core.size);
-      for (const cell of pattern.core) {
-        expect(Array.from(pattern.order)).not.toContain(cell);
+    for (const face of [{ x: 0, y: 1, z: 0 }, { x: 1, y: 0, z: 0 }, { x: 0, y: 0, z: -1 }]) {
+      const pattern = buildFracture(4, S, 6, TOPSOIL, face);
+      // Every piece belongs to a sheet, and the sheets are all the same size.
+      const sizes = new Map<number, number>();
+      for (let cell = 0; cell < CELL_COUNT; cell++) {
+        const l = pattern.layer[cell]!;
+        sizes.set(l, (sizes.get(l) ?? 0) + 1);
       }
-      // Everything breakable can go; what remains standing IS the clod.
-      expect(removedAt(pattern, 1)).toBe(pattern.breakable);
+      expect(sizes.size).toBe(CHIP_CELLS);
+      for (const n of sizes.values()) expect(n).toBe(LAYER_CELLS);
+
+      // The removal queue never revisits a sheet it has finished.
+      let previous = 0;
+      for (let i = 0; i < CELL_COUNT; i++) {
+        const l = pattern.layer[pattern.order[i]!]!;
+        expect(l).toBeGreaterThanOrEqual(previous);
+        previous = l;
+      }
+      // And sheet 0 is the one against her mandibles.
+      expect(pattern.layer[pattern.order[0]!]).toBe(0);
     }
   });
 
-  it('buries it on the far side from where she is working', () => {
-    // So chipping inward reveals it, rather than her digging straight past it.
-    const pattern = buildFracture(4, S, 4, TOPSOIL, { x: 0, y: 1, z: 0 });
-    expect(pattern.strike.y).toBe(1);
-    expect(pattern.clodCentre.y).toBeLessThan(0.45);
-    // ...but never so far that the core breaks the surface: a core crumb on
-    // the outer layer would leave a hole in an untouched voxel's shell.
-    for (const axis of ['x', 'y', 'z'] as const) {
-      expect(pattern.clodCentre[axis]).toBeGreaterThanOrEqual(0.35);
-      expect(pattern.clodCentre[axis]).toBeLessThanOrEqual(0.65);
+  it('frees every piece, because nothing is deleted any more', () => {
+    // The old model left one crumb standing to become the clod. Now all 64
+    // come away as real soil, so a dig is 64 pieces in, 64 pieces out.
+    const pattern = buildFracture(2, S, 3, TOPSOIL, { x: 0, y: 1, z: 0 });
+    expect(removedAt(pattern, 1)).toBe(CELL_COUNT);
+    expect(CELL_COUNT).toBe(PIECES_PER_VOXEL);
+    expect(releasedBetween(pattern, 0, 1)).toHaveLength(CELL_COUNT);
+  });
+
+  it('hands each piece out exactly once, in order', () => {
+    /*
+     * releasedBetween is what turns a piece into a real lump of soil, so a
+     * piece handed out twice is soil minted from nothing and one skipped is
+     * soil destroyed. Walking the whole dig in small steps has to yield each
+     * cell precisely once.
+     */
+    const pattern = buildFracture(7, S, 2, TOPSOIL, { x: 0, y: 1, z: 0 });
+    const seen: number[] = [];
+    let from = 0;
+    for (let to = 0.02; to <= 1.0001; to += 0.02) {
+      seen.push(...releasedBetween(pattern, from, to));
+      from = to;
     }
+    seen.push(...releasedBetween(pattern, from, 1));
+    expect(seen).toHaveLength(CELL_COUNT);
+    expect(new Set(seen).size).toBe(CELL_COUNT);
+    expect(seen).toEqual(Array.from(pattern.order));
   });
 
   it('fires chip events only when soil actually breaks', () => {
@@ -1138,59 +1075,30 @@ describe('fracture', () => {
     expect(worst).toBeLessThanOrEqual(CELL_COUNT * 6);
   });
 
-  describe('support under the buried clod', () => {
-    // crumbAt is the query that gives the clod weight: the scene probes points
-    // around the lump and lets it fall into whatever the chipping has opened.
-    const pattern = buildFracture(4, S, 6, TOPSOIL);
+  it('cannot mint soil by cancelling half way through', () => {
+    /*
+     * The trap the new model opens. Pieces are handed to the world a sheet at
+     * a time, so a dig stopped half way leaves loose soil on the floor while
+     * the cube it came from is still standing in the grid — soil out of
+     * nothing. The scene takes them back on cancel, and the discriminator is
+     * that the voxel is still solid, because a completed dig has removed it.
+     */
+    const world = makeWorld();
+    const session = new DigSession(world);
+    const pattern = buildFracture(20, S, 20, TOPSOIL, { x: 0, y: 1, z: 0 });
 
-    it('agrees with cellSurvives, so the thing you can see is the thing you land on', () => {
-      for (let cell = 0; cell < CELL_COUNT; cell++) {
-        if (pattern.core.has(cell)) continue;
-        const c = cellCentre(cell);
-        for (const p of [0, 0.25, 0.5, 0.75, 1]) {
-          expect(crumbAt(pattern, p, c.x, c.y, c.z)).toBe(cellSurvives(pattern, cell, p));
-        }
-      }
-    });
+    session.beginDig(20, S, 20);
+    session.tickDig(4);
+    const partial = releasedBetween(pattern, 0, session.chewRatio);
+    expect(partial.length).toBeGreaterThan(0);
+    expect(partial.length).toBeLessThan(CELL_COUNT);
 
-    it('never lets the clod rest on itself', () => {
-      // Core cells ARE the clod. Reporting them solid would wedge it in place
-      // forever, which is exactly the floating look this exists to fix.
-      for (const cell of pattern.core) {
-        const c = cellCentre(cell);
-        expect(crumbAt(pattern, 0, c.x, c.y, c.z)).toBe(false);
-      }
-    });
-
-    it('speaks only for its own voxel', () => {
-      for (const [x, y, z] of [[-0.1, 0.5, 0.5], [0.5, 1.2, 0.5], [0.5, 0.5, -3]]) {
-        expect(crumbAt(pattern, 1, x!, y!, z!)).toBe(false);
-      }
-    });
-
-    it('only ever loses support, so the clod cannot be pushed back up', () => {
-      const c = cellCentre(pattern.order[0]!);
-      let seenGone = false;
-      for (let p = 0; p <= 1.0001; p += 0.01) {
-        const solid = crumbAt(pattern, p, c.x, c.y, c.z);
-        if (!solid) seenGone = true;
-        else expect(seenGone).toBe(false);
-      }
-      expect(seenGone).toBe(true);
-    });
-
-    it('starts held and ends with nothing under it', () => {
-      // At rest the clod is packed in soil — there is footing on every side but
-      // its own cavity. By the end every crumb has gone, so it has fallen as
-      // far as the voxel allows rather than hanging where it was buried.
-      const c = pattern.clodCentre;
-      const below = { x: c.x, y: c.y - 0.3, z: c.z };
-      expect(crumbAt(pattern, 0, below.x, below.y, below.z)).toBe(true);
-      for (let cell = 0; cell < CELL_COUNT; cell++) {
-        const at = cellCentre(cell);
-        expect(crumbAt(pattern, 1, at.x, at.y, at.z)).toBe(false);
-      }
-    });
+    session.cancelDig();
+    // Nothing was excavated, so nothing may be lying loose: the scene's reclaim
+    // has to bring back exactly what it handed out.
+    expect(world.excavated).toBe(0);
+    expect(world.get(20, S, 20)).toBe(TOPSOIL);
+    expect(session.carried).toBe(0);
   });
 
   it('cannot be started on bedrock, so bedrock never gets a visual', () => {
@@ -1219,7 +1127,7 @@ describe('fracture', () => {
     session.beginDig(20, SURFACE, 20);
     session.tickDig(999);
     expect(world.excavated).toBe(1);
-    expect(session.carried).toBe(1);
+    expect(session.carried).toBe(PIECES_PER_VOXEL);
     session.place(20, SURFACE + 2, 20);
     expect(world.excavated).toBe(world.deposited);
   });
@@ -1265,10 +1173,16 @@ describe('loose soil', () => {
       const max = Math.max(...radii);
       // Irregular enough to read as broken soil...
       expect(max - min).toBeGreaterThan(0.02);
-      // ...but never a spike. A ratio above ~2 is a starfish, not a clod, and
-      // the bulge cap is what makes that a guarantee rather than a hope: lobes
-      // stack, so an uncapped sum is always one unlucky seed from a spike.
-      expect(max / min).toBeLessThan(2);
+      /*
+       * ...but never a spike. Measured against the MEAN rather than the min,
+       * because the shape families are deliberately not balls: a cube's own
+       * corner sits 1.73x its face distance before a single lump goes on, so a
+       * max/min bound would now be a bound on being cube-shaped rather than on
+       * being spiky. A spike is a vertex far from the body of the shape.
+       */
+      const mean = radii.reduce((a, b) => a + b, 0) / radii.length;
+      expect(max / mean).toBeLessThan(1.8);
+      expect(min / mean).toBeGreaterThan(0.35);
       expect(radii.every((r) => Number.isFinite(r))).toBe(true);
     }
   });
@@ -1296,19 +1210,22 @@ describe('loose soil', () => {
     session.tickDig(999);
     expect(world.excavated).toBe(1);
 
-    const unit = session.release()!;
+    const unit = session.release(PIECES_PER_VOXEL)!;
     expect(unit.source).toEqual({ x: 20, y: S, z: 20 });
-    soil.drop({ x: 20.5, y: S + 2, z: 20.5 }, unit.material, unit.source!);
-    // The unit is in exactly one place at a time.
+    for (let i = 0; i < unit.count; i++) {
+      soil.drop({ x: 20.5, y: S + 2, z: 20.5 }, unit.material, unit.source!);
+    }
+    // Every piece is in exactly one place at a time.
     expect(session.carried).toBe(0);
-    expect(soil.count).toBe(1);
-    expect(world.excavated).toBe(session.carried + soil.count + world.deposited);
+    expect(soil.count).toBe(PIECES_PER_VOXEL);
+    expect(world.excavated * PIECES_PER_VOXEL)
+      .toBe(session.carried + soil.count + world.deposited * PIECES_PER_VOXEL);
 
-    // Picking it back up returns the SAME soil, with the same identity.
+    // Scooping it back up returns the SAME soil, with the same identity.
     const clod = soil.clods[0]!;
-    soil.remove(clod);
-    session.load.push({ material: clod.material, count: 1, source: clod.source });
-    expect(session.carried).toBe(1);
+    for (const piece of [...soil.clods]) soil.remove(piece);
+    session.load.push({ material: clod.material, count: PIECES_PER_VOXEL, source: clod.source });
+    expect(session.carried).toBe(PIECES_PER_VOXEL);
     expect(soil.count).toBe(0);
     expect(styleForVoxel(clod.source.x, clod.source.y, clod.source.z, clod.material).variant)
       .toBe(styleForVoxel(20, S, 20, TOPSOIL).variant);
@@ -1324,14 +1241,76 @@ describe('loose soil', () => {
     const session = new DigSession(world);
     session.beginDig(20, S, 20);
     session.tickDig(999);
-    expect(session.carried).toBe(1);
+    expect(session.carried).toBe(PIECES_PER_VOXEL);
 
-    const unit = session.release()!;
+    const unit = session.release(PIECES_PER_VOXEL)!;
     expect(session.carried).toBe(0);
     // Simulating the refusal path: putting it back restores the load exactly.
     session.load.push(unit);
-    expect(session.carried).toBe(1);
-    expect(world.excavated).toBe(session.carried);
+    expect(session.carried).toBe(PIECES_PER_VOXEL);
+    expect(world.excavated * PIECES_PER_VOXEL).toBe(session.carried);
+  });
+
+  it('gathers a scoop of the nearest pieces, not one grain at a time', () => {
+    /*
+     * An ant packs a mandible-load and walks. Nearest-first rather than a
+     * radius, so a scoop is a FULL scoop wherever there is soil to fill it and
+     * the pile is eaten from the near side instead of hollowing wherever the
+     * radius happened to land.
+     */
+    const soil = new LooseSoil();
+    for (let i = 0; i < 30; i++) {
+      soil.drop({ x: 20 + i * 0.05, y: S, z: 20 }, TOPSOIL, { x: 20, y: S, z: 20 + i });
+    }
+    const scoop = soil.scoop({ x: 20, y: S, z: 20 }, SCOOP_PIECES, 2);
+    expect(scoop).toHaveLength(SCOOP_PIECES);
+    // Every piece taken is nearer than every piece left behind.
+    const taken = new Set(scoop);
+    const far = soil.clods.filter((c) => !taken.has(c));
+    const worstTaken = Math.max(...scoop.map((c) => c.position.x - 20));
+    const bestLeft = Math.min(...far.map((c) => c.position.x - 20));
+    expect(worstTaken).toBeLessThanOrEqual(bestLeft);
+  });
+
+  it('gives a short scoop rather than a phantom one when soil runs out', () => {
+    // Soil conservation again: a scoop must never hand back more pieces than
+    // are actually lying there.
+    const soil = new LooseSoil();
+    for (let i = 0; i < 5; i++) soil.drop({ x: 20, y: S, z: 20 }, TOPSOIL, { x: i, y: S, z: 20 });
+    expect(soil.scoop({ x: 20, y: S, z: 20 }, SCOOP_PIECES, 2)).toHaveLength(5);
+    expect(soil.scoop({ x: 40, y: S, z: 40 }, SCOOP_PIECES, 2)).toHaveLength(0);
+  });
+
+  it('holds a whole voxel as four scoops', () => {
+    // The scoop is the granularity of a GRAB, not a change to the economy: a
+    // cube is still a cube, and it still takes a cube's worth to place one.
+    expect(PIECES_PER_VOXEL).toBe(SCOOP_PIECES * 4);
+    const world = makeWorld();
+    const session = new DigSession(world, { capacityVoxels: 1 });
+    session.beginDig(20, S, 20);
+    session.tickDig(999);
+    expect(session.carriedScoops).toBe(4);
+    expect(session.carriedVoxels).toBe(1);
+
+    // Three scoops out is not enough to pack a cube; the fourth is.
+    for (let i = 0; i < 3; i++) session.release(SCOOP_PIECES);
+    expect(session.place(20, S + 2, 20).kind).toBe('empty');
+    expect(world.deposited).toBe(0);
+  });
+
+  it('builds a different lump for every piece of one voxel', () => {
+    // Sixty-four pieces out of one cube have to be sixty-four different lumps,
+    // and the same sixty-four after a reload — so the piece index rides in the
+    // coordinate the shape is hashed from.
+    const variants = new Set<number>();
+    for (let cell = 0; cell < PIECES_PER_VOXEL; cell++) {
+      const src = pieceSource(20, S, 20, cell);
+      variants.add(styleForVoxel(src.x, src.y, src.z, TOPSOIL).variant);
+      // Deterministic: same cell, same answer.
+      expect(pieceSource(20, S, 20, cell)).toEqual(src);
+    }
+    // Not all 12, but nothing like all-the-same either.
+    expect(variants.size).toBeGreaterThan(6);
   });
 
   it('drops a clod onto the ground and lets it fall asleep there', () => {
@@ -1358,8 +1337,10 @@ describe('loose soil', () => {
     const before = clod.position.z;
 
     // Walking into it from -Z should send it along +Z.
+    // Closer than it used to be: a piece is a quarter-voxel across now, so
+    // the reach that shoved a whole clod no longer touches one.
     const pushed = soil.displace(
-      { x: 20.5, y: clod.position.y, z: clod.position.z - 0.5 }, 0.3, { x: 0, y: 0, z: 1 }, 3,
+      { x: 20.5, y: clod.position.y, z: clod.position.z - 0.25 }, 0.3, { x: 0, y: 0, z: 1 }, 3,
     );
     expect(pushed).toContain(clod);
     expect(clod.asleep).toBe(false);

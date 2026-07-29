@@ -6,6 +6,7 @@
  * above ground is exactly the volume of the tunnels below it.
  */
 
+import { PIECES_PER_VOXEL, SCOOP_PIECES } from './LooseSoil';
 import { AIR, isSolid, materialOf, type VoxelId, type VoxelWorld } from './VoxelWorld';
 
 /**
@@ -32,7 +33,15 @@ export const DIG_FLOOR = 1.7;
 
 export interface DigSessionOptions {
   /** How many voxels of spoil the ant can carry at once. */
-  capacity?: number;
+  /**
+   * How many VOXELS' worth she can carry.
+   *
+   * Stated in voxels even though the load is counted in pieces, because a bare
+   * `capacity: 8` silently meant eight pieces the moment the unit changed —
+   * an eighth of a cube, when every caller meant eight cubes. One unit at the
+   * boundary, one unit inside, and no way to confuse them.
+   */
+  capacityVoxels?: number;
   /** Seconds for the first cube of topsoil, before any practice. */
   digStart?: number;
   /** Seconds shaved off per completed dig. */
@@ -50,6 +59,14 @@ export interface DigTarget {
 
 export interface CarryLoad {
   material: VoxelId;
+  /**
+   * PIECES, not voxels.
+   *
+   * A voxel now breaks into PIECES_PER_VOXEL of them and an ant gathers a
+   * scoop at a time, so the piece is the only unit that divides evenly into
+   * everything the game does with soil. Voxels are derived from it, never the
+   * other way round — one number, so conservation cannot drift between two.
+   */
   count: number;
   /**
    * The cell this soil came out of.
@@ -77,6 +94,7 @@ export type PlaceOutcome =
 
 export class DigSession {
   readonly world: VoxelWorld;
+  /** Pieces she can hold. Derived from capacityVoxels, never set directly. */
   readonly capacity: number;
   readonly digStart: number;
   readonly digStep: number;
@@ -92,7 +110,7 @@ export class DigSession {
 
   constructor(world: VoxelWorld, options: DigSessionOptions = {}) {
     this.world = world;
-    this.capacity = Math.max(1, options.capacity ?? 12);
+    this.capacity = Math.max(1, options.capacityVoxels ?? 12) * PIECES_PER_VOXEL;
     this.digStart = options.digStart ?? DIG_START;
     this.digStep = options.digStep ?? DIG_STEP;
     this.digFloor = options.digFloor ?? DIG_FLOOR;
@@ -122,8 +140,19 @@ export class DigSession {
     return t !== null && t.x === x && t.y === y && t.z === z;
   }
 
+  /** Pieces held. */
   get carried(): number {
     return this.load.reduce((total, entry) => total + entry.count, 0);
+  }
+
+  /** Whole voxels' worth held — what `place()` can actually spend. */
+  get carriedVoxels(): number {
+    return Math.floor(this.carried / PIECES_PER_VOXEL);
+  }
+
+  /** Scoops held, rounded up: a part scoop is still something in the jaws. */
+  get carriedScoops(): number {
+    return Math.ceil(this.carried / SCOOP_PIECES);
   }
 
   get isFull(): boolean {
@@ -228,21 +257,30 @@ export class DigSession {
    * `place()` is kept for the terrain path (and the day a deliberate "pack the
    * soil down" action arrives), but the player's DROP no longer uses it.
    */
-  release(): CarryLoad | null {
+  release(pieces = 1): CarryLoad | null {
     const top = this.load[this.load.length - 1];
     if (!top) return null;
-    const unit: CarryLoad = { material: top.material, count: 1, source: top.source };
-    top.count--;
+    const take = Math.min(pieces, top.count);
+    if (take <= 0) return null;
+    const unit: CarryLoad = { material: top.material, count: take, source: top.source };
+    top.count -= take;
     if (top.count <= 0) this.load.pop();
     return unit;
   }
 
-  /** Drop one voxel of spoil into an empty cell. Newest material goes first. */
+  /**
+   * Pack a whole voxel of spoil into an empty cell. Newest material first.
+   *
+   * Needs a FULL voxel's worth of pieces of one material — four scoops. Letting
+   * a part load place a cube would mint soil out of nothing, which is the one
+   * thing conservation exists to prevent.
+   */
   place(x: number, y: number, z: number): PlaceOutcome {
     const top = this.load[this.load.length - 1];
     if (!top) return { kind: 'empty' };
+    if (top.count < PIECES_PER_VOXEL) return { kind: 'empty' };
     if (!this.world.deposit(x, y, z, top.material)) return { kind: 'none' };
-    top.count--;
+    top.count -= PIECES_PER_VOXEL;
     if (top.count <= 0) this.load.pop();
     return { kind: 'placed', material: top.material };
   }
@@ -250,9 +288,9 @@ export class DigSession {
   private pickUp(material: VoxelId, source?: { x: number; y: number; z: number }): void {
     const top = this.load[this.load.length - 1];
     if (top && top.material === material) {
-      top.count++;
+      top.count += PIECES_PER_VOXEL;
       return;
     }
-    this.load.push({ material, count: 1, source });
+    this.load.push({ material, count: PIECES_PER_VOXEL, source });
   }
 }
