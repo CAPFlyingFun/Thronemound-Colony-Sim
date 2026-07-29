@@ -1044,6 +1044,37 @@ describe('fracture', () => {
     expect(late.quadCount).toBeGreaterThan(0);
   });
 
+  it('rounds the remnant off toward the clod as it is worked', () => {
+    // Ice to egg: the last thing standing should already be lump-shaped, so the
+    // clod she picks up reads as the soil you watched her free rather than as a
+    // swap at the final instant.
+    const pattern = buildFracture(7, S, 12, TOPSOIL);
+    const spread = (progress: number) => {
+      const data = chipMeshData(pattern, 7, S, 12, progress)!;
+      let worst = 0;
+      for (let i = 0; i < data.positions.length; i += 3) {
+        worst = Math.max(worst, Math.hypot(
+          data.positions[i]! - 7.5, data.positions[i + 1]! - S - 0.5, data.positions[i + 2]! - 12.5,
+        ));
+      }
+      return worst;
+    };
+    // Early on it still fills the cube's corners (half-diagonal ~0.87).
+    expect(spread(0.3)).toBeGreaterThan(0.7);
+    // By the end nothing reaches that far out any more.
+    expect(spread(0.97)).toBeLessThan(spread(0.3));
+  });
+
+  it('leaves intact terrain unrounded', () => {
+    // Rounding a barely-touched cube would make ordinary soil look sanded.
+    const pattern = buildFracture(7, S, 12, TOPSOIL);
+    const data = chipMeshData(pattern, 7, S, 12, 0)!;
+    for (let i = 0; i < data.positions.length; i += 3) {
+      expect(data.positions[i]!).toBeGreaterThanOrEqual(7 - 1e-6);
+      expect(data.positions[i]!).toBeLessThanOrEqual(8 + 1e-6);
+    }
+  });
+
   it('always leaves a crumb for the dig logic to finish', () => {
     // The visual must never make the voxel vanish on its own — removing it is
     // DigSession's call, not the renderer's.
@@ -1153,7 +1184,9 @@ describe('loose soil', () => {
       const max = Math.max(...radii);
       // Irregular enough to read as broken soil...
       expect(max - min).toBeGreaterThan(0.02);
-      // ...but never a spike. A ratio above ~2 is a starfish, not a clod.
+      // ...but never a spike. A ratio above ~2 is a starfish, not a clod, and
+      // the bulge cap is what makes that a guarantee rather than a hope: lobes
+      // stack, so an uncapped sum is always one unlucky seed from a spike.
       expect(max / min).toBeLessThan(2);
       expect(radii.every((r) => Number.isFinite(r))).toBe(true);
     }

@@ -56,12 +56,22 @@ export interface ClodFeel {
 
 const FEEL: Record<number, ClodFeel> = {
   // Looser, flatter, finer-grained — a scoop of sand slumps.
-  [SAND]: { lumpiness: 0.1, lobes: 5, flatten: 0.3 },
-  // Cohesive: broad smooth faces, few bumps, reads dense.
-  [CLAY]: { lumpiness: 0.13, lobes: 2, flatten: 0.14 },
+  [SAND]: { lumpiness: 0.18, lobes: 4, flatten: 0.3 },
+  // Cohesive: broad faces, few bumps, reads dense and heavy.
+  [CLAY]: { lumpiness: 0.22, lobes: 2, flatten: 0.2 },
 };
-/** Topsoil: crumbly, medium bumps. */
-const DEFAULT_FEEL: ClodFeel = { lumpiness: 0.18, lobes: 3, flatten: 0.2 };
+/**
+ * Topsoil: crumbly, angular.
+ *
+ * Lumpiness up half again from the first pass. Subtle displacement over a
+ * sphere is still a sphere, and it showed — the clods came out as eggs. A clod
+ * needs to be visibly out of round before flat shading has facets to catch.
+ *
+ * Not further, though: the "lumpy but not spiky" test caught 0.32 + 0.34 at a
+ * max/min radius ratio of 2.4, which is a starfish. Flat shading does most of
+ * the work here; the displacement only has to give it something to shade.
+ */
+const DEFAULT_FEEL: ClodFeel = { lumpiness: 0.26, lobes: 3, flatten: 0.26 };
 
 export function clodFeel(voxel: VoxelId): ClodFeel {
   return FEEL[voxel] ?? DEFAULT_FEEL;
@@ -194,14 +204,25 @@ export function buildClodShape(variant: number, feel: ClodFeel = DEFAULT_FEEL): 
     });
   }
 
+  /*
+   * Lobes STACK, so the total bulge has to be bounded rather than trusted.
+   *
+   * Where two or three lobes point the same way their amplitudes simply add,
+   * and the result is a spike — with three lobes the worst case was over twice
+   * the base radius, which is a starfish, not a clod. Tuning the amplitudes
+   * down until it happened to pass would have left the same unbounded sum one
+   * unlucky seed away from a spike again.
+   */
+  const bulgeCap = feel.lumpiness * 1.5;
   const radii = verts.map((v) => {
-    let r = 1;
+    let bulge = 0;
     for (const lobe of lobes) {
       const d = v[0]! * lobe.dir[0]! + v[1]! * lobe.dir[1]! + v[2]! * lobe.dir[2]!;
       // Only the facing hemisphere bulges, and smoothly — raising a clamped
       // dot to a power keeps the falloff broad instead of creasing.
-      r += lobe.amp * Math.pow(Math.max(0, d), lobe.tight);
+      bulge += lobe.amp * Math.pow(Math.max(0, d), lobe.tight);
     }
+    let r = 1 + Math.min(bulge, bulgeCap);
     // Squash the underside. Moderate, so it reads as a resting face rather
     // than as a sliced plane.
     if (v[1]! < 0) r *= 1 - feel.flatten * (-v[1]!);
@@ -213,44 +234,45 @@ export function buildClodShape(variant: number, feel: ClodFeel = DEFAULT_FEEL): 
   const mean = radii.reduce((a, b) => a + b, 0) / radii.length;
   const correction = 0.5 / mean;
 
-  const positions = new Float32Array(verts.length * 3);
-  for (let i = 0; i < verts.length; i++) {
-    const v = verts[i]!;
+  const shifted = verts.map((v, i) => {
     const r = radii[i]! * correction;
-    positions[i * 3 + 0] = v[0]! * r;
-    positions[i * 3 + 1] = v[1]! * r;
-    positions[i * 3 + 2] = v[2]! * r;
-  }
-
-  const indices = new Uint32Array(faces.length * 3);
-  faces.forEach((f, i) => {
-    indices[i * 3 + 0] = f[0]!;
-    indices[i * 3 + 1] = f[1]!;
-    indices[i * 3 + 2] = f[2]!;
+    return [v[0]! * r, v[1]! * r, v[2]! * r];
   });
 
-  // Area-weighted vertex normals, so the facets read as a rounded lump with
-  // flats rather than as a faceted gem.
-  const normals = new Float32Array(verts.length * 3);
-  for (let i = 0; i < faces.length; i++) {
-    const [a, b, c] = faces[i]! as [number, number, number];
-    const ax = positions[a * 3]!; const ay = positions[a * 3 + 1]!; const az = positions[a * 3 + 2]!;
-    const ux = positions[b * 3]! - ax; const uy = positions[b * 3 + 1]! - ay; const uz = positions[b * 3 + 2]! - az;
-    const vx = positions[c * 3]! - ax; const vy = positions[c * 3 + 1]! - ay; const vz = positions[c * 3 + 2]! - az;
-    const nx = uy * vz - uz * vy;
-    const ny = uz * vx - ux * vz;
-    const nz = ux * vy - uy * vx;
-    for (const idx of [a, b, c]) {
-      normals[idx * 3 + 0] = (normals[idx * 3 + 0] ?? 0) + nx;
-      normals[idx * 3 + 1] = (normals[idx * 3 + 1] ?? 0) + ny;
-      normals[idx * 3 + 2] = (normals[idx * 3 + 2] ?? 0) + nz;
-    }
-  }
-  for (let i = 0; i < verts.length; i++) {
-    const l = Math.hypot(normals[i * 3]!, normals[i * 3 + 1]!, normals[i * 3 + 2]!) || 1;
-    normals[i * 3 + 0] = (normals[i * 3 + 0] ?? 0) / l;
-    normals[i * 3 + 1] = (normals[i * 3 + 1] ?? 0) / l;
-    normals[i * 3 + 2] = (normals[i * 3 + 2] ?? 0) / l;
+  /*
+   * FLAT shaded, so each facet catches the light on its own.
+   *
+   * Smoothed vertex normals over a rounded hull is exactly what makes a clod
+   * read as an egg — the silhouette was already irregular, but the shading
+   * blended every facet into one continuous curve so none of it showed. Flat
+   * normals turn the same geometry into broken soil, which is why this emits
+   * non-indexed triangles: shared vertices cannot carry two different normals.
+   */
+  const positions = new Float32Array(faces.length * 9);
+  const normals = new Float32Array(faces.length * 9);
+  const indices = new Uint32Array(faces.length * 3);
+
+  for (let f = 0; f < faces.length; f++) {
+    const [a, b, c] = faces[f]! as [number, number, number];
+    const va = shifted[a]!; const vb = shifted[b]!; const vc = shifted[c]!;
+    const ux = vb[0]! - va[0]!; const uy = vb[1]! - va[1]!; const uz = vb[2]! - va[2]!;
+    const wx = vc[0]! - va[0]!; const wy = vc[1]! - va[1]!; const wz = vc[2]! - va[2]!;
+    let nx = uy * wz - uz * wy;
+    let ny = uz * wx - ux * wz;
+    let nz = ux * wy - uy * wx;
+    const l = Math.hypot(nx, ny, nz) || 1;
+    nx /= l; ny /= l; nz /= l;
+
+    [va, vb, vc].forEach((v, k) => {
+      const o = f * 9 + k * 3;
+      positions[o + 0] = v[0]!;
+      positions[o + 1] = v[1]!;
+      positions[o + 2] = v[2]!;
+      normals[o + 0] = nx;
+      normals[o + 1] = ny;
+      normals[o + 2] = nz;
+      indices[f * 3 + k] = f * 3 + k;
+    });
   }
 
   return { positions, normals, indices };

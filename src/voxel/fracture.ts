@@ -66,6 +66,21 @@ const WOBBLE_FROM = 0.7;
 /** How far a fully eroded crumb can tilt, in radians. */
 const MAX_TILT = 0.42;
 
+/**
+ * How far the remnant rounds off toward the clod it is about to become.
+ *
+ * The last thing standing used to be a squared-off stub that vanished and was
+ * replaced by a rounded lump, which reads as a swap rather than as the same
+ * piece of soil. Pulling the surviving crumbs toward a ball as the dig
+ * finishes makes the cube visibly chisel down INTO the clod — ice to egg —
+ * so the thing she picks up is the thing you watched her free.
+ *
+ * Held to zero for most of the dig: rounding a barely-touched cube would make
+ * intact terrain look sanded.
+ */
+const ROUND_FROM = 0.55;
+const ROUND_MAX = 0.55;
+
 export interface Vec3 {
   x: number;
   y: number;
@@ -171,7 +186,14 @@ export function cellCentre(cell: number): Vec3 {
  * evenly or hollowing from the middle. Attack points are pulled toward the
  * surface, because soil gives way at an exposed face first.
  */
-export function buildFracture(x: number, y: number, z: number, voxel: VoxelId): FracturePattern {
+export function buildFracture(
+  x: number,
+  y: number,
+  z: number,
+  voxel: VoxelId,
+  /** Outward normal of the face being worked, so the crater faces the ant. */
+  face?: Vec3 | null,
+): FracturePattern {
   const seed = hashVoxel(x, y, z, voxel);
   const rand = rng(seed);
   const feel = feelFor(voxel);
@@ -188,12 +210,24 @@ export function buildFracture(x: number, y: number, z: number, voxel: VoxelId): 
    * from the inside while the shell stays intact, so nothing visible happens
    * until it suddenly caves.
    */
-  const axis = Math.floor(rand() * 3);
-  const positive = rand() < 0.5;
   const strike: Vec3 = { x: 0.5, y: 0.5, z: 0.5 };
-  if (axis === 0) strike.x = positive ? 1 : 0;
-  else if (axis === 1) strike.y = positive ? 1 : 0;
-  else strike.z = positive ? 1 : 0;
+  if (face && (face.x !== 0 || face.y !== 0 || face.z !== 0)) {
+    // The face she is actually working. Seeding this meant the crater opened on
+    // a different side every dig — front, then the side, then round the back
+    // where you could not see it at all.
+    const ax = Math.abs(face.x); const ay = Math.abs(face.y); const az = Math.abs(face.z);
+    if (ax >= ay && ax >= az) strike.x = face.x > 0 ? 1 : 0;
+    else if (ay >= az) strike.y = face.y > 0 ? 1 : 0;
+    else strike.z = face.z > 0 ? 1 : 0;
+  } else {
+    // Total for callers with no approach to give: tests, and any future
+    // digging that happens off-screen.
+    const axis = Math.floor(rand() * 3);
+    const positive = rand() < 0.5;
+    if (axis === 0) strike.x = positive ? 1 : 0;
+    else if (axis === 1) strike.y = positive ? 1 : 0;
+    else strike.z = positive ? 1 : 0;
+  }
 
   const scores = new Float64Array(CELL_COUNT);
   for (let cell = 0; cell < CELL_COUNT; cell++) {
@@ -384,6 +418,9 @@ export function chipMeshData(
     erosionOf[cell] = erosionFor(pattern, cell, progress);
   }
   const size = 1 / CHIP_CELLS;
+  const round = progress <= ROUND_FROM
+    ? 0
+    : ((progress - ROUND_FROM) / (1 - ROUND_FROM)) * ROUND_MAX;
 
   for (let cell = 0; cell < CELL_COUNT; cell++) {
     if (gone.has(cell)) continue;
@@ -419,9 +456,26 @@ export function chipMeshData(
     const shrink = 1 - erosion * (0.35 + 0.55 * js);
     const half = (size * shrink) / 2;
     const drift = erosion * size * 0.22;
-    const midX = (cx + 0.5) * size + jx * drift;
-    const midY = (cy + 0.5) * size + jy * drift;
-    const midZ = (cz + 0.5) * size + jz * drift;
+    let midX = (cx + 0.5) * size + jx * drift;
+    let midY = (cy + 0.5) * size + jy * drift;
+    let midZ = (cz + 0.5) * size + jz * drift;
+
+    // Chisel the remnant toward the clod: pull each surviving crumb in from the
+    // corners toward a ball, so the block rounds off as it is worked rather
+    // than staying a stub that pops into a lump at the end.
+    if (round > 0) {
+      const ox = midX - 0.5;
+      const oy = midY - 0.5;
+      const oz = midZ - 0.5;
+      const d = Math.hypot(ox, oy, oz);
+      if (d > 1e-6) {
+        // 0.5 is the cube's half-width; a sphere of that radius is the target.
+        const k = (0.5 / d) * round + (1 - round);
+        midX = 0.5 + ox * k;
+        midY = 0.5 + oy * k;
+        midZ = 0.5 + oz * k;
+      }
+    }
 
     // Crumb-level brightness variation, so the cluster reads as loose grain
     // rather than one carved block.

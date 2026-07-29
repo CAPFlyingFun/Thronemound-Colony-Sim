@@ -199,8 +199,10 @@ const CLOD_PUSH = 2.2;
  * centre. Generous enough to be easy with a thumb, tight enough that spoil to
  * one side is ignored while you work.
  */
-const CLOD_REACH = 1.8;
-const CLOD_AIM = 0.55;
+const CLOD_REACH = 1;
+const CLOD_AIM = 0.3;
+
+interface Vec3Like { x: number; y: number; z: number }
 
 interface DigParticle {
   position: THREE.Vector3;
@@ -261,6 +263,8 @@ export class DigScene {
 
   /** The voxel being chipped, and the pooled dirt it throws off. */
   private chip: ActiveDigVisual | null = null;
+  /** Which face the current dig is worked from, so the crater always faces her. */
+  private strikeFace: Vec3Like | null = null;
   private chipClock = 0;
   private readonly particles: DigParticle[] = [];
   private readonly particleMesh: THREE.InstancedMesh;
@@ -704,7 +708,7 @@ export class DigScene {
 
     this.chip = {
       voxel: { x, y, z },
-      pattern: buildFracture(x, y, z, voxel),
+      pattern: buildFracture(x, y, z, voxel, this.strikeFace),
       progress: 0,
       lastProgress: 0,
       builtRemoved: -1,
@@ -1289,8 +1293,9 @@ export class DigScene {
   }
 
   /** Start (or cancel) a dig on a specific cube, if it's within reach. */
-  private startDig(x: number, y: number, z: number): void {
+  private startDig(x: number, y: number, z: number, face?: Vec3Like): void {
     if (!this.withinReach(x, y, z)) return;
+    this.strikeFace = face ?? null;
     this.session.toggleDig(x, y, z);
   }
 
@@ -1354,7 +1359,7 @@ export class DigScene {
       }
       default: {
         const hit = this.currentTarget();
-        if (hit) this.startDig(hit.x, hit.y, hit.z);
+        if (hit) this.startDig(hit.x, hit.y, hit.z, { x: hit.nx, y: hit.ny, z: hit.nz });
       }
     }
   }
@@ -2069,7 +2074,7 @@ export class DigScene {
     const clod = this.clodInReach();
     if (clod && this.takeClod(clod)) return;
     const hit = this.targetAlong(dir);
-    if (hit) this.startDig(hit.x, hit.y, hit.z);
+    if (hit) this.startDig(hit.x, hit.y, hit.z, { x: hit.nx, y: hit.ny, z: hit.nz });
   }
 
   private updateAction(dt: number): void {
