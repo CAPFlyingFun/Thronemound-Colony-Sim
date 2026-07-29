@@ -152,15 +152,20 @@ are effectively harmless — ants drop off things constantly and walk away.
 
 | | before | after |
 |---|---|---|
-| Gravity | 400 voxels/s² | 180 |
-| Terminal velocity | −1.30 m/s | −0.30 m/s |
+| Gravity | 400 voxels/s² | 90 |
+| Terminal velocity | −1.30 m/s | −0.15 m/s |
 | Climb speed | 4.0 cm/s | 2.25 cm/s (~1.1 body lengths/s) |
 | Jump height | 1.45 voxels | 1.47 voxels |
 
-Jump height is deliberately unchanged. Gravity and jump are coupled
-(`h = v²/2g`), so softening gravity without re-deriving `JUMP_SPEED` would have
-silently turned a 1.4-voxel hop into a 3.2-voxel leap — enough to jump out of
-shafts and make climbing pointless.
+Jump is expressed as a **height** with the launch speed derived from it
+(`JUMP_SPEED = √(2·g·h)`), because the two are coupled and hand-tuning them
+separately already went wrong once: softening gravity silently turned a
+1.4-voxel hop into a 3.2-voxel leap, enough to jump out of shafts and make
+climbing pointless. Gravity can now be retuned freely.
+
+Small creatures reach terminal velocity almost instantly, so what you see of an
+ant falling is a near-constant slow drift rather than a build-up — the terminal
+value matters more to the feel than the acceleration does.
 
 Climbing is gated on headroom. Without that check the ant pins against a
 ceiling and *hovers* — the blocked move cancels her velocity but she never

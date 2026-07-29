@@ -48,15 +48,22 @@ const STICK_RADIUS = 70;
  * are effectively harmless — ants drop off things constantly and walk away.
  * The old 400 / -260 pair modelled a human being and read as heavy.
  */
-const GRAVITY = 180;
-const TERMINAL_VELOCITY = -60;
+const GRAVITY = 90;
 /**
- * Kept at ~1.45 voxels of jump height. Gravity and jump are coupled
- * (h = v^2 / 2g), so softening gravity without re-deriving this would have
- * silently turned a 1.4 voxel hop into a 3.2 voxel leap — enough to jump out
- * of shafts and make climbing pointless.
+ * Small creatures hit terminal velocity almost instantly, so what you actually
+ * see of an ant falling is a near-constant slow drift, not a build-up. Keeping
+ * this low matters more to the feel than the acceleration does.
  */
-const JUMP_SPEED = 23;
+const TERMINAL_VELOCITY = -30;
+/**
+ * Jump is expressed as a HEIGHT and the launch speed derived from it, because
+ * the two are coupled (h = v^2 / 2g) and hand-tuning them separately has
+ * already gone wrong once: softening gravity silently turned a 1.4 voxel hop
+ * into a 3.2 voxel leap, enough to jump out of shafts and make climbing
+ * pointless. Deriving it means gravity can now be retuned freely.
+ */
+const JUMP_HEIGHT = 1.45;
+const JUMP_SPEED = Math.sqrt(2 * GRAVITY * JUMP_HEIGHT);
 /** Rise the ant steps over without jumping — one voxel plus a hair. */
 const STEP_HEIGHT = 1.05;
 /** Climbing runs a little under walking pace, as it does for real ants. */
@@ -742,13 +749,57 @@ export class DigScene {
       }
       return;
     }
-    applyOrientation(this.surface, wall, supportBelow(this.world, this.position, wall));
+    const support = supportBelow(this.world, this.position, wall);
+    const contact = support ? this.surfaceContact(wall, support) : null;
+    if (!contact) return; // no room on that face — better to refuse than embed
+    this.position.copy(contact);
+    applyOrientation(this.surface, wall, support);
     this.upVelocity = 0;
+    this.planarSpeed = 0;
     this.beginCameraTurn();
   }
 
   private beginCameraTurn(): void {
     this.cameraTurn = 1;
+  }
+
+  /**
+   * Place the contact point ON the face we're about to stand on.
+   *
+   * `position` is the contact point and the body runs EYE_HEIGHT along `up`,
+   * so when `up` changes the body's footprint changes shape entirely — it
+   * stops extending along Y and starts extending along Z, straight into the
+   * wall being gripped. Without this the ant reorients while embedded in dirt.
+   *
+   * Returns null if the ant wouldn't fit there, in which case the caller must
+   * refuse the transition rather than reorient into solid ground.
+   */
+  private surfaceContact(up: AxisDirection, voxel: { x: number; y: number; z: number }): THREE.Vector3 | null {
+    const axis = up.endsWith('_x') ? 'x' : up.endsWith('_y') ? 'y' : 'z';
+    const sign = up.startsWith('pos') ? 1 : -1;
+    const oldUp = this.upVec();
+    const oldAxis = this.upAxis();
+
+    // The face of `voxel` pointing along `up`, nudged a hair clear so the
+    // box's far edge doesn't floor() back into the voxel itself.
+    const face = sign > 0 ? voxel[axis] + 1 + 0.002 : voxel[axis] - 0.002;
+
+    /*
+     * Rotating swaps which axis is the body's LONG one. Standing, the ant is
+     * EYE_HEIGHT tall in Y and BODY_RADIUS wide in X/Z. Lying against a wall it
+     * is EYE_HEIGHT long in Z and BODY_RADIUS wide in X *and Y* — so an ant
+     * whose feet were flat on the floor now needs half its width of clearance
+     * below, and the naive snap put it through the floor. Lift along the old up
+     * until it fits, which is exactly what an ant does: it steps up onto the
+     * wall rather than pivoting in place.
+     */
+    const lifts = oldAxis === axis ? [0] : [0, BODY_RADIUS + 0.05, 1, EYE_HEIGHT];
+    for (const lift of lifts) {
+      const at = this.position.clone().addScaledVector(oldUp, lift);
+      at[axis] = face;
+      if (!this.collides(at, up)) return at;
+    }
+    return null;
   }
 
   private updatePlayer(dt: number): void {
@@ -807,8 +858,14 @@ export class DigScene {
     if (this.surface.mode === 'attached' || this.surface.up !== WORLD_UP) {
       const decision = evaluateEdge(this.world, this.position, this.surface, wish, magnitude);
       if (decision.commit && decision.up && decision.up !== CEILING_UP) {
-        applyOrientation(this.surface, decision.up, supportBelow(this.world, this.position, decision.up));
-        this.beginCameraTurn();
+        const nextSupport = supportBelow(this.world, this.position, decision.up);
+        const contact = nextSupport ? this.surfaceContact(decision.up, nextSupport) : null;
+        if (contact) {
+          this.position.copy(contact);
+          applyOrientation(this.surface, decision.up, nextSupport);
+          this.upVelocity = 0;
+          this.beginCameraTurn();
+        }
       }
     }
     this.surface.support = supportBelow(this.world, this.position, this.surface.up);
