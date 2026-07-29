@@ -190,6 +190,31 @@ export class LooseSoil {
     return within.slice(0, count).map((e) => e.clod);
   }
 
+  /**
+   * Wake everything near a point, because the world moved under it.
+   *
+   * A resting piece stops being simulated — that is what makes a nest full of
+   * spoil affordable — but it also means it never notices the cube it was
+   * lying on being dug out. Sixty-four pieces sat asleep in mid-air over the
+   * hole they had just been shaken out of. Anything that MUTATES the grid has
+   * to call this, or sleep silently turns into levitation.
+   */
+  wakeNear(point: Vec3, radius: number): number {
+    let woken = 0;
+    const limit = radius * radius;
+    for (const clod of this.clods) {
+      if (!clod.asleep) continue;
+      const dx = clod.position.x - point.x;
+      const dy = clod.position.y - point.y;
+      const dz = clod.position.z - point.z;
+      if (dx * dx + dy * dy + dz * dz > limit) continue;
+      clod.asleep = false;
+      clod.restFor = 0;
+      woken++;
+    }
+    return woken;
+  }
+
   /** Shove a clod, waking it. This is what walking into one does. */
   push(clod: Clod, impulse: Vec3): void {
     clod.velocity.x += impulse.x;

@@ -140,17 +140,38 @@ const ok = (m) => console.log(`  ok  ${m}`);
   else ok('dragging to look does not dig');
 
   const standing = await hud();
-  await tap(450, 700);
-  const first = await until('the first cube', (s) => s.dug >= 1);
+  /*
+   * A cube is FOUR presses now, one sheet each, and she cannot cut into her
+   * own spoil — so each sheet has to be scooped and tipped aside before the
+   * next. That is the loop; this suite only needs the cube gone at the end of
+   * it, so the haul is kept as short as it can be while still clearing the
+   * face.
+   */
+  for (let sheet = 1; sheet <= 4; sheet++) {
+    const b = await hud();
+    await look(700, 1180);
+    await page.waitForTimeout(700);
+    await page.click('.dig-action');
+    await until(`sheet ${sheet}`, (s) => s.loose + s.pieces >= b.loose + b.pieces + 16 || s.dug >= 1, 300000);
+    if (sheet === 4) break;
+    await page.click('.dig-action'); // CARRY: the sheet is on the face
+    await until('the sheet to be scooped', (s) => s.pieces >= 16, 60000);
+    await look(1180, 700); // level out, or DROP tips it back in
+    await page.waitForTimeout(800);
+    await page.click('.dig-action'); // DROP
+    await until('the spoil to be put down', (s) => s.pieces === 0, 60000);
+  }
+  const first = await until('the first cube', (s) => s.dug >= 1, 60000);
   if (first.dug !== 1) fail(`expected exactly one cube dug, got ${JSON.stringify(first)}`);
-  else ok('digs exactly one cube');
+  else ok('four presses, one sheet each, dig exactly one cube');
 
   // Digging FREES the soil rather than loading her, so she is empty-handed and
   // the spoil is lying in the hole.
-  const spilled = await until('the freed cube to become loose soil', (s) => s.loose >= 64, 40000);
-  if (spilled.pieces !== 0 || spilled.loose !== 64) {
-    fail(`digging should leave 64 loose pieces and empty hands: ${JSON.stringify(spilled)}`);
-  } else ok('the freed cube lies loose as 64 pieces and her mandibles are empty');
+  const spilled = await until('the freed cube to become loose soil',
+    (s) => s.loose + s.pieces >= 64, 40000);
+  if (spilled.loose + spilled.pieces !== 64) {
+    fail(`digging should account for 64 pieces: ${JSON.stringify(spilled)}`);
+  } else ok(`the freed cube is 64 pieces (${spilled.loose} loose, ${spilled.pieces} held)`);
 
   /*
    * Dig the floor out from under yourself and you must end up ON the new floor,

@@ -7,7 +7,7 @@ import { FACES, meshChunk } from '../src/voxel/mesher';
 import { MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES } from '../src/voxel/LooseSoil';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
-import { CELL_COUNT, CHIP_CELLS, LAYER_CELLS, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
+import { CELL_COUNT, CHIP_CELLS, LAYER_CELLS, LAYER_COUNT, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
@@ -171,40 +171,86 @@ describe('raycastVoxel', () => {
   });
 });
 
-describe('DigSession', () => {
-  /** Start a dig and run it to completion in one call. */
-  const digOut = (session: DigSession, x: number, y: number, z: number) => {
+/**
+ * Dig a whole cube out — all four sheets.
+ *
+ * A dig is ONE sheet and then she stops, so a cube is four presses. Every
+ * test that just wants the cube gone goes through here.
+ */
+const digOut = (session: DigSession, x: number, y: number, z: number) => {
+  let outcome = session.tickDig(0);
+  for (let sheet = 0; sheet < LAYER_COUNT; sheet++) {
     session.beginDig(x, y, z);
-    return session.tickDig(999);
-  };
+    outcome = session.tickDig(999);
+  }
+  return outcome;
+};
 
-  it('needs the full dig time before a voxel pops', () => {
+describe('DigSession', () => {
+  it('takes four presses to pop a voxel, one sheet each', () => {
+    /*
+     * A cube is four sheets and she stops after every one, which is what makes
+     * hauling the spoil part of digging rather than something you do
+     * afterwards. Running the timer past a sheet must NOT roll into the next.
+     */
     const world = makeWorld();
     const session = new DigSession(world);
-    const seconds = session.secondsFor(TOPSOIL);
+    const sheet = session.secondsFor(TOPSOIL) / LAYER_COUNT;
+
     session.beginDig(20, SURFACE, 20);
-    expect(session.tickDig(seconds * 0.5).kind).toBe('progress');
+    expect(session.tickDig(sheet * 0.5).kind).toBe('progress');
+    expect(session.tickDig(sheet * 0.6).kind).toBe('layer');
+    expect(session.sheetsDone(20, SURFACE, 20)).toBe(1);
+    // She stopped: holding the timer open digs nothing more.
+    expect(session.digging).toBeNull();
+    expect(session.tickDig(999).kind).toBe('none');
     expect(world.get(20, SURFACE, 20)).toBe(TOPSOIL);
-    expect(session.tickDig(seconds * 0.6).kind).toBe('dug');
+
+    for (let i = 0; i < LAYER_COUNT - 2; i++) {
+      session.beginDig(20, SURFACE, 20);
+      expect(session.tickDig(999).kind).toBe('layer');
+    }
+    session.beginDig(20, SURFACE, 20);
+    expect(session.tickDig(999).kind).toBe('dug');
     expect(world.get(20, SURFACE, 20)).toBe(AIR);
+    expect(session.sheetsDone(20, SURFACE, 20)).toBe(0);
+  });
+
+  it('remembers sheets per cube, so wandering off does not restart one', () => {
+    /*
+     * The trap: sheets already off have already spilled their soil into the
+     * world. Forgetting them would let the same cube spill twice, which is
+     * soil minted from nothing.
+     */
+    const world = makeWorld();
+    const session = new DigSession(world);
+    session.beginDig(20, SURFACE, 20);
+    session.tickDig(999);
+    session.beginDig(25, SURFACE, 25);
+    session.tickDig(999);
+    expect(session.sheetsDone(20, SURFACE, 20)).toBe(1);
+    expect(session.sheetsDone(25, SURFACE, 25)).toBe(1);
+    // And a part-dug cube counts its sheets as excavated, because they are.
+    expect(session.excavatedPieces).toBe(2 * LAYER_CELLS);
   });
 
   it('holds its target so the camera can look away mid-dig', () => {
     const world = makeWorld();
     const session = new DigSession(world);
+    const sheet = session.secondsFor(TOPSOIL) / LAYER_COUNT;
     session.beginDig(20, SURFACE, 20);
-    session.tickDig(session.secondsFor(TOPSOIL) * 0.9);
+    session.tickDig(sheet * 0.9);
     // Nothing re-aims it — the locked cube is the only thing tickDig knows
     // about, which is what removed the old thumb-drift progress reset.
     expect(session.digging).toEqual({ x: 20, y: SURFACE, z: 20 });
-    expect(session.tickDig(session.secondsFor(TOPSOIL) * 0.2).kind).toBe('dug');
+    expect(session.tickDig(sheet * 0.2).kind).toBe('layer');
   });
 
   it('tapping the cube being dug cancels it and discards progress', () => {
     const world = makeWorld();
     const session = new DigSession(world);
     session.toggleDig(20, SURFACE, 20);
-    session.tickDig(session.secondsFor(TOPSOIL) * 0.9);
+    session.tickDig((session.secondsFor(TOPSOIL) / LAYER_COUNT) * 0.9);
     expect(session.toggleDig(20, SURFACE, 20).kind).toBe('cancelled');
     expect(session.digging).toBeNull();
     expect(session.chewRatio).toBe(0);
@@ -1096,11 +1142,12 @@ describe('fracture', () => {
     const session = new DigSession(world);
     const pattern = buildFracture(20, S, 20, TOPSOIL, { x: 0, y: 1, z: 0 });
 
+    // Part way through the FIRST sheet: some of its pieces are already out.
     session.beginDig(20, S, 20);
-    session.tickDig(4);
+    session.tickDig((session.secondsFor(TOPSOIL) / LAYER_COUNT) * 0.96);
     const partial = releasedBetween(pattern, 0, session.chewRatio);
     expect(partial.length).toBeGreaterThan(0);
-    expect(partial.length).toBeLessThan(CELL_COUNT);
+    expect(partial.length).toBeLessThan(LAYER_CELLS);
 
     session.cancelDig();
     // Nothing was excavated, so nothing may be lying loose: the scene's reclaim
@@ -1133,8 +1180,7 @@ describe('fracture', () => {
     // so a full dig still moves exactly one voxel.
     const world = makeWorld();
     const session = new DigSession(world);
-    session.beginDig(20, SURFACE, 20);
-    session.tickDig(999);
+    digOut(session, 20, SURFACE, 20);
     expect(world.excavated).toBe(1);
     expect(session.carried).toBe(PIECES_PER_VOXEL);
     session.place(20, SURFACE + 2, 20);
@@ -1215,8 +1261,7 @@ describe('loose soil', () => {
     const session = new DigSession(world);
     const soil = new LooseSoil();
 
-    session.beginDig(20, S, 20);
-    session.tickDig(999);
+    digOut(session, 20, S, 20);
     expect(world.excavated).toBe(1);
 
     const unit = session.release(PIECES_PER_VOXEL)!;
@@ -1248,8 +1293,7 @@ describe('loose soil', () => {
      */
     const world = makeWorld();
     const session = new DigSession(world);
-    session.beginDig(20, S, 20);
-    session.tickDig(999);
+    digOut(session, 20, S, 20);
     expect(session.carried).toBe(PIECES_PER_VOXEL);
 
     const unit = session.release(PIECES_PER_VOXEL)!;
@@ -1258,6 +1302,44 @@ describe('loose soil', () => {
     session.load.push(unit);
     expect(session.carried).toBe(PIECES_PER_VOXEL);
     expect(world.excavated * PIECES_PER_VOXEL).toBe(session.carried);
+  });
+
+  it('wakes resting spoil when the ground under it is dug away', () => {
+    /*
+     * The bug: a resting piece stops being simulated, which is what makes a
+     * nest full of spoil affordable — and also means it never notices the cube
+     * it was lying on being removed. A whole sheet sat asleep in mid-air over
+     * the hole it had just come out of. Anything that mutates the grid has to
+     * wake what is near it, or sleep quietly becomes levitation.
+     */
+    const world = makeWorld();
+    const soil = new LooseSoil();
+    soil.drop({ x: 20.5, y: SURFACE + 1.2, z: 20.5 }, TOPSOIL, { x: 20, y: SURFACE, z: 20 });
+    for (let i = 0; i < 400; i++) soil.step(world, 1 / 60, 12);
+    const clod = soil.clods[0]!;
+    expect(clod.asleep).toBe(true);
+    const restingAt = clod.position.y;
+
+    // Take the floor away. Asleep, it would hang here for ever.
+    world.dig(20, SURFACE, 20);
+    for (let i = 0; i < 60; i++) soil.step(world, 1 / 60, 12);
+    expect(clod.position.y).toBeCloseTo(restingAt, 5);
+
+    expect(soil.wakeNear({ x: 20.5, y: SURFACE + 0.5, z: 20.5 }, 2.5)).toBe(1);
+    expect(clod.asleep).toBe(false);
+    for (let i = 0; i < 120; i++) soil.step(world, 1 / 60, 12);
+    expect(clod.position.y).toBeLessThan(restingAt - 0.3);
+  });
+
+  it('only wakes what is actually near the change', () => {
+    const soil = new LooseSoil();
+    const near = soil.drop({ x: 20, y: 0, z: 20 }, TOPSOIL, { x: 1, y: 0, z: 0 })!;
+    const far = soil.drop({ x: 40, y: 0, z: 40 }, TOPSOIL, { x: 2, y: 0, z: 0 })!;
+    near.asleep = true;
+    far.asleep = true;
+    expect(soil.wakeNear({ x: 20, y: 0, z: 20 }, 2.5)).toBe(1);
+    expect(near.asleep).toBe(false);
+    expect(far.asleep).toBe(true);
   });
 
   it('gathers a scoop of the nearest pieces, not one grain at a time', () => {
@@ -1296,8 +1378,7 @@ describe('loose soil', () => {
     expect(PIECES_PER_VOXEL).toBe(SCOOP_PIECES * 4);
     const world = makeWorld();
     const session = new DigSession(world, { capacityVoxels: 1 });
-    session.beginDig(20, S, 20);
-    session.tickDig(999);
+    digOut(session, 20, S, 20);
     expect(session.carriedScoops).toBe(4);
     expect(session.carriedVoxels).toBe(1);
 
@@ -1422,8 +1503,7 @@ describe('loose soil', () => {
     // The whole point of the change: only EXCAVATED soil stops being a cube.
     const world = makeWorld();
     const session = new DigSession(world);
-    session.beginDig(20, S, 20);
-    session.tickDig(999);
+    digOut(session, 20, S, 20);
     session.release();
     // Nothing was deposited, and the world is still a plain voxel grid.
     expect(world.deposited).toBe(0);

@@ -6,6 +6,7 @@
  * above ground is exactly the volume of the tunnels below it.
  */
 
+import { LAYER_CELLS, LAYER_COUNT } from './fracture';
 import { PIECES_PER_VOXEL, SCOOP_PIECES } from './LooseSoil';
 import { AIR, isSolid, materialOf, type VoxelId, type VoxelWorld } from './VoxelWorld';
 
@@ -78,6 +79,8 @@ export interface CarryLoad {
 export type DigOutcome =
   | { kind: 'none' }
   | { kind: 'progress'; ratio: number }
+  /** One sheet came away. She stops; the next needs another press. */
+  | { kind: 'layer'; done: number; material: VoxelId }
   | { kind: 'dug'; material: VoxelId }
   | { kind: 'cancelled' }
   | { kind: 'full' }
@@ -103,6 +106,18 @@ export class DigSession {
   private digsCompleted = 0;
   private target: DigTarget | null = null;
   private progress = 0;
+
+  /**
+   * Sheets already taken off each cube, keyed by cell.
+   *
+   * A dig is ONE layer and then she stops, so this has to survive between
+   * presses — and it has to be per CELL rather than a single "current cube",
+   * or wandering off to dig somewhere else and coming back would restart a
+   * half-dug cube from zero and spill its soil a second time. Entries are
+   * dropped the moment the cube goes, so this only ever holds cubes that are
+   * partly dug.
+   */
+  private readonly sheets = new Map<string, number>();
 
   constructor(world: VoxelWorld, options: DigSessionOptions = {}) {
     this.world = world;
@@ -155,9 +170,46 @@ export class DigSession {
     return this.carried >= this.capacity;
   }
 
-  /** 0..1 progress against the voxel currently being chewed on. */
+  private static cell(x: number, y: number, z: number): string {
+    return `${x},${y},${z}`;
+  }
+
+  /** Sheets already off this cube. 0 for one nobody has touched. */
+  sheetsDone(x: number, y: number, z: number): number {
+    return this.sheets.get(DigSession.cell(x, y, z)) ?? 0;
+  }
+
+  /**
+   * 0..1 against the whole CUBE, counting sheets already off.
+   *
+   * The chipping visual is built per cube, so it needs the cube's progress —
+   * not the current sheet's — or every press would rewind the lattice to
+   * whole and spill the same soil again.
+   */
   get chewRatio(): number {
-    return this.progress;
+    const t = this.target;
+    const done = t ? this.sheetsDone(t.x, t.y, t.z) : 0;
+    return (done + this.progress) / LAYER_COUNT;
+  }
+
+  /** Sheets off the cube she is working, or the one she last worked. */
+  get sheetsOnTarget(): number {
+    const t = this.target;
+    return t ? this.sheetsDone(t.x, t.y, t.z) : 0;
+  }
+
+  /**
+   * Pieces excavated, counting part-dug cubes.
+   *
+   * `world.excavated` only counts WHOLE cubes, and a sheet coming away puts 16
+   * real pieces in the world while its cube is still standing — so the world's
+   * figure is short by exactly the sheets in flight. Conservation is checked
+   * against this, not against the cube count.
+   */
+  get excavatedPieces(): number {
+    let partial = 0;
+    for (const done of this.sheets.values()) partial += done * LAYER_CELLS;
+    return this.world.excavated * PIECES_PER_VOXEL + partial;
   }
 
   cancelDig(): void {
@@ -213,15 +265,33 @@ export class DigSession {
       return refusal;
     }
 
-    const seconds = Math.max(0.01, this.secondsFor(this.world.get(x, y, z)));
+    /*
+     * One SHEET per press, not one cube.
+     *
+     * secondsFor() is the whole cube, so a sheet is a quarter of it. She stops
+     * when it comes away and the next needs another press — which is what
+     * makes clearing the spoil part of digging rather than something you do
+     * afterwards.
+     */
+    const material = this.world.get(x, y, z);
+    const seconds = Math.max(0.01, this.secondsFor(material) / LAYER_COUNT);
     this.progress += deltaSeconds / seconds;
     if (this.progress < 1) return { kind: 'progress', ratio: this.progress };
 
+    const key = DigSession.cell(x, y, z);
+    const done = (this.sheets.get(key) ?? 0) + 1;
+    if (done < LAYER_COUNT) {
+      this.sheets.set(key, done);
+      this.cancelDig();
+      return { kind: 'layer', done, material };
+    }
+
     const removed = this.world.dig(x, y, z);
+    this.sheets.delete(key);
     this.cancelDig();
     if (removed === AIR) return { kind: 'none' };
-    // Practice counts only completed cubes. Crediting it on beginDig instead
-    // would make tap-cancel-tap-cancel a way to reach top speed in seconds.
+    // Practice counts only completed cubes. Crediting it per sheet would make
+    // tap-cancel-tap-cancel a way to reach top speed in seconds.
     this.digsCompleted++;
     this.pickUp(removed, { x, y, z });
     return { kind: 'dug', material: removed };

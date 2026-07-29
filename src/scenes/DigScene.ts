@@ -17,7 +17,7 @@ import {
 import { meshChunk } from '../voxel/mesher';
 import {
   buildFracture, cellCentre, chipMeshData, eventsBetween, hashVoxel, releasedBetween, removedAt,
-  CELL_COUNT, LAYER_CELLS, type DigEvent, type DigEventKind, type FracturePattern,
+  CELL_COUNT, LAYER_CELLS, LAYER_COUNT, type DigEvent, type DigEventKind, type FracturePattern,
 } from '../voxel/fracture';
 import {
   SOIL_CLOD_VARIANT_COUNT, buildClodShape, clodFeel, clodRadius, pieceSource, styleForVoxel,
@@ -237,6 +237,18 @@ const PIECE_SIZE = 0.17;
  * and the pit left looking swept. Much less and the sheet lands where it stood
  * and looks placed rather than shed.
  */
+/**
+ * How far from a changed cube spoil gets woken.
+ *
+ * Generous: cheap (it only touches sleeping pieces, and only when the grid
+ * actually changes) and being stingy here means a piece one cube further out
+ * stays hanging, which is the exact bug this exists to kill.
+ */
+const WAKE_RADIUS = 2.5;
+/** How clear the working face has to be before the next sheet can be cut. */
+const FACE_CLEAR = 0.9;
+/** How long the "clear the spoil" nudge stays up after a refused press. */
+const BLOCKED_MESSAGE_TIME = 2.5;
 const PIECE_KICK = 0.9;
 const PIECE_FAN = 0.5;
 const CLOD_AHEAD = 0.34;
@@ -404,6 +416,10 @@ export class DigScene {
   private cameraRoll = 0;
   /** Roll carried over from a frame change, decaying to zero. */
   private rollOffset = 0;
+  /** Seconds left on the "clear the spoil first" nudge. */
+  private blockedFor = 0;
+  /** Sheets off the last cube worked, for the objective line. */
+  private sheetsMessage = 0;
   /** Outward normal of the wall currently being pushed into, if any. */
   private readonly wallNormal = new THREE.Vector3();
   private hasWall = false;
@@ -791,14 +807,26 @@ export class DigScene {
     if (!isSolid(voxel) || !materialOf(voxel).diggable) return;
 
     const pattern = buildFracture(x, y, z, voxel, this.strikeFace);
+    /*
+     * RESUME, do not restart.
+     *
+     * Sheets already off this cube have already put their soil in the world,
+     * so a fresh chip starting at zero would hand the same pieces out again —
+     * soil minted by pressing dig a second time. The pattern is deterministic
+     * per voxel, so picking up at the cube's own progress reconstructs exactly
+     * the lattice that is standing there.
+     */
+    const resumed = this.session.chewRatio;
     this.chip = {
       voxel: { x, y, z },
       pattern,
-      progress: 0,
-      lastProgress: 0,
+      progress: resumed,
+      lastProgress: resumed,
       builtRemoved: -1,
       mesh: null,
-      spilled: 0,
+      spilled: removedAt(pattern, resumed),
+      // Empty on purpose: the pieces from FINISHED sheets are legitimately
+      // dug, and cancelling this sheet must not claw them back.
       dropped: [],
     };
     this.rebuildChunkAt(x, y, z);
@@ -1538,8 +1566,51 @@ export class DigScene {
   /** Start (or cancel) a dig on a specific cube, if it's within reach. */
   private startDig(x: number, y: number, z: number, face?: Vec3Like): void {
     if (!this.withinReach(x, y, z)) return;
+    if (this.faceBlocked(x, y, z)) {
+      this.blockedFor = BLOCKED_MESSAGE_TIME;
+      return;
+    }
     this.strikeFace = face ?? null;
     this.session.toggleDig(x, y, z);
+  }
+
+  /**
+   * Is the face she wants to cut buried under its own spoil?
+   *
+   * A sheet has to be hauled away before the next one can be cut, which is
+   * what turns digging into the ant loop — cut, clear, cut — rather than a
+   * progress bar you hold. Measured against the cube's own centre, so it is
+   * the working face that has to be clear and not the whole room.
+   */
+  private faceBlocked(x: number, y: number, z: number): boolean {
+    if (this.session.isDigging(x, y, z)) return false; // cancelling is always allowed
+    return this.soil.scoop({ x: x + 0.5, y: y + 0.5, z: z + 0.5 }, 1, FACE_CLEAR).length > 0;
+  }
+
+  /** A sheet came away. She stops here; the next one needs another press. */
+  private onSheetFreed(cell: { x: number; y: number; z: number }, done: number): void {
+    const chip = this.chip;
+    if (chip && chip.voxel.x === cell.x && chip.voxel.y === cell.y && chip.voxel.z === cell.z) {
+      /*
+       * Flush this sheet, then hand its pieces over for good.
+       *
+       * tickDig completes the sheet and clears the target in the same call, so
+       * by the time updateChip next runs there is no target and chewRatio
+       * reads zero — the sheet's last pieces would never be released at all.
+       * And clearing `dropped` matters just as much: endChip reclaims that
+       * list when the cube is still solid, which is right for a cancelled
+       * sheet and would be theft for a finished one.
+       */
+      const upto = done / LAYER_COUNT;
+      const owed = releasedBetween(chip.pattern, chip.progress, upto);
+      if (owed.length > 0) this.spillPieces(chip, owed);
+      chip.progress = upto;
+      chip.lastProgress = upto;
+      chip.dropped.length = 0;
+    }
+    this.digAudio?.('DIG_CRACK', new THREE.Vector3(cell.x + 0.5, cell.y + 0.5, cell.z + 0.5));
+    this.soil.wakeNear({ x: cell.x + 0.5, y: cell.y + 0.5, z: cell.z + 0.5 }, WAKE_RADIUS);
+    this.sheetsMessage = done;
   }
 
   private showStick(visible: boolean): void {
@@ -1576,10 +1647,14 @@ export class DigScene {
 
   private refreshActionButton(): void {
     const mode = this.actionMode();
+    // DIG says which sheet is next, because a cube is four presses now and
+    // "press it again" is only obvious if the button admits there is a count.
+    const hit = mode === 'dig' ? this.currentTarget() : null;
+    const sheets = hit ? this.session.sheetsDone(hit.x, hit.y, hit.z) : 0;
     const label = mode === 'cancel' ? '\u2715 CANCEL'
       : mode === 'drop' ? '\u2935 DROP'
         : mode === 'carry' ? '\u2934 CARRY'
-          : '\u26cf DIG';
+          : `\u26cf DIG ${sheets + 1}/${LAYER_COUNT}`;
     if (this.actionButton.textContent !== label) this.actionButton.textContent = label;
     this.actionButton.classList.toggle('is-cancel', mode === 'cancel');
     this.actionButton.classList.toggle('is-carry', mode === 'carry');
@@ -2334,6 +2409,7 @@ export class DigScene {
   }
 
   private updateAction(dt: number): void {
+    if (this.blockedFor > 0) this.blockedFor = Math.max(0, this.blockedFor - dt);
     // The dig runs against its LOCKED cube, so looking away doesn't interrupt
     // it. Reach is the scene's business, so it is enforced here rather than in
     // the session: walk out of range and she stops working.
@@ -2345,7 +2421,20 @@ export class DigScene {
         // the ant silently, so DROP appeared without being asked for and the
         // next tap threw soil she did not know she was holding. Picking it up
         // is now its own deliberate act.
-        if (outcome.kind === 'dug') this.spillDug(digging);
+        if (outcome.kind === 'dug') {
+          this.spillDug(digging);
+          /*
+           * The cube is gone, so anything resting ON it is now resting on
+           * nothing. Sleeping pieces do not notice the world changing under
+           * them — that is the whole point of sleeping — so a whole sheet of
+           * spoil sat in mid-air over the hole it had just come out of.
+           */
+          this.soil.wakeNear(
+            { x: digging.x + 0.5, y: digging.y + 0.5, z: digging.z + 0.5 },
+            WAKE_RADIUS,
+          );
+        }
+        if (outcome.kind === 'layer') this.onSheetFreed(digging, outcome.done);
       } else this.session.cancelDig();
     }
     this.syncChip();
@@ -2450,7 +2539,14 @@ export class DigScene {
     if (!readout) return;
 
     const status = this.founding.evaluate(this.world, this.position.x, this.position.y, this.position.z);
-    this.objective.textContent = status.objective;
+    /*
+     * A refused press has to SAY why. Silently doing nothing is the same
+     * "I pressed it and nothing happened" failure the mode toggle was deleted
+     * for, and here the reason is a rule the player cannot see.
+     */
+    this.objective.textContent = this.blockedFor > 0
+      ? 'Spoil in the way — clear the loose soil before cutting the next sheet'
+      : status.objective;
     this.objective.classList.toggle('is-ready', status.phase === 'ready');
     // Only offer the button while the site actually qualifies — step out of the
     // chamber and the offer withdraws, which teaches the requirement better

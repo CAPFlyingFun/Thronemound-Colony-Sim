@@ -46,14 +46,6 @@ export const PIECES_PER_VOXEL = CELL_COUNT;
 /** Every piece comes away now — nothing is left standing to become a clod. */
 export const MAX_REMOVED = CELL_COUNT;
 
-/** Crumbs start breaking here, and the last one is due by here. */
-/*
- * Crumbs break across almost the whole dig, so the rate is roughly even: 124
- * pieces over ~0.93 of a 12.5 second cube is about ten a second, which is what
- * a steady chipping-away should look like.
- */
-const FIRST_BREAK = 0.06;
-const LAST_BREAK = 0.99;
 
 /**
  * How far ahead of its own turn a piece starts to loosen — exactly one layer.
@@ -68,7 +60,7 @@ const LAST_BREAK = 0.99;
  * sheet is ever eroding, so the rest of the cube stays fused and solid instead
  * of dissolving evenly like a grid.
  */
-const EROSION_LEAD = (LAST_BREAK - FIRST_BREAK) / LAYER_COUNT;
+const EROSION_LEAD = 1 / LAYER_COUNT;
 
 /**
  * How long a sheet takes to let go, as a fraction of the whole dig.
@@ -285,13 +277,20 @@ export function buildFracture(
    * go as one slab, sand's trickle over a fraction of a second. The stagger is
    * far smaller than a layer window, so the ordering rule still holds.
    */
-  const span = LAST_BREAK - FIRST_BREAK;
+  /*
+   * Sheet k is due at exactly (k+1)/LAYER_COUNT — the moment that sheet's own
+   * timer runs out. These used to be squeezed into a [0.06, 0.99] window, a
+   * leftover from when pieces trickled across the whole dig, which put every
+   * sheet's soil a quarter of a cube LATE: sheet 0's pieces were not due until
+   * partway through sheet 1, so pressing dig, watching a sheet finish, and
+   * cancelling produced nothing at all.
+   */
   const thresholds = new Float32Array(CELL_COUNT);
   const stagger = LAYER_STAGGER / Math.max(1, feel.clumping);
   for (let i = 0; i < CELL_COUNT; i++) {
     const sheet = Math.floor(i / LAYER_CELLS);
     const within = i % LAYER_CELLS;
-    const due = FIRST_BREAK + (span * (sheet + 1)) / LAYER_COUNT;
+    const due = (sheet + 1) / LAYER_COUNT;
     thresholds[i] = due - stagger * (1 - (within + 1) / LAYER_CELLS);
   }
 

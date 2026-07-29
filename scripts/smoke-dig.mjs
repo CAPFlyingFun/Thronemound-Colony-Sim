@@ -154,41 +154,102 @@ else ok('a cancelled dig removes nothing');
 if (afterCancel.seconds < 12.4) fail('a cancelled dig credited practice — tap-cancel would be an exploit');
 else ok('a cancelled dig credits no practice');
 
-// 5. Tap and let it run to completion. Five seconds of SIM time is a long
-// wall-clock wait: dt is clamped to 50 ms and software rendering manages ~3 fps
-// once the sky is drawn, so the sim advances at roughly 0.15x real time.
-await tap(450, 800);
 /*
- * Pieces are not deleted, they are handed to the world a sheet at a time. So
- * spoil should appear DURING the dig rather than all at the end — watch the
- * loose count climb while the cube is still there.
+ * 5. Four presses, one sheet each, hauling the spoil between them.
+ *
+ * A cube is no longer one press. She cuts a sheet of sixteen, stops, and
+ * cannot cut the next until its spoil is out of the way — which is the whole
+ * loop: cut, clear, cut. Sim time runs at roughly 0.15x wall here (dt clamped
+ * to 50 ms, ~3 fps under software rendering), so a 3.1 second sheet is about
+ * twenty seconds of waiting.
  */
-let looseDuringDig = 0;
-let spillSeen = 0;
-const dug = await until('the first cube to pop', (s) => s.dug >= 1, 300000, (s) => {
-  if (s.dug === 0) looseDuringDig = Math.max(looseDuringDig, s.loose);
-  if (!Number.isNaN(s.spill)) spillSeen = Math.max(spillSeen, s.spill);
-});
+const label = async () => (await page.textContent('.dig-action')) ?? '';
+const objective = async () => (await page.textContent('#dig-objective')) ?? '';
+
+// Aim back down at the cube after any detour.
+const aimDown = async () => {
+  await swipeLook(700, 1180);
+  await page.waitForTimeout(800);
+};
+
+let sheetsCut = 0;
+let refusedSeen = false;
+for (let sheet = 1; sheet <= 4; sheet++) {
+  await aimDown();
+  // Count what is in her JAWS too: a stray piece scooped up is still soil that
+  // came off the cube, and measuring loose alone made a finished sheet look
+  // short by however many she happened to be holding.
+  const b = await hud();
+  const before = b.loose + b.pieces;
+
+  if (!(await label()).includes(`DIG ${sheet}/4`)) {
+    fail(`expected the button to offer DIG ${sheet}/4, got "${(await label()).trim()}"`);
+    break;
+  }
+  await page.click('.dig-action');
+  const cut = await until(
+    `sheet ${sheet} to come away`,
+    (s) => s.loose + s.pieces >= before + 16 || s.dug >= 1,
+    300000,
+  );
+  if (cut.loose + cut.pieces < before + 16 && cut.dug < 1) break;
+  sheetsCut++;
+
+  // She STOPPED. One press is one sheet, not a cube.
+  if (sheet < 4 && cut.dug !== 0) {
+    fail(`the whole cube went on press ${sheet} — a press should cut one sheet`);
+    break;
+  }
+
+  if (sheet === 4) break;
+
+  /*
+   * You cannot cut into your own spoil. The button says CARRY, not DIG —
+   * which is a better answer than a refusal, because it names the thing you
+   * have to do next instead of just saying no.
+   */
+  if ((await label()).includes('DIG')) {
+    fail(`spoil is on the face but the button still offered "${(await label()).trim()}"`);
+  } else refusedSeen = true;
+
+  /*
+   * Clear it: scoop the sheet and tip it ahead of her.
+   *
+   * Deliberately WITHOUT walking. Walking out and back sounds more like the
+   * real loop, but W and S for the same duration do not land her back on the
+   * same cube — she falls into the shaft, the return is blocked, and the next
+   * press lands on a different cube whose sheet count is zero. Since sheets
+   * are tracked per cell, that reads as the count resetting when nothing is
+   * wrong. Tipping the load forward clears the face just as well and keeps the
+   * test measuring the rule instead of the pathfinding.
+   */
+  await page.click('.dig-action');
+  const carried = await until('the sheet to be scooped', (s) => s.pieces >= 16, 60000);
+  if (carried.pieces < 16) { fail('could not scoop the sheet away'); break; }
+  await swipeLook(1180, 700); // level out, or DROP aims back into the hole
+  await page.waitForTimeout(900);
+  await page.click('.dig-action');
+  await until('the spoil to be put down', (s) => s.pieces === 0, 60000);
+}
+
+if (sheetsCut === 4) ok('four presses, one sheet each, cut the cube');
+else fail(`only ${sheetsCut} of 4 sheets were cut`);
+if (refusedSeen) ok('a buried face offers CARRY, never DIG — clear it before cutting on');
+else fail('the button offered DIG straight into a pile of spoil');
+
+const dug = await hud();
 if (dug.dug < 1) fail(`nothing was excavated — "${dug.text}"`);
 else ok(`excavated ${dug.dug}, holding ${dug.pieces} pieces`);
-// Digging FREES the soil, it does not load her. The spoil is lying in the hole
-// and picking it up is a separate, deliberate act.
-if (dug.pieces !== 0) fail(`digging silently loaded the ant: ${dug.pieces} pieces`);
-else ok('digging leaves the spoil on the ground, not in her mandibles');
-if (looseDuringDig < 16) {
-  fail(`spoil only appeared at the end — loose peaked at ${looseDuringDig} mid-dig`);
-} else {
-  ok(`pieces came away during the dig, not after (${looseDuringDig} loose before it popped)`);
-}
-if (spillSeen < 16) fail(`the peel never got a sheet out: spill peaked at ${spillSeen}`);
-else ok(`the cube peeled in sheets (spill reached ${spillSeen})`);
-const spilled = await until('the freed cube to become loose soil', (s) => s.loose >= 64, 25000);
-if (spilled.loose !== 64) fail(`expected 64 loose pieces, got ${spilled.loose}`);
-else ok(`the freed cube is lying there as ${spilled.loose} pieces`);
 if (dug.seconds > 12.4) fail(`practice did not advance after a completed dig (${dug.seconds}s)`);
 else ok(`practice advanced: now ${dug.seconds}s/cube`);
 
-// Completing must also tear it down, leaving the normal terrain path to draw
+// Conservation counts PIECES, and part-dug cubes count their finished sheets.
+const settled = await until('the spoil to settle', (s) => s.speed < 0.2, 30000);
+if (settled.pieces + settled.loose < 64) {
+  fail(`soil went missing: ${settled.pieces} held + ${settled.loose} loose`);
+} else ok(`a cube's worth of soil is accounted for (${settled.pieces} held + ${settled.loose} loose)`);
+
+// Completing must tear the chip down, leaving the normal terrain path to draw
 // the (now removed) voxel. A leftover crumb cluster would float in the hole.
 const afterDig = await until('the chipped visual to be torn down on completion',
   (s) => Number.isNaN(s.chip), 20000);
@@ -199,59 +260,14 @@ const dugShot = await shot('2-dug');
 if (Buffer.compare(surfaceShot, dugShot) === 0) fail('frame did not change after digging');
 else ok('rendered frame changed after digging');
 
-// 6. The three-mode action button: CARRY, then DROP.
-//
-// With nothing held and spoil under the crosshair the button offers CARRY; once
-// she is holding it, and only then, it offers DROP. A standing DROP button was
-// what let soil get thrown by accident.
-//
 /*
- * Find the pile. Pieces come away at the FACE she is working, so digging down
- * heaps the spoil on the rim while she is standing in the shaft — the
- * crosshair has to be on the pile, not on the floor under her feet. Sweep the
- * pitch rather than guessing one angle, and cancel any dig a stray tap starts
- * along the way, since a dig in progress owns the button.
+ * 6. Soil conservation, end to end, in PIECES.
+ *
+ * The cube is gone and every piece of it is either in her jaws or lying on the
+ * ground. Counted in pieces because a cube is 64 of them and the scoop is 16 —
+ * the cube figure alone cannot see a sheet going missing.
  */
-let carryLabel = false;
-for (const [from, to] of [[1000, 700], [700, 560], [560, 460], [460, 820]]) {
-  await swipeLook(from, to);
-  await page.waitForTimeout(1200);
-  if ((await hud()).chip > 0 || !Number.isNaN((await hud()).chip)) {
-    const label = (await page.textContent('.dig-action')) ?? '';
-    if (label.includes('CANCEL')) {
-      await page.click('.dig-action');
-      await page.waitForTimeout(600);
-    }
-  }
-  carryLabel = await untilLabel('CARRY', 4000);
-  if (carryLabel) break;
-}
-if (!carryLabel) fail('looking at the spoil pile did not offer CARRY');
-else ok('spoil under the crosshair offers CARRY');
-
-await page.click('.dig-action');
-// A scoop is SIXTEEN pieces in one grab — the whole point of the change. She
-// should not be picking spoil up one grain at a time.
-const held = await until('the scoop to be gathered', (s) => s.pieces >= 1, 25000);
-if (held.pieces !== 16) fail(`carry took ${held.pieces} pieces, expected a scoop of 16`);
-else ok(`CARRY gathers a scoop of ${held.pieces} in one grab`);
-if (held.loose !== 48) fail(`scoop left ${held.loose} loose, expected 48`);
-else ok(`the rest of the pile stays where it is (${held.loose} loose)`);
-if (!await untilLabel('DROP')) fail('holding a scoop did not offer DROP');
-else ok('holding a scoop offers DROP, and only then');
-
-// Climb out and put it down on the surface.
-await page.keyboard.down('KeyW');
-await page.waitForTimeout(2000);
-await page.keyboard.up('KeyW');
-await until('the ant to stop walking', (s) => s.speed < 0.2, 40000);
-
-await page.click('.dig-action');
-const placed = await until('the scoop to become loose spoil', (s) => s.pieces === 0, 25000);
-if (placed.pieces !== 0) fail(`DROP placed nothing — "${placed.text}"`);
-else ok(`dropped the scoop, now holding ${placed.pieces} pieces`);
-// Conservation is counted in PIECES now: one dug cube is 64 of them, and every
-// one is either in her jaws or lying on the ground.
+const placed = await hud();
 if (placed.dug * 64 !== placed.pieces + placed.loose) {
   fail(`soil not conserved: dug ${placed.dug} x64 != held ${placed.pieces} + loose ${placed.loose}`);
 } else ok(`soil conserved end to end: ${placed.dug} cube = ${placed.pieces} held + ${placed.loose} loose`);
