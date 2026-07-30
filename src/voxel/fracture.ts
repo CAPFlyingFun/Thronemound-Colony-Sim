@@ -377,6 +377,90 @@ export function eventsBetween(
 }
 
 /**
+ * Cracks spreading across the face she is working.
+ *
+ * With one cell per press there is nothing left to SUBTRACT during a dig — the
+ * cell is whole until it is gone — so the progress a player reads has to come
+ * from the surface itself. Branches run out from the strike point and lengthen
+ * as she works, which is what packed soil actually does under a mandible, and
+ * it costs no soil-accounting at all because a crack is pure decoration.
+ *
+ * Deterministic from the pattern's own seed, like everything else here: the
+ * same cell cracks the same way across a cancel, a reload or a save.
+ */
+export const CRACK_BRANCHES = 7;
+export const CRACK_JOINTS = 4;
+/** Progress before the first crack shows. Below this she is still just biting. */
+export const CRACK_START = 0.12;
+/** How far the crack sits proud of the face, so it does not z-fight with it. */
+export const CRACK_LIFT = 0.006;
+/**
+ * Half-width of a crack at its root, in face-local units where the face spans
+ * -1..1. At 0.05 these came out as fat dark bars painted across the cell rather
+ * than as soil splitting — the width has to read as a LINE at the distance an
+ * ant works from, which is about a body length off the face.
+ */
+export const CRACK_WIDTH = 0.014;
+
+export interface CrackSegment {
+  /** Face-local, -1..1 across the struck face. */
+  ax: number;
+  ay: number;
+  bx: number;
+  by: number;
+  /** Progress at which this segment has finished appearing. */
+  at: number;
+  /** Half-width, in the same face-local units. */
+  width: number;
+}
+
+export function crackSegments(pattern: FracturePattern): CrackSegment[] {
+  const rand = rng(pattern.seed ^ 0x9e3779b9);
+  const normal: Vec3 = { x: 0, y: 0, z: 0 };
+  const axes: [number, number, number] = [0, 0, 0];
+  axes[pattern.strikeAxis] = pattern.strikeSign;
+  normal.x = axes[0]!; normal.y = axes[1]!; normal.z = axes[2]!;
+  const [axisA, axisB] = tangentAxes([normal.x, normal.y, normal.z]);
+  const strike = [pattern.strike.x, pattern.strike.y, pattern.strike.z];
+
+  // Where the blow landed, in face-local -1..1. Every branch starts here, so
+  // the pattern reads as damage radiating from one point rather than as noise.
+  const su = strike[axisA]! * 2 - 1;
+  const sv = strike[axisB]! * 2 - 1;
+
+  const segments: CrackSegment[] = [];
+  const span = 0.86 - CRACK_START;
+  for (let b = 0; b < CRACK_BRANCHES; b++) {
+    let angle = (b / CRACK_BRANCHES) * Math.PI * 2 + rand() * 0.9;
+    const reach = 0.35 + rand() * 0.5;
+    let px = su;
+    let py = sv;
+    // Branches stagger their start, so they do not all appear on one frame.
+    const opens = CRACK_START + (b / CRACK_BRANCHES) * 0.08;
+    for (let j = 0; j < CRACK_JOINTS; j++) {
+      // Wander, so a crack forks and kinks the way a real one does instead of
+      // running dead straight out from the middle.
+      angle += (rand() - 0.5) * 0.9;
+      const step = (reach / CRACK_JOINTS) * (1 - j * 0.15);
+      const nx = px + Math.cos(angle) * step;
+      const ny = py + Math.sin(angle) * step;
+      segments.push({
+        ax: px,
+        ay: py,
+        bx: nx,
+        by: ny,
+        at: opens + ((j + 1) / CRACK_JOINTS) * span,
+        // Tapers along its length: widest at the blow, hairline at the tip.
+        width: CRACK_WIDTH * (1 - (j / CRACK_JOINTS) * 0.65),
+      });
+      px = nx;
+      py = ny;
+    }
+  }
+  return segments;
+}
+
+/**
  * The pieces that came away between two progress readings.
  *
  * The whole point of the change: a piece that leaves the lattice is not
@@ -560,6 +644,83 @@ export function chipMeshData(
       }
 
       indices.push(first, first + 1, first + 2, first, first + 2, first + 3);
+      quadCount++;
+    }
+
+    /*
+     * Cracks, on the face she is working.
+     *
+     * Emitted in the SAME buffers and through the same spin as the cell itself,
+     * so they stay glued to it as it rocks — built separately they would slide
+     * across a surface that is tilting underneath them. They are dark vertex
+     * colour on the ordinary soil material rather than a texture or a second
+     * mesh, because the material already multiplies vertex colour over the
+     * albedo, so a crack costs one quad and no new state.
+     */
+    const cracks = crackSegments(pattern);
+    const faceAxis = pattern.strikeAxis;
+    const faceNormal: [number, number, number] = [0, 0, 0];
+    faceNormal[faceAxis] = pattern.strikeSign;
+    const [ca, cb] = tangentAxes(faceNormal);
+    const crackNormal = spinVec(faceNormal[0]!, faceNormal[1]!, faceNormal[2]!);
+    const crackTangent: [number, number, number] = [0, 0, 0];
+    crackTangent[ca] = 1;
+    for (const seg of cracks) {
+      if (progress < seg.at - 0.0001) continue;
+      const dx = seg.bx - seg.ax;
+      const dy = seg.by - seg.ay;
+      const len = Math.hypot(dx, dy);
+      if (len < 1e-6) continue;
+      const px = (-dy / len) * seg.width;
+      const py = (dx / len) * seg.width;
+      const quad: [number, number][] = [
+        [seg.ax + px, seg.ay + py],
+        [seg.bx + px, seg.by + py],
+        [seg.bx - px, seg.by - py],
+        [seg.ax - px, seg.ay - py],
+      ];
+      const base = positions.length / 3;
+      const world3: [number, number, number][] = [];
+      for (const [u, v] of quad) {
+        const l: [number, number, number] = [0, 0, 0];
+        l[faceAxis] = pattern.strikeSign * (half + CRACK_LIFT);
+        l[ca] = u * half;
+        l[cb] = v * half;
+        const rot = spinVec(l[0]!, l[1]!, l[2]!);
+        const wx = x + midX + rot[0];
+        const wy = y + midY + rot[1];
+        const wz = z + midZ + rot[2];
+        world3.push([wx, wy, wz]);
+        positions.push(wx, wy, wz);
+        normals.push(crackNormal[0], crackNormal[1], crackNormal[2]);
+        layers.push(pattern.voxel);
+        tangents.push(crackTangent[0], crackTangent[1], crackTangent[2]);
+        const w = [wx, wy, wz] as const;
+        uvs.push(w[ca]! / TILE_VOXELS, w[cb]! / TILE_VOXELS);
+        // Dark enough to read as an opening rather than as a painted line, and
+        // still tinted by the cell so it belongs to this lump of soil.
+        const dark = 0.24 * tint;
+        colors.push(dark, dark, dark);
+      }
+      /*
+       * Wind it to face OUT, decided by the cross product rather than assumed.
+       *
+       * The face-local (u, v) basis is not consistently right-handed against
+       * the face normal — on a top face the tangent axes are X and Z, and
+       * cross(X, Z) is -Y — so a fixed index order leaves the crack facing INTO
+       * the soil on half the faces and back-face culling eats it. This is the
+       * third time that has bitten in this codebase, after the hex room's walls
+       * and the chamfer bevels, so it is computed here too.
+       */
+      const e1 = [world3[1]![0] - world3[0]![0], world3[1]![1] - world3[0]![1],
+        world3[1]![2] - world3[0]![2]];
+      const e2 = [world3[2]![0] - world3[0]![0], world3[2]![1] - world3[0]![1],
+        world3[2]![2] - world3[0]![2]];
+      const facing = (e1[1]! * e2[2]! - e1[2]! * e2[1]!) * crackNormal[0]
+        + (e1[2]! * e2[0]! - e1[0]! * e2[2]!) * crackNormal[1]
+        + (e1[0]! * e2[1]! - e1[1]! * e2[0]!) * crackNormal[2];
+      if (facing >= 0) indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+      else indices.push(base, base + 2, base + 1, base, base + 3, base + 2);
       quadCount++;
     }
   }

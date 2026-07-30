@@ -253,6 +253,8 @@ const WAKE_RADIUS = 2.5;
 const FACE_CLEAR = 0.9;
 /** How long the "clear the spoil" nudge stays up after a refused press. */
 const BLOCKED_MESSAGE_TIME = 2.5;
+/** Progress between chip rebuilds. Fine enough that cracks open smoothly. */
+const CHIP_REBUILD_STEP = 0.02;
 const PIECE_KICK = 1.3;
 const PIECE_GATHER = 2.2;
 const CLOD_AHEAD = 0.34;
@@ -313,6 +315,8 @@ interface ActiveDigVisual {
   lastProgress: number;
   /** Crumb count the current geometry was built for; -1 means never built. */
   builtRemoved: number;
+  /** Progress the geometry was last built at, so erosion and cracks animate. */
+  builtProgress: number;
   mesh: THREE.Mesh | null;
   /**
    * Pieces already handed to LooseSoil.
@@ -850,6 +854,7 @@ export class DigScene {
       progress: resumed,
       lastProgress: resumed,
       builtRemoved: -1,
+      builtProgress: -1,
       mesh: null,
       spilled: removedAt(pattern, resumed),
       // Empty on purpose: pieces from FINISHED sheets are legitimately dug, and
@@ -1019,9 +1024,23 @@ export class DigScene {
       this.onDigEvent(event, chip);
     }
 
+    /*
+     * Rebuild on PROGRESS, not only when a piece leaves.
+     *
+     * The old test was "has the removed count changed", which worked when a
+     * voxel was 64 crumbs coming away a few at a time — something left every
+     * few frames and dragged a rebuild along with it. A cell is one piece now,
+     * so that count stays at zero for the entire dig and the mesh was built
+     * once and never touched again: the cracks never opened and the cell never
+     * visibly loosened. Stepping on progress costs ~50 rebuilds of ~21 quads
+     * across a whole dig, which is nothing, and it is what animates the only
+     * feedback the player has that a press is working.
+     */
     const removed = removedAt(chip.pattern, chip.progress);
-    if (removed !== chip.builtRemoved) {
+    if (removed !== chip.builtRemoved
+      || chip.progress - chip.builtProgress >= CHIP_REBUILD_STEP) {
       chip.builtRemoved = removed;
+      chip.builtProgress = chip.progress;
       this.refreshChipMesh(chip);
     }
 

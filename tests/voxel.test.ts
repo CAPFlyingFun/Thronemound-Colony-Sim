@@ -9,7 +9,7 @@ import {
 import { MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES } from '../src/voxel/LooseSoil';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
-import { CELL_COUNT, CHIP_CELLS, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
+import { CELL_COUNT, CHIP_CELLS, CRACK_BRANCHES, CRACK_JOINTS, CRACK_START, crackSegments, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
@@ -1315,6 +1315,95 @@ describe('fracture', () => {
     }
   });
 
+  it('cracks the face progressively, and never un-cracks it', () => {
+    /*
+     * With one cell per press there is nothing to subtract during a dig, so the
+     * cracks ARE the progress readout. They have to grow monotonically — a
+     * crack that closed again would read as the soil healing.
+     */
+    const pattern = buildFracture(7, S, 9, TOPSOIL);
+    const at = (p: number) => crackSegments(pattern).filter((c) => p >= c.at - 1e-4).length;
+    expect(at(0)).toBe(0);
+    expect(at(CRACK_START - 0.01)).toBe(0);
+    let last = 0;
+    for (let p = 0; p <= 1.0001; p += 0.02) {
+      const n = at(p);
+      expect(n).toBeGreaterThanOrEqual(last);
+      last = n;
+    }
+    expect(last).toBe(CRACK_BRANCHES * CRACK_JOINTS);
+  });
+
+  it('grows the crack geometry with the dig', () => {
+    // The mesh has to carry it, not just the segment list: a cracked cell is
+    // six cube faces plus one quad per crack that has opened so far.
+    const pattern = buildFracture(7, S, 9, TOPSOIL);
+    const early = chipMeshData(pattern, 7, S, 9, 0.05)!.quadCount;
+    const mid = chipMeshData(pattern, 7, S, 9, 0.5)!.quadCount;
+    const late = chipMeshData(pattern, 7, S, 9, 0.95)!.quadCount;
+    expect(early).toBe(6);
+    expect(mid).toBeGreaterThan(early);
+    expect(late).toBeGreaterThan(mid);
+    expect(late).toBe(6 + CRACK_BRANCHES * CRACK_JOINTS);
+  });
+
+  it('starts every crack at the point she struck', () => {
+    /*
+     * Damage radiating from one blow, not noise sprinkled over a face. The
+     * strike point is also what decides which face is cracked at all, so this
+     * catches the pattern being laid out on the wrong side of the cell.
+     */
+    const pattern = buildFracture(7, S, 9, TOPSOIL, { x: 1, y: 0, z: 0 });
+    const [axisA, axisB] = tangentAxes([1, 0, 0]);
+    const strike = [pattern.strike.x, pattern.strike.y, pattern.strike.z];
+    const su = strike[axisA]! * 2 - 1;
+    const sv = strike[axisB]! * 2 - 1;
+    const roots = crackSegments(pattern).filter((c) => c.ax === su && c.ay === sv);
+    expect(roots).toHaveLength(CRACK_BRANCHES);
+  });
+
+  it('winds every crack quad outward, on every face she can strike', () => {
+    /*
+     * The bug this exists for: the face-local (u, v) basis is not consistently
+     * right-handed against the face normal — on a top face the tangent axes are
+     * X and Z, and cross(X, Z) is -Y — so a fixed index order leaves the crack
+     * facing INTO the soil on half the faces and back-face culling eats it. It
+     * rendered nothing at all and the quad COUNT was still correct, which is
+     * exactly why counting quads could not see it.
+     */
+    for (const face of FACES) {
+      const pattern = buildFracture(7, S, 9, TOPSOIL, {
+        x: face.normal[0], y: face.normal[1], z: face.normal[2],
+      });
+      const data = chipMeshData(pattern, 7, S, 9, 0.9)!;
+      for (let t = 0; t < data.indices.length; t += 3) {
+        const [i, j, k] = [data.indices[t]!, data.indices[t + 1]!, data.indices[t + 2]!];
+        const p = (n: number) => [
+          data.positions[n * 3]!, data.positions[n * 3 + 1]!, data.positions[n * 3 + 2]!,
+        ] as const;
+        const [a, b, c] = [p(i), p(j), p(k)];
+        const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        const ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        const cross = [
+          ab[1]! * ac[2]! - ab[2]! * ac[1]!,
+          ab[2]! * ac[0]! - ab[0]! * ac[2]!,
+          ab[0]! * ac[1]! - ab[1]! * ac[0]!,
+        ];
+        const n = [data.normals[i * 3]!, data.normals[i * 3 + 1]!, data.normals[i * 3 + 2]!];
+        expect(cross[0]! * n[0]! + cross[1]! * n[1]! + cross[2]! * n[2]!).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('cracks the same way every time, so a cancel does not reshuffle them', () => {
+    const a = crackSegments(buildFracture(7, S, 9, TOPSOIL));
+    const b = crackSegments(buildFracture(7, S, 9, TOPSOIL));
+    expect(a).toEqual(b);
+    // And a different cell cracks differently.
+    const c = crackSegments(buildFracture(8, S, 9, TOPSOIL));
+    expect(c).not.toEqual(a);
+  });
+
   it('draws the cell as ONE lump, not a cluster', () => {
     /*
      * The complaint that started the rework: it read as one large cube breaking
@@ -1323,8 +1412,18 @@ describe('fracture', () => {
      * faces and there are no interior seams for a grid to show through.
      */
     const pattern = buildFracture(11, S, 23, TOPSOIL);
-    expect(chipMeshData(pattern, 11, S, 23, 0.2)!.quadCount).toBe(6);
-    expect(chipMeshData(pattern, 11, S, 23, 0.9)!.quadCount).toBe(6);
+    // Sampled before the first crack opens, so this counts the LUMP alone.
+    expect(chipMeshData(pattern, 11, S, 23, CRACK_START - 0.01)!.quadCount).toBe(6);
+    /*
+     * And whatever grows after that is cracks on its surface, never more lumps.
+     * Stated against the segments actually open at that moment rather than
+     * against all fifteen, so it does not quietly depend on where the last
+     * crack falls relative to the cell letting go.
+     */
+    const late = 0.9;
+    const open = crackSegments(pattern).filter((c) => late >= c.at - 1e-4).length;
+    expect(open).toBeGreaterThan(0);
+    expect(chipMeshData(pattern, 11, S, 23, late)!.quadCount - open).toBe(6);
   });
 
   it('frees every piece, because nothing is deleted any more', () => {
@@ -1376,13 +1475,16 @@ describe('fracture', () => {
   });
 
   it('stays cheap enough for a phone', () => {
-    // Worst case is every crumb standing and separated: 27 x 6 quads.
+    // Worst case is the whole lump plus every crack open: 6 + 28 quads, for
+    // ONE cell being worked at a time. It was 27 x 6 when a voxel was a cluster,
+    // and only ever ONE cell is being worked, so this is the whole dig budget.
     let worst = 0;
     for (let p = 0; p <= 1; p += 0.02) {
       const data = chipMeshData(buildFracture(2, S, 3, TOPSOIL), 2, S, 3, p);
       worst = Math.max(worst, data?.quadCount ?? 0);
     }
-    expect(worst).toBeLessThanOrEqual(CELL_COUNT * 6);
+    expect(worst).toBeLessThanOrEqual(CELL_COUNT * 6 + CRACK_BRANCHES * CRACK_JOINTS);
+    expect(worst).toBeLessThan(40);
   });
 
   it('cannot mint soil by cancelling half way through', () => {
