@@ -33,28 +33,51 @@ export interface SpeedBands {
  */
 export const DEFAULT_BANDS: SpeedBands = { crawl: 2, walk: 4.5, run: 7.5 };
 
-/** Stick magnitudes at which each band is reached. */
-export const BAND_EDGES = { crawl: 0.35, walk: 0.75 } as const;
+/** Which band a full throw of the stick reaches. */
+export type Gait = 'crawl' | 'walk' | 'run';
+
+/** Ordered slowest to fastest, for cycling and for tests. */
+export const GAITS: readonly Gait[] = ['crawl', 'walk', 'run'];
 
 /**
- * Map stick magnitude (0..1) to a speed. Piecewise-linear through the band
- * anchors rather than three discrete steps: the bands give the thumb
- * meaningful landmarks, but the response in between stays continuous so the
- * ant never jumps between speeds.
+ * Walking, unless she is told otherwise.
+ *
+ * The three bands used to live inside a SINGLE throw of the stick: a third of
+ * the way out was a crawl, three quarters a walk, the rim a run. On a thumb
+ * stick that is a curve nobody can drive — you plant your thumb on the rim and
+ * leave it there. So every band below the last was unreachable in practice and
+ * she sprinted everywhere, which is also why she read as too fast for a fire
+ * ant when the top of the range is meant to be a genuine sprint.
+ *
+ * The gait is a MODE now, chosen deliberately, and the stick stays analogue
+ * within whichever one is set.
  */
-export function speedForStick(magnitude: number, bands: SpeedBands = DEFAULT_BANDS): number {
+export const DEFAULT_GAIT: Gait = 'walk';
+
+/** What a full throw of the stick is worth in this gait. */
+export function topSpeed(gait: Gait, bands: SpeedBands = DEFAULT_BANDS): number {
+  if (gait === 'crawl') return bands.crawl;
+  if (gait === 'run') return bands.run;
+  return bands.walk;
+}
+
+/**
+ * Map stick magnitude (0..1) to a speed within the current gait.
+ *
+ * Linear on purpose. The gait already gives the thumb the landmarks the old
+ * piecewise curve was reaching for, and keeping the curve as well would leave
+ * two separate things deciding one number — which is the shape of most of the
+ * bugs in this project.
+ */
+export function speedForStick(
+  magnitude: number,
+  gait: Gait = DEFAULT_GAIT,
+  bands: SpeedBands = DEFAULT_BANDS,
+): number {
   const m = Math.min(1, Math.max(0, magnitude));
   if (m <= STICK_DEADZONE) return 0;
   const t = (m - STICK_DEADZONE) / (1 - STICK_DEADZONE);
-  if (t <= BAND_EDGES.crawl) {
-    return bands.crawl * (t / BAND_EDGES.crawl);
-  }
-  if (t <= BAND_EDGES.walk) {
-    const k = (t - BAND_EDGES.crawl) / (BAND_EDGES.walk - BAND_EDGES.crawl);
-    return bands.crawl + (bands.walk - bands.crawl) * k;
-  }
-  const k = (t - BAND_EDGES.walk) / (1 - BAND_EDGES.walk);
-  return bands.walk + (bands.run - bands.walk) * k;
+  return topSpeed(gait, bands) * t;
 }
 
 /**

@@ -15,7 +15,7 @@ import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
 import { DEN_MIN_CHAMBER, DEN_MIN_DEPTH, QueenFounding, countChamberAir } from '../src/voxel/QueenFounding';
-import { BAND_EDGES, DEFAULT_BANDS, STICK_DEADZONE, approach, clampStickOrigin, speedForStick, stickVector } from '../src/voxel/locomotion';
+import { DEFAULT_BANDS, DEFAULT_GAIT, GAITS, topSpeed, STICK_DEADZONE, approach, clampStickOrigin, speedForStick, stickVector } from '../src/voxel/locomotion';
 import { ALL_AXES, INPUT_COMMIT_THRESHOLD, MAX_PITCH, dragLook, rollBetween, ORIENTATION_LOCK_MS, WORLD_UP, applyOrientation, attachableWall, axisFromVector, axisVector, canChangeOrientation, createSurfaceState, evaluateEdge, isPerpendicular, lookVector, opposite, rankSurfaces, referenceRight, reframeLook, supportBelow, tickLock, type AxisDirection, type Vec3 } from '../src/voxel/SurfaceFrame';
 
 const SURFACE = 96;
@@ -956,31 +956,53 @@ describe('locomotion', () => {
     expect(speedForStick(STICK_DEADZONE + 0.01)).toBeGreaterThan(0);
   });
 
-  it('reaches each band at its edge', () => {
-    const d = STICK_DEADZONE;
-    const at = (t: number) => speedForStick(d + t * (1 - d));
-    expect(at(BAND_EDGES.crawl)).toBeCloseTo(DEFAULT_BANDS.crawl, 5);
-    expect(at(BAND_EDGES.walk)).toBeCloseTo(DEFAULT_BANDS.walk, 5);
-    expect(at(1)).toBeCloseTo(DEFAULT_BANDS.run, 5);
+  it('tops out at the gait she is in, not at a run', () => {
+    /*
+     * The reported problem, in one assertion: a thumb parked on the rim of the
+     * stick used to mean RUN, because the three bands shared a single throw and
+     * nobody drives a stick to 35% and holds it. Full throw is a walk now, and
+     * the other two gaits are asked for rather than found by accident.
+     */
+    expect(speedForStick(1)).toBeCloseTo(DEFAULT_BANDS.walk, 5);
+    expect(speedForStick(1, 'walk')).toBeCloseTo(DEFAULT_BANDS.walk, 5);
+    expect(speedForStick(1, 'crawl')).toBeCloseTo(DEFAULT_BANDS.crawl, 5);
+    expect(speedForStick(1, 'run')).toBeCloseTo(DEFAULT_BANDS.run, 5);
+    expect(DEFAULT_GAIT).toBe('walk');
   });
 
-  it('is continuous and monotonic — no speed jumps between bands', () => {
-    let previous = -1;
-    for (let m = 0; m <= 1.0001; m += 0.01) {
-      const v = speedForStick(m);
-      expect(v).toBeGreaterThanOrEqual(previous - 1e-9);
-      previous = v;
-    }
-    // A step would show up as a large delta across one sample.
-    for (let m = 0.1; m < 1; m += 0.005) {
-      expect(Math.abs(speedForStick(m + 0.005) - speedForStick(m))).toBeLessThan(0.35);
+  it('keeps the stick analogue inside every gait', () => {
+    // The point of the mode is to cap the top, not to throw away fine control:
+    // half a throw is still half speed, whichever gait is engaged.
+    for (const gait of GAITS) {
+      const top = topSpeed(gait);
+      expect(speedForStick(0, gait)).toBe(0);
+      expect(speedForStick(STICK_DEADZONE, gait)).toBe(0);
+      const half = STICK_DEADZONE + (1 - STICK_DEADZONE) / 2;
+      expect(speedForStick(half, gait)).toBeCloseTo(top / 2, 5);
+      expect(speedForStick(1, gait)).toBeCloseTo(top, 5);
     }
   });
 
-  it('gives a genuinely slow band for careful digging', () => {
-    // A third of the stick should be well under half walking pace, otherwise
-    // "crawl" is a label rather than a usable speed.
-    expect(speedForStick(0.3)).toBeLessThan(DEFAULT_BANDS.walk * 0.5);
+  it('is continuous and monotonic within a gait', () => {
+    for (const gait of GAITS) {
+      let previous = -1;
+      for (let m = 0; m <= 1.0001; m += 0.01) {
+        const v = speedForStick(m, gait);
+        expect(v).toBeGreaterThanOrEqual(previous - 1e-9);
+        previous = v;
+      }
+      for (let m = 0.1; m < 1; m += 0.005) {
+        const step = Math.abs(speedForStick(m + 0.005, gait) - speedForStick(m, gait));
+        expect(step).toBeLessThan(0.35);
+      }
+    }
+  });
+
+  it('orders the gaits, and makes the crawl genuinely slow', () => {
+    expect(topSpeed('crawl')).toBeLessThan(topSpeed('walk'));
+    expect(topSpeed('walk')).toBeLessThan(topSpeed('run'));
+    // Otherwise "crawl" is a label rather than a usable placement speed.
+    expect(topSpeed('crawl')).toBeLessThan(topSpeed('walk') * 0.5);
   });
 
   it('accelerates and decelerates at different rates', () => {

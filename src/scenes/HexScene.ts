@@ -27,7 +27,7 @@ import {
   HEX_AIR, HEX_HEIGHT, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld,
 } from '../voxel/HexGrid';
 import { voxelTint } from '../voxel/mesher';
-import { DEFAULT_BANDS, approach, clampStickOrigin, speedForStick, stickVector } from '../voxel/locomotion';
+import { DEFAULT_BANDS, DEFAULT_GAIT, approach, clampStickOrigin, speedForStick, stickVector } from '../voxel/locomotion';
 import { DIG_START } from '../voxel/DigSession';
 
 /**
@@ -385,7 +385,8 @@ export class HexScene {
     const moving = wish.lengthSq() > 1e-6;
     if (moving) wish.normalize();
 
-    const targetSpeed = moving ? speedForStick(magnitude, DEFAULT_BANDS) : 0;
+    // The experiment scene has no gait buttons, so it simply walks.
+    const targetSpeed = moving ? speedForStick(magnitude, DEFAULT_GAIT, DEFAULT_BANDS) : 0;
     this.planarSpeed = approach(this.planarSpeed, targetSpeed, WALK_ACCEL, WALK_DECEL, dt);
 
     if (this.jumpQueued && this.grounded) {

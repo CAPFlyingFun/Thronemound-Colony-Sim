@@ -33,7 +33,10 @@ import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
 import { DigSession } from '../voxel/DigSession';
 import { createVoxelMaterial, type VoxelMaterialBundle } from '../voxel/voxelMaterial';
 import { DEN_MIN_CHAMBER, DEN_MIN_DEPTH, QueenFounding } from '../voxel/QueenFounding';
-import { DEFAULT_BANDS, approach, clampStickOrigin, speedForStick, stickVector } from '../voxel/locomotion';
+import {
+  DEFAULT_BANDS, DEFAULT_GAIT, approach, clampStickOrigin, speedForStick, stickVector,
+  topSpeed, type Gait,
+} from '../voxel/locomotion';
 import {
   WORLD_UP, applyOrientation, axisVector, createSurfaceState,
   INPUT_COMMIT_THRESHOLD, axisFromVector, canChangeOrientation,
@@ -68,8 +71,6 @@ const BODY_RADIUS = 0.3;
  */
 const WALK_ACCEL = 14;
 const WALK_DECEL = 22;
-/** Keyboard has no analogue axis, so it picks a band rather than full tilt. */
-const KEY_MAGNITUDE = 0.7;
 const STICK_RADIUS = 70;
 /**
  * Tuned for an ant, not a person. By the square-cube law an ant has enormous
@@ -490,7 +491,16 @@ export class DigScene {
   private moveZ = 0;
   private stickMagnitude = 0;
   private keyboardDriving = false;
-  private sprinting = false;
+  /*
+   * The gait she travels at, as a MODE rather than a stick position.
+   *
+   * Walk by default. Crawl and run are asked for — by the two buttons on
+   * touch, by holding Shift or Control on a keyboard — because a thumb parked
+   * on the rim of the stick can only ever express one speed.
+   */
+  private gait: Gait = DEFAULT_GAIT;
+  /** Set while a keyboard modifier is held; overrides the button choice. */
+  private keyGait: Gait | null = null;
   private jumpQueued = false;
   /** Jumped and not yet landed — suspends weightlessness so the leap survives. */
   private airborne = false;
@@ -499,6 +509,8 @@ export class DigScene {
   private readonly actionButton: HTMLButtonElement;
   private readonly foundButton: HTMLButtonElement;
   private readonly jumpButton: HTMLButtonElement;
+  private readonly crawlButton: HTMLButtonElement;
+  private readonly runButton: HTMLButtonElement;
   private readonly objective: HTMLDivElement;
   private readonly stick: HTMLDivElement;
   private readonly stickKnob: HTMLDivElement;
@@ -621,6 +633,8 @@ export class DigScene {
     this.actionButton = document.createElement('button');
     this.foundButton = document.createElement('button');
     this.jumpButton = document.createElement('button');
+    this.crawlButton = document.createElement('button');
+    this.runButton = document.createElement('button');
     this.objective = document.createElement('div');
     this.stick = document.createElement('div');
     this.stickKnob = document.createElement('div');
@@ -756,15 +770,46 @@ export class DigScene {
       <div class="dig-readout" id="dig-readout"></div>
       <div class="dig-crosshair"></div>
       <div class="dig-controls"></div>
-      <div class="dig-hint">Left half: walk &nbsp;·&nbsp; Right half: look &nbsp;·&nbsp; Tap soil to dig, tap a clod to carry</div>
+      <div class="dig-hint">Left half: walk &nbsp;·&nbsp; Right half: look &nbsp;·&nbsp; CRAWL / RUN change gait &nbsp;·&nbsp; Tap soil to dig, tap a clod to carry</div>
     `;
     const controls = this.hud.querySelector('.dig-controls')!;
     this.actionButton.className = 'dig-btn dig-action';
     this.actionButton.textContent = '⛏ DIG';
     this.jumpButton.className = 'dig-btn dig-jump';
     this.jumpButton.textContent = '\u2191 JUMP';
+    /*
+     * Gait buttons TOGGLE rather than being held down.
+     *
+     * Hold-to-run is the desktop convention and it does not survive the move to
+     * a phone: the left thumb owns the stick and the right owns these, so
+     * holding RUN means never being able to reach DIG or JUMP. Latching them
+     * costs one tap and leaves the other thumb free. Keyboard keeps hold, where
+     * it is natural and where there are spare fingers.
+     */
+    this.crawlButton.className = 'dig-btn dig-gait dig-crawl';
+    this.crawlButton.textContent = '\u{1F40C} CRAWL';
+    this.runButton.className = 'dig-btn dig-gait dig-run';
+    this.runButton.textContent = '\u{1F3C3} RUN';
+    controls.appendChild(this.crawlButton);
+    controls.appendChild(this.runButton);
     controls.appendChild(this.jumpButton);
     controls.appendChild(this.actionButton);
+
+    // Mutually exclusive, and each is its own off switch: tapping the gait you
+    // are already in drops back to walking, so there is no state you can reach
+    // that you cannot leave with the button that put you there.
+    const setGait = (want: Gait) => (event: Event) => {
+      event.preventDefault();
+      this.gait = this.gait === want ? DEFAULT_GAIT : want;
+      this.refreshGaitButtons();
+    };
+    const crawlDown = setGait('crawl');
+    const runDown = setGait('run');
+    this.crawlButton.addEventListener('pointerdown', crawlDown);
+    this.runButton.addEventListener('pointerdown', runDown);
+    this.cleanups.push(() => this.crawlButton.removeEventListener('pointerdown', crawlDown));
+    this.cleanups.push(() => this.runButton.removeEventListener('pointerdown', runDown));
+    this.refreshGaitButtons();
 
     const jumpDown = (event: Event) => {
       event.preventDefault();
@@ -1806,6 +1851,18 @@ export class DigScene {
     this.actionButton.classList.toggle('is-drop', mode === 'drop');
   }
 
+  /**
+   * Show which gait is engaged.
+   *
+   * A latching button that does not LOOK latched is worse than no button: the
+   * point of a mode is being able to tell which one you are in without having
+   * to set off walking to find out.
+   */
+  private refreshGaitButtons(): void {
+    this.crawlButton.classList.toggle('is-on', this.gait === 'crawl');
+    this.runButton.classList.toggle('is-on', this.gait === 'run');
+  }
+
   /** The one action, whatever it happens to be. Button, click and key share it. */
   private doAction(): void {
     switch (this.actionMode()) {
@@ -1990,7 +2047,8 @@ export class DigScene {
         case 'KeyS': case 'ArrowDown': this.moveZ = 1; this.keyboardDriving = true; break;
         case 'KeyA': case 'ArrowLeft': this.moveX = -1; this.keyboardDriving = true; break;
         case 'KeyD': case 'ArrowRight': this.moveX = 1; this.keyboardDriving = true; break;
-        case 'ShiftLeft': case 'ShiftRight': this.sprinting = true; break;
+        case 'ShiftLeft': case 'ShiftRight': this.keyGait = 'run'; break;
+        case 'ControlLeft': case 'ControlRight': this.keyGait = 'crawl'; break;
         case 'Space': this.jumpQueued = true; event.preventDefault(); break;
         case 'KeyG': this.jumpQueued = true; event.preventDefault(); break;
         case 'KeyE': case 'Tab': this.doAction(); event.preventDefault(); break;
@@ -2001,7 +2059,8 @@ export class DigScene {
       switch (event.code) {
         case 'KeyW': case 'ArrowUp': case 'KeyS': case 'ArrowDown': this.moveZ = 0; break;
         case 'KeyA': case 'ArrowLeft': case 'KeyD': case 'ArrowRight': this.moveX = 0; break;
-        case 'ShiftLeft': case 'ShiftRight': this.sprinting = false; break;
+        case 'ShiftLeft': case 'ShiftRight': case 'ControlLeft': case 'ControlRight':
+          this.keyGait = null; break;
       }
     };
     window.addEventListener('keydown', keyDown);
@@ -2334,14 +2393,18 @@ export class DigScene {
     const wish = new THREE.Vector3()
       .addScaledVector(forward, -this.moveZ)
       .addScaledVector(right, this.moveX);
-    const magnitude = this.keyboardDriving
-      ? (this.sprinting ? 1 : KEY_MAGNITUDE)
-      : Math.min(1, this.stickMagnitude);
+    /*
+     * A key is either down or it is not, so the keyboard throws the stick fully
+     * and lets the GAIT decide the speed — the same rule the buttons follow.
+     * It used to hold magnitude at KEY_MAGNITUDE to land mid-curve, which only
+     * meant anything while the three bands shared one throw.
+     */
+    const magnitude = this.keyboardDriving ? 1 : Math.min(1, this.stickMagnitude);
     /*
      * Speed needs a DIRECTION, not just a magnitude.
      *
      * `magnitude` comes from the stick throw, and for keyboard it is pinned at
-     * KEY_MAGNITUDE for as long as keyboardDriving is set — which outlives the
+     * full throw for as long as keyboardDriving is set — which outlives the
      * keypress. So releasing W left targetSpeed at walking pace forever: the
      * ant stood still (wish is the zero vector, so the step is zero) while
      * reporting 3.4 voxels/s and swaying as though mid-stride.
@@ -2353,7 +2416,8 @@ export class DigScene {
     // on what she happens to be brushing against.
     const load = this.position.y < UNDERGROUND_Y ? UNDERGROUND_SPEED : 1;
     const haul = this.session.carried > 0 ? CARRY_SPEED : 1;
-    const targetSpeed = moving ? speedForStick(magnitude, DEFAULT_BANDS) * load * haul : 0;
+    const gait = this.keyGait ?? this.gait;
+    const targetSpeed = moving ? speedForStick(magnitude, gait, DEFAULT_BANDS) * load * haul : 0;
 
     this.planarSpeed = approach(this.planarSpeed, targetSpeed, WALK_ACCEL, WALK_DECEL, dt);
     const step = wish.clone().multiplyScalar(this.planarSpeed * dt);
@@ -2732,6 +2796,8 @@ export class DigScene {
     this.foundButton.hidden = true;
     this.actionButton.hidden = true;
     this.jumpButton.hidden = true;
+    this.crawlButton.hidden = true;
+    this.runButton.hidden = true;
     this.showStick(false);
     this.hud.classList.add('is-colony');
     // Frame the den from slightly above and outside.
@@ -2888,7 +2954,7 @@ export class DigScene {
       <b>Carrying</b> ${this.session.carried}/${this.session.capacity} pellets &nbsp;
       <b>Loose</b> ${this.soil.count} &nbsp;
       <b>Dug</b> ${this.world.excavated}<br>
-      <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 ` : ''}${this.weightless ? '\u{1FAB5} weightless \u00b7 ' : this.surface.mode === 'attached' ? '\u{1F9D7} gripping \u00b7 ' : ''}Target: ${targetName}${bar}${chamber}${skill}${held}${drawn}${chipping} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
+      <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 gait ${this.keyGait ?? this.gait} \u00b7 ` : ''}${this.weightless ? '\u{1FAB5} weightless \u00b7 ' : this.surface.mode === 'attached' ? '\u{1F9D7} gripping \u00b7 ' : ''}Target: ${targetName}${bar}${chamber}${skill}${held}${drawn}${chipping} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
     `;
   }
 

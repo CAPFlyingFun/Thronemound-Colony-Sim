@@ -235,6 +235,26 @@ canvas {
 .dig-jump[hidden] { display: none; }
 .dig-jump:active { background: #e6b95c; }
 
+/* ------------------------------------------------------------------ gait
+
+   CRAWL and RUN latch rather than being held: on a phone the left thumb owns
+   the stick and the right owns these, so holding one would mean never reaching
+   DIG. That makes the lit state load-bearing — a mode you cannot see is a mode
+   you have to set off walking to identify — hence `is-on` carrying real
+   contrast rather than a tint. */
+
+.dig-gait {
+  padding: 9px 14px;
+  background: rgba(243, 236, 216, 0.62);
+  font-size: 12px;
+}
+
+.dig-gait[hidden] { display: none; }
+.dig-gait:active { background: rgba(230, 185, 92, 0.9); }
+
+.dig-crawl.is-on { background: #8fb46a; color: #0d1208; }
+.dig-run.is-on { background: #e6b95c; color: #1a1305; }
+
 /* Safe-area padding on the sides matters in landscape, where the notch sits
    beside the content rather than above it. */
 .dig-readout,
@@ -277,6 +297,7 @@ canvas {
 
 .dig-hud.is-short .dig-action { width: 74px; height: 74px; font-size: 12px; }
 .dig-hud.is-short .dig-jump { padding: 9px 12px; font-size: 12px; }
+.dig-hud.is-short .dig-gait { padding: 8px 10px; font-size: 11px; }
 .dig-hud.is-short .dig-hint { display: none; }
 .dig-hud.is-short .dig-found { bottom: max(96px, calc(env(safe-area-inset-bottom) + 96px)); }
 .dig-hud.is-short .dig-toast { top: 26%; padding: 12px 14px; }
