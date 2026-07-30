@@ -2342,57 +2342,161 @@ describe('burial shading', () => {
 });
 
 describe('chamfer holes at dug corners', () => {
-  /** Sky-facing area of a chunk, which a hole in the ground eats into. */
-  const skyArea = (data: NonNullable<ReturnType<typeof meshChunk>>) => {
-    let up = 0;
-    for (let t = 0; t < data.indices.length; t += 3) {
-      const [i, j, k] = [data.indices[t]!, data.indices[t + 1]!, data.indices[t + 2]!];
-      const p = (n: number) => [data.positions[n * 3]!, data.positions[n * 3 + 2]!];
-      const [a, b, c] = [p(i), p(j), p(k)];
-      const area = ((b[0]! - a[0]!) * (c[1]! - a[1]!) - (c[0]! - a[0]!) * (b[1]! - a[1]!)) / 2;
-      if (data.normals[i * 3 + 1]! > 0.5) up += Math.abs(area);
+  /*
+   * Watertightness by ray parity, not by area and not by edge census.
+   *
+   * Both of those were tried and both were wrong. The edge census cannot tell a
+   * hole from a T-junction, which the cavity dish creates by the hundred. And
+   * upward-facing AREA is not conserved at all: chamfering a convex vertical
+   * edge legitimately trades flat top surface for sloped bevel, so a perfectly
+   * closed pit corner comes up half a chamfer squared short — which is the
+   * "shortfall" two earlier tests here were built around and failed on forever.
+   *
+   * Parity is immune to both. A ray from the sky down into deep soil crosses a
+   * closed surface an ODD number of times, whatever the tessellation.
+   */
+  const digAt = (cells: [number, number, number][]) => {
+    const world = makeWorld();
+    for (const [x, y, z] of cells) world.dig(x, y, z);
+    const tris: number[][] = [];
+    for (let cy = 1; cy <= 3; cy++) {
+      const d = meshChunk(world, 1, cy, 1);
+      if (!d) continue;
+      const p = (n: number) => [
+        d.positions[n * 3]!, d.positions[n * 3 + 1]!, d.positions[n * 3 + 2]!,
+      ];
+      for (let t = 0; t < d.indices.length; t += 3) {
+        tris.push([...p(d.indices[t]!), ...p(d.indices[t + 1]!), ...p(d.indices[t + 2]!)]);
+      }
     }
-    return up;
+    return tris;
   };
 
-  /*
-   * KNOWN FAILING, kept red on purpose.
-   *
-   * Reported from play and reproduced here: sky shows through the ground where
-   * two runs of rim meet. The shortfall is 0.0429, which is exactly half a
-   * chamfer squared — one right-triangle with legs of EDGE_CHAMFER, so a single
-   * corner wedge is missing, the same shape as the bug the vertex rule fixed
-   * for straight rims.
-   *
-   * Marked `fails` rather than skipped so it stays in the run and flips green
-   * of its own accord when the corner case is handled; a skip would go quiet.
-   */
-  it.fails('opens no hole where two runs of rim meet at a corner', () => {
-    /*
-     * Reported from play as sky showing through the ground at the corner of a
-     * dig. Straight trenches were already covered; an L is the case where two
-     * runs of rim MEET, so a vertex can be supported by the edge continuing
-     * along one arm while the other arm disagrees about it.
-     */
-    const world = makeWorld();
-    const cy = Math.floor(SURFACE / CHUNK);
-    for (let i = 0; i < 3; i++) world.dig(40 + i, SURFACE, 40);
-    for (let i = 1; i < 3; i++) world.dig(40, SURFACE, 40 + i);
-    expect(skyArea(meshChunk(world, 1, cy, 1)!)).toBeCloseTo(CHUNK * CHUNK - 5, 4);
+  /** Sample points whose downward ray crosses the surface an EVEN number of times. */
+  const leaks = (tris: number[][], lo: number, hi: number) => {
+    const bad: string[] = [];
+    const N = 12;
+    for (let iu = 0; iu < (hi - lo) * N; iu++) {
+      for (let iv = 0; iv < (hi - lo) * N; iv++) {
+        // Offset by irrationals: a sample landing exactly on a quad's shared
+        // diagonal hits both of its triangles and reads as even for no reason.
+        const x = lo + (iu + 0.5) / N + 0.00317;
+        const z = lo + (iv + 0.5) / N + 0.00731;
+        let n = 0;
+        for (const t of tris) {
+          const [ax, az] = [t[0]!, t[2]!];
+          const [bx, bz] = [t[3]!, t[5]!];
+          const [cx, cz] = [t[6]!, t[8]!];
+          const dA = (x - bx) * (az - bz) - (ax - bx) * (z - bz);
+          const dB = (x - cx) * (bz - cz) - (bx - cx) * (z - cz);
+          const dC = (x - ax) * (cz - az) - (cx - ax) * (z - az);
+          if ((dA < 0 || dB < 0 || dC < 0) && (dA > 0 || dB > 0 || dC > 0)) continue;
+          n++;
+        }
+        if (n % 2 === 0) bad.push(`${x.toFixed(3)},${z.toFixed(3)} crossings=${n}`);
+      }
+    }
+    return bad;
+  };
+
+  it('leaves no hole where two runs of rim meet at a corner', () => {
+    // An L is the case where two runs of rim MEET, so a vertex can be supported
+    // by the edge continuing along one arm while the other arm disagrees.
+    const tris = digAt([
+      [40, SURFACE, 40], [41, SURFACE, 40], [42, SURFACE, 40],
+      [40, SURFACE, 41], [40, SURFACE, 42],
+    ]);
+    expect(leaks(tris, 38, 45)).toEqual([]);
   });
 
+  it('leaves no hole around a cell dug diagonally from another', () => {
+    // The checkerboard case: two cells touching only along an edge, each
+    // carrying its own rim, with nothing between them to agree with.
+    expect(leaks(digAt([[45, SURFACE, 45], [46, SURFACE, 46]]), 43, 49)).toEqual([]);
+  });
+
+  it('leaves no hole in a pit whose floor steps down unevenly', () => {
+    // Depth varying cell to cell is what an ant actually digs, and it is the
+    // only shape here that exercises the chamfer on vertical edges of walls
+    // that are one cell tall in one place and three in the next.
+    const cells: [number, number, number][] = [];
+    const depth = [1, 3, 2, 0, 2, 1, 3, 1, 0, 2, 1, 3, 2, 1, 1, 0];
+    for (let i = 0; i < 16; i++) {
+      for (let d = 0; d < depth[i]!; d++) {
+        cells.push([44 + (i & 3), SURFACE - d, 44 + (i >> 2)]);
+      }
+    }
+    expect(leaks(digAt(cells), 43, 49)).toEqual([]);
+  });
+});
+
+describe('chunk invalidation', () => {
   /*
-   * KNOWN FAILING, same cause. Shortfall is 0.0858, exactly TWO corner wedges,
-   * which is what two diagonally-touching pits should produce if each loses one.
+   * The corner holes reported from play, and the reason every test above could
+   * be green while the game was visibly broken: the MESHER was never at fault.
+   * Chunks are meshed independently and marked dirty by proximity to the edit,
+   * and that rule only ever counted the six FACE neighbours — from back when a
+   * voxel's geometry depended only on the six voxels touching it.
+   *
+   * The chamfer changed that. It decides each corner by asking whether the
+   * convex edge runs on past the vertex, which reads a voxel DIAGONALLY across,
+   * so digging beside a seam can change geometry in a chunk that meets this one
+   * only at an edge or a corner. That chunk was never rebuilt: it went on
+   * chamfering as though nothing had been dug while the chunk next to it pulled
+   * its corners in for the new pit, and the wedge between the two was open sky.
    */
-  it.fails('opens no hole around a single dug cell with a neighbour dug diagonally', () => {
-    // The checkerboard case: two cells touching only at an edge, each carrying
-    // its own rim, with nothing between them to agree with.
+  const fingerprints = (world: VoxelWorld) => {
+    const out = new Map<number, string>();
+    for (let cy = 0; cy < world.chunksY; cy++) {
+      for (let cz = 0; cz < world.chunksZ; cz++) {
+        for (let cx = 0; cx < world.chunksX; cx++) {
+          const d = meshChunk(world, cx, cy, cz);
+          let h = 0;
+          for (const v of d?.positions ?? []) h = (Math.imul(h, 31) + Math.round(v * 4096)) | 0;
+          out.set(world.chunkIndex(cx, cy, cz), `${d?.positions.length ?? 0}:${h}`);
+        }
+      }
+    }
+    return out;
+  };
+
+  it('marks every chunk whose mesh a dig changes, not just the face neighbours', () => {
+    // Narrow rather than the usual 128 cube: this re-meshes the WHOLE world
+    // twice to see what moved, so the cost is every chunk in it.
+    const world = new VoxelWorld(64, 128, 64, layeredGenerator(SURFACE));
+    /*
+     * Set up so that (32, SURFACE, 32) — the first cell of chunk (1,·,1) — has
+     * its top corner chamfered only once the DIAGONAL cell is gone. That is the
+     * trench rule: the edge runs on past the vertex when the cell across the
+     * corner is air too. The two digs are in two different chunks, and neither
+     * shares a face with (1,·,1)'s.
+     */
+    world.dig(31, SURFACE, 32);
+    const before = fingerprints(world);
+    world.dirty.clear();
+    world.dig(31, SURFACE, 31);
+    const after = fingerprints(world);
+
+    const changed = [...before.keys()].filter((i) => before.get(i) !== after.get(i));
+    // If this ever comes up empty the test has stopped testing anything, so
+    // assert the setup as well as the rule.
+    expect(changed.length).toBeGreaterThan(1);
+    expect(changed.filter((i) => !world.dirty.has(i))).toEqual([]);
+  });
+
+  it('reaches every chunk the mesher can read from, in all 26 directions', () => {
     const world = makeWorld();
-    const cy = Math.floor(SURFACE / CHUNK);
-    // Chunk 1 spans 32..63, so the cells have to be inside it to be counted.
-    world.dig(45, SURFACE, 45);
-    world.dig(46, SURFACE, 46);
-    expect(skyArea(meshChunk(world, 1, cy, 1)!)).toBeCloseTo(CHUNK * CHUNK - 2, 4);
+    // A voxel in the very corner of chunk (1,1,1) can be read by the mesher
+    // from all eight chunks meeting at that lattice corner.
+    const corner = world.chunksNear(32, 32, 32);
+    for (const [cx, cy, cz] of [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1],
+      [1, 1, 0], [1, 0, 1], [0, 1, 1], [1, 1, 1]] as [number, number, number][]) {
+      expect(corner).toContain(world.chunkIndex(cx, cy, cz));
+    }
+    // Deep inside a chunk nothing else can see it, and rebuilding 27 chunks per
+    // dig would undo the whole point of chunking.
+    expect(world.chunksNear(48, 48, 48)).toEqual([world.chunkIndex(1, 1, 1)]);
+    // Clamped at the world edge rather than emitting out-of-range indices.
+    expect(world.chunksNear(0, 0, 0)).toEqual([world.chunkIndex(0, 0, 0)]);
   });
 });

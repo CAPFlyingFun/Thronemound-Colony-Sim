@@ -190,13 +190,22 @@ const ok = (m) => console.log(`  ok  ${m}`);
   if (afterWalk.loose !== beforeWalk.loose) fail('walking changed the loose count');
   else ok('walking through spoil neither destroys nor duplicates it');
 
-  // Carry it, then put it down: soil conserved across the whole round trip.
-  const back = await until('the spoil to be carryable', (s) => s.loose >= 1, 25000);
-  if (back.loose < 1) fail('lost the spoil');
+  /*
+   * Put it down, then pick it back up: soil conserved across the round trip.
+   *
+   * The two halves used to be the other way round, from when a finished cell
+   * dropped its pellet on the floor and waited to be collected. It is taken on
+   * completion now, so the ant arrives here already carrying it and there is
+   * nothing loose lying about — waiting for `loose >= 1` first only timed out.
+   */
+  const held = await until('the freed pellet to be in hand', (s) => s.scoops >= 1, 25000);
+  if (held.scoops < 1) fail('lost the spoil');
+  else ok('a finished cell is carried without being asked for');
   await page.click('.dig-action');
+  await until('the pellet to be set down', (s) => s.loose >= 1, 25000);
   await page.waitForTimeout(1500);
   await page.click('.dig-action');
-  const done = await until('the round trip to settle', (s) => s.loose >= 1, 40000);
+  const done = await until('the round trip to settle', (s) => s.scoops + s.loose >= 1, 40000);
   if (done.dug !== done.pieces + done.loose) fail(`soil not conserved: ${JSON.stringify(done)}`);
   else ok(`soil conserved: ${done.dug} cube = ${done.pieces} held + ${done.loose} loose`);
 

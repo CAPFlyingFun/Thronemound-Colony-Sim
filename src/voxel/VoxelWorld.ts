@@ -61,6 +61,16 @@ export function isSolid(id: VoxelId): boolean {
 
 export const CHUNK = 32;
 
+/**
+ * How far from a voxel the mesher can still be reading it, in cells.
+ *
+ * Two, set by the cavity dish: it counts the solid around the AIR voxel beyond
+ * a face, which reaches `normal + normal` — two cells out along one axis. The
+ * chamfer is tighter at one cell, but DIAGONALLY, which is the part that keeps
+ * getting missed. Anything within this radius of an edit has to be re-meshed.
+ */
+export const MESH_DEPENDENCY_RADIUS = 2;
+
 /** Whether a chunk is entirely empty, entirely solid, or a mix of both. */
 type Fill = 'air' | 'solid' | 'mixed';
 
@@ -164,7 +174,7 @@ export class VoxelWorld {
     const i = VoxelWorld.localIndex(x, y, z);
     if (chunk.data[i] === value) return false;
     chunk.data[i] = value;
-    this.markDirty(cx, cy, cz, x, y, z);
+    this.markDirty(x, y, z);
     return true;
   }
 
@@ -218,6 +228,39 @@ export class VoxelWorld {
         for (let cx = 0; cx < this.chunksX; cx++) {
           if (this.chunkMayHaveFaces(cx, cy, cz)) out.push(this.chunkIndex(cx, cy, cz));
         }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Every in-bounds chunk whose MESH depends on this voxel.
+   *
+   * Not the six face neighbours. The chamfer decides each corner by asking
+   * whether the convex edge runs on PAST it, and that question reads voxels
+   * diagonally across — so a cell in one chunk can decide geometry in a chunk
+   * it meets only along an edge or at a single corner. The cavity dish reaches
+   * further still, two cells out along a face normal, and that is the widest
+   * anything in the mesher looks; hence the radius.
+   *
+   * Rebuilding only the face neighbours is what left a stale rim beside a fresh
+   * one. The rebuilt side pulled its corners in for the new pit, the diagonal
+   * chunk went on chamfering as though nothing had been dug, and the wedge
+   * between the two was open sky — a triangle of background at the corner of
+   * the excavation, which is exactly how it was reported from play.
+   */
+  chunksNear(x: number, y: number, z: number): number[] {
+    const out: number[] = [];
+    const span = (v: number, count: number): [number, number] => [
+      Math.max(0, (v - MESH_DEPENDENCY_RADIUS) >> 5),
+      Math.min(count - 1, (v + MESH_DEPENDENCY_RADIUS) >> 5),
+    ];
+    const [x0, x1] = span(x, this.chunksX);
+    const [y0, y1] = span(y, this.chunksY);
+    const [z0, z1] = span(z, this.chunksZ);
+    for (let cy = y0; cy <= y1; cy++) {
+      for (let cz = z0; cz <= z1; cz++) {
+        for (let cx = x0; cx <= x1; cx++) out.push(this.chunkIndex(cx, cy, cz));
       }
     }
     return out;
@@ -284,21 +327,8 @@ export class VoxelWorld {
     return data;
   }
 
-  /** A face on a chunk edge belongs to the neighbour's mesh too. */
-  private markDirty(cx: number, cy: number, cz: number, x: number, y: number, z: number): void {
-    this.dirty.add(this.chunkIndex(cx, cy, cz));
-    const lx = x & 31;
-    const ly = y & 31;
-    const lz = z & 31;
-    const touch = (nx: number, ny: number, nz: number) => {
-      if (nx < 0 || ny < 0 || nz < 0 || nx >= this.chunksX || ny >= this.chunksY || nz >= this.chunksZ) return;
-      this.dirty.add(this.chunkIndex(nx, ny, nz));
-    };
-    if (lx === 0) touch(cx - 1, cy, cz);
-    if (lx === CHUNK - 1) touch(cx + 1, cy, cz);
-    if (ly === 0) touch(cx, cy - 1, cz);
-    if (ly === CHUNK - 1) touch(cx, cy + 1, cz);
-    if (lz === 0) touch(cx, cy, cz - 1);
-    if (lz === CHUNK - 1) touch(cx, cy, cz + 1);
+  /** Whatever the mesher can see from here has to be rebuilt. */
+  private markDirty(x: number, y: number, z: number): void {
+    for (const index of this.chunksNear(x, y, z)) this.dirty.add(index);
   }
 }

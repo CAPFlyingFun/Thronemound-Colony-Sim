@@ -984,7 +984,7 @@ export class DigScene {
   }
 
   /**
-   * Rebuild the chunk holding this voxel — AND any neighbour across a seam.
+   * Rebuild every chunk the render mask can be seen from.
    *
    * Masking a voxel opens up its neighbours' faces toward it, and a face on a
    * chunk edge belongs to the NEIGHBOUR's mesh rather than this one. Rebuilding
@@ -992,28 +992,12 @@ export class DigScene {
    * through the excavation into the sky. (64, 96, 64) sits on all three
    * boundaries at once, which is exactly where it showed up.
    *
-   * The same rule VoxelWorld.markDirty already applies for real edits — the
-   * render mask needs it for the same reason.
+   * The neighbourhood is the world's, not a second copy of it here. Keeping two
+   * versions of this rule is how the render mask ended up rebuilding only the
+   * face neighbours long after the chamfer had started reading diagonals.
    */
   private rebuildChunkAt(x: number, y: number, z: number): void {
-    const span = Math.ceil(WORLD_SIZE / CHUNK);
-    const cx = Math.floor(x / CHUNK);
-    const cy = Math.floor(y / CHUNK);
-    const cz = Math.floor(z / CHUNK);
-    const touch = (nx: number, ny: number, nz: number) => {
-      if (nx < 0 || ny < 0 || nz < 0 || nx >= span || ny >= span || nz >= span) return;
-      this.rebuildChunk(this.world.chunkIndex(nx, ny, nz));
-    };
-    touch(cx, cy, cz);
-    const lx = x & (CHUNK - 1);
-    const ly = y & (CHUNK - 1);
-    const lz = z & (CHUNK - 1);
-    if (lx === 0) touch(cx - 1, cy, cz);
-    if (lx === CHUNK - 1) touch(cx + 1, cy, cz);
-    if (ly === 0) touch(cx, cy - 1, cz);
-    if (ly === CHUNK - 1) touch(cx, cy + 1, cz);
-    if (lz === 0) touch(cx, cy, cz - 1);
-    if (lz === CHUNK - 1) touch(cx, cy, cz + 1);
+    for (const index of this.world.chunksNear(x, y, z)) this.rebuildChunk(index);
   }
 
   /**
