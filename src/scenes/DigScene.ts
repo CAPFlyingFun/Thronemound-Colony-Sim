@@ -231,11 +231,15 @@ const PIECE_SIZE = 0.17;
 /**
  * How hard a freed piece is kicked off the face, and how far the sheet fans.
  *
- * Enough to arc visibly and land somewhere slightly different each time. The
- * fan was three times this to begin with, which flung the sheet clear of the
- * hole entirely — sixteen pieces in four corner clumps, out of scooping range,
- * and the pit left looking swept. Much less and the sheet lands where it stood
- * and looks placed rather than shed.
+ * The kick buys the flight TIME that the gather needs. At 0.9 up and 0.6
+ * inward a piece was airborne about a tenth of a second and moved four
+ * hundredths of a voxel sideways — the direction was right and you could not
+ * see it happen. Popping higher and pulling harder turns the same idea into
+ * sixteen pieces visibly converging into one heap.
+ *
+ * The gather is INWARD on purpose. Fanning them out ringed the pit with the
+ * very spoil you have to clear before cutting again, so every sheet left you
+ * shovelling a doughnut.
  */
 /**
  * How far from a changed cube spoil gets woken.
@@ -249,8 +253,8 @@ const WAKE_RADIUS = 2.5;
 const FACE_CLEAR = 0.9;
 /** How long the "clear the spoil" nudge stays up after a refused press. */
 const BLOCKED_MESSAGE_TIME = 2.5;
-const PIECE_KICK = 0.9;
-const PIECE_FAN = 0.5;
+const PIECE_KICK = 1.3;
+const PIECE_GATHER = 2.2;
 const CLOD_AHEAD = 0.34;
 const CLOD_DROP = 0.2;
 /** Instances per variant batch. Twelve of these covers the heap cap. */
@@ -358,7 +362,19 @@ export class DigScene {
   private readonly hemisphere: THREE.HemisphereLight;
 
   /** The voxel being chipped, and the pooled dirt it throws off. */
-  private chip: ActiveDigVisual | null = null;
+  /**
+   * Every voxel that is PART dug, keyed by cell — not only the one being
+   * worked this instant.
+   *
+   * A cube is four presses, and between them the grid still says "solid": the
+   * sheets she has taken off exist ONLY in this visual. Dropping it when she
+   * stopped meant the outer wall grew back the moment a sheet finished, so you
+   * could not see your own hole until the whole cube was out — it reappeared
+   * when you pressed dig and vanished again when the sheet landed.
+   */
+  private readonly chips = new Map<string, ActiveDigVisual>();
+  /** The one being worked right now, if any. */
+  private active: ActiveDigVisual | null = null;
   /** Which face the current dig is worked from, so the crater always faces her. */
   private strikeFace: Vec3Like | null = null;
   private chipClock = 0;
@@ -608,7 +624,7 @@ export class DigScene {
     });
     this.meshes.clear();
     this.materialBundle.dispose();
-    this.endChip();
+    for (const chip of [...this.chips.values()]) this.disposeChip(chip);
     for (const batch of this.soilBatches.values()) this.scene.remove(batch);
     this.soilBatches.clear();
     this.soilMaterial.dispose();
@@ -642,13 +658,16 @@ export class DigScene {
    * mask exists purely so the procedural chipped mesh isn't drawn inside an
    * intact cube.
    */
+  private static chipKey(x: number, y: number, z: number): string {
+    return `${x},${y},${z}`;
+  }
+
   private meshSampler(): { get(x: number, y: number, z: number): number } {
-    const hidden = this.chip?.voxel;
-    if (!hidden) return this.world;
+    if (this.chips.size === 0) return this.world;
+    // EVERY part-dug voxel is masked, not just the active one, or a cube she
+    // walked away from half finished would render whole again.
     return {
-      get: (x, y, z) => (x === hidden.x && y === hidden.y && z === hidden.z
-        ? AIR
-        : this.world.get(x, y, z)),
+      get: (x, y, z) => (this.chips.has(DigScene.chipKey(x, y, z)) ? AIR : this.world.get(x, y, z)),
     };
   }
 
@@ -802,9 +821,16 @@ export class DigScene {
    * bedrock never gets a visual.
    */
   private beginChip(x: number, y: number, z: number): void {
-    this.endChip();
+    this.releaseActive();
     const voxel = this.world.get(x, y, z);
     if (!isSolid(voxel) || !materialOf(voxel).diggable) return;
+
+    const existing = this.chips.get(DigScene.chipKey(x, y, z));
+    if (existing) {
+      // Already part dug and already drawn — just pick the chisel back up.
+      this.active = existing;
+      return;
+    }
 
     const pattern = buildFracture(x, y, z, voxel, this.strikeFace);
     /*
@@ -817,7 +843,7 @@ export class DigScene {
      * the lattice that is standing there.
      */
     const resumed = this.session.chewRatio;
-    this.chip = {
+    const chip: ActiveDigVisual = {
       voxel: { x, y, z },
       pattern,
       progress: resumed,
@@ -825,40 +851,68 @@ export class DigScene {
       builtRemoved: -1,
       mesh: null,
       spilled: removedAt(pattern, resumed),
-      // Empty on purpose: the pieces from FINISHED sheets are legitimately
-      // dug, and cancelling this sheet must not claw them back.
+      // Empty on purpose: pieces from FINISHED sheets are legitimately dug, and
+      // cancelling this sheet must not claw them back.
       dropped: [],
     };
+    this.chips.set(DigScene.chipKey(x, y, z), chip);
+    this.active = chip;
     this.rebuildChunkAt(x, y, z);
-    this.refreshChipMesh();
+    this.refreshChipMesh(chip);
   }
 
-  /** Drop the temporary visual and put the intact voxel back on screen. */
-  private endChip(): void {
-    const chip = this.chip;
+  /**
+   * Put the chisel down. The cube STAYS drawn if it is still part dug.
+   *
+   * A cancelled sheet takes its pieces back: spoil is handed out as a sheet
+   * comes away, so stopping half way would otherwise leave loose soil on the
+   * floor while the cube it came from is still standing in the grid — soil
+   * minted from nothing. Finished sheets have already had `dropped` cleared,
+   * so this only ever reclaims the sheet in progress.
+   */
+  private releaseActive(): void {
+    const chip = this.active;
+    this.active = null;
     if (!chip) return;
-    /*
-     * A CANCELLED dig takes its pieces back.
-     *
-     * Spoil is handed out a sheet at a time now, so stopping half way used to
-     * leave loose soil on the floor while the cube it came from was still
-     * standing in the grid — soil minted from nothing, and the one rule the
-     * whole design exists to keep. The voxel still being solid IS the test for
-     * cancelled: a completed dig has already removed it.
-     */
-    if (isSolid(this.world.get(chip.voxel.x, chip.voxel.y, chip.voxel.z))) {
-      for (const piece of chip.dropped) this.soil.remove(piece);
-      chip.dropped.length = 0;
-      chip.spilled = 0;
+    const { x, y, z } = chip.voxel;
+    if (!isSolid(this.world.get(x, y, z))) {
+      // The cube went. Its visual has nothing left to stand in for, and
+      // leaving it in the map would mask a voxel that is already air.
+      this.disposeChip(chip);
+      return;
     }
+
+    for (const piece of chip.dropped) this.soil.remove(piece);
+    chip.dropped.length = 0;
+
+    // Wind the visual back to the last FINISHED sheet, so what is drawn is
+    // exactly what has actually been taken away.
+    const sheets = this.session.sheetsDone(x, y, z);
+    const settled = sheets / LAYER_COUNT;
+    chip.progress = settled;
+    chip.lastProgress = settled;
+    chip.spilled = removedAt(chip.pattern, settled);
+    if (sheets === 0) {
+      // Untouched again: nothing to show, so let the terrain draw it whole.
+      this.disposeChip(chip);
+      return;
+    }
+    chip.builtRemoved = -1;
+    this.refreshChipMesh(chip);
+  }
+
+  /** Drop a chipped visual entirely and put the terrain path back in charge. */
+  private disposeChip(chip: ActiveDigVisual): void {
     if (chip.mesh) {
       this.scene.remove(chip.mesh);
       chip.mesh.geometry.dispose();
+      chip.mesh = null;
     }
     const { x, y, z } = chip.voxel;
-    this.chip = null;
-    // Clearing `chip` first is what un-masks it — the rebuild below sees the
-    // real world again.
+    if (this.active === chip) this.active = null;
+    this.chips.delete(DigScene.chipKey(x, y, z));
+    // Deleting from the map first is what un-masks it — the rebuild below sees
+    // the real world again.
     this.rebuildChunkAt(x, y, z);
   }
 
@@ -907,19 +961,17 @@ export class DigScene {
   private syncChip(): void {
     const target = this.session.digging;
     if (!target) {
-      if (this.chip) this.endChip();
+      this.releaseActive();
       return;
     }
-    const chip = this.chip;
+    const chip = this.active;
     if (!chip || chip.voxel.x !== target.x || chip.voxel.y !== target.y || chip.voxel.z !== target.z) {
       this.beginChip(target.x, target.y, target.z);
     }
   }
 
   /** Regenerate the crumb geometry. Called only when a crumb actually breaks. */
-  private refreshChipMesh(): void {
-    const chip = this.chip;
-    if (!chip) return;
+  private refreshChipMesh(chip: ActiveDigVisual): void {
     const { x, y, z } = chip.voxel;
     const data = chipMeshData(chip.pattern, x, y, z, chip.progress);
     if (!data) {
@@ -960,7 +1012,7 @@ export class DigScene {
    * transform, so holding a dig costs nothing per frame.
    */
   private updateChip(dt: number): void {
-    const chip = this.chip;
+    const chip = this.active;
     if (!chip) return;
 
     chip.lastProgress = chip.progress;
@@ -973,7 +1025,7 @@ export class DigScene {
     const removed = removedAt(chip.pattern, chip.progress);
     if (removed !== chip.builtRemoved) {
       chip.builtRemoved = removed;
-      this.refreshChipMesh();
+      this.refreshChipMesh(chip);
     }
 
     this.chipClock += dt;
@@ -1014,19 +1066,20 @@ export class DigScene {
       const local = [c.x, c.y, c.z];
       local[strikeAxis] = out;
       /*
-       * Thrown clear, so you can SEE it fall.
+       * Thrown clear so you can SEE it fall, and pulled toward the middle.
        *
        * A sheet that appears at the face and settles in the same frame reads as
-       * spoil being spawned, not shed — the drop was about a tenth of a voxel
-       * and over before the next frame. Each piece now gets kicked off the face
-       * and OUTWARD from the middle of the sheet, so sixteen of them fan apart,
-       * arc, and land: the whole point of them being real bodies.
+       * spoil being spawned, not shed — the drop was a tenth of a voxel and
+       * over before the next frame. Each piece is kicked off the face and drawn
+       * IN toward the centre of the sheet as it flies, so sixteen of them
+       * converge into one heap you can lift in a single scoop.
        */
       const jx = chip.pattern.jitter[cell * 4 + 0]!;
       const jy = chip.pattern.jitter[cell * 4 + 1]!;
       const jz = chip.pattern.jitter[cell * 4 + 2]!;
-      const spread = [c.x - 0.5, c.y - 0.5, c.z - 0.5];
-      spread[strikeAxis] = 0; // fan across the sheet, not through it
+      // Toward the middle of the sheet, not away from it.
+      const spread = [0.5 - c.x, 0.5 - c.y, 0.5 - c.z];
+      spread[strikeAxis] = 0; // gather across the sheet, not through it
       const kick = [jx * 0.4, jy * 0.4, jz * 0.4];
       kick[strikeAxis]! += strikeSign * PIECE_KICK;
       const placed = this.soil.drop(
@@ -1034,9 +1087,9 @@ export class DigScene {
         voxel,
         pieceSource(x, y, z, cell),
         {
-          x: kick[0]! + spread[0]! * PIECE_FAN,
-          y: kick[1]! + spread[1]! * PIECE_FAN,
-          z: kick[2]! + spread[2]! * PIECE_FAN,
+          x: kick[0]! + spread[0]! * PIECE_GATHER,
+          y: kick[1]! + spread[1]! * PIECE_GATHER,
+          z: kick[2]! + spread[2]! * PIECE_GATHER,
         },
       );
       // Heap full: leave the rest in the lattice's ledger so completion hands
@@ -1129,7 +1182,7 @@ export class DigScene {
 
     // While digging, showBuriedClod owns the mesh — it is the clod being
     // uncovered, not one being carried.
-    if (this.chip) return;
+    if (this.active) return;
 
     const load = this.session.topLoad;
     if (!load || !load.source) {
@@ -1453,11 +1506,12 @@ export class DigScene {
      * ran in, and the count came out 48 or 64 depending on the frame. Asking
      * for everything still owed makes it 64 every time.
      */
-    if (this.chip) {
-      const owed = releasedBetween(this.chip.pattern, this.chip.progress, 1);
-      if (owed.length > 0) this.spillPieces(this.chip, owed);
+    const chip = this.active;
+    if (chip) {
+      const owed = releasedBetween(chip.pattern, chip.progress, 1);
+      if (owed.length > 0) this.spillPieces(chip, owed);
     }
-    const spilled = this.chip?.spilled ?? 0;
+    const spilled = chip?.spilled ?? 0;
     if (spilled > 0) this.session.release(spilled);
     const stranded = PIECES_PER_VOXEL - spilled;
     if (stranded > 0) {
@@ -1589,7 +1643,7 @@ export class DigScene {
 
   /** A sheet came away. She stops here; the next one needs another press. */
   private onSheetFreed(cell: { x: number; y: number; z: number }, done: number): void {
-    const chip = this.chip;
+    const chip = this.active;
     if (chip && chip.voxel.x === cell.x && chip.voxel.y === cell.y && chip.voxel.z === cell.z) {
       /*
        * Flush this sheet, then hand its pieces over for good.
@@ -2583,9 +2637,13 @@ export class DigScene {
     // Pieces in her jaws. Conservation is counted in these, so a headless test
     // needs to see them rather than the rounded scoop figure.
     const held = this.debug ? ` \u00B7 pieces ${this.session.carried}` : '';
-    const chipping = this.debug && this.chip
-      ? ` \u00B7 chip ${CELL_COUNT - removedAt(this.chip.pattern, this.chip.progress)}/${CELL_COUNT}`
-        + ` \u00B7 spill ${this.chip.spilled}`
+    // Part-dug cubes still being drawn. One that stops being masked while it
+    // is still part dug IS the "outer wall grows back" bug, and this is the
+    // only handle a headless test has on it.
+    const drawn = this.debug ? ` \u00B7 chips ${this.chips.size}` : '';
+    const chipping = this.debug && this.active
+      ? ` \u00B7 chip ${CELL_COUNT - removedAt(this.active.pattern, this.active.progress)}/${CELL_COUNT}`
+        + ` \u00B7 spill ${this.active.spilled}`
       : '';
     const chamber = status.depthMet ? ` \u00b7 Chamber ${status.chamber}/${DEN_MIN_CHAMBER}` : '';
     readout.innerHTML = `
@@ -2593,7 +2651,7 @@ export class DigScene {
       <b>Carrying</b> ${this.session.carriedScoops}/4 scoops &nbsp;
       <b>Loose</b> ${this.soil.count} &nbsp;
       <b>Dug</b> ${this.world.excavated}<br>
-      <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 ` : ''}${this.weightless ? '\u{1FAB5} weightless \u00b7 ' : this.surface.mode === 'attached' ? '\u{1F9D7} gripping \u00b7 ' : ''}Target: ${targetName}${bar}${chamber}${skill}${held}${chipping} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
+      <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 ` : ''}${this.weightless ? '\u{1FAB5} weightless \u00b7 ' : this.surface.mode === 'attached' ? '\u{1F9D7} gripping \u00b7 ' : ''}Target: ${targetName}${bar}${chamber}${skill}${held}${drawn}${chipping} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
     `;
   }
 

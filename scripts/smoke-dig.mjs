@@ -82,6 +82,7 @@ const hud = async () => {
     chip: Number(/chip (\d+)\/\d+/.exec(t)?.[1] ?? 'NaN'),
     chipTotal: Number(/chip \d+\/(\d+)/.exec(t)?.[1] ?? 'NaN'),
     spill: Number(/spill (\d+)/.exec(t)?.[1] ?? 'NaN'),
+    chips: Number(/chips (\d+)/.exec(t)?.[1] ?? '0'),
   };
 };
 /**
@@ -130,14 +131,18 @@ if (!await untilLabel('CANCEL')) fail('tapping soil did not start a dig');
 else ok('tap starts a dig and the button offers CANCEL');
 
 /*
- * The voxel must come apart while she works, not sit perfect and vanish.
- * `chip N/27` counts the crumbs still standing on the locked target: it only
- * exists while something is being chipped, so it doubles as proof the
- * temporary visual is created and later destroyed.
+ * The voxel is replaced by a chipped lattice while she works, not left perfect
+ * until it vanishes. `chips N` counts the part-dug cubes being drawn in place
+ * of solid ones.
+ *
+ * This used to wait for a CRUMB to disappear, which is now a race: pieces only
+ * leave in the last tenth of a sheet, so "visibly chipping" and "the sheet
+ * finished" are the same instant, and the cancel below would land on a
+ * finished sheet instead of a running one.
  */
-const chipping = await until('the target to start crumbling', (s) => s.chip < s.chipTotal, 90000);
-if (!(chipping.chip < chipping.chipTotal)) fail(`target never lost a crumb — "${chipping.text}"`);
-else ok(`target is visibly chipping (${chipping.chip}/${chipping.chipTotal} crumbs left)`);
+const chipping = await until('the chipped lattice to appear', (s) => s.chips >= 1, 90000);
+if (chipping.chips < 1) fail(`target never got a chipped visual — "${chipping.text}"`);
+else ok('the target is drawn as a chipped lattice while she works');
 
 // 4. Tapping the same cube again cancels it, discarding progress.
 await tap(450, 800);
@@ -145,9 +150,11 @@ if (!await untilLabel('DIG')) fail('tapping the cube again did not cancel');
 else ok('tapping the same cube again cancels');
 // Cancelling must take the temporary crumb mesh away and put the intact voxel
 // back — no `chip` readout means no active visual.
-const cleared = await until('the chipped visual to be torn down', (s) => Number.isNaN(s.chip), 20000);
-if (!Number.isNaN(cleared.chip)) fail(`cancel left a chipped visual behind — "${cleared.text}"`);
-else ok('cancelling removes the temporary chipped visual');
+// Cancelling an UNTOUCHED cube has nothing left to show, so the visual goes
+// and the terrain draws it whole again.
+const cleared = await until('the chipped visual to be torn down', (s) => s.chips === 0, 20000);
+if (cleared.chips !== 0) fail(`cancel left a chipped visual behind — "${cleared.text}"`);
+else ok('cancelling an untouched cube removes the temporary visual');
 const afterCancel = await hud();
 if (afterCancel.dug !== 0) fail(`a cancelled dig still removed soil: dug ${afterCancel.dug}`);
 else ok('a cancelled dig removes nothing');
@@ -182,7 +189,11 @@ for (let sheet = 1; sheet <= 4; sheet++) {
   const b = await hud();
   const before = b.loose + b.pieces;
 
-  if (!(await label()).includes(`DIG ${sheet}/4`)) {
+  // POLLED, not sampled once. The HUD and the button repaint every 6th frame,
+  // so reading immediately after aiming catches the previous label — and
+  // reading it a second time for the error message showed the correct one,
+  // which made the failure look like "expected X, got X".
+  if (!await untilLabel(`DIG ${sheet}/4`, 15000)) {
     fail(`expected the button to offer DIG ${sheet}/4, got "${(await label()).trim()}"`);
     break;
   }
@@ -211,6 +222,20 @@ for (let sheet = 1; sheet <= 4; sheet++) {
   if ((await label()).includes('DIG')) {
     fail(`spoil is on the face but the button still offered "${(await label()).trim()}"`);
   } else refusedSeen = true;
+
+  /*
+   * The hole has to STAY between presses.
+   *
+   * A part-dug cube is still solid in the grid, so the sheets she has taken
+   * off exist only in the chipped visual. Drop it when she stops and the outer
+   * wall grows back: you cannot see your own dig until the whole cube is out,
+   * and it flickers back into view every time you press.
+   */
+  if ((await hud()).chips < 1) {
+    fail(`the hole closed up after sheet ${sheet} — the part-dug cube stopped being drawn`);
+  } else if (sheet === 1) {
+    ok('the hole stays open between presses');
+  }
 
   /*
    * Clear it: scoop the sheet and tip it ahead of her.
@@ -252,9 +277,9 @@ if (settled.pieces + settled.loose < 64) {
 // Completing must tear the chip down, leaving the normal terrain path to draw
 // the (now removed) voxel. A leftover crumb cluster would float in the hole.
 const afterDig = await until('the chipped visual to be torn down on completion',
-  (s) => Number.isNaN(s.chip), 20000);
-if (!Number.isNaN(afterDig.chip)) fail(`completion left a chipped visual behind — "${afterDig.text}"`);
-else ok('completing a dig removes the temporary visual');
+  (s) => s.chips === 0, 20000);
+if (afterDig.chips !== 0) fail(`completion left a chipped visual behind — "${afterDig.text}"`);
+else ok('completing a cube removes the temporary visual');
 
 const dugShot = await shot('2-dug');
 if (Buffer.compare(surfaceShot, dugShot) === 0) fail('frame did not change after digging');
