@@ -27,6 +27,7 @@ import {
   CLOD_RADIUS, LooseSoil, PIECES_PER_VOXEL, SCOOP_PIECES, type Clod,
 } from '../voxel/LooseSoil';
 import { raycastVoxel } from '../voxel/raycast';
+import { DAY_HOURS, packColor, skyAt } from '../voxel/daylight';
 import { DigSession } from '../voxel/DigSession';
 import { createVoxelMaterial, type VoxelMaterialBundle } from '../voxel/voxelMaterial';
 import { DEN_MIN_CHAMBER, DEN_MIN_DEPTH, QueenFounding } from '../voxel/QueenFounding';
@@ -367,6 +368,12 @@ export class DigScene {
   private sky: THREE.Texture | null = null;
   private environment: THREE.Texture | null = null;
   private readonly hemisphere: THREE.HemisphereLight;
+  private readonly sun: THREE.DirectionalLight;
+  /**
+   * Hour of the day. Read from ?hour=, so a time can be reproduced exactly for
+   * a screenshot instead of waiting for one to come round.
+   */
+  private hour = 12;
 
   /** The voxel being chipped, and the pooled dirt it throws off. */
   /**
@@ -521,9 +528,9 @@ export class DigScene {
     // the ambient term and washes the soil out.
     this.hemisphere = new THREE.HemisphereLight(0xd8e8ff, 0x4a3a26, 1.15);
     this.scene.add(this.hemisphere);
-    const sun = new THREE.DirectionalLight(0xfff2d0, 1.5);
-    sun.position.set(60, 120, 40);
-    this.scene.add(sun);
+    this.sun = new THREE.DirectionalLight(0xfff2d0, 1.5);
+    this.sun.position.set(60, 120, 40);
+    this.scene.add(this.sun);
     // Tunnels get genuinely dark once the sky is behind you; without this the
     // whole underground half of the game is unplayable.
     this.headlamp = new THREE.PointLight(0xffd9a0, 1.6, 26, 1.4);
@@ -580,8 +587,14 @@ export class DigScene {
     // ?debug=den pre-carves a qualifying shaft + chamber and drops the queen in
     // it. Founding otherwise needs 40 voxels of hand-digging, which makes both
     // manual iteration and the smoke test impractical.
-    const debugFlag = new URLSearchParams(window.location.search).get('debug');
+    const params = new URLSearchParams(window.location.search);
+    const debugFlag = params.get('debug');
     this.debug = debugFlag !== null;
+    // ?hour=19.5 pins the time of day, so a screenshot of dusk does not mean
+    // waiting for dusk to come round.
+    const hour = Number(params.get('hour'));
+    if (Number.isFinite(hour) && params.get('hour') !== null) this.hour = hour;
+    this.applyDaylight();
     if (debugFlag === 'den') {
       this.carveDebugDen();
     }
@@ -810,9 +823,16 @@ export class DigScene {
       // is kept because image-based lighting alone leaves deep tunnels, which
       // the sky cannot see into, almost black.
       this.hemisphere.intensity = HEMI_WITH_SKY;
-      // The colony view is a cutaway lit as underground; it must keep its dark
-      // earth background even if the sky arrives after founding.
-      if (!this.colonyView) this.scene.background = texture;
+      /*
+       * The sky goes up in EVERY view, colony included.
+       *
+       * The colony view used to keep a dark earth background on the grounds
+       * that it is a cutaway lit as underground. In practice you are outside
+       * looking in, and the top half of the frame is the horizon — dark brown
+       * there reads as the sky having failed to load, not as being underground.
+       */
+      this.scene.background = texture;
+      this.applyDaylight();
     }, undefined, () => {
       // Left on the flat colour deliberately — a missing sky is cosmetic.
     });
@@ -2595,6 +2615,36 @@ export class DigScene {
     );
     this.camera.lookAt(target);
     this.headlamp.position.copy(target);
+  }
+
+  /**
+   * Push the time of day into the lights, the sky and the fog.
+   *
+   * Called on load and whenever the hour moves. Everything it touches is a
+   * property of an existing object, so there is no per-frame cost and no second
+   * lighting rig to keep in step with the first.
+   */
+  private applyDaylight(): void {
+    const grade = skyAt(this.hour);
+    this.sun.color.setHex(packColor(grade.sun));
+    this.sun.intensity = grade.sunIntensity;
+    // Swing the sun around and up, so shadows and the lit side of a mound move
+    // with the hour rather than the light merely changing colour in place.
+    const azimuth = (this.hour / DAY_HOURS) * Math.PI * 2;
+    const reach = 140;
+    this.sun.position.set(
+      Math.cos(azimuth) * Math.cos(grade.elevation) * reach,
+      Math.sin(grade.elevation) * reach,
+      Math.sin(azimuth) * Math.cos(grade.elevation) * reach,
+    );
+    if (this.sky) this.hemisphere.intensity = grade.hemisphere;
+    if (this.sky) {
+      this.scene.backgroundIntensity = grade.background;
+      this.scene.environmentIntensity = SKY_LIGHT * grade.environment;
+    }
+    const horizon = packColor(grade.horizon);
+    if (!this.colonyView && this.scene.fog) (this.scene.fog as THREE.Fog).color.setHex(horizon);
+    if (!this.sky) this.scene.background = new THREE.Color(horizon);
   }
 
   private updateHud(): void {

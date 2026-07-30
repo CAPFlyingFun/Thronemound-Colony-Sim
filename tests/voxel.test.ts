@@ -9,6 +9,7 @@ import {
 import { MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES } from '../src/voxel/LooseSoil';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
+import { SKY_PHASES, packColor, skyAt, wrapHours } from '../src/voxel/daylight';
 import { CELL_COUNT, CHIP_CELLS, CRACK_BRANCHES, CRACK_JOINTS, CRACK_START, crackSegments, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
@@ -2106,5 +2107,67 @@ describe('hex grid experiment', () => {
       seen++;
     }
     expect(seen).toBeGreaterThan(0);
+  });
+});
+
+describe('daylight', () => {
+  it('lands exactly on a phase at its own hour', () => {
+    for (const phase of SKY_PHASES) {
+      const grade = skyAt(phase.at);
+      expect(grade.background).toBeCloseTo(phase.background, 6);
+      expect(grade.sunIntensity).toBeCloseTo(phase.sunIntensity, 6);
+      expect(grade.from.name).toBe(phase.name);
+      expect(grade.blend).toBe(0);
+    }
+  });
+
+  it('blends the short way round midnight instead of running backwards', () => {
+    /*
+     * The one case worth a test. Phases are ordered by hour, so the gap between
+     * the LAST of them and the first runs through midnight — measured as a
+     * plain subtraction it comes out negative and puts the blend outside 0..1,
+     * which reads as the sky snapping from dusk back to noon at 23:59.
+     */
+    const dusk = SKY_PHASES[SKY_PHASES.length - 1]!;
+    const night = SKY_PHASES[0]!;
+    const span = 24 - dusk.at + night.at;
+    const mid = skyAt(dusk.at + span / 2);
+    expect(mid.from.name).toBe(dusk.name);
+    expect(mid.to.name).toBe(night.name);
+    expect(mid.blend).toBeCloseTo(0.5, 5);
+    // And it really is between the two, not past either end.
+    const lo = Math.min(dusk.background, night.background);
+    const hi = Math.max(dusk.background, night.background);
+    expect(mid.background).toBeGreaterThanOrEqual(lo);
+    expect(mid.background).toBeLessThanOrEqual(hi);
+  });
+
+  it('wraps, so any hour is a valid hour', () => {
+    expect(wrapHours(-1)).toBe(23);
+    expect(wrapHours(25)).toBe(1);
+    expect(skyAt(-6).background).toBeCloseTo(skyAt(18).background, 6);
+    for (let h = -48; h <= 48; h += 0.37) {
+      const g = skyAt(h);
+      expect(Number.isFinite(g.background)).toBe(true);
+      expect(g.blend).toBeGreaterThanOrEqual(0);
+      expect(g.blend).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('never goes darker than night or brighter than noon', () => {
+    // A lerp between listed phases cannot overshoot, and that is the property
+    // that keeps a bad phase table from blowing out the exposure at 03:00.
+    const lows = SKY_PHASES.map((p) => p.background);
+    for (let h = 0; h < 24; h += 0.1) {
+      expect(skyAt(h).background).toBeGreaterThanOrEqual(Math.min(...lows) - 1e-9);
+      expect(skyAt(h).background).toBeLessThanOrEqual(Math.max(...lows) + 1e-9);
+    }
+  });
+
+  it('packs colours without wrapping a channel', () => {
+    expect(packColor([0, 0, 0])).toBe(0x000000);
+    expect(packColor([1, 1, 1])).toBe(0xffffff);
+    // Out of range must clamp, not roll over into the next channel.
+    expect(packColor([2, -1, 0.5])).toBe(0xff0080);
   });
 });
