@@ -10,7 +10,7 @@ import { MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES } from '../src/voxel/LooseSoil
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
 import { SKY_PHASES, packColor, skyAt, wrapHours } from '../src/voxel/daylight';
-import { CELL_COUNT, CHIP_CELLS, CRACK_BRANCHES, MAX_SHRINK, CRACK_JOINTS, CRACK_START, crackSegments, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
+import { CELL_COUNT, CHIP_CELLS, CRACK_BRANCHES, HIT_COUNT, MAX_SHRINK, hitPhase, CRACK_JOINTS, CRACK_START, crackSegments, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
@@ -1563,6 +1563,44 @@ describe('fracture', () => {
      * MAX_SHRINK is checked where it is applied instead.
      */
     expect(MAX_SHRINK).toBeCloseTo(0.1, 6);
+  });
+
+  it('changes only ON a hit, never between them', () => {
+    /*
+     * The dig is a sequence of BLOWS now, not a smooth dissolve: a crack opens,
+     * the block jolts and loses a step of size, dust comes off — and between
+     * hits nothing happens at all. Continuous erosion made the cell shrink on
+     * its own while nothing was striking it, which reads as the soil
+     * evaporating rather than as an ant working at it.
+     *
+     * Asserted by sampling either side of a hit boundary: no crack may open in
+     * the quiet stretch between two blows.
+     */
+    const pattern = buildFracture(3, S, 4, TOPSOIL);
+    for (const c of allCracks(pattern)) {
+      // Every crack lands exactly on a hit boundary.
+      expect(c.at * HIT_COUNT).toBeCloseTo(Math.round(c.at * HIT_COUNT), 6);
+    }
+    // And the quiet stretch really is quiet.
+    for (let h = 0; h < HIT_COUNT; h++) {
+      const from = (h + 0.05) / HIT_COUNT;
+      const to = (h + 0.95) / HIT_COUNT;
+      expect(eventsBetween(pattern, from, to)).toEqual([]);
+    }
+  });
+
+  it('jolts on the hit and settles before the next one', () => {
+    // The kick has to die away, or the block buzzes continuously instead of
+    // being struck. Driven off hit phase, not wall time, so it stays in step
+    // with a dig that speeds up with practice.
+    expect(hitPhase(0).hits).toBe(0);
+    expect(hitPhase(1).hits).toBe(HIT_COUNT);
+    const mid = hitPhase(2.5 / HIT_COUNT);
+    expect(mid.hits).toBe(2);
+    expect(mid.since).toBeCloseTo(0.5, 6);
+    // Out of range clamps rather than running the hit count off either end.
+    expect(hitPhase(-1).hits).toBe(0);
+    expect(hitPhase(99).hits).toBe(HIT_COUNT);
   });
 
   it('sheds dust from each crack as it opens', () => {

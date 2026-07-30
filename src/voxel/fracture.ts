@@ -61,13 +61,6 @@ export const MAX_REMOVED = CELL_COUNT;
  */
 const EROSION_LEAD = 1;
 
-/**
- * How long the cell takes to let go, as a fraction of the whole dig.
- *
- * Divided by the material's clumping, so clay lets go as a slab and sand
- * crumbles a fraction earlier.
- */
-const LAYER_STAGGER = 0.05;
 export const EROSION_MAX = 0.55;
 /**
  * How far a cell shrinks by the time it lets go: a tenth, so it still reads as
@@ -87,6 +80,30 @@ export const MAX_SHRINK = 0.10;
  * BEFORE the splitting.
  */
 const SHRINK_LAG = 2;
+
+/**
+ * Strikes per cell. A dig is a sequence of BLOWS, not a smooth dissolve.
+ *
+ * Everything visible now happens on a hit and nothing happens between: a crack
+ * opens, the block jolts and loses a step of size, dust comes off. Continuous
+ * erosion made the cell shrink on its own while nothing was striking it, which
+ * reads as the soil evaporating rather than as an ant working at it.
+ *
+ * Twelve over a full dig is roughly one a second at the unpractised speed, and
+ * it stays legible when practice takes the dig down to six seconds.
+ */
+export const HIT_COUNT = 12;
+
+/** How hard the block jolts on a hit, and how fast that dies away. */
+const HIT_SHAKE = 0.055;
+const HIT_SHAKE_DECAY = 9;
+
+/** Hits landed, and how far through the current one we are. */
+export function hitPhase(progress: number): { hits: number; since: number } {
+  const phase = Math.max(0, Math.min(1, progress)) * HIT_COUNT;
+  const hits = Math.floor(phase);
+  return { hits, since: phase - hits };
+}
 
 /** How far a fully eroded crumb can tilt, in radians. */
 const MAX_TILT = 0.42;
@@ -289,8 +306,17 @@ export function buildFracture(
    * dig, watching a sheet finish and cancelling produced no soil at all. There
    * is nothing left to get out of order — the cell is due when the dig is done.
    */
-  const stagger = LAYER_STAGGER / Math.max(1, feel.clumping);
-  for (let i = 0; i < CELL_COUNT; i++) thresholds[i] = 1 - stagger;
+  /*
+   * The cell comes away on the LAST HIT, at exactly 1.
+   *
+   * It used to release a hair early, at 1 - stagger, a leftover from when a
+   * voxel was 64 pieces trickling out and the stagger let clay slab off while
+   * sand crumbled. With one cell that only decided whether it popped slightly
+   * before the dig finished — and since everything else now lands on a hit
+   * boundary, a release that did not was the one event still drifting between
+   * blows. Material feel lives in the crack timing instead.
+   */
+  for (let i = 0; i < CELL_COUNT; i++) thresholds[i] = 1;
 
   const jitter = new Float32Array(CELL_COUNT * 4);
   const spin = new Float32Array(CELL_COUNT * 3);
@@ -443,9 +469,11 @@ export const CRACK_LIFT = 0.006;
  * Half-width of a crack at its root, in face-local units where the face spans
  * -1..1. At 0.05 these came out as fat dark bars painted across the cell rather
  * than as soil splitting — the width has to read as a LINE at the distance an
- * ant works from, which is about a body length off the face.
+ * ant works from, which is about a body length off the face. Halved again once
+ * they were on all six faces: what reads as a line on one face reads as a grid
+ * of bars when you can see three at once.
  */
-export const CRACK_WIDTH = 0.014;
+export const CRACK_WIDTH = 0.007;
 
 export interface CrackSegment {
   /** Face-local, -1..1 across the struck face. */
@@ -537,7 +565,14 @@ export function crackSegments(pattern: FracturePattern, face = -1): CrackSegment
          * CRACK_START was pulled back to nothing. It is also how fracture
          * actually goes: the split is sudden, the spread is slow.
          */
-        at: opens + (((j + 1) / CRACK_JOINTS) ** 2) * span,
+        /*
+         * Squared so the FIRST joint lands almost at once and later ones spread
+         * out — the split is sudden, the spread is slow — then SNAPPED UP to a
+         * hit boundary, so no crack ever appears between blows. That is what
+         * ties the crack, the jolt, the dust and the sound into one event
+         * instead of four things drifting past each other.
+         */
+        at: Math.ceil((opens + (((j + 1) / CRACK_JOINTS) ** 2) * span) * HIT_COUNT) / HIT_COUNT,
         // Tapers along its length: widest at the blow, hairline at the tip.
         width: CRACK_WIDTH * (1 - (j / CRACK_JOINTS) * 0.65),
       });
@@ -646,12 +681,28 @@ export function chipMeshData(
      * out of z-fight range. At a 0.2 cell that is a ~26 micron gap, invisible
      * as a hole but decisive for the depth buffer. Removal is what you see.
      */
-    const shrink = 1 - ((erosion / EROSION_MAX) ** SHRINK_LAG) * MAX_SHRINK * (0.85 + 0.3 * js);
+    /*
+     * Size comes off in STEPS, one per hit, and only on the hit.
+     *
+     * It used to ride the erosion curve continuously, so the block shrank
+     * steadily whether or not anything was striking it.
+     */
+    const { hits, since } = hitPhase(progress);
+    const struck = (hits / HIT_COUNT) ** SHRINK_LAG;
+    const shrink = 1 - struck * MAX_SHRINK * (0.85 + 0.3 * js);
     const half = (size * shrink) / 2;
     const drift = erosion * size * 0.22;
-    const midX = (cx + 0.5) * size + jx * drift;
-    const midY = (cy + 0.5) * size + jy * drift;
-    const midZ = (cz + 0.5) * size + jz * drift;
+    /*
+     * The jolt: a kick on the hit that dies away before the next one.
+     *
+     * Driven off `since` rather than off wall time, so it stays in step with a
+     * dig that speeds up with practice and stops dead when the dig is
+     * cancelled — there is no separate clock to leave running.
+     */
+    const jolt = hits > 0 ? Math.exp(-since * HIT_SHAKE_DECAY) * HIT_SHAKE : 0;
+    const midX = (cx + 0.5) * size + jx * drift + jx * jolt;
+    const midY = (cy + 0.5) * size + jy * drift + jy * jolt;
+    const midZ = (cz + 0.5) * size + jz * drift + jz * jolt;
 
 
     // Crumb-level brightness variation, so the cluster reads as loose grain
