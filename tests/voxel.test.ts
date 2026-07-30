@@ -1373,6 +1373,11 @@ describe('fracture', () => {
     }
   });
 
+  /** Every crack on the lump, across all six faces. */
+  const allCracks = (pattern: Parameters<typeof crackSegments>[0]) => (
+    FACES.flatMap((_, i) => crackSegments(pattern, i))
+  );
+
   it('cracks the face progressively, and never un-cracks it', () => {
     /*
      * With one cell per press there is nothing to subtract during a dig, so the
@@ -1380,7 +1385,7 @@ describe('fracture', () => {
      * crack that closed again would read as the soil healing.
      */
     const pattern = buildFracture(7, S, 9, TOPSOIL);
-    const at = (p: number) => crackSegments(pattern).filter((c) => p >= c.at - 1e-4).length;
+    const at = (p: number) => allCracks(pattern).filter((c) => p >= c.at - 1e-4).length;
     expect(at(0)).toBe(0);
     expect(at(CRACK_START - 0.01)).toBe(0);
     let last = 0;
@@ -1389,7 +1394,8 @@ describe('fracture', () => {
       expect(n).toBeGreaterThanOrEqual(last);
       last = n;
     }
-    expect(last).toBe(CRACK_BRANCHES * CRACK_JOINTS);
+    // The struck face at full strength, the other five reduced and delayed.
+    expect(last).toBe((CRACK_BRANCHES + 5 * (CRACK_BRANCHES - 3)) * CRACK_JOINTS);
   });
 
   it('grows the crack geometry with the dig', () => {
@@ -1402,7 +1408,8 @@ describe('fracture', () => {
     expect(early).toBe(6);
     expect(mid).toBeGreaterThan(early);
     expect(late).toBeGreaterThan(mid);
-    expect(late).toBe(6 + CRACK_BRANCHES * CRACK_JOINTS);
+    const open = allCracks(pattern).filter((c) => 0.95 >= c.at - 1e-4).length;
+    expect(late).toBe(6 + open);
   });
 
   it('starts every crack at the point she struck', () => {
@@ -1416,7 +1423,9 @@ describe('fracture', () => {
     const strike = [pattern.strike.x, pattern.strike.y, pattern.strike.z];
     const su = strike[axisA]! * 2 - 1;
     const sv = strike[axisB]! * 2 - 1;
-    const roots = crackSegments(pattern).filter((c) => c.ax === su && c.ay === sv);
+    // The struck face only: the other five have no blow to radiate from.
+    const struckFace = FACES.findIndex((f) => f.normal[0] === 1);
+    const roots = crackSegments(pattern, struckFace).filter((c) => c.ax === su && c.ay === sv);
     expect(roots).toHaveLength(CRACK_BRANCHES);
   });
 
@@ -1454,12 +1463,16 @@ describe('fracture', () => {
   });
 
   it('cracks the same way every time, so a cancel does not reshuffle them', () => {
-    const a = crackSegments(buildFracture(7, S, 9, TOPSOIL));
-    const b = crackSegments(buildFracture(7, S, 9, TOPSOIL));
+    const a = allCracks(buildFracture(7, S, 9, TOPSOIL));
+    const b = allCracks(buildFracture(7, S, 9, TOPSOIL));
     expect(a).toEqual(b);
     // And a different cell cracks differently.
-    const c = crackSegments(buildFracture(8, S, 9, TOPSOIL));
-    expect(c).not.toEqual(a);
+    expect(allCracks(buildFracture(8, S, 9, TOPSOIL))).not.toEqual(a);
+    // And no two FACES of one cell share a pattern, or the lump reads as one
+    // stamp repeated six times however you walk round it.
+    const p = buildFracture(7, S, 9, TOPSOIL);
+    const perFace = FACES.map((_, i) => JSON.stringify(crackSegments(p, i)));
+    expect(new Set(perFace).size).toBe(FACES.length);
   });
 
   it('draws the cell as ONE lump, not a cluster', () => {
@@ -1479,7 +1492,7 @@ describe('fracture', () => {
      * crack falls relative to the cell letting go.
      */
     const late = 0.9;
-    const open = crackSegments(pattern).filter((c) => late >= c.at - 1e-4).length;
+    const open = allCracks(pattern).filter((c) => late >= c.at - 1e-4).length;
     expect(open).toBeGreaterThan(0);
     expect(chipMeshData(pattern, 11, S, 23, late)!.quadCount - open).toBe(6);
   });
@@ -1541,8 +1554,10 @@ describe('fracture', () => {
       const data = chipMeshData(buildFracture(2, S, 3, TOPSOIL), 2, S, 3, p);
       worst = Math.max(worst, data?.quadCount ?? 0);
     }
-    expect(worst).toBeLessThanOrEqual(CELL_COUNT * 6 + CRACK_BRANCHES * CRACK_JOINTS);
-    expect(worst).toBeLessThan(40);
+    const pattern = buildFracture(2, S, 3, TOPSOIL);
+    expect(worst).toBeLessThanOrEqual(CELL_COUNT * 6 + allCracks(pattern).length);
+    // Six faces of cracks on ONE cell, and only ever one cell is being worked.
+    expect(worst).toBeLessThan(130);
   });
 
   it('cannot mint soil by cancelling half way through', () => {

@@ -221,13 +221,16 @@ const CLOD_PROBES: readonly (readonly [number, number, number])[] = [
  * How big one loose PIECE draws.
  *
  * Under the quarter-cube it represents, and deliberately. Pieces are spawned on
- * the lattice at 0.25 spacing and nothing resolves piece-against-piece contact,
- * so drawing them at their true size leaves every neighbour interpenetrating
- * and a spilled cube reads as one brown mass rather than as 64 grains. Loose
- * soil occupies more room than the rock it came from anyway; what matters here
- * is that you can see the grains apart.
+ * DERIVED from CLOD_RADIUS, and it has to be.
+ *
+ * The clod shapes are normalised to mean radius 0.5 — diameter one — so this
+ * scale IS the diameter, and half of it is the radius the pellet is drawn at.
+ * Hard-coding it left the drawn radius at 0.085 while collision used 0.3, so
+ * every pellet came to rest on a sphere three times bigger than the thing you
+ * could see and appeared to hover a fifth of a voxel above the ground. Two
+ * numbers meaning one thing, and only one of them got updated.
  */
-const PIECE_SIZE = 0.17;
+const PIECE_SIZE = CLOD_RADIUS * 2;
 /**
  * How hard a freed piece is kicked off the face, and how far the sheet fans.
  *
@@ -1078,9 +1081,16 @@ export class DigScene {
        * and hides underneath. Emerging at the face is both true (this is where
        * the sheet is being shaved off) and self-consistent: it starts in air.
        */
-      const out = strikeSign > 0 ? 1 + CLOD_RADIUS + 0.02 : -CLOD_RADIUS - 0.02;
+      /*
+       * The pellet appears in the MIDDLE of the cell it came out of.
+       *
+       * It used to be ejected through the worked face, which was right when a
+       * press shaved a sheet off a cube that was still standing — the soil had
+       * nowhere else to be. A press takes the whole cell now, so by the time
+       * the pellet exists the cell is air and its own centre is the truthful
+       * place for it: the block bursts and what is left of it is right there.
+       */
       const local = [c.x, c.y, c.z];
-      local[strikeAxis] = out;
       /*
        * Thrown clear so you can SEE it fall, and pulled toward the middle.
        *

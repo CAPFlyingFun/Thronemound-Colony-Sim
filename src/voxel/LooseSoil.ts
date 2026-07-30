@@ -22,13 +22,18 @@ import { isSolid, type VoxelId } from './VoxelWorld';
  * How big one PELLET is for collision.
  *
  * One cell is now one pellet, so this is a whole voxel's worth of soil rather
- * than a sixty-fourth. It is deliberately well under the half-voxel that would
- * fill the cell it came out of: a pellet has to be able to lie in a one-cell
- * bore with room for an ant to squeeze past, or a dropped load seals the tunnel
- * behind the player. The old piece was a 1.25mm grain — that is sand, and it is
- * why the chipping read as dust rather than as soil being moved.
+ * than a sixty-fourth: half the block across, which is what a mouthful of soil
+ * looks like next to the hole it came out of. The old piece was a 1.25mm grain
+ * — that is sand, and it is why the chipping read as dust rather than as soil
+ * being moved.
+ *
+ * Note the consequence: at half a voxel across, a pellet dropped in a one-cell
+ * bore leaves 0.5 clear and the ant is 0.6 across, so she cannot squeeze past
+ * it. A blocked tunnel is now a real block rather than a nuisance, and clearing
+ * spoil is not optional. The old 0.1 radius was deliberately under the true
+ * eighth so she always could.
  */
-export const CLOD_RADIUS = 0.3;
+export const CLOD_RADIUS = 0.25;
 
 /**
  * One cell, one pellet.

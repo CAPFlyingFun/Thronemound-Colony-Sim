@@ -69,6 +69,15 @@ const EROSION_LEAD = 1;
  */
 const LAYER_STAGGER = 0.05;
 export const EROSION_MAX = 0.55;
+/**
+ * How far a cell shrinks by the time it lets go: a tenth, so it still reads as
+ * the same block of soil that was there when she started.
+ *
+ * Normalised BY EROSION_MAX so the two cannot drift. Written as an absolute
+ * fraction it silently meant whatever erosion happened to peak at — 13% at the
+ * time, and any retune of the erosion curve moved it again.
+ */
+export const MAX_SHRINK = 0.10;
 
 /** How far a fully eroded crumb can tilt, in radians. */
 const MAX_TILT = 0.42;
@@ -414,29 +423,49 @@ export interface CrackSegment {
   width: number;
 }
 
-export function crackSegments(pattern: FracturePattern): CrackSegment[] {
-  const rand = rng(pattern.seed ^ 0x9e3779b9);
-  const normal: Vec3 = { x: 0, y: 0, z: 0 };
+export function crackSegments(pattern: FracturePattern, face = -1): CrackSegment[] {
+  /*
+   * Every face cracks, not just the one she struck.
+   *
+   * A cell is a free-standing lump the moment there is air around it, so it is
+   * seen from every side — cracking only the struck face means walking round it
+   * shows a pristine block, and which side is pristine depends on where she
+   * happened to hit it. Each face gets its own seed, so no two match and the
+   * lump does not read as one pattern stamped six times.
+   */
+  const struck = face < 0 || (
+    FACES[face]!.normal[pattern.strikeAxis] === pattern.strikeSign
+  );
+  const rand = rng(pattern.seed ^ 0x9e3779b9 ^ Math.imul(face + 2, 0x85ebca6b));
   const axes: [number, number, number] = [0, 0, 0];
-  axes[pattern.strikeAxis] = pattern.strikeSign;
-  normal.x = axes[0]!; normal.y = axes[1]!; normal.z = axes[2]!;
-  const [axisA, axisB] = tangentAxes([normal.x, normal.y, normal.z]);
+  if (face < 0) axes[pattern.strikeAxis] = pattern.strikeSign;
+  else { axes[0] = FACES[face]!.normal[0]; axes[1] = FACES[face]!.normal[1]; axes[2] = FACES[face]!.normal[2]; }
+  const [axisA, axisB] = tangentAxes([axes[0]!, axes[1]!, axes[2]!]);
   const strike = [pattern.strike.x, pattern.strike.y, pattern.strike.z];
 
-  // Where the blow landed, in face-local -1..1. Every branch starts here, so
-  // the pattern reads as damage radiating from one point rather than as noise.
-  const su = strike[axisA]! * 2 - 1;
-  const sv = strike[axisB]! * 2 - 1;
+  /*
+   * Where the branches start, in face-local -1..1.
+   *
+   * On the face she is actually working that is the blow itself, so the damage
+   * reads as radiating from one point. On the others there is no blow to
+   * radiate from, so it is a seeded point somewhere near the middle — cracks
+   * carrying THROUGH the lump rather than a copy of the front.
+   */
+  const su = struck ? strike[axisA]! * 2 - 1 : (rand() - 0.5) * 1.1;
+  const sv = struck ? strike[axisB]! * 2 - 1 : (rand() - 0.5) * 1.1;
+  // Fewer, later cracks away from the blow: the far side gives last.
+  const branches = struck ? CRACK_BRANCHES : CRACK_BRANCHES - 3;
+  const delay = struck ? 0 : 0.18;
 
   const segments: CrackSegment[] = [];
-  const span = 0.86 - CRACK_START;
-  for (let b = 0; b < CRACK_BRANCHES; b++) {
-    let angle = (b / CRACK_BRANCHES) * Math.PI * 2 + rand() * 0.9;
+  const span = 0.86 - CRACK_START - delay;
+  for (let b = 0; b < branches; b++) {
+    let angle = (b / branches) * Math.PI * 2 + rand() * 0.9;
     const reach = 0.35 + rand() * 0.5;
     let px = su;
     let py = sv;
     // Branches stagger their start, so they do not all appear on one frame.
-    const opens = CRACK_START + (b / CRACK_BRANCHES) * 0.08;
+    const opens = CRACK_START + delay + (b / branches) * 0.08;
     for (let j = 0; j < CRACK_JOINTS; j++) {
       // Wander, so a crack forks and kinks the way a real one does instead of
       // running dead straight out from the middle.
@@ -558,7 +587,7 @@ export function chipMeshData(
      * out of z-fight range. At a 0.2 cell that is a ~26 micron gap, invisible
      * as a hole but decisive for the depth buffer. Removal is what you see.
      */
-    const shrink = 1 - erosion * (0.1 + 0.14 * js);
+    const shrink = 1 - (erosion / EROSION_MAX) * MAX_SHRINK * (0.85 + 0.3 * js);
     const half = (size * shrink) / 2;
     const drift = erosion * size * 0.22;
     const midX = (cx + 0.5) * size + jx * drift;
@@ -648,7 +677,7 @@ export function chipMeshData(
     }
 
     /*
-     * Cracks, on the face she is working.
+     * Cracks, on every face of the lump.
      *
      * Emitted in the SAME buffers and through the same spin as the cell itself,
      * so they stay glued to it as it rocks — built separately they would slide
@@ -657,71 +686,72 @@ export function chipMeshData(
      * mesh, because the material already multiplies vertex colour over the
      * albedo, so a crack costs one quad and no new state.
      */
-    const cracks = crackSegments(pattern);
-    const faceAxis = pattern.strikeAxis;
-    const faceNormal: [number, number, number] = [0, 0, 0];
-    faceNormal[faceAxis] = pattern.strikeSign;
-    const [ca, cb] = tangentAxes(faceNormal);
-    const crackNormal = spinVec(faceNormal[0]!, faceNormal[1]!, faceNormal[2]!);
-    const crackTangent: [number, number, number] = [0, 0, 0];
-    crackTangent[ca] = 1;
-    for (const seg of cracks) {
-      if (progress < seg.at - 0.0001) continue;
-      const dx = seg.bx - seg.ax;
-      const dy = seg.by - seg.ay;
-      const len = Math.hypot(dx, dy);
-      if (len < 1e-6) continue;
-      const px = (-dy / len) * seg.width;
-      const py = (dx / len) * seg.width;
-      const quad: [number, number][] = [
-        [seg.ax + px, seg.ay + py],
-        [seg.bx + px, seg.by + py],
-        [seg.bx - px, seg.by - py],
-        [seg.ax - px, seg.ay - py],
-      ];
-      const base = positions.length / 3;
-      const world3: [number, number, number][] = [];
-      for (const [u, v] of quad) {
-        const l: [number, number, number] = [0, 0, 0];
-        l[faceAxis] = pattern.strikeSign * (half + CRACK_LIFT);
-        l[ca] = u * half;
-        l[cb] = v * half;
-        const rot = spinVec(l[0]!, l[1]!, l[2]!);
-        const wx = x + midX + rot[0];
-        const wy = y + midY + rot[1];
-        const wz = z + midZ + rot[2];
-        world3.push([wx, wy, wz]);
-        positions.push(wx, wy, wz);
-        normals.push(crackNormal[0], crackNormal[1], crackNormal[2]);
-        layers.push(pattern.voxel);
-        tangents.push(crackTangent[0], crackTangent[1], crackTangent[2]);
-        const w = [wx, wy, wz] as const;
-        uvs.push(w[ca]! / TILE_VOXELS, w[cb]! / TILE_VOXELS);
-        // Dark enough to read as an opening rather than as a painted line, and
-        // still tinted by the cell so it belongs to this lump of soil.
-        const dark = 0.24 * tint;
-        colors.push(dark, dark, dark);
+    for (let fi = 0; fi < FACES.length; fi++) {
+      const fn = FACES[fi]!.normal;
+      const faceAxis = fn[0] !== 0 ? 0 : fn[1] !== 0 ? 1 : 2;
+      const faceSign = fn[faceAxis]!;
+      const [ca, cb] = tangentAxes(fn);
+      const crackNormal = spinVec(fn[0], fn[1], fn[2]);
+      const crackTangent: [number, number, number] = [0, 0, 0];
+      crackTangent[ca] = 1;
+      for (const seg of crackSegments(pattern, fi)) {
+        if (progress < seg.at - 0.0001) continue;
+        const dx = seg.bx - seg.ax;
+        const dy = seg.by - seg.ay;
+        const len = Math.hypot(dx, dy);
+        if (len < 1e-6) continue;
+        const px = (-dy / len) * seg.width;
+        const py = (dx / len) * seg.width;
+        const quad: [number, number][] = [
+          [seg.ax + px, seg.ay + py],
+          [seg.bx + px, seg.by + py],
+          [seg.bx - px, seg.by - py],
+          [seg.ax - px, seg.ay - py],
+        ];
+        const base = positions.length / 3;
+        const world3: [number, number, number][] = [];
+        for (const [u, v] of quad) {
+          const l: [number, number, number] = [0, 0, 0];
+          l[faceAxis] = faceSign * (half + CRACK_LIFT);
+          l[ca] = u * half;
+          l[cb] = v * half;
+          const rot = spinVec(l[0]!, l[1]!, l[2]!);
+          const wx = x + midX + rot[0];
+          const wy = y + midY + rot[1];
+          const wz = z + midZ + rot[2];
+          world3.push([wx, wy, wz]);
+          positions.push(wx, wy, wz);
+          normals.push(crackNormal[0], crackNormal[1], crackNormal[2]);
+          layers.push(pattern.voxel);
+          tangents.push(crackTangent[0], crackTangent[1], crackTangent[2]);
+          const w = [wx, wy, wz] as const;
+          uvs.push(w[ca]! / TILE_VOXELS, w[cb]! / TILE_VOXELS);
+          // Dark enough to read as an opening rather than a painted line, and
+          // still tinted by the cell so it belongs to this lump of soil.
+          const dark = 0.24 * tint;
+          colors.push(dark, dark, dark);
+        }
+        /*
+         * Wind it to face OUT, decided by the cross product rather than assumed.
+         *
+         * The face-local (u, v) basis is not consistently right-handed against
+         * the face normal — on a top face the tangent axes are X and Z, and
+         * cross(X, Z) is -Y — so a fixed index order leaves the crack facing
+         * INTO the soil on half the faces and back-face culling eats it. Third
+         * time that has bitten here, after the hex room's walls and the chamfer
+         * bevels, so it is computed rather than assumed.
+         */
+        const e1 = [world3[1]![0] - world3[0]![0], world3[1]![1] - world3[0]![1],
+          world3[1]![2] - world3[0]![2]];
+        const e2 = [world3[2]![0] - world3[0]![0], world3[2]![1] - world3[0]![1],
+          world3[2]![2] - world3[0]![2]];
+        const facing = (e1[1]! * e2[2]! - e1[2]! * e2[1]!) * crackNormal[0]
+          + (e1[2]! * e2[0]! - e1[0]! * e2[2]!) * crackNormal[1]
+          + (e1[0]! * e2[1]! - e1[1]! * e2[0]!) * crackNormal[2];
+        if (facing >= 0) indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+        else indices.push(base, base + 2, base + 1, base, base + 3, base + 2);
+        quadCount++;
       }
-      /*
-       * Wind it to face OUT, decided by the cross product rather than assumed.
-       *
-       * The face-local (u, v) basis is not consistently right-handed against
-       * the face normal — on a top face the tangent axes are X and Z, and
-       * cross(X, Z) is -Y — so a fixed index order leaves the crack facing INTO
-       * the soil on half the faces and back-face culling eats it. This is the
-       * third time that has bitten in this codebase, after the hex room's walls
-       * and the chamfer bevels, so it is computed here too.
-       */
-      const e1 = [world3[1]![0] - world3[0]![0], world3[1]![1] - world3[0]![1],
-        world3[1]![2] - world3[0]![2]];
-      const e2 = [world3[2]![0] - world3[0]![0], world3[2]![1] - world3[0]![1],
-        world3[2]![2] - world3[0]![2]];
-      const facing = (e1[1]! * e2[2]! - e1[2]! * e2[1]!) * crackNormal[0]
-        + (e1[2]! * e2[0]! - e1[0]! * e2[2]!) * crackNormal[1]
-        + (e1[0]! * e2[1]! - e1[1]! * e2[0]!) * crackNormal[2];
-      if (facing >= 0) indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-      else indices.push(base, base + 2, base + 1, base, base + 3, base + 2);
-      quadCount++;
     }
   }
 
