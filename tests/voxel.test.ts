@@ -6,7 +6,7 @@ import {
 import {
   CAVITY_DISH, DISH_CELLS, EDGE_CHAMFER, FACES, burialShade, meshChunk, tangentAxes,
 } from '../src/voxel/mesher';
-import { MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES } from '../src/voxel/LooseSoil';
+import { CLOD_RADIUS, MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES } from '../src/voxel/LooseSoil';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
 import { SKY_PHASES, packColor, skyAt, wrapHours } from '../src/voxel/daylight';
@@ -1568,9 +1568,12 @@ describe('fracture', () => {
      * By then the cell is tilted and carrying a hundred crack quads lifted
      * proud of its faces, both of which grow the axis-aligned bounds — the box
      * is actually WIDER at 0.95 than at 0, so it says nothing about shrink.
-     * MAX_SHRINK is checked where it is applied instead.
+     * MAX_SHRINK is checked against the thing it is derived FROM instead: the
+     * block has to finish at exactly the size of the pellet it becomes, or the
+     * handover is a swap between two different objects rather than one lump
+     * carrying on.
      */
-    expect(MAX_SHRINK).toBeCloseTo(0.1, 6);
+    expect(1 - MAX_SHRINK).toBeCloseTo(2 * CLOD_RADIUS, 6);
   });
 
   it('changes only ON a hit, never between them', () => {

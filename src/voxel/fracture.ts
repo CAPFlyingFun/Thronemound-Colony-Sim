@@ -23,6 +23,7 @@
 import { FACES, tangentAxes, voxelTint, type MeshData } from './mesher';
 import { TILE_VOXELS } from './tileTextures';
 import { CLAY, SAND, type VoxelId } from './VoxelWorld';
+import { CLOD_RADIUS } from './LooseSoil';
 
 /**
  * Pieces per axis. ONE — a cell is not subdivided at all any more.
@@ -63,14 +64,20 @@ const EROSION_LEAD = 1;
 
 export const EROSION_MAX = 0.55;
 /**
- * How far a cell shrinks by the time it lets go: a tenth, so it still reads as
- * the same block of soil that was there when she started.
+ * How far a cell shrinks by the time it lets go — down to EXACTLY the pellet it
+ * is about to become.
  *
- * Normalised BY EROSION_MAX so the two cannot drift. Written as an absolute
- * fraction it silently meant whatever erosion happened to peak at — 13% at the
- * time, and any retune of the erosion curve moved it again.
+ * Derived, not chosen. The block starts a whole voxel across and the clod
+ * shapes are normalised to diameter one, so a pellet spans 2 * CLOD_RADIUS;
+ * shrinking by the difference lands the last hit on the same size the pellet
+ * appears at, and the handover is a continuation rather than a swap between two
+ * different objects. It was a flat tenth before, so the block you had spent
+ * twelve hits on vanished and a differently-sized lump took its place.
+ *
+ * Tying it to CLOD_RADIUS also means retuning the pellet cannot silently
+ * desynchronise the two again.
  */
-export const MAX_SHRINK = 0.10;
+export const MAX_SHRINK = 1 - 2 * CLOD_RADIUS;
 /**
  * How sharply the shrink lags the cracks.
  *
@@ -707,7 +714,12 @@ export function chipMeshData(
      */
     const { hits, since } = hitPhase(progress);
     const struck = (hits / HIT_COUNT) ** SHRINK_LAG;
-    const shrink = 1 - struck * MAX_SHRINK * (0.85 + 0.3 * js);
+    /*
+     * No per-cell jitter on the amount: the END has to land exactly on the
+     * pellet's size or the handover shows. Variation lives in the drift, the
+     * spin and the crack pattern, none of which affect where it finishes.
+     */
+    const shrink = 1 - struck * MAX_SHRINK;
     const half = (size * shrink) / 2;
     const drift = erosion * size * 0.22;
     /*
