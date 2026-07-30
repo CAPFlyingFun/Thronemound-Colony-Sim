@@ -14,7 +14,7 @@ import {
   AIR, CHUNK, MATERIALS, TOPSOIL, VoxelWorld,
   isSolid, layeredGenerator, materialOf, type VoxelId,
 } from '../voxel/VoxelWorld';
-import { meshChunk } from '../voxel/mesher';
+import { FACES, burialShade, meshChunk } from '../voxel/mesher';
 import {
   buildFracture, cellCentre, chipMeshData, eventsBetween, hashVoxel, releasedBetween, removedAt,
   CELL_COUNT, type DigEvent, type DigEventKind, type FracturePattern,
@@ -1387,7 +1387,8 @@ export class DigScene {
       this.soilDummy.updateMatrix();
       batch.setMatrixAt(slot, this.soilDummy.matrix);
       const base = materialOf(clod.material).color;
-      this.soilColor.setRGB(base[0] * style.tint, base[1] * style.tint, base[2] * style.tint);
+      const shade = style.tint * this.clodShade(clod.position);
+      this.soilColor.setRGB(base[0] * shade, base[1] * shade, base[2] * shade);
       batch.setColorAt(slot, this.soilColor);
       batch.count = slot + 1;
     }
@@ -1395,6 +1396,33 @@ export class DigScene {
       batch.instanceMatrix.needsUpdate = true;
       if (batch.instanceColor) batch.instanceColor.needsUpdate = true;
     }
+  }
+
+  /**
+   * How shadowed a pellet is, from how walled-in it sits.
+   *
+   * The terrain mesher gives every vertex real ambient occlusion and the chip
+   * visual has its own burial term, but loose soil had neither: its instance
+   * colour was material times tint and nothing else. Above ground that reads
+   * fine, because nothing is occluding it anyway. Underground it was the one
+   * thing in the frame lit from nowhere — a pale lump sitting in a tunnel whose
+   * walls are correctly darkened, which is what made spoil look pasted on.
+   *
+   * Six samples per pellet per frame, which at the 256 cap is about 1500 array
+   * lookups — well under a tenth of a millisecond, and cheaper than caching it
+   * would be to keep correct, since digging the cell next to a sleeping pellet
+   * has to change its shading.
+   */
+  private clodShade(at: { x: number; y: number; z: number }): number {
+    const cx = Math.floor(at.x);
+    const cy = Math.floor(at.y);
+    const cz = Math.floor(at.z);
+    let enclosure = 0;
+    for (const face of FACES) {
+      const [nx, ny, nz] = face.normal;
+      if (isSolid(this.world.get(cx + nx, cy + ny, cz + nz))) enclosure++;
+    }
+    return burialShade(enclosure);
   }
 
   /* ---------------------------------------------------------- particles */

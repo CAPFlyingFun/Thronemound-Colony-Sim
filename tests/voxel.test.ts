@@ -4,7 +4,7 @@ import {
   isSolid, layeredGenerator, materialOf,
 } from '../src/voxel/VoxelWorld';
 import {
-  CAVITY_DISH, DISH_CELLS, EDGE_CHAMFER, FACES, meshChunk, tangentAxes,
+  CAVITY_DISH, DISH_CELLS, EDGE_CHAMFER, FACES, burialShade, meshChunk, tangentAxes,
 } from '../src/voxel/mesher';
 import { MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES } from '../src/voxel/LooseSoil';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
@@ -2169,5 +2169,42 @@ describe('daylight', () => {
     expect(packColor([1, 1, 1])).toBe(0xffffff);
     // Out of range must clamp, not roll over into the next channel.
     expect(packColor([2, -1, 0.5])).toBe(0xff0080);
+  });
+});
+
+describe('burial shading', () => {
+  it('bottoms out exactly where the terrain AO does', () => {
+    /*
+     * The bug this exists for: loose soil had NO occlusion at all. Terrain gets
+     * per-vertex AO and the chip visual has a burial term, but a pellet in a
+     * tunnel was drawn at plain material brightness — the one thing in frame
+     * lit from nowhere, which is what made spoil look pasted on.
+     *
+     * The floor has to MATCH, or a pellet and the wall behind it bottom out at
+     * different darknesses and the pellet reads as a hole or a highlight.
+     */
+    const solid = { get: () => TOPSOIL };
+    // A cell walled in on every side is the darkest case either system has, and
+    // both have to agree on it. 0.45 is AO_LEVELS[0] inside the mesher.
+    expect(burialShade(FACES.length)).toBeCloseTo(0.45, 6);
+    // And a pellet out in the open is not darkened at all, the way open ground
+    // is not — otherwise spoil on the surface reads as permanently in shadow.
+    expect(burialShade(0)).toBe(1);
+    expect(meshChunk(solid, 0, 0, 0)).toBeNull();
+  });
+
+  it('is monotonic and never brightens anything', () => {
+    expect(burialShade(0)).toBe(1);
+    let last = 1.0001;
+    for (let n = 0; n <= FACES.length; n++) {
+      const v = burialShade(n);
+      expect(v).toBeLessThanOrEqual(last);
+      expect(v).toBeGreaterThan(0);
+      expect(v).toBeLessThanOrEqual(1);
+      last = v;
+    }
+    // Out of range clamps rather than going negative and inverting the colour.
+    expect(burialShade(99)).toBe(burialShade(FACES.length));
+    expect(burialShade(-3)).toBe(1);
   });
 });

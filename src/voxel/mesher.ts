@@ -106,6 +106,23 @@ export const EDGE_CHAMFER = 0.2929;
 /** Brightness multiplier per AO level, darkest (fully enclosed corner) first. */
 const AO_LEVELS = [0.45, 0.62, 0.8, 1.0] as const;
 
+/**
+ * How dark something sitting in a hollow should be, from how walled in it is.
+ *
+ * Exported because LOOSE soil needs it too and had none: the terrain gets real
+ * per-vertex AO here and the chip visual has its own burial term, but a pellet
+ * lying in a tunnel was drawn at plain material brightness. It was the one
+ * thing in the frame lit from nowhere, which is what made spoil look pasted on
+ * rather than dropped.
+ *
+ * Bottoms out at the SAME value as the darkest AO level, so a pellet and the
+ * wall behind it reach the floor together instead of one going darker.
+ */
+export function burialShade(solidNeighbours: number): number {
+  const t = Math.max(0, Math.min(1, solidNeighbours / FACES.length));
+  return 1 - t * (1 - AO_LEVELS[0]!);
+}
+
 /** FACES index for an axis and sign. Mirrors the table's +X,-X,+Y,-Y,+Z,-Z order. */
 function faceIndex(axis: number, sign: number): number {
   return axis * 2 + (sign > 0 ? 0 : 1);
