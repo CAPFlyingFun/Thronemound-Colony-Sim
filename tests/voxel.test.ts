@@ -10,7 +10,7 @@ import { MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES } from '../src/voxel/LooseSoil
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
 import { SKY_PHASES, packColor, skyAt, wrapHours } from '../src/voxel/daylight';
-import { CELL_COUNT, CHIP_CELLS, CRACK_BRANCHES, CRACK_JOINTS, CRACK_START, crackSegments, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
+import { CELL_COUNT, CHIP_CELLS, CRACK_BRANCHES, MAX_SHRINK, CRACK_JOINTS, CRACK_START, crackSegments, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
@@ -1525,6 +1525,72 @@ describe('fracture', () => {
     expect(seen).toHaveLength(CELL_COUNT);
     expect(new Set(seen).size).toBe(CELL_COUNT);
     expect(seen).toEqual(Array.from(pattern.order));
+  });
+
+  it('cracks BEFORE it visibly shrinks, not after', () => {
+    /*
+     * Reported from play: the block started shrinking and the cracks turned up
+     * about three seconds later, so it read as the soil deflating and then
+     * splitting rather than splitting and then giving.
+     *
+     * Two causes. Cracks were held until 12% of the dig, and the shrink ran
+     * linearly from 0% — so the ordering was literally reversed. Measured off
+     * the geometry rather than the constants, because that is what the player
+     * sees.
+     */
+    const pattern = buildFracture(3, S, 4, TOPSOIL);
+    const width = (p: number) => {
+      const d = chipMeshData(pattern, 3, S, 4, p)!;
+      let lo = Infinity; let hi = -Infinity;
+      for (let i = 0; i < d.positions.length; i += 3) {
+        lo = Math.min(lo, d.positions[i]!); hi = Math.max(hi, d.positions[i]!);
+      }
+      return hi - lo;
+    };
+    const whole = width(0);
+    const firstCrack = Math.min(...allCracks(pattern).map((c) => c.at));
+    /*
+     * Under a tenth of the dig — about a second at twelve seconds a cell.
+     * It was 0.23, or nearly three seconds, which is what the report described.
+     */
+    expect(firstCrack).toBeLessThan(0.1);
+    expect(whole - width(firstCrack + 0.001)).toBeLessThan(whole * 0.01);
+    /*
+     * Deliberately NOT asserting the end-state size from the same measurement.
+     * By then the cell is tilted and carrying a hundred crack quads lifted
+     * proud of its faces, both of which grow the axis-aligned bounds — the box
+     * is actually WIDER at 0.95 than at 0, so it says nothing about shrink.
+     * MAX_SHRINK is checked where it is applied instead.
+     */
+    expect(MAX_SHRINK).toBeCloseTo(0.1, 6);
+  });
+
+  it('sheds dust from each crack as it opens', () => {
+    /*
+     * One cell means ONE removal event, so the whole trickle of chip events
+     * that used to come from 64 pieces breaking away went with the sheets and
+     * the dig was silent until the cell let go. A crack opening is the only
+     * thing actually happening during a press, so it is what carries the dust.
+     */
+    const pattern = buildFracture(3, S, 4, TOPSOIL);
+    const mid = eventsBetween(pattern, 0.3, 0.6);
+    expect(mid.length).toBeGreaterThan(0);
+    expect(mid.every((e) => e.kind === 'DIG_CHIP_SMALL')).toBe(true);
+    // Positioned ON the block, so the dust falls off the damage rather than
+    // appearing in a cloud around it.
+    for (const e of mid) {
+      for (const k of ['x', 'y', 'z'] as const) {
+        expect(e.at[k]).toBeGreaterThanOrEqual(0);
+        expect(e.at[k]).toBeLessThanOrEqual(1);
+      }
+    }
+    /*
+     * Every crack fires exactly once across the whole dig, never twice — plus
+     * the one the CELL ITSELF fires as it comes away, which is a different
+     * thing and has to still be there.
+     */
+    const chips = eventsBetween(pattern, 0, 1).filter((e) => e.kind === 'DIG_CHIP_SMALL');
+    expect(chips.length).toBe(allCracks(pattern).length + 1);
   });
 
   it('fires chip events only when soil actually breaks', () => {

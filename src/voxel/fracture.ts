@@ -78,6 +78,15 @@ export const EROSION_MAX = 0.55;
  * time, and any retune of the erosion curve moved it again.
  */
 export const MAX_SHRINK = 0.10;
+/**
+ * How sharply the shrink lags the cracks.
+ *
+ * Squared, so early on the block barely moves while the cracks spread across
+ * it, and it only starts visibly giving once they are established. Linear
+ * shrink starts the moment the dig does, which is what put the deflation
+ * BEFORE the splitting.
+ */
+const SHRINK_LAG = 2;
 
 /** How far a fully eroded crumb can tilt, in radians. */
 const MAX_TILT = 0.42;
@@ -379,6 +388,26 @@ export function eventsBetween(
     events.push({ kind: crumbs >= 2 ? 'DIG_CHIP_LARGE' : 'DIG_CHIP_SMALL', at, crumbs });
   }
 
+  /*
+   * Every crack that opens sheds a little soil.
+   *
+   * Without this the dig is silent until the cell lets go: one cell means one
+   * removal event, so the whole 64-piece trickle of chip events went with the
+   * sheets. A crack appearing is the only thing actually HAPPENING during a
+   * press, so it is the thing worth a puff of dust — and it puts the dust where
+   * the damage is rather than in a generic cloud around the block.
+   */
+  for (let fi = 0; fi < FACES.length; fi++) {
+    for (const seg of crackSegments(pattern, fi)) {
+      if (seg.at <= from || seg.at > to) continue;
+      events.push({
+        kind: 'DIG_CHIP_SMALL',
+        at: crackPoint(fi, (seg.ax + seg.bx) / 2, (seg.ay + seg.by) / 2),
+        crumbs: 1,
+      });
+    }
+  }
+
   if (from < 1 && to >= 1) {
     events.push({ kind: 'DIG_RELEASE', at: { x: 0.5, y: 0.5, z: 0.5 }, crumbs: 0 });
   }
@@ -399,8 +428,15 @@ export function eventsBetween(
  */
 export const CRACK_BRANCHES = 7;
 export const CRACK_JOINTS = 4;
-/** Progress before the first crack shows. Below this she is still just biting. */
-export const CRACK_START = 0.12;
+/**
+ * Progress before the first crack shows. Almost nothing.
+ *
+ * It was 0.12, which at twelve seconds a cell is a second and a half of the
+ * block visibly SHRINKING before anything cracked — the wrong way round, and it
+ * read as the soil deflating and then splitting rather than splitting and then
+ * giving. Cracks lead now; the shrink follows them (see MAX_SHRINK).
+ */
+export const CRACK_START = 0.02;
 /** How far the crack sits proud of the face, so it does not z-fight with it. */
 export const CRACK_LIFT = 0.006;
 /**
@@ -421,6 +457,19 @@ export interface CrackSegment {
   at: number;
   /** Half-width, in the same face-local units. */
   width: number;
+}
+
+/** A point on a face, from face-local -1..1 to voxel-local 0..1. */
+export function crackPoint(face: number, u: number, v: number): Vec3 {
+  const fn = FACES[face]!.normal;
+  const axis = fn[0] !== 0 ? 0 : fn[1] !== 0 ? 1 : 2;
+  const [ca, cb] = tangentAxes(fn);
+  const p: [number, number, number] = [0, 0, 0];
+  p[axis] = fn[axis]! > 0 ? 1 : 0;
+  const clamp = (n: number) => Math.max(0, Math.min(1, (n + 1) / 2));
+  p[ca] = clamp(u);
+  p[cb] = clamp(v);
+  return { x: p[0], y: p[1], z: p[2] };
 }
 
 export function crackSegments(pattern: FracturePattern, face = -1): CrackSegment[] {
@@ -478,7 +527,17 @@ export function crackSegments(pattern: FracturePattern, face = -1): CrackSegment
         ay: py,
         bx: nx,
         by: ny,
-        at: opens + ((j + 1) / CRACK_JOINTS) * span,
+        /*
+         * Squared, so the FIRST joint lands almost at once and later ones
+         * spread out.
+         *
+         * Spacing them evenly meant the earliest visible crack was a quarter of
+         * the span in — about three seconds at twelve seconds a cell — which is
+         * what made the block appear to shrink before it cracked even after
+         * CRACK_START was pulled back to nothing. It is also how fracture
+         * actually goes: the split is sudden, the spread is slow.
+         */
+        at: opens + (((j + 1) / CRACK_JOINTS) ** 2) * span,
         // Tapers along its length: widest at the blow, hairline at the tip.
         width: CRACK_WIDTH * (1 - (j / CRACK_JOINTS) * 0.65),
       });
@@ -587,7 +646,7 @@ export function chipMeshData(
      * out of z-fight range. At a 0.2 cell that is a ~26 micron gap, invisible
      * as a hole but decisive for the depth buffer. Removal is what you see.
      */
-    const shrink = 1 - (erosion / EROSION_MAX) * MAX_SHRINK * (0.85 + 0.3 * js);
+    const shrink = 1 - ((erosion / EROSION_MAX) ** SHRINK_LAG) * MAX_SHRINK * (0.85 + 0.3 * js);
     const half = (size * shrink) / 2;
     const drift = erosion * size * 0.22;
     const midX = (cx + 0.5) * size + jx * drift;
