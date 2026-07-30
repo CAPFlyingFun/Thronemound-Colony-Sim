@@ -220,46 +220,70 @@ Hex prism, across-flats *w*, depth *d*:
 | Faces per cm² of floor vs today | 1× | 7.2× | 3.2× | 3.2× | 1.8× |
 
 **The dominant cost is cell size, not cell shape.** Surface-area-to-volume for a
-3 mm hex prism is 2.0 mm⁻¹; for a 3 mm *cube* it is also 2.0 mm⁻¹. A 3 mm hex
-prism and a 3 mm cube cost the same to store and very nearly the same to mesh.
-Whatever the phone does at 3 mm hex, it does at 3 mm cube — which means the
-scale question can be answered without writing a hex world at all (§6).
+3 mm hex prism is exactly 2.0 mm⁻¹ (46.77 mm² / 23.38 mm³); for a 3 mm *cube* it
+is also exactly 2.0 (54 / 27). Not a rounding coincidence — at these proportions
+they are equal.
+
+**But the cube is an optimistic floor for hex, not an equivalence.** Two ways
+hex costs more at the same across-flats width:
+
+- Cells per cube-voxel is 5.35× for hex against 4.63× for a 3 mm cube — **hex
+  packs ~15% more cells into the same volume**, because a hex prism of
+  across-flats 3 and depth 3 is smaller than a 3 mm cube (23.38 vs 27 mm³).
+- A hexagonal cap triangulates to **4 triangles**; a square face is **2**. Cap
+  faces therefore cost double, so hex meshing runs roughly **15–30% hotter**
+  than the cube proxy predicts.
+
+So the cube grid answers the *scale* question faithfully (§6) and its
+performance numbers should be read as a floor for hex, with ~30% headroom
+required before hex is considered viable at the same scale.
 
 ### 5.2 Dig economy, against the real founding requirement
 
 `QueenFounding` requires `DEN_MIN_DEPTH = 4` voxels (20 mm) and
-`DEN_MIN_CHAMBER = 14` air voxels inside a radius-2 ball. With the shaft that is
-~19 voxels ≈ **2400 mm³** of excavation for the whole founding sequence.
+`DEN_MIN_CHAMBER = 14` air voxels inside a radius-2 ball. `QueenFounding.ts:30`
+notes a bare shaft already yields about 5 of those, so the theoretical minimum
+excavation is 4 + (14 − 5) = **13 voxels ≈ 1625 mm³**.
+
+*(Corrected. An earlier revision said ~19 voxels / 2400 mm³, which assumed
+practical overshoot while presenting itself as derived. Every ratio below is
+unaffected: presses scale as V / cellVolume, so V cancels and the verdicts hold
+at either volume. Per-press rate re-derived from `DIG_FLOOR 6.4 s ÷ 4 sheets =
+1.6 s`.)*
 
 | | presses | at 1.6 s/press | vs today |
 |---|---:|---:|---:|
-| today (19 voxels × 4 sheets) | 76 | 2.0 min | 1× |
-| hex 2 mm | 346 | 9.2 min | 4.6× |
-| **hex 3 mm** | **103** | **2.7 min** | **1.35×** |
-| hex 3 mm, *d* = 1.73 | 178 | 4.7 min | 2.3× |
-| hex 4 mm | 43 | 1.2 min | 0.57× |
+| today (13 voxels × 4 sheets) | 52 | 1.4 min | 1× |
+| hex 2 mm | 235 | 6.3 min | 4.51× |
+| **hex 3 mm** | **69** | **1.9 min** | **1.34×** |
+| hex 3 mm, *d* = 1.73 (the §3.3 fix) | 120 | 3.2 min | **2.31×** |
+| hex 4 mm | 29 | 0.8 min | 0.56× |
 
-**3 mm is nearly press-neutral.** That is the strongest quantitative argument in
-favour of the proposal's preferred scale, and it holds for a 3 mm cube equally.
+**3 mm at depth 3 mm is nearly press-neutral,** and it holds for a 3 mm cube
+equally.
 
-**2 mm is disqualified on this metric alone** — 4.6× the presses for the opening
-tutorial. And note the self-contradiction: the only way to rescue 2 mm is
-multi-cell digs, which reintroduces the "large parent region" the proposal
-exists to remove.
+**2 mm is disqualified on this metric alone** — 4.51× the presses for the opening
+tutorial. The only way to rescue it is multi-cell digs, which reintroduces the
+"large parent region" the proposal exists to remove.
+
+**And read row 4 against §3.3.** The depth-3 mm configuration is the one that
+renders as a palisade fence; the depth-1.73 mm configuration is the aesthetic
+fix — and it costs 2.31×, which **fails this document's own ≤1.5× pass bar in
+§6.** See §11.1: this is a contradiction in the hex case, not a detail.
 
 ### 5.3 The carry economy — the proposal's one serious design error
 
 `DigSession` defaults to `capacityVoxels ?? 12` — the queen holds **12 voxels =
-1500 mm³ = 768 pieces**. The entire founding is 2400 mm³, so today she does it
-in **about two trips**.
+1500 mm³ = 768 pieces**. The founding is 1625 mm³, so today she does it in
+**about two trips**.
 
 The proposal says "Queen normally carries one detached soil cell." At 3 mm that
-is 23.4 mm³ per trip, so founding becomes **103 round trips** down and up a
+is 23.4 mm³ per trip, so founding becomes **69 round trips** down and up a
 20 mm shaft. At a plausible 10 mm/s ant walk that is ~40 mm of travel plus
-grab/drop per trip — call it 8–10 s — so **15 to 17 minutes of pure hauling** for
+grab/drop per trip — call it 8–10 s — so **9 to 12 minutes of pure hauling** for
 what is currently a two-trip errand, on top of the digging.
 
-**This is a 50× regression in trip count and it has nothing to do with geometry.**
+**This is a 35× regression in trip count and it has nothing to do with geometry.**
 It is the single most likely thing to make the rewrite feel worse than what it
 replaces, and it would be blamed on hexagons.
 
@@ -279,29 +303,48 @@ clods.
 A 3 mm hex cell is 23.4 mm³ — **12× the volume, 2.3× across**. Chunky pellets an
 ant carries in her mandibles, which is the actual reference.
 
-| | piece volume | pieces to hold 1500 mm³ | founding spoil (2400 mm³) |
+| | piece volume | pieces to hold 1500 mm³ | founding spoil (1625 mm³) |
 |---|---:|---:|---:|
-| today | 1.95 mm³ | 768 (= the cap) | 1229 pieces — **over cap** |
-| hex 3 mm | 23.38 mm³ | 64 | 103 pieces |
+| today | 1.95 mm³ | 768 (= the cap) | 832 pieces — **over cap** |
+| hex 3 mm | 23.38 mm³ | 64 | 69 pieces |
 
 So today's `MAX_LOOSE_CLODS = 768` is already tight enough that founding spoil
-cannot all exist at once. Under the new model 103 pieces covers the whole
-founding. **Recommend capping by volume with a count backstop of 256** — 4× the
-soil headroom of today at 1/3 the simulated objects. Do not scale 768 up; scale
-it *down*.
+cannot all exist at once. Under the new model 69 pieces covers the whole
+founding. **Recommend capping by volume with a count backstop of 256** — 256 ×
+23.4 ≈ 6000 mm³, 4× today's volumetric headroom at 1/3 the records. Do not scale
+768 up; scale it *down*.
+
+**Unverified interaction.** `CLOD_RADIUS 0.1` is documented as deliberately under
+the true eighth-radius so an ant can squeeze past a few clods in a tunnel — a
+jam is a nuisance, not a dead end. At 3 mm with pellet = whole cell, the pellet is
+~2.9 mm across in a 6 mm minimum bore (§6), a completely different ratio. **That
+squeeze-past property must be re-verified at the new scale**; if it fails, a
+dropped bundle can seal a tunnel behind the player.
 
 ### 5.5 Chunking at 3 mm
 
 Keep 32³ cells per chunk and byte-per-cell, so a chunk stays 32 KB and lazy
 allocation still works. But note the extent shrinks: 32 × 5 mm = 160 mm today
-versus 32 × 3 mm = 96 mm. Covering the same world volume needs **(160/96)³ ≈
-4.6× more chunks**, which means ~4.6× the chunk records, dirty-set churn, and —
-if the mesher stays one mesh per chunk per material — **~4.6× the draw calls.**
+versus 32 × 3 mm = 96 mm.
 
-That is the number most likely to break the 60 fps target, and it is a
-consequence of cell size, not lattice. Mitigations, in order of preference:
-merge adjacent chunk meshes into one draw call per material per 2×2×2 region;
-or raise chunk size to 48³ (108 KB, worse lazy-allocation granularity).
+**Corrected draw-call estimate: ~2.8×, not 4.6×.** An earlier revision hedged
+that the mesher might emit one mesh per chunk *per material* and derived a
+volumetric (160/96)³ ≈ 4.6×. Both halves were wrong:
+
+- `meshChunk` returns a **single** `MeshData` per chunk, with material carried as
+  a per-vertex texture-array layer (`MeshData.layers`, "equals the voxel id"). So
+  it is already **one draw call per visible chunk**, whatever the material mix.
+- `mesher.ts:6` — "a fully buried chunk produces nothing at all", and
+  `meshChunk` returns `null` at `quadCount === 0`. Draw calls therefore scale
+  with chunks *intersecting exposed surface*, which for this world (one surface
+  plane plus sparse tunnels) is **quasi-2D**: (160/96)² ≈ **2.8×**, with tunnels
+  adding roughly linearly on top.
+
+The volumetric 4.6× still applies to **chunk records and dirty-set churn**, which
+are cheap — a record is 2 fields and a null pointer until written.
+
+Mitigation is still worth doing (merge adjacent chunk meshes per 2×2×2 region),
+but this is no longer the top perf risk. §11.3 names what replaced it.
 
 Coordinates: axial `q, r` plus `layer`. A **rhombus** chunk in axial space tiles
 perfectly — no hex-shaped chunks needed. Chunk id via arithmetic shift
@@ -513,22 +556,35 @@ integer index 0–7 with a **precomputed basis table**, never as accumulated
 rotation. Lateral frames all share world-Y as their in-plane vertical tangent,
 which is *simpler* than the cube case where the tangent basis varies per axis.
 
-Hazard 1 — **`isPerpendicular` becomes a lie.** `SurfaceFrame.ts:66` returns
-"neither equal nor opposite," and `:228` uses it as the convex/concave
-classifier. On cubes those coincide: not-equal-and-not-opposite *is* 90° *is*
-convex. On hexes, adjacent lateral walls are **60°** apart and opposite walls
-180°, with 120° pairs in between — so the binary becomes a three-way
-classification and line 228 silently mislabels shallow corners. This is the
-precise place the 90° assumption is baked in.
+Hazard 1 — **`isPerpendicular` stops meaning what it says.**
+`SurfaceFrame.ts:66` returns "neither equal nor opposite," and `:228` uses it as
+the convex/concave classifier. On six axis frames the only options are 0° / 90° /
+180°, so the binary is exact. At 60° hex hinges it mislabels shallow corners and
+has to become a three-way classification.
 
-Hazard 2 — **the `rollOffset` accumulator gets worse.** `DigScene.ts:1994` does
-`this.rollOffset += rollBetween(look, from, up)`, which is the barrel-roll bug
-already identified. Walking around a hex column crosses **six** corners per
-circuit instead of four, so accumulated error grows 1.5× faster per unit
-distance. **Fix `reorient()` to transport the look through the hinge rotation
-and delete the accumulator before Phase 7, not after.**
+*Downgraded from "landmine" on review.* Line 228 sits inside the same 415 lines
+Phase 7 rewrites anyway, so this is a design note for a planned rewrite rather
+than a trap in existing code.
 
-Neither hazard makes eight frames unstable. Both are reasons the 415 most
+Hazard 2 — **the roll wobble goes from occasional to constant.**
+`DigScene.ts:1994` does `this.rollOffset += rollBetween(look, from, up)`.
+
+*Reasoning corrected on review.* An earlier revision called this an unbounded
+accumulator whose error "grows 1.5× faster" around a hex column with six corners
+instead of four. That is wrong. `DigScene.ts:2392` decays it every frame —
+`rollOffset *= Math.exp(-CAMERA_TURN_RATE * dt)` with `CAMERA_TURN_RATE = 13`, so
+it is gone in ~0.3 s and snapped to zero below 1e-4. Nothing compounds unless you
+circle a column faster than the decay.
+
+The real reason it is a Phase 7 prerequisite is the original diagnosis:
+**pinning world-look across an up-change mathematically forces a roll.** At 60°
+hinges the transitions are more frequent and individually shallower, so the
+roll-then-unroll wobble stops being an occasional lurch at corners and becomes a
+continuous shimmer along any curved wall. Fix `reorient()` to transport the look
+through the hinge rotation and delete the offset — **and do it in Phase 0
+regardless**, since it is a live bug on the cube grid today.
+
+Neither hazard makes eight frames unstable. Both remain reasons the 415 most
 delicate lines in the project would be re-earned for a cosmetic payoff.
 
 ### 8.4 The existing hex scene
@@ -616,3 +672,167 @@ rather than rewrite it for a lattice change.
 **Sequencing note:** the `reorient()` / `rollOffset` fix is currently optional
 and becomes a prerequisite the moment 60° hinges exist (§8.3). It is worth doing
 in Phase 0 either way, since it fixes a bug that exists today.
+
+---
+
+## 11. Amendments after external review
+
+An independent review read this document and every file it cites at commit
+`a6c525d`, re-deriving the numbers from the code rather than from the text. It
+confirmed the recommendation and the load-bearing code claims (the one-voxel-fit
+invariant, the carry economy, the loose-soil cap inversion) and found one
+overstated number, one padded number, one piece of bad reasoning, and one
+internal contradiction. All four are corrected in place above; §11.1–11.4 record
+what changed and why. §11.5–11.8 are gaps neither document covered.
+
+### 11.1 The contradiction in the hex case — and it cuts against hex
+
+§3.3 says the lateral faces must be square, so depth = side length (1.732 mm),
+or tunnel walls render as a palisade fence. §5.2 prices that configuration at
+**2.31× the presses**. §6 sets the pass bar at **≤1.5×**.
+
+Both rows were in this document from the start and were never put side by side.
+Stated honestly:
+
+> **Hex done wrong looks like a fence. Hex done right fails the press budget.**
+> The aesthetically-corrected configuration is disqualified by this document's own
+> criteria — unless you also add multi-cell digs, which is the parent-region
+> behaviour the whole proposal exists to remove.
+
+That is a stronger argument against the hex rewrite than anything in §10, and it
+did not come from the party that wrote §10. Anyone championing hex has to answer
+it first.
+
+The escape hatches, for completeness: depth between 1.73 and 3 mm (partial fence,
+partial press cost); a non-regular hexagon (loses the tiling elegance that
+motivated hex); or accepting >1.5× presses (then argue why the founding tutorial
+should take twice as long).
+
+### 11.2 What hex genuinely buys, which §3 undersold
+
+**Tunnel headings.** On a cube grid every horizontal tunnel is axis-aligned or a
+jagged staircase: 2 clean headings (±X, ±Z). A hex lattice gives **3** (6
+directions). "Tunnels look like plumbing" is partly an *axis-alignment* complaint,
+and no amount of per-cell jitter or chamfering fixes alignment — that is a real
+limitation of the cube grid that §3.4 waved past.
+
+It does not rescue hex, because 3 headings is still a small finite set and §11.1
+still applies. But it identifies the actual complaint, which leads to §11.3.
+
+### 11.3 New Phase 3b — smoothed meshing, with a named failure mode
+
+If the real problem is axis alignment, the direct fix is **not** a lattice swap
+but **smoothed isosurface meshing** (surface nets / dual contouring) over the
+existing cube grid. It erases both the blocky signature *and* the honeycomb one,
+needs no new coordinate system, and the `Sampler` interface means the mesher can
+be swapped without touching `VoxelWorld`, `raycast`, collision or `SurfaceFrame`.
+Insert as **Phase 3b**, before the gate.
+
+**The qualification the review did not make, and it matters:** smoothed meshing
+has to be **render-only**, because `SurfaceFrame` requires discrete axis-aligned
+normals — an isosurface has continuous ones, and adopting them for physics is
+precisely the rewrite §10 exists to avoid. Render-only means **the visible surface
+no longer coincides with the collision surface.** At 3 mm the mismatch is up to
+~1 cell ≈ ⅓ of the queen's body length: you would see a smooth curve and collide
+with a cube. Mitigations are to clamp displacement well inside the cell, or to
+inset collision by the maximum displacement (costs usable bore).
+
+So Phase 3b is a cheap, high-upside *experiment* with a specific known way to
+fail — not a free win. It is still the first thing to try if Phase 3 chamfering
+is not enough, because it is render-only and revertible.
+
+### 11.4 The gate was subjective, judged by the interested party
+
+§7's decision gate read "tunnels now read as soil," assessed by whoever prefers
+not to rewrite. Replace with a gate that cannot be argued:
+
+1. **Blind side-by-side.** Same chamber, same camera, same lighting: cube-Phase-3
+   (and 3b) against a static hex mockup render. **Unlabelled**, judged on the
+   phone by the project owner. Whoever prepares the images does not pick them.
+2. **Hard numbers** from §5.6, on-device, both configurations.
+3. **§11.1 answered in writing** by anyone arguing for hex.
+
+With an objective gate, "the phases land and the gate never opens" stops being a
+failure mode and becomes the gate correctly staying shut. That distinction was
+the fair criticism of the phased approach, and this is the fix — amend the gate,
+not the sequence.
+
+*On the status-quo-bias question:* partially inoculated, since Phase 1 deletes
+~900 lines of the plan author's own systems (`fracture`, `sheets`, `chips`), which
+is not what protective bias looks like. The gate was the real exposure. It is now
+closed.
+
+### 11.5 The largest gap in both documents — nobody costed the NPC ants
+
+Every figure in this plan and in the original proposal is **single-player**: one
+`collides()`, one `SurfaceFrame`, one raycast per frame. The destination is a
+colony sim with dozens of workers wall-walking, pathing and hauling. Cell size
+×5.35 multiplies the navigation graph, and pathing over a *tunnel surface
+manifold* (because workers wall-walk) is its own problem at any lattice.
+
+**Add to Phase 0: `?scene=stress&ants=N`** — N scripted ants running the real
+`SurfaceFrame` + `collides()` loop at the current 5 mm, profiled on the phone.
+
+> If 20 workers already eat the frame budget at 5 mm, the entire 3 mm question is
+> academic.
+
+This is now the highest-priority measurement in the plan and it costs a day.
+
+### 11.6 Loose soil never re-packs, so the cap chokes eventually
+
+§4 says a `LooseSoil` record is "never discarded." Taken literally, every pellet
+ever excavated stays a physics record for the colony's lifetime, so **any** cap
+eventually blocks digging rather than merely limiting spoil.
+
+The missing transition is **deposited → packed**: pellets merge back into the
+lattice as ordinary soil, closing the conservation loop, removing the cap as a
+structural limit, and incidentally delivering nest construction, which a colony
+sim needs regardless.
+
+**Refinement the review did not have:** `LooseSoil.ts:1–10` records that dropped
+soil *used* to go straight back into the voxel grid and that this was removed
+deliberately — it made the mound walkable but meant "a heap of dirt could never be
+shoved, carried again, or knocked into a tunnel." So re-packing must **not** be
+automatic on drop, or it re-breaks exactly what that change fixed. It has to be an
+explicit **tamping action** — a distinct verb, ideally the same one that builds
+walls — giving five states, not four:
+
+`packed (lattice)` → `loose` → `carried` → `dropped (loose)` → **`tamped`** → `packed (lattice)`
+
+### 11.7 The third-person camera and bore width interact, favourably
+
+An over-the-shoulder camera **cannot physically exist** in a one-cell 5 mm bore —
+there is nowhere to put it. At 3 mm the §1.5 invariant break *forces* a 2-cell
+(6 mm) minimum bore, which is what makes a third-person underground camera
+viable at all.
+
+So the headline cost of the smaller cell is simultaneously the enabler for a
+stated non-negotiable feature. Accordingly: **promote the third-person stub in the
+Phase 2 test scene from "if practical" to required** — it is the cheapest possible
+test of a feature that would otherwise be discovered to be impossible much later.
+
+### 11.8 Save growth is a non-issue; the record list is the real risk
+
+Chunks are lazily allocated and byte-per-cell, so save size scales with *dug*
+volume: ~5× the records for the same excavation, still kilobytes. Not worth
+planning around.
+
+The actual persistence risk is the **loose-soil record list** from §11.6 — an
+unbounded, permanently-growing array of live physics records is what makes a save
+file grow without limit. Fixing §11.6 fixes this too.
+
+### 11.9 Amended verdict
+
+§10 stands unchanged: ship Phases 0–3, gate hex on evidence. With four
+amendments, in priority order:
+
+| # | Amendment | Phase |
+|---|---|---|
+| 1 | Add `?scene=stress&ants=N` — NPC cost at 5 mm decides whether 3 mm is even a question (§11.5) | 0 |
+| 2 | Replace the subjective gate with a blind side-by-side plus on-device numbers (§11.4) | gate |
+| 3 | Add smoothed render-only meshing as an alternative to the lattice swap, with the collision-mismatch caveat (§11.3) | 3b |
+| 4 | Add the tamping transition so spoil re-packs and the cap stops being structural (§11.6) | 6 |
+
+And correct the risk register: **draw calls drop from High severity to Medium**
+(2.8× not 4.6×, §5.5), and **NPC ant cost enters at High / High** — untested,
+unbudgeted, and upstream of every other number here.
