@@ -78,6 +78,26 @@ export const EROSION_MAX = 0.55;
  * desynchronise the two again.
  */
 export const MAX_SHRINK = 1 - 2 * CLOD_RADIUS;
+
+/**
+ * Per-cell size variation, so no two pellets come out the same.
+ *
+ * Applied to the block's END SIZE and to the pellet alike, from one hash of the
+ * one cell, so they still land on each other exactly — the handover survives
+ * the variation instead of being broken by it. Varying either side alone would
+ * put the seam straight back.
+ *
+ * Lives HERE rather than in clod.ts, which is where it belongs by subject,
+ * because clod.ts already imports hashVoxel from this file and the other
+ * direction would be a cycle.
+ */
+export const CLOD_SIZE_MIN = 0.78;
+export const CLOD_SIZE_MAX = 1.16;
+
+export function clodSizeScale(x: number, y: number, z: number, material: VoxelId): number {
+  const rand = rng(hashVoxel(x, y, z, material) ^ 0x5bf03635);
+  return CLOD_SIZE_MIN + rand() * (CLOD_SIZE_MAX - CLOD_SIZE_MIN);
+}
 /**
  * How sharply the shrink lags the cracks.
  *
@@ -214,6 +234,8 @@ export interface FracturePattern {
   strikeSign: 1 | -1;
   /** Layer each piece belongs to: 0 is the one under her mandibles. */
   layer: Int32Array;
+  /** This cell's own size, as a multiple of the nominal pellet. */
+  sizeScale: number;
 }
 
 export function cellCentre(cell: number): Vec3 {
@@ -356,6 +378,7 @@ export function buildFracture(
     rank,
     thresholds,
     layer,
+    sizeScale: clodSizeScale(x, y, z, voxel),
     strikeAxis,
     strikeSign,
     jitter,
@@ -719,7 +742,8 @@ export function chipMeshData(
      * pellet's size or the handover shows. Variation lives in the drift, the
      * spin and the crack pattern, none of which affect where it finishes.
      */
-    const shrink = 1 - struck * MAX_SHRINK;
+    // Down to THIS cell's own pellet size, not the nominal one.
+    const shrink = 1 - struck * (1 - 2 * CLOD_RADIUS * pattern.sizeScale);
     const half = (size * shrink) / 2;
     const drift = erosion * size * 0.22;
     /*

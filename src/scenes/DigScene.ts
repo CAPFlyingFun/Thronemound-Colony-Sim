@@ -17,7 +17,7 @@ import {
 import { FACES, burialShade, meshChunk } from '../voxel/mesher';
 import {
   buildFracture, cellCentre, chipMeshData, eventsBetween, hashVoxel, releasedBetween, removedAt,
-  CELL_COUNT, type DigEvent, type DigEventKind, type FracturePattern,
+  CELL_COUNT, clodSizeScale, type DigEvent, type DigEventKind, type FracturePattern,
 } from '../voxel/fracture';
 import {
   SOIL_CLOD_VARIANT_COUNT, buildClodShape, clodFeel, clodRadius, pieceSource, styleForVoxel,
@@ -1379,10 +1379,20 @@ export class DigScene {
       this.soilDummy.rotation.set(style.spin[0], style.spin[1], style.spin[2]);
       // Piece scale, not load scale: the lump in her jaws represents a whole
       // scoop, but each thing lying on the ground is one 64th of a cube.
+      /*
+       * The SAME per-cell size the block shrank down to.
+       *
+       * Both sides read it from one hash of the one source cell, so a pellet
+       * appears at exactly the size its block finished at. Varying either side
+       * on its own would put the seam back that tying them together removed.
+       */
+      const grew = PIECE_SIZE * clodSizeScale(
+        clod.source.x, clod.source.y, clod.source.z, clod.material,
+      );
       this.soilDummy.scale.set(
-        PIECE_SIZE * style.axisScale[0],
-        PIECE_SIZE * style.axisScale[1],
-        PIECE_SIZE * style.axisScale[2],
+        grew * style.axisScale[0],
+        grew * style.axisScale[1],
+        grew * style.axisScale[2],
       );
       this.soilDummy.updateMatrix();
       batch.setMatrixAt(slot, this.soilDummy.matrix);

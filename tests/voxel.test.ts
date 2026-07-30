@@ -10,7 +10,7 @@ import { CLOD_RADIUS, MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES } from '../src/vo
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
 import { SKY_PHASES, packColor, skyAt, wrapHours } from '../src/voxel/daylight';
-import { CELL_COUNT, CHIP_CELLS, CRACK_BRANCHES, HIT_COUNT, MAX_SHRINK, hitPhase, CRACK_JOINTS, CRACK_START, crackSegments, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
+import { CELL_COUNT, CHIP_CELLS, CLOD_SIZE_MAX, CLOD_SIZE_MIN, CRACK_BRANCHES, HIT_COUNT, MAX_SHRINK, clodSizeScale, hitPhase, CRACK_JOINTS, CRACK_START, crackSegments, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
@@ -1574,6 +1574,22 @@ describe('fracture', () => {
      * carrying on.
      */
     expect(1 - MAX_SHRINK).toBeCloseTo(2 * CLOD_RADIUS, 6);
+    /*
+     * And with the per-cell variation applied, every cell still lands on its
+     * OWN pellet — which is the property that lets the size vary at all.
+     */
+    for (let i = 0; i < 40; i++) {
+      const scale = clodSizeScale(i, S, 7, TOPSOIL);
+      expect(scale).toBeGreaterThanOrEqual(CLOD_SIZE_MIN);
+      expect(scale).toBeLessThanOrEqual(CLOD_SIZE_MAX);
+      const p2 = buildFracture(i, S, 7, TOPSOIL);
+      expect(p2.sizeScale).toBeCloseTo(scale, 9);
+    }
+    // Different cells really do differ, or the variation is decorative only.
+    const scales = new Set(
+      Array.from({ length: 30 }, (_, i) => clodSizeScale(i, S, 8, TOPSOIL).toFixed(5)),
+    );
+    expect(scales.size).toBeGreaterThan(25);
   });
 
   it('changes only ON a hit, never between them', () => {
