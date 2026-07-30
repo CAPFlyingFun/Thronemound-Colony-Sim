@@ -696,6 +696,47 @@ export function releasedBetween(
  * face is emitted so the crevices between them are properly solid rather than
  * see-through. Worst case is 27 crumbs x 6 faces = 162 quads.
  */
+/**
+ * Half-extent of the block being worked, in voxel units.
+ *
+ * The one number that says how big the thing on screen is right now, so that
+ * COLLISION can be the same size as the picture. It was not: the cell stays
+ * solid in the world for as long as it is being dug — that is what stops the
+ * soil being spent before the dig finishes — so the ant went on standing on a
+ * full cube while the block under her had shrunk to half of one. She hovered.
+ *
+ * The mesh builder reads this rather than recomputing it, because a second copy
+ * of this arithmetic is exactly how the block and the pellet ended up different
+ * sizes in the first place.
+ *
+ * The block also drifts and jolts about its cell as it loosens; that is NOT in
+ * here. It is a deliberate wobble of up to a sixth of a voxel, and a floor that
+ * twitched with it would be worse than one that is a sixth of a voxel out.
+ */
+export function chipHalfExtent(pattern: FracturePattern, progress: number): number {
+  const size = 1 / CHIP_CELLS;
+  const { hits } = hitPhase(progress);
+  /*
+   * Worked out over the hits that are actually DRAWN, which is one fewer.
+   *
+   * hitPhase only reaches HIT_COUNT at progress exactly 1, and at progress 1
+   * the cell is gone and no chip is built at all — so the last frame anyone
+   * sees is hit eleven of twelve. Dividing by twelve meant the final step never
+   * landed: the block handed over a seventh larger than the pellet replacing
+   * it, every time. Anchoring on the last VISIBLE hit is what makes "it shrinks
+   * down into the thing you pick up" true rather than nearly true.
+   */
+  const struck = Math.min(1, hits / (HIT_COUNT - 1)) ** SHRINK_LAG;
+  /*
+   * Down to THIS cell's own pellet size, not the nominal one, and with no
+   * per-cell jitter on the amount: the END has to land exactly on the pellet or
+   * the handover shows. Variation lives in the drift, the spin and the crack
+   * pattern, none of which affect where it finishes.
+   */
+  const shrink = 1 - struck * (1 - 2 * CLOD_RADIUS * pattern.sizeScale);
+  return (size * shrink) / 2;
+}
+
 export function chipMeshData(
   pattern: FracturePattern,
   x: number,
@@ -773,26 +814,9 @@ export function chipMeshData(
      * steadily whether or not anything was striking it.
      */
     const { hits, since } = hitPhase(progress);
-    /*
-     * Worked out over the hits that are actually DRAWN, which is one fewer.
-     *
-     * hitPhase only reaches HIT_COUNT at progress exactly 1, and at progress 1
-     * the cell is gone and the chip mesh is not built at all — so the last
-     * frame anyone sees is hit eleven of twelve. Dividing by twelve meant the
-     * final step never landed: the block handed over a seventh larger than the
-     * pellet that replaced it, every time, on top of the two size faults in the
-     * pellet itself. Anchoring on the last VISIBLE hit is what makes "it shrinks
-     * down into the thing you pick up" true rather than nearly true.
-     */
-    const struck = Math.min(1, hits / (HIT_COUNT - 1)) ** SHRINK_LAG;
-    /*
-     * No per-cell jitter on the amount: the END has to land exactly on the
-     * pellet's size or the handover shows. Variation lives in the drift, the
-     * spin and the crack pattern, none of which affect where it finishes.
-     */
-    // Down to THIS cell's own pellet size, not the nominal one.
-    const shrink = 1 - struck * (1 - 2 * CLOD_RADIUS * pattern.sizeScale);
-    const half = (size * shrink) / 2;
+    // Shared with collision, so what she stands on is what she is looking at.
+    const half = chipHalfExtent(pattern, progress);
+    const shrink = (half * 2) / size;
     const drift = erosion * size * 0.22;
     /*
      * The jolt: a kick on the hit that dies away before the next one.

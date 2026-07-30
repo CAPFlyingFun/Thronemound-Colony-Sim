@@ -16,7 +16,8 @@ import {
 } from '../voxel/VoxelWorld';
 import { FACES, burialShade, meshChunk } from '../voxel/mesher';
 import {
-  buildFracture, cellCentre, chipMeshData, eventsBetween, hashVoxel, releasedBetween, removedAt,
+  buildFracture, cellCentre, chipHalfExtent, chipMeshData, eventsBetween, hashVoxel,
+  releasedBetween, removedAt,
   CELL_COUNT, clodSizeScale, type DigEvent, type DigEventKind, type FracturePattern,
 } from '../voxel/fracture';
 import {
@@ -94,6 +95,9 @@ const JUMP_HEIGHT = 1.45;
 const JUMP_SPEED = Math.sqrt(2 * GRAVITY * JUMP_HEIGHT);
 /** Rise the ant steps over without jumping — one voxel plus a hair. */
 const STEP_HEIGHT = 1.05;
+
+/** A corner of an axis-aligned box, in voxel units. */
+interface Box { x: number; y: number; z: number }
 /** Amplitude and rate of the crawl sway while climbing. */
 const CLIMB_SWAY = 0.025;
 const CLIMB_SWAY_HZ = 2.4;
@@ -219,20 +223,20 @@ const CLOD_SAG = 0.09;
 const CLOD_PROBES: readonly (readonly [number, number, number])[] = [
   [0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
 ];
-/**
- * How big one loose PIECE draws.
+/*
+ * How big one loose PIECE draws used to live here, as CLOD_RADIUS * 2.
  *
- * Under the quarter-cube it represents, and deliberately. Pieces are spawned on
- * DERIVED from CLOD_RADIUS, and it has to be.
+ * It is LooseSoil.radius() now, and the move is the point. This was a second
+ * number meaning the same thing as the collision radius, and twice it drifted
+ * from it: first hard-coded at 0.17 against a collision radius of 0.3, so every
+ * pellet hovered a fifth of a voxel above the ground on a sphere three times
+ * bigger than the thing you could see; then derived correctly but only from the
+ * NOMINAL size, while the pellet was drawn at its own — which floated the small
+ * ones all over again, one twentieth of a voxel up.
  *
- * The clod shapes are normalised to mean radius 0.5 — diameter one — so this
- * scale IS the diameter, and half of it is the radius the pellet is drawn at.
- * Hard-coding it left the drawn radius at 0.085 while collision used 0.3, so
- * every pellet came to rest on a sphere three times bigger than the thing you
- * could see and appeared to hover a fifth of a voxel above the ground. Two
- * numbers meaning one thing, and only one of them got updated.
+ * One owner, asked by everyone: what is drawn, what she walks on, what rests on
+ * the floor.
  */
-const PIECE_SIZE = CLOD_RADIUS * 2;
 /**
  * How hard a freed piece is kicked off the face, and how far the sheet fans.
  *
@@ -422,7 +426,14 @@ export class DigScene {
   private readonly clodAnchor = new THREE.Vector3();
 
   /* Spoil lying around: real objects, shovable and re-carryable. */
-  private readonly soil = new LooseSoil();
+  /*
+   * Told how big a pellet actually is, rather than assuming the nominal size.
+   * Resting height, the ant's collision and the drawn instance all read this
+   * one number now, which is what stops a pellet hovering or sinking.
+   */
+  private readonly soil = new LooseSoil((clod) => CLOD_RADIUS * clodSizeScale(
+    clod.source.x, clod.source.y, clod.source.z, clod.material,
+  ));
   /**
    * One InstancedMesh per clod variant, so a whole nest of spoil costs twelve
    * draw calls no matter how many clods there are. Per-instance colour carries
@@ -1364,15 +1375,13 @@ export class DigScene {
       // Piece scale, not load scale: the lump in her jaws represents a whole
       // scoop, but each thing lying on the ground is one 64th of a cube.
       /*
-       * The SAME per-cell size the block shrank down to.
-       *
-       * Both sides read it from one hash of the one source cell, so a pellet
-       * appears at exactly the size its block finished at. Varying either side
-       * on its own would put the seam back that tying them together removed.
+       * The SAME per-cell size the block shrank down to, taken from the soil
+       * itself so the three things that need to agree cannot drift apart: what
+       * is drawn, what the ant walks on, and what rests on the floor. Reading
+       * the hash separately here is how the drawn pellet and its resting
+       * height came to be two different sizes.
        */
-      const grew = PIECE_SIZE * clodSizeScale(
-        clod.source.x, clod.source.y, clod.source.z, clod.material,
-      );
+      const grew = this.soil.radius(clod) * 2;
       this.soilDummy.scale.set(
         grew * style.axisScale[0],
         grew * style.axisScale[1],
@@ -2101,11 +2110,11 @@ export class DigScene {
    * an axis-aligned box at 43 degrees fits nowhere, and allowing one would
    * throw away the entire six-direction simplification.
    */
-  private collides(at: THREE.Vector3, up = this.surface.up): boolean {
+  private bodyBox(at: THREE.Vector3, up: AxisDirection): { lo: Box; hi: Box } {
     const axis = up.endsWith('_x') ? 'x' : up.endsWith('_y') ? 'y' : 'z';
     const sign = up.startsWith('pos') ? 1 : -1;
-    const lo = { x: 0, y: 0, z: 0 };
-    const hi = { x: 0, y: 0, z: 0 };
+    const lo: Box = { x: 0, y: 0, z: 0 };
+    const hi: Box = { x: 0, y: 0, z: 0 };
     for (const a of ['x', 'y', 'z'] as const) {
       if (a === axis) {
         const reach = EYE_HEIGHT * sign;
@@ -2116,12 +2125,76 @@ export class DigScene {
         hi[a] = at[a] + BODY_RADIUS;
       }
     }
+    return { lo, hi };
+  }
+
+  private collides(at: THREE.Vector3, up = this.surface.up): boolean {
+    const { lo, hi } = this.bodyBox(at, up);
     for (let x = Math.floor(lo.x); x <= Math.floor(hi.x); x++) {
       for (let y = Math.floor(lo.y); y <= Math.floor(hi.y); y++) {
         for (let z = Math.floor(lo.z); z <= Math.floor(hi.z); z++) {
-          if (isSolid(this.world.get(x, y, z))) return true;
+          if (!isSolid(this.world.get(x, y, z))) continue;
+          /*
+           * A cell part-way through being dug is only as big as it LOOKS.
+           *
+           * It stays solid in the world for the whole dig — that is what stops
+           * the soil being spent before she has finished earning it — so the
+           * collision box was the full cube no matter how far the block had
+           * shrunk. Standing on a cell she was digging down through, she hung
+           * in the air a third of a voxel above it and dropped when it went.
+           */
+          const chip = this.chips.get(DigScene.chipKey(x, y, z));
+          if (!chip) return true;
+          const half = chipHalfExtent(chip.pattern, chip.progress);
+          if (lo.x < x + 0.5 + half && hi.x > x + 0.5 - half
+            && lo.y < y + 0.5 + half && hi.y > y + 0.5 - half
+            && lo.z < z + 0.5 + half && hi.z > z + 0.5 - half) return true;
         }
       }
+    }
+    if (this.clodsBlock(lo, hi)) return true;
+    return false;
+  }
+
+  /**
+   * Loose soil is something to climb over, not walk through.
+   *
+   * Spoil used to ignore the ant entirely, on the reasoning that a heap you can
+   * walk into is a heap you can build up rather than one that shoves you
+   * around. In practice it read as exactly what it was — dirt she passed
+   * straight through. STEP_HEIGHT is well over a pellet, so a heap she walks
+   * into she simply steps onto, which is the behaviour that was wanted from
+   * the walk-through in the first place.
+   *
+   * Sized per pellet rather than at the nominal CLOD_RADIUS, because pellets
+   * vary by a fifth either way and the whole point here is that the collision
+   * is the size of the thing you can see.
+   */
+  private clodsBlock(lo: Box, hi: Box): boolean {
+    if (this.soil.count === 0) return false;
+    let here: { lo: Box; hi: Box } | null = null;
+    for (const clod of this.soil.clods) {
+      const r = this.soil.radius(clod);
+      const p = clod.position;
+      if (lo.x >= p.x + r || hi.x <= p.x - r) continue;
+      if (lo.y >= p.y + r || hi.y <= p.y - r) continue;
+      if (lo.z >= p.z + r || hi.z <= p.z - r) continue;
+      /*
+       * A pellet she is ALREADY inside cannot be allowed to hold her.
+       *
+       * Every move is tested against the position it would land on, so one
+       * dropped onto her — or settled into her while she stood still — would
+       * otherwise make every direction blocked at once and freeze her there
+       * with nothing to push against. Ignoring the ones that already overlap
+       * lets her walk out, and they start blocking again the moment she is
+       * clear. Computed lazily: on almost every call nothing is near enough to
+       * reach this line.
+       */
+      here ??= this.bodyBox(this.position, this.surface.up);
+      if (here.lo.x < p.x + r && here.hi.x > p.x - r
+        && here.lo.y < p.y + r && here.hi.y > p.y - r
+        && here.lo.z < p.z + r && here.hi.z > p.z - r) continue;
+      return true;
     }
     return false;
   }

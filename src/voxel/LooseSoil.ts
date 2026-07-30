@@ -95,8 +95,39 @@ function solidAt(world: Sampler, x: number, y: number, z: number): boolean {
   return isSolid(world.get(Math.floor(x), Math.floor(y), Math.floor(z)));
 }
 
+/** How big one pellet is, so the caller can vary it per cell. */
+export type ClodRadius = (clod: Clod) => number;
+
 export class LooseSoil {
   readonly clods: Clod[] = [];
+
+  /**
+   * Injected rather than imported.
+   *
+   * Pellet size varies per source cell, and the function that says by how much
+   * lives next to the fracture code that also uses it — which imports
+   * CLOD_RADIUS from here, so reaching for it directly would be a cycle. A
+   * caller that knows about both passes it in; anything that only cares about
+   * the physics gets the nominal size and never has to know.
+   */
+  private readonly sizeOf: ClodRadius;
+
+  constructor(sizeOf: ClodRadius = () => CLOD_RADIUS) {
+    this.sizeOf = sizeOf;
+  }
+
+  /**
+   * This pellet's own radius.
+   *
+   * Public because the ANT collides with pellets too, and her idea of how big
+   * one is has to be the same as theirs. Resting height came from the nominal
+   * radius while the pellet was DRAWN at its own, so a small one hovered a
+   * twentieth of a voxel off the floor — which is the floating-clod fault
+   * again, one rung down.
+   */
+  radius(clod: Clod): number {
+    return this.sizeOf(clod);
+  }
 
   get count(): number {
     return this.clods.length;
@@ -266,7 +297,7 @@ export class LooseSoil {
         next[axis] += step;
         // Sample the leading face of the clod rather than its centre, so it
         // stops on contact instead of sinking half a radius in.
-        const lead = next[axis] + Math.sign(step) * CLOD_RADIUS;
+        const lead = next[axis] + Math.sign(step) * this.sizeOf(clod);
         const probe = { ...next };
         probe[axis] = lead;
         if (solidAt(world, probe.x, probe.y, probe.z)) {
@@ -309,8 +340,8 @@ export class LooseSoil {
    */
   displace(centre: Vec3, radius: number, motion: Vec3, strength: number): Clod[] {
     const touched: Clod[] = [];
-    const reach = radius + CLOD_RADIUS;
     for (const clod of this.clods) {
+      const reach = radius + this.sizeOf(clod);
       const dx = clod.position.x - centre.x;
       const dy = clod.position.y - centre.y;
       const dz = clod.position.z - centre.z;
@@ -342,8 +373,8 @@ export class LooseSoil {
     }));
   }
 
-  static fromJSON(data: ReturnType<LooseSoil['toJSON']>): LooseSoil {
-    const soil = new LooseSoil();
+  static fromJSON(data: ReturnType<LooseSoil['toJSON']>, sizeOf?: ClodRadius): LooseSoil {
+    const soil = new LooseSoil(sizeOf);
     for (const entry of data) {
       soil.clods.push({
         position: { x: entry.p[0], y: entry.p[1], z: entry.p[2] },

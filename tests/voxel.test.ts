@@ -6,11 +6,11 @@ import {
 import {
   CAVITY_DISH, DISH_CELLS, EDGE_CHAMFER, FACES, burialShade, meshChunk, tangentAxes,
 } from '../src/voxel/mesher';
-import { CLOD_RADIUS, MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES } from '../src/voxel/LooseSoil';
+import { CLOD_RADIUS, MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES, type Clod } from '../src/voxel/LooseSoil';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
 import { SKY_PHASES, packColor, skyAt, wrapHours } from '../src/voxel/daylight';
-import { HIT_BEVEL, CELL_COUNT, CHIP_CELLS, CLOD_SIZE_MAX, CLOD_SIZE_MIN, CRACK_BRANCHES, HIT_COUNT, MAX_SHRINK, clodSizeScale, hitPhase, CRACK_JOINTS, CRACK_START, crackSegments, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
+import { HIT_BEVEL, CELL_COUNT, CHIP_CELLS, chipHalfExtent, CLOD_SIZE_MAX, CLOD_SIZE_MIN, CRACK_BRANCHES, HIT_COUNT, MAX_SHRINK, clodSizeScale, hitPhase, CRACK_JOINTS, CRACK_START, crackSegments, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
@@ -1620,6 +1620,52 @@ describe('fracture', () => {
     expect(scales.size).toBeGreaterThan(25);
   });
 
+  it('publishes the size it is drawn at, for collision to use', () => {
+    /*
+     * The block stays SOLID in the world for the whole dig — that is what stops
+     * the soil being spent before it is earned — so the ant collided with a
+     * full cube however far the block under her had shrunk. Standing on a cell
+     * she was digging down through, she hovered a third of a voxel above it and
+     * dropped when it finally went.
+     *
+     * Collision reads chipHalfExtent now, so it can only be right if that is
+     * the same number the mesh is built from. Measured against the mesh here
+     * rather than re-derived, because a second copy of this arithmetic is
+     * exactly how the block and the pellet came to be different sizes.
+     */
+    const pattern = buildFracture(11, S, 23, TOPSOIL);
+    let last = Infinity;
+    for (const progress of [0, 0.2, 0.4, 0.6, 0.8, 0.95]) {
+      const half = chipHalfExtent(pattern, progress);
+      // Never grows back: collision that ratchets the wrong way would push her
+      // out of a hole she had already dug.
+      expect(half).toBeLessThanOrEqual(last + 1e-9);
+      last = half;
+
+      // The faces of the drawn block sit exactly this far from its centre. Its
+      // own drift and jolt move the whole lump, so measure about the middle of
+      // what was drawn rather than about the cell.
+      const data = chipMeshData(pattern, 11, S, 23, progress)!;
+      for (const k of [0, 1, 2]) {
+        let lo = Infinity;
+        let hi = -Infinity;
+        for (let i = k; i < data.positions.length; i += 3) {
+          lo = Math.min(lo, data.positions[i]!);
+          hi = Math.max(hi, data.positions[i]!);
+        }
+        // Bevelled corners and tilt pull the extremes IN, and the cracks lifted
+        // proud of each face push them back out, so this is a bound rather than
+        // an equality — but a full cube would be 0.5 and blow straight past it.
+        expect((hi - lo) / 2).toBeLessThanOrEqual(half * 1.2);
+      }
+    }
+    // It ends on the pellet, which is the whole point of the handover.
+    expect(chipHalfExtent(pattern, 0.999)).toBeCloseTo(CLOD_RADIUS * pattern.sizeScale, 9);
+    // And a fresh cell is still a whole voxel, or she would fall into the
+    // ground the instant she started digging.
+    expect(chipHalfExtent(pattern, 0)).toBeCloseTo(0.5, 9);
+  });
+
   it('changes only ON a hit, never between them', () => {
     /*
      * The dig is a sequence of BLOWS now, not a smooth dissolve: a crack opens,
@@ -1905,6 +1951,46 @@ describe('loose soil', () => {
     const cut = Math.hypot(1, 1 - HIT_BEVEL, 1 - HIT_BEVEL);
     expect(far / 0.5).toBeLessThan(cut * 1.12);
     expect(far / 0.5).toBeGreaterThan(1.2);
+  });
+
+  it('rests a pellet on the floor at the size it is drawn', () => {
+    /*
+     * The floating-clod fault, one rung down from where it was caught before.
+     *
+     * That time the drawn radius was hard-coded at 0.085 against a collision
+     * radius of 0.3. This time the drawn radius was right and the PHYSICS used
+     * the nominal size, so a pellet drawing at 0.78 of nominal came to rest on
+     * a sphere a fifth bigger than itself and hovered above the floor.
+     */
+    const sizeOf = (c: Clod) => CLOD_RADIUS * clodSizeScale(
+      c.source.x, c.source.y, c.source.z, c.material,
+    );
+    const floor = { get: (_x: number, y: number) => (y <= S ? TOPSOIL : AIR) };
+    /*
+     * The EXTREMES of the size range, searched for rather than picked.
+     *
+     * The first version of this used two cells that happened to land near the
+     * nominal size, so the gap it exists to catch was a few thousandths of a
+     * voxel — and it passed with the fault put back in. These two are the
+     * smallest and largest pellet in a 60x60 sweep.
+     */
+    const sources = [{ x: 48, y: S, z: 47 }, { x: 26, y: S, z: 4 }];
+    const sizes = sources.map((source) => {
+      const soil = new LooseSoil(sizeOf);
+      const clod = soil.drop({ x: 20.5, y: S + 3, z: 20.5 }, TOPSOIL, source)!;
+      for (let i = 0; i < 900; i++) soil.step(floor, 1 / 60, 9.8);
+      /*
+       * Its underside is ON the floor: neither sunk into it nor hovering.
+       *
+       * Two decimals, which is not slack. It settles within a thousandth --
+       * the physics stops on contact a fraction of a frame's fall short -- and
+       * resting at the nominal size instead misses by fifty times that.
+       */
+      expect(clod.position.y - soil.radius(clod)).toBeCloseTo(S + 1, 2);
+      return soil.radius(clod);
+    });
+    // Far enough apart that resting them both at the nominal size cannot pass.
+    expect(Math.abs(sizes[0]! - sizes[1]!)).toBeGreaterThan(0.08);
   });
 
   it('conserves soil across dig, drop and pick up again', () => {
