@@ -81,8 +81,35 @@ export const DISH_CELLS = 3;
  */
 export const CAVITY_ENCLOSURE = 3;
 
+/**
+ * How far a CONVEX edge is cut back, making cells read as octagons.
+ *
+ * Slice the corners off a square by this fraction of its width and the square
+ * becomes a regular octagon: 1/(2+sqrt2) = 0.2929, which leaves the four
+ * original sides and the four new diagonals exactly equal. Do it to all twelve
+ * edges and eight corners of a cube and you get a rhombicuboctahedron — 6
+ * squares, 12 bevels, 8 triangles — which reads as round from every direction
+ * rather than only sideways. An octagon fills 90% of its circumscribed circle
+ * against a hexagon's 83%, which is the whole reason to prefer eight sides.
+ *
+ * Cuts material AWAY, so the drawn surface only ever recedes into the soil, the
+ * same safety rule dishing follows: never draw geometry in front of where the
+ * DDA raycast and the AABB collision think the solid is.
+ *
+ * CONVEX edges only — outside corners, where two exposed faces of the SAME
+ * voxel meet. A tunnel's interior creases are CONCAVE and formed by two
+ * DIFFERENT voxels, so they are untouched by this and remain the dish's job.
+ * That boundary is what keeps this watertight and per-voxel local.
+ */
+export const EDGE_CHAMFER = 0.2929;
+
 /** Brightness multiplier per AO level, darkest (fully enclosed corner) first. */
 const AO_LEVELS = [0.45, 0.62, 0.8, 1.0] as const;
+
+/** FACES index for an axis and sign. Mirrors the table's +X,-X,+Y,-Y,+Z,-Z order. */
+function faceIndex(axis: number, sign: number): number {
+  return axis * 2 + (sign > 0 ? 0 : 1);
+}
 
 /** Cheap deterministic per-voxel jitter so soil reads as grain, not plastic. */
 export function voxelTint(x: number, y: number, z: number): number {
@@ -145,6 +172,20 @@ export function meshChunk(
         // carries only shading (AO x jitter) and multiplies over the albedo.
         const tint = voxelTint(x, y, z);
 
+        /*
+         * Which of the six neighbours are air, computed once per voxel.
+         *
+         * The face loop needs it anyway, and the chamfer needs it for the four
+         * IN-PLANE directions of every face — an edge is convex exactly when
+         * the neighbour beyond it is air, because that is when the adjoining
+         * face is also being drawn. Six samples replace up to twenty-four.
+         */
+        const open: boolean[] = [];
+        for (const probe of FACES) {
+          open.push(!sample(x + probe.normal[0], y + probe.normal[1], z + probe.normal[2]));
+        }
+        const openDir = (axis: number, sign: number) => open[faceIndex(axis, sign)]!;
+
         for (const face of FACES) {
           const [nx, ny, nz] = face.normal;
           if (isSolid(world.get(x + nx, y + ny, z + nz))) continue;
@@ -175,18 +216,38 @@ export function meshChunk(
           }
           const dish = enclosure >= CAVITY_ENCLOSURE ? CAVITY_DISH : 0;
 
-          for (const corner of face.corners) {
-            const wx = x + corner[0];
-            const wy = y + corner[1];
-            const wz = z + corner[2];
-            positions.push(wx, wy, wz);
-            normals.push(nx, ny, nz);
-            layers.push(voxel);
-            tangents.push(tangent[0], tangent[1], tangent[2]);
-            // World-space UVs: neighbouring voxels of one material read as a
-            // single continuous surface, and one tile spans TILE_VOXELS.
-            const world = [wx, wy, wz] as const;
-            uvs.push(world[axisA]! / TILE_VOXELS, world[axisB]! / TILE_VOXELS);
+          /*
+           * Pull a corner in along whichever of its two in-plane edges is
+           * convex. The bevel quads and corner triangles below are generated
+           * from the same constant and the same test, so the point this lands
+           * on is byte-for-byte the point they start from — that is what makes
+           * the result watertight instead of a mesh full of hairline slits.
+           */
+          const insetCorner = (corner: Vec3): [number, number, number] => {
+            const p: [number, number, number] = [corner[0], corner[1], corner[2]];
+            const ia = corner[axisA] === 1 ? 1 : -1;
+            const ib = corner[axisB] === 1 ? 1 : -1;
+            if (openDir(axisA, ia)) p[axisA] -= ia * EDGE_CHAMFER;
+            if (openDir(axisB, ib)) p[axisB] -= ib * EDGE_CHAMFER;
+            return p;
+          };
+          const inset = face.corners.map(insetCorner) as [
+            [number, number, number], [number, number, number],
+            [number, number, number], [number, number, number],
+          ];
+
+          /*
+           * AO first, vertices second.
+           *
+           * A dished face never uses these four corner vertices — it pushes its
+           * own subdivided grid and the corners are left orphaned in the buffer.
+           * That was 4 dead vertices on every dished face, which is most of the
+           * underground surface, and it also makes the buffer impossible to
+           * reason about from outside. So compute the shading here and push
+           * geometry only in the branch that actually draws it.
+           */
+          for (let ci = 0; ci < 4; ci++) {
+            const corner = face.corners[ci]!;
 
             // Corner components are 0/1; map to -1/+1 offsets in the face plane.
             const da = corner[axisA] === 1 ? 1 : -1;
@@ -210,27 +271,42 @@ export function meshChunk(
               return sample(p[0]!, p[1]!, p[2]!);
             })();
 
-            const level = aoLevel(sideA, sideB, diagonal);
-            ao.push(level);
-            const shade = AO_LEVELS[level]! * tint;
-            colors.push(shade, shade, shade);
+            ao.push(aoLevel(sideA, sideB, diagonal));
           }
 
-          if (dish > 0) {
+          if (dish === 0) {
+            for (let ci = 0; ci < 4; ci++) {
+              const drawn = inset[ci]!;
+              const wx = x + drawn[0];
+              const wy = y + drawn[1];
+              const wz = z + drawn[2];
+              positions.push(wx, wy, wz);
+              normals.push(nx, ny, nz);
+              layers.push(voxel);
+              tangents.push(tangent[0], tangent[1], tangent[2]);
+              // World-space UVs: neighbouring voxels of one material read as a
+              // single continuous surface, and one tile spans TILE_VOXELS.
+              const w = [wx, wy, wz] as const;
+              uvs.push(w[axisA]! / TILE_VOXELS, w[axisB]! / TILE_VOXELS);
+              const shade = AO_LEVELS[ao[ci]!]! * tint;
+              colors.push(shade, shade, shade);
+            }
+          } else {
             /*
              * Subdivide and bow the middle in.
              *
-             * The four corner vertices just pushed stay exactly where they are —
-             * the dish falls to zero along every edge, so neighbouring faces
-             * still meet vertex for vertex. Carrying it into the edges would
-             * inset this face from its neighbours and open a hairline slit at
-             * every corner of every tunnel, which you can see straight through.
+             * The dish falls to zero along every edge of the INSET quad, so the
+             * face still meets its own bevels vertex for vertex. Carrying it
+             * into the edges would inset this face from its neighbours a second
+             * time and open a hairline slit at every corner of every tunnel,
+             * which you can see straight through.
              *
              * Interior samples are bilinear across the quad: position, UV and
              * AO alike, so the shading follows the geometry rather than being
              * recomputed per sample against neighbours that have not changed.
              */
-            const c = face.corners;
+            // The INSET corners, so a dished face and its bevels share edges.
+            const c = inset;
             const lerp3 = (u: number, v: number, axis: number) => (
               (c[0][axis]! * (1 - u) + c[1][axis]! * u) * (1 - v)
               + (c[3][axis]! * (1 - u) + c[2][axis]! * u) * v
@@ -334,6 +410,127 @@ export function meshChunk(
             indices.push(first, first + 1, first + 2, first, first + 2, first + 3);
           }
           quadCount++;
+        }
+
+        /*
+         * The chamfer geometry: one bevel per convex EDGE, one triangle per
+         * convex CORNER.
+         *
+         * A flat wall has a single exposed face, so no pair of faces is open
+         * and none of this runs — flat surfaces cost exactly what they cost
+         * before this existed. The price tracks how convoluted the surface is,
+         * which is the right thing for it to track. A fully exposed voxel is
+         * the worst case at 6 + 12 + 8 = 26 primitives.
+         */
+        if (EDGE_CHAMFER > 0) {
+          const lo = EDGE_CHAMFER;
+          const hi = 1 - EDGE_CHAMFER;
+          /** Face-plane coordinate: the cube's own side. */
+          const at = (sign: number) => (sign > 0 ? 1 : 0);
+          /** Cut-back coordinate: one chamfer in from that side. */
+          const back = (sign: number) => (sign > 0 ? hi : lo);
+
+          /*
+           * Emit with the winding that matches an outward normal.
+           *
+           * Determined from the cross product rather than asserted, because the
+           * FACES table traverses some faces' in-plane axes backwards and
+           * getting this wrong is the exact bug that made the hex room's walls
+           * invisible from inside the room.
+           */
+          const emit = (pts: readonly [number, number, number][], n: Vec3) => {
+            const base = positions.length / 3;
+            const nlen = Math.hypot(n[0], n[1], n[2]) || 1;
+            const un: Vec3 = [n[0] / nlen, n[1] / nlen, n[2] / nlen];
+            // Chamfer faces sit on convex edges, so nothing local occludes
+            // them — unless the voxel diagonally across is solid, which puts
+            // the edge in a crease after all.
+            const diag = sample(
+              x + (un[0] > 0 ? 1 : un[0] < 0 ? -1 : 0),
+              y + (un[1] > 0 ? 1 : un[1] < 0 ? -1 : 0),
+              z + (un[2] > 0 ? 1 : un[2] < 0 ? -1 : 0),
+            );
+            const shade = AO_LEVELS[diag ? 2 : 3]! * tint;
+            const [uAxis, vAxis] = tangentAxes(un[0] !== 0 && un[1] !== 0 && un[2] !== 0
+              ? [1, 0, 0] : un);
+            const tan: [number, number, number] = [0, 0, 0];
+            tan[uAxis] = 1;
+            const tdot = tan[0] * un[0] + tan[1] * un[1] + tan[2] * un[2];
+            const tx = tan[0] - un[0] * tdot;
+            const ty = tan[1] - un[1] * tdot;
+            const tz = tan[2] - un[2] * tdot;
+            const tlen = Math.hypot(tx, ty, tz) || 1;
+            for (const p of pts) {
+              positions.push(x + p[0], y + p[1], z + p[2]);
+              normals.push(un[0], un[1], un[2]);
+              layers.push(voxel);
+              tangents.push(tx / tlen, ty / tlen, tz / tlen);
+              const w = [x + p[0], y + p[1], z + p[2]] as const;
+              uvs.push(w[uAxis]! / TILE_VOXELS, w[vAxis]! / TILE_VOXELS);
+              colors.push(shade, shade, shade);
+            }
+            // Winding from the first triangle; flip the whole fan if it faces in.
+            const e1 = [pts[1]![0] - pts[0]![0], pts[1]![1] - pts[0]![1], pts[1]![2] - pts[0]![2]];
+            const e2 = [pts[2]![0] - pts[0]![0], pts[2]![1] - pts[0]![1], pts[2]![2] - pts[0]![2]];
+            const facing = (e1[1]! * e2[2]! - e1[2]! * e2[1]!) * un[0]
+              + (e1[2]! * e2[0]! - e1[0]! * e2[2]!) * un[1]
+              + (e1[0]! * e2[1]! - e1[1]! * e2[0]!) * un[2];
+            for (let i = 1; i + 1 < pts.length; i++) {
+              if (facing >= 0) indices.push(base, base + i, base + i + 1);
+              else indices.push(base, base + i + 1, base + i);
+            }
+            quadCount++;
+          };
+
+          // One bevel per convex edge. af < ag visits each perpendicular pair
+          // once, so no edge is emitted twice.
+          for (let af = 0; af < 3; af++) {
+            for (const sf of [1, -1] as const) {
+              if (!openDir(af, sf)) continue;
+              for (let ag = af + 1; ag < 3; ag++) {
+                for (const sg of [1, -1] as const) {
+                  if (!openDir(ag, sg)) continue;
+                  const ac = 3 - af - ag;
+                  // The bevel's ends stop short wherever the edge running into
+                  // them is also convex, leaving room for the corner triangle.
+                  const eLo = openDir(ac, -1) ? lo : 0;
+                  const eHi = openDir(ac, 1) ? hi : 1;
+                  const point = (onF: boolean, along: number) => {
+                    const p: [number, number, number] = [0, 0, 0];
+                    p[af] = onF ? at(sf) : back(sf);
+                    p[ag] = onF ? back(sg) : at(sg);
+                    p[ac] = along;
+                    return p;
+                  };
+                  const n: [number, number, number] = [0, 0, 0];
+                  n[af] = sf;
+                  n[ag] = sg;
+                  emit(
+                    [point(true, eLo), point(true, eHi), point(false, eHi), point(false, eLo)],
+                    n,
+                  );
+                }
+              }
+            }
+          }
+
+          // One triangle per convex corner, closing the three bevels that meet
+          // there. Its vertices are the bevels' own end points, exactly.
+          for (const sx of [1, -1] as const) {
+            for (const sy of [1, -1] as const) {
+              for (const sz of [1, -1] as const) {
+                if (!openDir(0, sx) || !openDir(1, sy) || !openDir(2, sz)) continue;
+                emit(
+                  [
+                    [at(sx), back(sy), back(sz)],
+                    [back(sx), at(sy), back(sz)],
+                    [back(sx), back(sy), at(sz)],
+                  ],
+                  [sx, sy, sz],
+                );
+              }
+            }
+          }
         }
       }
     }

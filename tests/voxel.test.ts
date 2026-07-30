@@ -3,7 +3,9 @@ import {
   AIR, CHUNK, CLAY, SAND, STONE, TOPSOIL, VoxelWorld,
   isSolid, layeredGenerator, materialOf,
 } from '../src/voxel/VoxelWorld';
-import { CAVITY_DISH, DISH_CELLS, FACES, meshChunk, tangentAxes } from '../src/voxel/mesher';
+import {
+  CAVITY_DISH, DISH_CELLS, EDGE_CHAMFER, FACES, meshChunk, tangentAxes,
+} from '../src/voxel/mesher';
 import { MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES } from '../src/voxel/LooseSoil';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
@@ -120,6 +122,111 @@ describe('mesher', () => {
     }
   });
 
+  /*
+   * A lone voxel floating in a void, so every edge and corner is convex and the
+   * chamfer runs at full strength. This is the only configuration that exercises
+   * all of it at once.
+   */
+  const loneVoxel = (sx: number, sy: number, sz: number) => ({
+    get: (x: number, y: number, z: number) => (x === sx && y === sy && z === sz ? TOPSOIL : 0),
+  });
+
+  /** Every undirected edge of the triangle soup, keyed by POSITION not index. */
+  const edgeCensus = (data: NonNullable<ReturnType<typeof meshChunk>>) => {
+    const key = (i: number) => {
+      const p = data.positions;
+      return `${p[i * 3]!.toFixed(4)},${p[i * 3 + 1]!.toFixed(4)},${p[i * 3 + 2]!.toFixed(4)}`;
+    };
+    const counts = new Map<string, number>();
+    for (let t = 0; t < data.indices.length; t += 3) {
+      const v = [data.indices[t]!, data.indices[t + 1]!, data.indices[t + 2]!];
+      for (let e = 0; e < 3; e++) {
+        const a = key(v[e]!);
+        const b = key(v[(e + 1) % 3]!);
+        const id = a < b ? `${a}|${b}` : `${b}|${a}`;
+        counts.set(id, (counts.get(id) ?? 0) + 1);
+      }
+    }
+    return counts;
+  };
+
+  it('chamfers a lone voxel into a rhombicuboctahedron', () => {
+    const data = meshChunk(loneVoxel(5, 5, 5), 0, 0, 0)!;
+    expect(data).not.toBeNull();
+    // 6 square faces + 12 edge bevels + 8 corner triangles. This is the shape
+    // that reads as round from every direction rather than only sideways.
+    expect(data.quadCount).toBe(26);
+    expect(data.positions.length / 3).toBe(6 * 4 + 12 * 4 + 8 * 3);
+    expect(data.indices.length).toBe(6 * 6 + 12 * 6 + 8 * 3);
+  });
+
+  it('leaves no slit anywhere in the chamfered surface', () => {
+    /*
+     * The whole risk of insetting a face is that its neighbours no longer meet
+     * it and you get a hairline crack you can see straight through. A closed
+     * surface has every edge shared by exactly two triangles; anything shared
+     * once is a hole.
+     */
+    const counts = edgeCensus(meshChunk(loneVoxel(5, 5, 5), 0, 0, 0)!);
+    const open = [...counts.entries()].filter(([, n]) => n !== 2);
+    expect(open).toEqual([]);
+  });
+
+  it('only ever cuts material away, never adds it', () => {
+    /*
+     * Targeting is a DDA raycast and collision is axis-separated AABBs, both
+     * against the true grid. Geometry drawn OUTSIDE the voxel is rock the
+     * player can walk their face through, so the chamfer has to stay inside.
+     */
+    const data = meshChunk(loneVoxel(5, 5, 5), 0, 0, 0)!;
+    for (let i = 0; i < data.positions.length; i += 3) {
+      for (let axis = 0; axis < 3; axis++) {
+        expect(data.positions[i + axis]!).toBeGreaterThanOrEqual(5 - 1e-6);
+        expect(data.positions[i + axis]!).toBeLessThanOrEqual(6 + 1e-6);
+      }
+    }
+  });
+
+  it('winds every chamfer primitive outward too', () => {
+    /*
+     * The bevels and corner triangles pick their winding from a cross product
+     * at runtime rather than from a hand-written table, because the FACES table
+     * traverses some faces' in-plane axes backwards. This checks the result
+     * against the normal each vertex actually carries.
+     */
+    const data = meshChunk(loneVoxel(5, 5, 5), 0, 0, 0)!;
+    for (let t = 0; t < data.indices.length; t += 3) {
+      const [i, j, k] = [data.indices[t]!, data.indices[t + 1]!, data.indices[t + 2]!];
+      const p = (n: number) => [
+        data.positions[n * 3]!, data.positions[n * 3 + 1]!, data.positions[n * 3 + 2]!,
+      ] as const;
+      const [a, b, c] = [p(i), p(j), p(k)];
+      const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+      const ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+      const cross = [
+        ab[1]! * ac[2]! - ab[2]! * ac[1]!,
+        ab[2]! * ac[0]! - ab[0]! * ac[2]!,
+        ab[0]! * ac[1]! - ab[1]! * ac[0]!,
+      ];
+      const n = [data.normals[i * 3]!, data.normals[i * 3 + 1]!, data.normals[i * 3 + 2]!];
+      expect(cross[0]! * n[0]! + cross[1]! * n[1]! + cross[2]! * n[2]!).toBeGreaterThan(0);
+    }
+  });
+
+  it('costs a flat wall nothing — no convex edges, no chamfer', () => {
+    /*
+     * The property that makes this affordable. A wall voxel has one exposed
+     * face and four solid in-plane neighbours, so no pair of faces is open and
+     * none of the chamfer code runs. Asserted through the vertex count, which
+     * would rise the moment a bevel appeared.
+     */
+    const world = makeWorld();
+    const cy = Math.floor(SURFACE / CHUNK);
+    const data = meshChunk(world, 1, cy, 1)!;
+    expect(data.positions.length / 3).toBe(data.quadCount * 4);
+    expect(data.indices.length).toBe(data.quadCount * 6);
+  });
+
   it('emits nothing for a fully buried chunk', () => {
     const world = makeWorld();
     // Chunk (1,1,1) spans y 32..63 — all solid, and every neighbour is too.
@@ -163,7 +270,17 @@ describe('mesher', () => {
      * because open ground is never dished.
      */
     const cell = DISH_CELLS * DISH_CELLS;
-    expect(after).toBe(before - 1 + 4 * cell);
+    /*
+     * Plus four bevels, one per rim voxel.
+     *
+     * Each of the pit's four lateral neighbours now shows TWO faces — its sky
+     * face and the new pit wall — and those are perpendicular, so the edge
+     * between them is convex and gets chamfered. This is the rim of the hole
+     * being rounded off, and it is the whole point: a dug pit reads as a socket
+     * with a soft lip rather than a square cut. No corner triangles, because
+     * that needs three open faces meeting and these voxels only have two.
+     */
+    expect(after).toBe(before - 1 + 4 * cell + 4);
     // The pit's floor belongs to the chunk BELOW — SURFACE is the first voxel
     // row of chunk cy, so y-1 is across the seam. That is exactly why set()
     // dirties the neighbouring chunk as well.
@@ -190,55 +307,93 @@ describe('mesher', () => {
     }
   });
 
-  it('dishes into the soil and never toward the player', () => {
+  it('always has solid soil immediately behind the drawn surface', () => {
     /*
      * Targeting is a DDA raycast and collision is axis-separated AABBs, both
-     * against the true grid. Drawn geometry in FRONT of that plane is rock you
-     * can walk your face through, so every displaced vertex has to sit on the
-     * face plane or behind it.
+     * against the true grid. Drawn geometry in FRONT of that grid is rock the
+     * player can walk their face through.
+     *
+     * Stated as "step a hair along -normal and you must be inside solid soil",
+     * which is the invariant itself rather than a proxy for it. That matters
+     * now: the old form measured each vertex against its own lattice plane and
+     * recovered the face axis from the UVs, which is meaningless for a bevel or
+     * a corner triangle — they have no single face axis. This covers flat faces,
+     * dished faces and chamfer geometry with one rule.
+     *
+     * Sampled at triangle CENTROIDS, not vertices. A vertex can sit exactly on a
+     * lattice corner shared by four voxels, and if any one of them has been dug
+     * then which voxel floor() picks is arbitrary — (40,97,40) is such a point
+     * here. The centroid of a triangle is always strictly inside its own face,
+     * so there is nothing to be ambiguous about.
      */
     const world = makeWorld();
     world.dig(40, SURFACE, 40);
     world.dig(40, SURFACE - 1, 40);
     const cy = Math.floor(SURFACE / CHUNK);
     const data = meshChunk(world, 1, cy, 1)!;
-    for (let i = 0; i < data.positions.length; i += 3) {
-      const p = [data.positions[i]!, data.positions[i + 1]!, data.positions[i + 2]!] as const;
-      const n = [data.normals[i]!, data.normals[i + 1]!, data.normals[i + 2]!];
-      const axis = faceAxisOf(p, data.uvs[(i / 3) * 2]!, data.uvs[(i / 3) * 2 + 1]!);
-      // Displacement from the face's own lattice plane. The sign of the flat
-      // face direction is recoverable from the normal's own dominant component
-      // on that axis, which stays correct however the dish tilts it.
-      const plane = Math.round(p[axis]!);
-      const out = (p[axis]! - plane) * Math.sign(n[axis]! || 1);
-      expect(out).toBeLessThanOrEqual(1e-6);
-      expect(out).toBeGreaterThan(-CAVITY_DISH - 1e-6);
+    for (let t = 0; t < data.indices.length; t += 3) {
+      const vs = [data.indices[t]!, data.indices[t + 1]!, data.indices[t + 2]!];
+      const mid = [0, 1, 2].map((k) => vs.reduce((s, v) => s + data.positions[v * 3 + k]!, 0) / 3);
+      const n = [0, 1, 2].map((k) => vs.reduce((s, v) => s + data.normals[v * 3 + k]!, 0) / 3);
+      const behind = [0, 1, 2].map((k) => Math.floor(mid[k]! - 1e-3 * n[k]!));
+      expect(world.get(behind[0]!, behind[1]!, behind[2]!)).not.toBe(0);
     }
   });
 
-  it('holds the dish at zero along every face edge, so no slit opens', () => {
+  it('anchors the dish to the CHAMFERED boundary, so bevels still meet it', () => {
     /*
-     * The dish MUST vanish at the edges. Carry it into them and each face is
-     * inset from its neighbours, opening a hairline gap at every corner of
-     * every tunnel that you can see straight through — the same trap the hex
-     * mesher had.
+     * Dishing and chamfering both move a face's vertices, and they have to agree
+     * about where its boundary is. The dish bows the middle of the quad back and
+     * must fall to zero at the quad's edge; the chamfer decides where that edge
+     * IS. Point the dish at the raw lattice corners instead of the inset ones
+     * and each dished face stops short of its own bevel, opening a hairline slit
+     * at every rounded edge — the same trap the hex mesher had.
+     *
+     * A stepped tunnel is the smallest shape with both: the standing voxel at
+     * (7,5,5) shows two perpendicular faces, both facing enclosed air.
+     */
+    const step = {
+      get: (x: number, y: number, z: number) => {
+        const lower = y === 5 && z === 5 && x >= 4 && x <= 6;
+        const upper = y === 6 && z === 5 && x >= 7 && x <= 9;
+        return lower || upper ? 0 : TOPSOIL;
+      },
+    };
+    const data = meshChunk(step, 0, 0, 0)!;
+    // Everything drawn on or just behind the plane x=7 inside that voxel: the
+    // dished face, plus the bevel that shares its upper edge.
+    const onFace = [];
+    for (let i = 0; i < data.positions.length; i += 3) {
+      const [px, py, pz] = [data.positions[i]!, data.positions[i + 1]!, data.positions[i + 2]!];
+      if (px >= 7 - 1e-6 && px <= 7 + CAVITY_DISH + 1e-6
+        && py >= 5 - 1e-6 && py <= 6 + 1e-6 && pz >= 5 - 1e-6 && pz <= 6 + 1e-6
+        && data.normals[i]! < 0) onFace.push(py);
+    }
+    expect(onFace.length).toBeGreaterThanOrEqual((DISH_CELLS + 1) ** 2);
+    /*
+     * +Y is open (the step continues upward), so that edge is cut back by
+     * exactly one chamfer and NOTHING is drawn above it — that strip is where
+     * the bevel goes. -Y is solid, so that edge stays on the lattice.
+     */
+    expect(Math.max(...onFace)).toBeCloseTo(6 - EDGE_CHAMFER, 5);
+    expect(Math.min(...onFace)).toBeCloseTo(5, 5);
+  });
+
+  it('leaves no orphaned vertices in the buffer', () => {
+    /*
+     * A dished face used to push its four flat corners and then never index
+     * them, drawing a subdivided grid instead: four dead vertices on every
+     * dished face, which is most of the underground surface. It also made the
+     * buffer impossible to reason about from outside, which is how the
+     * chamfer's own test came to be measuring geometry that is never drawn.
      */
     const world = makeWorld();
     world.dig(40, SURFACE, 40);
+    world.dig(40, SURFACE - 1, 40);
     const cy = Math.floor(SURFACE / CHUNK);
-    const data = meshChunk(world, 1, cy, 1)!;
-    let edges = 0;
-    for (let i = 0; i < data.positions.length; i += 3) {
-      const p = [data.positions[i]!, data.positions[i + 1]!, data.positions[i + 2]!] as const;
-      const axis = faceAxisOf(p, data.uvs[(i / 3) * 2]!, data.uvs[(i / 3) * 2 + 1]!);
-      const inPlane = [0, 1, 2].filter((k) => k !== axis);
-      // On an edge of its own face: one in-plane coordinate is on the lattice.
-      const onEdge = inPlane.some((k) => Math.abs(p[k]! - Math.round(p[k]!)) < 1e-6);
-      if (!onEdge) continue;
-      edges++;
-      expect(Math.abs(p[axis]! - Math.round(p[axis]!))).toBeLessThan(1e-6);
+    for (const data of [meshChunk(world, 1, cy, 1)!, meshChunk(loneVoxel(5, 5, 5), 0, 0, 0)!]) {
+      expect(new Set(data.indices).size).toBe(data.positions.length / 3);
     }
-    expect(edges).toBeGreaterThan(20);
   });
 });
 
