@@ -1,17 +1,20 @@
 /**
  * Time of day, as a curve rather than a set of presets.
  *
- * The scene has ONE sky image. Rather than pretend otherwise, the phases below
- * grade it: brightness, the colour the lights take, where the sun sits and how
- * strong the ambient fill is. That is enough for dawn, noon, dusk and night to
- * read as different times of day from a single 185 KB JPEG, and it costs
- * nothing to download.
+ * Most of what sells a time of day is the LIGHT, not the picture, so the phases
+ * below carry both: brightness, the colour the lights take, where the sun sits,
+ * how strong the ambient fill is — and optionally an image of their own.
  *
- * It is also built to be REPLACED rather than extended. Each phase names a sky
- * image; when a phase has its own file the renderer uses it and cross-fades
- * between the two nearest, and when it does not it falls back to the shared one
- * graded. So dropping real HDRIs into public/sky/ and naming them here upgrades
- * the result without touching the renderer.
+ * A phase with no image falls back to the shared sky, graded. That is why night
+ * and dusk read convincingly off a daylight JPEG. A phase WITH one gets it,
+ * and the renderer swaps to whichever phase is nearer at the halfway mark; it
+ * does not cross-fade the two images, because `scene.background` takes a single
+ * texture and blending would mean drawing the background through a shader of
+ * our own. The lighting interpolates continuously either way, which is what the
+ * eye actually reads as time passing.
+ *
+ * So this is built to be extended by dropping files into public/sky/ and naming
+ * them here — no renderer change needed.
  *
  * Pure — no three.js — so the interpolation is testable without a GL context.
  */
@@ -70,7 +73,9 @@ export const SKY_PHASES: readonly SkyPhase[] = [
   {
     name: 'noon',
     at: 12,
-    image: null,
+    // The brighter, bluer of the two we have — the one worth the extra 350 KB
+    // is the one you spend the most daylight looking at.
+    image: 'daysky_2k.jpg',
     background: 1,
     environment: 1,
     hemisphere: 0.28,

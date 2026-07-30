@@ -27,7 +27,7 @@ import {
   CLOD_RADIUS, LooseSoil, PIECES_PER_VOXEL, SCOOP_PIECES, type Clod,
 } from '../voxel/LooseSoil';
 import { raycastVoxel } from '../voxel/raycast';
-import { DAY_HOURS, packColor, skyAt } from '../voxel/daylight';
+import { DAY_HOURS, SKY_PHASES, packColor, skyAt } from '../voxel/daylight';
 import { DigSession } from '../voxel/DigSession';
 import { createVoxelMaterial, type VoxelMaterialBundle } from '../voxel/voxelMaterial';
 import { DEN_MIN_CHAMBER, DEN_MIN_DEPTH, QueenFounding } from '../voxel/QueenFounding';
@@ -366,6 +366,10 @@ export class DigScene {
   private readonly headlamp: THREE.PointLight;
   /** Equirectangular sky and the irradiance map derived from it. */
   private sky: THREE.Texture | null = null;
+  /** Skies named by a phase, by filename. Empty until they decode. */
+  private readonly skies = new Map<string, {
+    texture: THREE.Texture; environment: THREE.Texture;
+  }>();
   private environment: THREE.Texture | null = null;
   private readonly hemisphere: THREE.HemisphereLight;
   private readonly sun: THREE.DirectionalLight;
@@ -806,6 +810,17 @@ export class DigScene {
    * because there is no roughness-aware blur.
    */
   private loadSky(): void {
+    /*
+     * Every distinct image named by a phase, plus the shared fallback.
+     *
+     * Loaded as a set rather than one at a time because the irradiance map has
+     * to be built per image: assigning a raw equirectangular texture to
+     * `environment` gives a hard, sparkly result, so each one needs its own
+     * PMREM pass and there is no cheap way to do that lazily mid-flight.
+     */
+    const wanted = new Set<string>();
+    for (const phase of SKY_PHASES) if (phase.image) wanted.add(phase.image);
+    for (const name of wanted) this.loadSkyImage(name);
     new THREE.TextureLoader().load(SKY_URL, (texture) => {
       if (this.disposed) return;
       texture.mapping = THREE.EquirectangularReflectionMapping;
@@ -835,6 +850,22 @@ export class DigScene {
       this.applyDaylight();
     }, undefined, () => {
       // Left on the flat colour deliberately — a missing sky is cosmetic.
+    });
+  }
+
+  /** One named sky, kept alongside its irradiance map. */
+  private loadSkyImage(name: string): void {
+    new THREE.TextureLoader().load(`${import.meta.env.BASE_URL}sky/${name}`, (texture) => {
+      if (this.disposed) return;
+      texture.mapping = THREE.EquirectangularReflectionMapping;
+      texture.colorSpace = THREE.SRGBColorSpace;
+      const pmrem = new THREE.PMREMGenerator(this.renderer);
+      const environment = pmrem.fromEquirectangular(texture).texture;
+      pmrem.dispose();
+      this.skies.set(name, { texture, environment });
+      this.applyDaylight();
+    }, undefined, () => {
+      // A phase whose image is missing simply falls back to the shared sky.
     });
   }
 
@@ -2638,8 +2669,26 @@ export class DigScene {
       Math.sin(azimuth) * Math.cos(grade.elevation) * reach,
     );
     if (this.sky) this.hemisphere.intensity = grade.hemisphere;
-    if (this.sky) {
+    /*
+     * Whichever phase is NEARER owns the sky, and it swaps at the halfway mark.
+     *
+     * Not a cross-fade. `scene.background` takes one texture, so blending two
+     * images means rendering the background through a shader of our own — a
+     * real change, and not worth it while the images either side of a swap are
+     * both daylight skies. The LIGHTING still interpolates continuously, which
+     * is what the eye actually reads as time passing, so the swap lands inside
+     * a change that is already happening rather than as a jump on its own.
+     */
+    const near = grade.blend < 0.5 ? grade.from : grade.to;
+    const named = near.image ? this.skies.get(near.image) : undefined;
+    const texture = named?.texture ?? this.sky;
+    const environment = named?.environment ?? this.environment;
+    if (texture) {
+      this.scene.background = texture;
       this.scene.backgroundIntensity = grade.background;
+    }
+    if (environment) {
+      this.scene.environment = environment;
       this.scene.environmentIntensity = SKY_LIGHT * grade.environment;
     }
     const horizon = packColor(grade.horizon);
