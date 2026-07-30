@@ -128,8 +128,12 @@ export const HIT_COUNT = 12;
  * worked: sharp when she starts, knocked down at the corners by the end. Real
  * soil does not stay a crisp cube while being hit, and this is the cheapest
  * honest way to say so — the corners are where damage shows first.
+ *
+ * Exported because the loose pellet is built to the same number: what she picks
+ * up is the block she just finished working, so its corners have to be cut back
+ * by exactly as much or the swap shows.
  */
-const HIT_BEVEL = 0.3;
+export const HIT_BEVEL = 0.3;
 
 /** How hard the block jolts on a hit, and how fast that dies away. */
 const HIT_SHAKE = 0.055;
@@ -568,8 +572,37 @@ export function crackSegments(pattern: FracturePattern, face = -1): CrackSegment
    * radiate from, so it is a seeded point somewhere near the middle — cracks
    * carrying THROUGH the lump rather than a copy of the front.
    */
-  const su = struck ? strike[axisA]! * 2 - 1 : (rand() - 0.5) * 1.1;
-  const sv = struck ? strike[axisB]! * 2 - 1 : (rand() - 0.5) * 1.1;
+  /*
+   * How far out on the face a crack is allowed to go.
+   *
+   * The square face is all a crack has: the twelve bevels and eight corner
+   * cuts around it are freshly knocked-off soil, drawn lighter for that reason,
+   * and old cracks running across them would say the opposite. By the last hit
+   * the bevel has taken HIT_BEVEL off each side, so this is where the face ends
+   * up — and keeping the whole walk inside it from the start is what stops
+   * branches being drawn out in mid-air beside the block, which is where a
+   * reach of up to 1.6 on a face spanning 1 was putting them.
+   *
+   * Less the crack's own half-width, or a branch pressed right up against the
+   * edge would still hang its outer lip over it.
+   */
+  const edge = 1 - HIT_BEVEL - CRACK_WIDTH;
+  /*
+   * Turned back at the edge rather than stopped against it.
+   *
+   * Clamping was the obvious thing and it is subtly worse twice over: branches
+   * bunch up along the rim, and a branch pressed into a corner has both
+   * coordinates pinned, so its remaining joints land on top of each other and
+   * come out as zero-length segments that nothing draws. Reflecting always
+   * moves the point, so every joint is a real one, and a crack that reaches the
+   * edge running back into the face is what a crack does anyway.
+   */
+  const onFace = (v: number) => {
+    const folded = v > edge ? 2 * edge - v : v < -edge ? -2 * edge - v : v;
+    return Math.max(-edge, Math.min(edge, folded));
+  };
+  const su = onFace(struck ? strike[axisA]! * 2 - 1 : (rand() - 0.5) * 1.1);
+  const sv = onFace(struck ? strike[axisB]! * 2 - 1 : (rand() - 0.5) * 1.1);
   // Fewer, later cracks away from the blow: the far side gives last.
   const branches = struck ? CRACK_BRANCHES : CRACK_BRANCHES - 3;
   const delay = struck ? 0 : 0.18;
@@ -596,8 +629,12 @@ export function crackSegments(pattern: FracturePattern, face = -1): CrackSegment
       // running dead straight out from the middle.
       angle += (rand() - 0.5) * 0.9;
       const step = (reach / CRACK_JOINTS) * (1 - j * 0.15);
-      const nx = px + Math.cos(angle) * step;
-      const ny = py + Math.sin(angle) * step;
+      // Kept on the face rather than truncated at it, so the branch's whole
+      // length still buys coverage. Dropping the part that ran off the edge
+      // instead cost a third of the crack quads — which is the coverage the
+      // longer branches were lengthened to get in the first place.
+      const nx = onFace(px + Math.cos(angle) * step);
+      const ny = onFace(py + Math.sin(angle) * step);
       segments.push({
         ax: px,
         ay: py,
@@ -736,7 +773,18 @@ export function chipMeshData(
      * steadily whether or not anything was striking it.
      */
     const { hits, since } = hitPhase(progress);
-    const struck = (hits / HIT_COUNT) ** SHRINK_LAG;
+    /*
+     * Worked out over the hits that are actually DRAWN, which is one fewer.
+     *
+     * hitPhase only reaches HIT_COUNT at progress exactly 1, and at progress 1
+     * the cell is gone and the chip mesh is not built at all — so the last
+     * frame anyone sees is hit eleven of twelve. Dividing by twelve meant the
+     * final step never landed: the block handed over a seventh larger than the
+     * pellet that replaced it, every time, on top of the two size faults in the
+     * pellet itself. Anchoring on the last VISIBLE hit is what makes "it shrinks
+     * down into the thing you pick up" true rather than nearly true.
+     */
+    const struck = Math.min(1, hits / (HIT_COUNT - 1)) ** SHRINK_LAG;
     /*
      * No per-cell jitter on the amount: the END has to land exactly on the
      * pellet's size or the handover shows. Variation lives in the drift, the
@@ -754,8 +802,10 @@ export function chipMeshData(
      * cancelled — there is no separate clock to leave running.
      */
     const jolt = hits > 0 ? Math.exp(-since * HIT_SHAKE_DECAY) * HIT_SHAKE : 0;
-    // Corners knocked back one step per hit, like the size.
-    const bevel = (hits / HIT_COUNT) * HIT_BEVEL * half;
+    // Corners knocked back one step per hit, like the size, and over the same
+    // drawn hits — the pellet is cut back by the full HIT_BEVEL, so the block
+    // has to get there while it is still on screen.
+    const bevel = Math.min(1, hits / (HIT_COUNT - 1)) * HIT_BEVEL * half;
     const midX = (cx + 0.5) * size + jx * drift + jx * jolt;
     const midY = (cy + 0.5) * size + jy * drift + jy * jolt;
     const midZ = (cz + 0.5) * size + jz * drift + jz * jolt;
@@ -945,8 +995,25 @@ export function chipMeshData(
       const crackNormal = spinVec(fn[0], fn[1], fn[2]);
       const crackTangent: [number, number, number] = [0, 0, 0];
       crackTangent[ca] = 1;
+      /*
+       * How far the DRAWN face reaches, in the crack walk's own units.
+       *
+       * The walk runs a branch out by up to 1.6 from where the blow landed, on
+       * a face that only spans 1, so cracks were being drawn well past the edge
+       * of the block — thin dark whiskers hanging in the air beside it. They
+       * also made the block measure a seventh wider than the solid it is, which
+       * is a size difference at exactly the moment it is handed over to the
+       * pellet. Corners knocked off by the bevel take their cracks with them,
+       * so this shrinks as the block is worked.
+       */
+      const faceEdge = half > 1e-6 ? 1 - bevel / half : 1;
       for (const seg of crackSegments(pattern, fi)) {
         if (progress < seg.at - 0.0001) continue;
+        // A crack that reaches the edge stops there. Truncating mid-segment
+        // would leave a stub pointing at nothing; the branch simply ends.
+        const room = faceEdge - seg.width + 1e-6;
+        if (Math.max(Math.abs(seg.ax), Math.abs(seg.ay)) > room) continue;
+        if (Math.max(Math.abs(seg.bx), Math.abs(seg.by)) > room) continue;
         const dx = seg.bx - seg.ax;
         const dy = seg.by - seg.ay;
         const len = Math.hypot(dx, dy);

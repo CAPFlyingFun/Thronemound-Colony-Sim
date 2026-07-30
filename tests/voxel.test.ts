@@ -10,7 +10,7 @@ import { CLOD_RADIUS, MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES } from '../src/vo
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
 import { SKY_PHASES, packColor, skyAt, wrapHours } from '../src/voxel/daylight';
-import { CELL_COUNT, CHIP_CELLS, CLOD_SIZE_MAX, CLOD_SIZE_MIN, CRACK_BRANCHES, HIT_COUNT, MAX_SHRINK, clodSizeScale, hitPhase, CRACK_JOINTS, CRACK_START, crackSegments, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
+import { HIT_BEVEL, CELL_COUNT, CHIP_CELLS, CLOD_SIZE_MAX, CLOD_SIZE_MIN, CRACK_BRANCHES, HIT_COUNT, MAX_SHRINK, clodSizeScale, hitPhase, CRACK_JOINTS, CRACK_START, crackSegments, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
@@ -1399,6 +1399,34 @@ describe('fracture', () => {
     expect(last).toBe((CRACK_BRANCHES + 5 * (CRACK_BRANCHES - 3)) * CRACK_JOINTS);
   });
 
+  it('keeps every crack on the face it belongs to', () => {
+    /*
+     * Branches reach up to 1.6 across a face that spans 1, so before they were
+     * folded back they were simply drawn past the edge — thin dark whiskers
+     * hanging in the air beside the block. That also made the block MEASURE a
+     * seventh wider than the solid it is, at the one moment its size is being
+     * compared against the pellet replacing it.
+     *
+     * The limit is the square face at its smallest, which is after the bevel
+     * has taken HIT_BEVEL off each side: the twelve bevels and eight corner
+     * cuts around it are freshly broken soil and carry no old cracks.
+     */
+    const room = 1 - HIT_BEVEL;
+    for (let i = 0; i < 24; i++) {
+      const pattern = buildFracture(3 + i, S, 7 + i * 5, i % 2 ? TOPSOIL : CLAY);
+      for (let face = 0; face < 6; face++) {
+        for (const seg of crackSegments(pattern, face)) {
+          for (const v of [seg.ax, seg.ay, seg.bx, seg.by]) {
+            expect(Math.abs(v) + seg.width).toBeLessThanOrEqual(room + 1e-9);
+          }
+          // And every joint is a REAL one: folding back at the edge has to move
+          // the point, or the list claims cracks the mesh will not draw.
+          expect(Math.hypot(seg.bx - seg.ax, seg.by - seg.ay)).toBeGreaterThan(1e-6);
+        }
+      }
+    }
+  });
+
   it('grows the crack geometry with the dig', () => {
     // The mesh has to carry it, not just the segment list: a cracked cell is
     // six cube faces plus one quad per crack that has opened so far.
@@ -1813,6 +1841,70 @@ describe('loose soil', () => {
       return total / n;
     });
     expect(Math.max(...means) / Math.min(...means)).toBeLessThan(1.12);
+  });
+
+  /*
+   * The handoff, which had been wrong in two ways at once and looked it.
+   *
+   * A dig ends by swapping the worked block for a loose pellet, in one frame,
+   * in the middle of the screen. For that not to read as a swap, the pellet has
+   * to be the same solid at the same size — and neither side of it held:
+   *
+   *  - SIZE: both sides scale themselves by clodSizeScale of a coordinate, but
+   *    pieceSource scrambled the pellet's, so the two drew INDEPENDENT numbers
+   *    out of the same range. Measured at up to a quarter apart.
+   *  - SHAPE: the block ends as a cube with its corners knocked off; the pellet
+   *    was a hex prism.
+   *
+   * Both are pinned here rather than left to the eye, because neither is
+   * visible in any single frame of a screenshot — only in the cut between two.
+   */
+  it('hands the block over to a pellet of the same size', () => {
+    for (const [x, y, z] of [[64, S, 64], [65, S, 64], [64, S - 1, 64], [70, S, 71]]) {
+      // What the chip mesh shrinks to: half-extent CLOD_RADIUS * its own scale.
+      const blockHalf = CLOD_RADIUS * clodSizeScale(x!, y!, z!, TOPSOIL);
+      // What the pellet is drawn at: PIECE_SIZE * the scale for its source
+      // cell, applied to a shape whose own half-extent is 0.5.
+      const src = pieceSource(x!, y!, z!, 0);
+      const pelletHalf = CLOD_RADIUS * clodSizeScale(src.x, src.y, src.z, TOPSOIL);
+      expect(pelletHalf).toBeCloseTo(blockHalf, 10);
+    }
+  });
+
+  it('builds the pellet as the block, cut back by the same bevel', () => {
+    const shape = buildClodShape(0);
+    /*
+     * Half-extent along an axis is simply how far the solid reaches on it: the
+     * six square faces ARE the extremes. Unlike a sphere-sampled hull there is
+     * no vertex sitting ON the axis to go looking for — an earlier version of
+     * this went looking for one, found none, and reported a half-extent of zero.
+     */
+    const axis = (k: number) => {
+      let most = 0;
+      for (let i = k; i < shape.positions.length; i += 3) {
+        most = Math.max(most, Math.abs(shape.positions[i]!));
+      }
+      return most;
+    };
+    // 0.5, so PIECE_SIZE scales it onto the block's own span. The roughening
+    // moves it a little; the tolerance is that, not slack.
+    for (const k of [0, 1, 2]) expect(axis(k)).toBeGreaterThan(0.46);
+    for (const k of [0, 1, 2]) expect(axis(k)).toBeLessThan(0.54);
+
+    /*
+     * And the corners really are cut. An uncut cube reaches sqrt(3) times its
+     * face distance; this solid stops at sqrt(1 + 2 * (1 - HIT_BEVEL)^2), which
+     * is what makes it read as worked rather than as a die.
+     */
+    let far = 0;
+    for (let i = 0; i < shape.positions.length; i += 3) {
+      far = Math.max(far, Math.hypot(
+        shape.positions[i]!, shape.positions[i + 1]!, shape.positions[i + 2]!,
+      ));
+    }
+    const cut = Math.hypot(1, 1 - HIT_BEVEL, 1 - HIT_BEVEL);
+    expect(far / 0.5).toBeLessThan(cut * 1.12);
+    expect(far / 0.5).toBeGreaterThan(1.2);
   });
 
   it('conserves soil across dig, drop and pick up again', () => {
