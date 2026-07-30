@@ -16,7 +16,7 @@ import {
 } from '../voxel/VoxelWorld';
 import { FACES, burialShade, meshChunk } from '../voxel/mesher';
 import {
-  buildFracture, cellCentre, chipHalfExtent, chipMeshData, eventsBetween, hashVoxel,
+  buildFracture, cellCentre, chipHalfExtent, chipMeshData, chipOffset, eventsBetween, hashVoxel,
   releasedBetween, removedAt,
   CELL_COUNT, clodSizeScale, type DigEvent, type DigEventKind, type FracturePattern,
 } from '../voxel/fracture';
@@ -2657,15 +2657,32 @@ export class DigScene {
       return;
     }
     /*
-     * The box is the cell, full size, always.
+     * The box is the BLOCK, not the cell it came out of.
      *
-     * It used to shrink along the strike axis as sheets came off, because a
-     * quarter of the cube really had gone and a full-size outline claimed a
-     * boundary with nothing behind it. One press is the whole cell now, so the
-     * soil inside the box is either all there or the box is gone with it.
+     * Full size until she starts, because until then the block is the cell. It
+     * was full size throughout — the reasoning being that one press takes the
+     * whole cell, so the soil inside is either all there or gone with the box —
+     * and that stopped being true the moment the block began visibly shrinking
+     * and drifting inside it. By the last hits the outline enclosed a lump half
+     * its size sitting off to one side: a boundary drawn where there is no
+     * longer any soil.
+     *
+     * It matters past the cosmetic. This outline is what says where the dirt
+     * is, and an ant sent to work a cell rather than the block in it would
+     * stand a clear half-voxel back from the thing she is supposed to be
+     * biting.
      */
-    const scale = { x: 1, y: 1, z: 1 };
-    const centre = { x: shown.x + 0.5, y: shown.y + 0.5, z: shown.z + 0.5 };
+    const working = this.chips.get(DigScene.chipKey(shown.x, shown.y, shown.z));
+    const span = working ? chipHalfExtent(working.pattern, working.progress) * 2 : 1;
+    const drift = working
+      ? chipOffset(working.pattern, working.progress)
+      : { x: 0, y: 0, z: 0 };
+    const scale = { x: span, y: span, z: span };
+    const centre = {
+      x: shown.x + 0.5 + drift.x,
+      y: shown.y + 0.5 + drift.y,
+      z: shown.z + 0.5 + drift.z,
+    };
     this.highlight.scale.set(scale.x, scale.y, scale.z);
     this.highlight.position.set(centre.x, centre.y, centre.z);
     this.highlightDepth = Math.min(scale.x, scale.y, scale.z);

@@ -10,7 +10,7 @@ import { CLOD_RADIUS, MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES, type Clod } from
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
 import { SKY_PHASES, packColor, skyAt, wrapHours } from '../src/voxel/daylight';
-import { HIT_BEVEL, CELL_COUNT, CHIP_CELLS, chipHalfExtent, CLOD_SIZE_MAX, CLOD_SIZE_MIN, CRACK_BRANCHES, HIT_COUNT, MAX_SHRINK, clodSizeScale, hitPhase, CRACK_JOINTS, CRACK_START, crackSegments, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
+import { HIT_BEVEL, CELL_COUNT, CHIP_CELLS, chipHalfExtent, chipOffset, CLOD_SIZE_MAX, CLOD_SIZE_MIN, CRACK_BRANCHES, HIT_COUNT, MAX_SHRINK, clodSizeScale, hitPhase, CRACK_JOINTS, CRACK_START, crackSegments, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
@@ -1664,6 +1664,45 @@ describe('fracture', () => {
     // And a fresh cell is still a whole voxel, or she would fall into the
     // ground the instant she started digging.
     expect(chipHalfExtent(pattern, 0)).toBeCloseTo(0.5, 9);
+  });
+
+  it('publishes where the block has drifted to, for the outline to follow', () => {
+    /*
+     * The block does not sit still: it drifts as it loosens and kicks on every
+     * hit. The target outline was a full cell centred on the CELL, so by the
+     * last hits it enclosed a lump half its size sitting off to one side — an
+     * outline drawn where there was no longer any soil.
+     *
+     * Checked against where the mesh actually IS rather than by re-deriving the
+     * arithmetic, because a second copy of it is how the block and the pellet
+     * came to be different sizes in the first place.
+     */
+    const pattern = buildFracture(11, S, 23, TOPSOIL);
+    let moved = 0;
+    for (const progress of [0, 0.25, 0.5, 0.75, 0.95]) {
+      const data = chipMeshData(pattern, 11, S, 23, progress)!;
+      const offset = chipOffset(pattern, progress);
+      const cell = [11.5, S + 0.5, 23.5];
+      for (const k of [0, 1, 2]) {
+        let lo = Infinity;
+        let hi = -Infinity;
+        for (let i = k; i < data.positions.length; i += 3) {
+          lo = Math.min(lo, data.positions[i]!);
+          hi = Math.max(hi, data.positions[i]!);
+        }
+        // Tilt turns about the block's own centre and the cracks sit on
+        // opposite faces alike, so the middle of what is drawn IS its middle.
+        const drawn = (lo + hi) / 2 - cell[k]!;
+        expect(drawn).toBeCloseTo([offset.x, offset.y, offset.z][k]!, 2);
+        moved = Math.max(moved, Math.abs(drawn));
+      }
+    }
+    // It really does wander, or an outline pinned to the cell would have been
+    // fine all along and this is testing nothing.
+    expect(moved).toBeGreaterThan(0.02);
+    // An untouched cell has not moved: the outline starts out on the cell.
+    const still = chipOffset(pattern, 0);
+    expect(Math.hypot(still.x, still.y, still.z)).toBeCloseTo(0, 9);
   });
 
   it('changes only ON a hit, never between them', () => {

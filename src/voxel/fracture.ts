@@ -737,6 +737,32 @@ export function chipHalfExtent(pattern: FracturePattern, progress: number): numb
   return (size * shrink) / 2;
 }
 
+/**
+ * Where the block actually IS, as an offset from the centre of its cell.
+ *
+ * It does not sit still: it drifts as it loosens and kicks on every hit, by up
+ * to about a sixth of a voxel all told. Anything drawn around it has to follow
+ * or it stops being around it — the target outline was a full cell centred on
+ * the cell, so by the last hits it enclosed a block half its size sitting off
+ * to one side, and the outline was claiming a boundary with nothing behind it.
+ *
+ * Collision deliberately does NOT use this. A floor that twitched on every blow
+ * would be worse than one a sixth of a voxel out.
+ */
+export function chipOffset(pattern: FracturePattern, progress: number): Vec3 {
+  const size = 1 / CHIP_CELLS;
+  const erosion = erosionAt(pattern, progress);
+  const { hits, since } = hitPhase(progress);
+  const drift = erosion * size * 0.22;
+  const jolt = hits > 0 ? Math.exp(-since * HIT_SHAKE_DECAY) * HIT_SHAKE : 0;
+  const shift = drift + jolt;
+  return {
+    x: pattern.jitter[0]! * shift,
+    y: pattern.jitter[1]! * shift,
+    z: pattern.jitter[2]! * shift,
+  };
+}
+
 export function chipMeshData(
   pattern: FracturePattern,
   x: number,
