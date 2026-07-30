@@ -1,7 +1,7 @@
 {
   "name": "thronemound-colony-sim",
   "private": true,
-  "version": "0.23.0",
+  "version": "0.24.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,7 +12,8 @@
     "typecheck": "tsc -b",
     "smoke:dig": "node scripts/smoke-dig.mjs",
     "smoke:queen": "node scripts/smoke-queen.mjs",
-    "smoke:mobility": "node scripts/smoke-mobility.mjs"
+    "smoke:mobility": "node scripts/smoke-mobility.mjs",
+    "smoke:model": "node scripts/smoke-model.mjs"
   },
   "dependencies": {
     "phaser": "^3.90.0",

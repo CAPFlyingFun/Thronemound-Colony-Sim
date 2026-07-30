@@ -4,7 +4,16 @@ const params = new URLSearchParams(window.location.search);
 
 const scene = params.get('scene');
 
-if (scene === 'hex') {
+if (scene === 'queen') {
+  // Model + gait preview. Nothing in the game imports it — see QueenScene.
+  const host = document.getElementById('app');
+  if (host) {
+    host.classList.add('dig-host');
+    void import('./scenes/QueenScene').then(({ QueenScene }) => {
+      new QueenScene(host);
+    });
+  }
+} else if (scene === 'hex') {
   // Hex-grid experiment. Entirely separate from the cube world — see
   // src/voxel/HexGrid.ts for why it cannot simply reuse DigScene.
   const host = document.getElementById('app');
