@@ -187,6 +187,64 @@ describe('mesher', () => {
     }
   });
 
+  it('chamfers along a RUN of rim and tapers at both its ends', () => {
+    /*
+     * The thing "all three faces open" could not do. A tunnel rim has only two
+     * faces open, so under that rule every rim stayed square; the question that
+     * works is whether the convex edge CONTINUES past this vertex.
+     *
+     * A three-cell trench in flat ground: the rim runs from z=10 to z=13, so the
+     * two interior vertices are supported by the edge carrying on and the two
+     * end vertices are not. The face should be cut back in the middle and sit on
+     * the lattice at the ends — a taper, which is what a chamfered edge is.
+     */
+    const trench = {
+      get: (x: number, y: number, z: number) => {
+        if (y > 5) return 0;
+        if (x === 10 && y === 5 && z >= 10 && z <= 12) return 0;
+        return TOPSOIL;
+      },
+    };
+    const data = meshChunk(trench, 0, 0, 0)!;
+    // The sky-facing edge of the rim voxels at x=11, sampled per lattice line.
+    const byZ = new Map<number, number>();
+    for (let i = 0; i < data.positions.length; i += 3) {
+      const [px, py, pz] = [data.positions[i]!, data.positions[i + 1]!, data.positions[i + 2]!];
+      if (data.normals[i + 1]! < 0.5 || Math.abs(py - 6) > 1e-6) continue;
+      if (px < 11 - 1e-6 || px > 11 + EDGE_CHAMFER + 1e-6) continue;
+      if (Math.abs(pz - Math.round(pz)) > 1e-6) continue;
+      byZ.set(Math.round(pz), Math.min(byZ.get(Math.round(pz)) ?? 99, px));
+    }
+    // Ends of the run sit on the lattice; the interior is cut back.
+    expect(byZ.get(10)).toBeCloseTo(11, 5);
+    expect(byZ.get(13)).toBeCloseTo(11, 5);
+    expect(byZ.get(11)).toBeCloseTo(11 + EDGE_CHAMFER, 5);
+    expect(byZ.get(12)).toBeCloseTo(11 + EDGE_CHAMFER, 5);
+  });
+
+  it('opens no hole along a run of rim either', () => {
+    /*
+     * A taper is exactly where two voxels have to agree about a shared vertex
+     * and can most easily disagree. Measured as sky-facing area, which a hole
+     * eats into: flat ground less the three cells of trench.
+     */
+    const world = makeWorld();
+    const cy = Math.floor(SURFACE / CHUNK);
+    world.dig(40, SURFACE, 40);
+    world.dig(40, SURFACE, 41);
+    world.dig(40, SURFACE, 42);
+    const data = meshChunk(world, 1, cy, 1)!;
+    let up = 0;
+    for (let t = 0; t < data.indices.length; t += 3) {
+      const [i, j, k] = [data.indices[t]!, data.indices[t + 1]!, data.indices[t + 2]!];
+      const p = (n: number) => [data.positions[n * 3]!, data.positions[n * 3 + 2]!];
+      const [a, b, c] = [p(i), p(j), p(k)];
+      const area = ((b[0]! - a[0]!) * (c[1]! - a[1]!) - (c[0]! - a[0]!) * (b[1]! - a[1]!)) / 2;
+      if (data.normals[i * 3 + 1]! > 0.5) up += Math.abs(area);
+    }
+    expect(up).toBeCloseTo(CHUNK * CHUNK - 3, 4);
+  });
+
   it('opens no hole at the corners of a dug pit', () => {
     /*
      * The exact shape of the shipped bug, kept as a regression. At a pit corner

@@ -186,30 +186,51 @@ export function meshChunk(
         }
         const openDir = (axis: number, sign: number) => open[faceIndex(axis, sign)]!;
         /*
-         * A cube VERTEX is cut only when all three faces meeting at it are open.
+         * How far a face pulls its corner in, decided at the LATTICE VERTEX.
          *
-         * Deciding this per EDGE instead opens holes, and the failure is worth
-         * recording because it is not obvious from the code. At the corner of a
-         * dug pit three voxels' top faces meet: the two bordering the pit each
-         * pull their corner in, while the third — diagonal to the pit, so both
-         * ITS lateral neighbours are solid — does not. A bevel can only fill the
-         * gap between two faces of the SAME voxel, so nothing covers the wedge
-         * between the two that moved and the one that did not, and you see sky
-         * through a triangular hole at every pit corner.
+         * Two rules had to be thrown out before this one. Deciding per EDGE
+         * tore holes: at a pit corner three top faces meet, the two bordering
+         * the pit each pulled their corner in, the diagonal one did not, and
+         * you saw sky through the wedge between them. Deciding per VERTEX with
+         * "all three faces open" closed the holes but chamfered almost nothing
+         * — a tunnel rim has only two faces open, so every rim stayed square.
          *
-         * Per vertex there is ONE decision instead of three, so the three faces
-         * meeting there cannot disagree: each pulls its corner to one of the
-         * three points the corner triangle spans.
+         * The question that actually works is whether the convex edge CONTINUES
+         * past this vertex: does the next voxel along it have the same two faces
+         * open? Both voxels sharing that vertex ask about the same pair of
+         * voxels and the same pair of faces, so they cannot disagree, and a run
+         * of rim gets cut along its length and tapers to nothing at its ends —
+         * which is what a chamfered edge looks like.
          */
-        const cutAt = (sx: number, sy: number, sz: number) => (
-          openDir(0, sx) && openDir(1, sy) && openDir(2, sz)
-        );
-        const cutVertex = (
-          a1: number, s1: number, a2: number, s2: number, a3: number, s3: number,
+        const solidAt = (a: number, sa: number, b = -1, sb = 0, c = -1, sc = 0) => {
+          const p = [x, y, z];
+          p[a] = p[a]! + sa;
+          if (b >= 0) p[b] = p[b]! + sb;
+          if (c >= 0) p[c] = p[c]! + sc;
+          return sample(p[0]!, p[1]!, p[2]!);
+        };
+        /** Does the neighbour past this vertex carry the same convex edge on? */
+        const edgeRuns = (
+          na: number, ns: number,
+          f1a: number, f1s: number,
+          f2a: number, f2s: number,
+        ) => solidAt(na, ns)
+          && !solidAt(na, ns, f1a, f1s)
+          && !solidAt(na, ns, f2a, f2s);
+        /**
+         * The cut face (fa,fs) applies along `ta` at the corner (ta:sa, tb:sb).
+         * Zero unless that edge is convex AND supported at this end — either by
+         * a third open face (a convex corner, which the corner triangle closes)
+         * or by the edge running on into the neighbour.
+         */
+        const cutAlong = (
+          fa: number, fs: number,
+          ta: number, sa: number,
+          tb: number, sb: number,
         ) => {
-          const s = [0, 0, 0];
-          s[a1] = s1; s[a2] = s2; s[a3] = s3;
-          return cutAt(s[0]!, s[1]!, s[2]!);
+          if (!openDir(ta, sa)) return 0;
+          if (openDir(tb, sb) || edgeRuns(tb, sb, fa, fs, ta, sa)) return EDGE_CHAMFER;
+          return 0;
         };
 
         for (const face of FACES) {
@@ -255,10 +276,8 @@ export function meshChunk(
             const p: [number, number, number] = [corner[0], corner[1], corner[2]];
             const ia = corner[axisA] === 1 ? 1 : -1;
             const ib = corner[axisB] === 1 ? 1 : -1;
-            if (cutVertex(nAxis, nSign, axisA, ia, axisB, ib)) {
-              p[axisA] = p[axisA]! - ia * EDGE_CHAMFER;
-              p[axisB] = p[axisB]! - ib * EDGE_CHAMFER;
-            }
+            p[axisA] = p[axisA]! - ia * cutAlong(nAxis, nSign, axisA, ia, axisB, ib);
+            p[axisB] = p[axisB]! - ib * cutAlong(nAxis, nSign, axisB, ib, axisA, ia);
             return p;
           };
           const inset = face.corners.map(insetCorner) as [
@@ -529,33 +548,49 @@ export function meshChunk(
                 for (const sg of [1, -1] as const) {
                   if (!openDir(ag, sg)) continue;
                   const ac = 3 - af - ag;
-                  const cutLo = cutVertex(af, sf, ag, sg, ac, -1);
-                  const cutHi = cutVertex(af, sf, ag, sg, ac, 1);
-                  if (!cutLo && !cutHi) continue;
-                  /** On face f's plane, cut back toward g. */
-                  const onF = (along: number) => {
+                  // Both faces are open here, so the cut along ac is simply
+                  // whether the ac face is open, and the cut ACROSS the edge is
+                  // whether the edge is supported at that end.
+                  const across = (sc: number) => (
+                    openDir(ac, sc) || edgeRuns(ac, sc, af, sf, ag, sg) ? EDGE_CHAMFER : 0
+                  );
+                  const mLo = across(-1);
+                  const mHi = across(1);
+                  if (mLo === 0 && mHi === 0) continue;
+                  const endAt = (sc: number) => (
+                    sc > 0 ? 1 - (openDir(ac, sc) ? EDGE_CHAMFER : 0)
+                      : (openDir(ac, sc) ? EDGE_CHAMFER : 0)
+                  );
+                  /** On face f's plane, cut back toward g by `m`. */
+                  const onF = (sc: number, m: number) => {
                     const p: [number, number, number] = [0, 0, 0];
-                    p[af] = at(sf); p[ag] = back(sg); p[ac] = along;
+                    p[af] = at(sf); p[ag] = at(sg) - sg * m; p[ac] = endAt(sc);
                     return p;
                   };
-                  /** On face g's plane, cut back toward f. */
-                  const onG = (along: number) => {
+                  /** On face g's plane, cut back toward f by `m`. */
+                  const onG = (sc: number, m: number) => {
                     const p: [number, number, number] = [0, 0, 0];
-                    p[af] = back(sf); p[ag] = at(sg); p[ac] = along;
+                    p[af] = at(sf) - sf * m; p[ag] = at(sg); p[ac] = endAt(sc);
                     return p;
                   };
                   /** The untouched lattice vertex both faces still share. */
-                  const corner = (along: number) => {
+                  const corner = (sc: number) => {
                     const p: [number, number, number] = [0, 0, 0];
-                    p[af] = at(sf); p[ag] = at(sg); p[ac] = along;
+                    p[af] = at(sf); p[ag] = at(sg); p[ac] = endAt(sc);
                     return p;
                   };
                   const n: [number, number, number] = [0, 0, 0];
                   n[af] = sf;
                   n[ag] = sg;
-                  if (cutLo && cutHi) emit([onF(lo), onF(hi), onG(hi), onG(lo)], n);
-                  else if (cutLo) emit([onF(lo), corner(1), onG(lo)], n);
-                  else emit([onF(hi), onG(hi), corner(0)], n);
+                  if (mLo > 0 && mHi > 0) {
+                    emit([onF(-1, mLo), onF(1, mHi), onG(1, mHi), onG(-1, mLo)], n);
+                  } else if (mLo > 0) {
+                    // The edge dies here: taper to the lattice vertex, or the
+                    // two faces diverge from a corner they no longer share.
+                    emit([onF(-1, mLo), corner(1), onG(-1, mLo)], n);
+                  } else {
+                    emit([onF(1, mHi), onG(1, mHi), corner(-1)], n);
+                  }
                 }
               }
             }
@@ -566,7 +601,7 @@ export function meshChunk(
           for (const sx of [1, -1] as const) {
             for (const sy of [1, -1] as const) {
               for (const sz of [1, -1] as const) {
-                if (!cutAt(sx, sy, sz)) continue;
+                if (!openDir(0, sx) || !openDir(1, sy) || !openDir(2, sz)) continue;
                 emit(
                   [
                     [at(sx), back(sy), back(sz)],
