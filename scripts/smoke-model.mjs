@@ -127,6 +127,50 @@ const d = await shot('d-digging');
 if (Buffer.compare(c, d) === 0) fail('she freezes while digging');
 else ok('she keeps moving while digging');
 
+/*
+ * 5. All three castes load, and each rig map matches its own file.
+ *
+ * The readout reports how many bones a map names that the FILE does not have.
+ * That number is the only visible sign of a drifted map: the ant would stand
+ * perfectly still, render perfectly well, and throw nothing. It also confirms
+ * each caste is scaled from its OWN measured length — the exports are
+ * height-normalised, so a shared scale would make them all the same size.
+ */
+const seen = [];
+for (const caste of ['worker', 'major', 'queen']) {
+  await page.evaluate((want) => {
+    document.querySelector(`button[data-caste="${want}"]`)?.dispatchEvent(
+      new MouseEvent('click', { bubbles: true }),
+    );
+  }, caste);
+  const ok2 = await page.waitForFunction(
+    (want) => (document.querySelector('.dig-hud')?.textContent ?? '')
+      .includes(want) && (document.querySelector('.dig-hud')?.textContent ?? '')
+      .includes('loaded'),
+    caste,
+    { timeout: 30000 },
+  ).then(() => true).catch(() => false);
+  const line = (await page.textContent('.dig-hud'))?.replace(/\s+/g, ' ').trim() ?? '';
+  if (!ok2) { fail(`${caste} never loaded — "${line}"`); continue; }
+  if (line.includes('BONES MISSING')) {
+    fail(`${caste}'s rig map does not match its file — "${line}"`);
+    continue;
+  }
+  const mm = Number(/\((\d+) mm\)/.exec(line)?.[1] ?? '0');
+  const jaws = line.includes('jaws rigged');
+  seen.push(`${caste} ${mm}mm ${jaws ? 'jaws' : 'no jaws'}`);
+  if (caste === 'queen' && jaws) fail('the queen reports jaws she does not have');
+  if (caste !== 'queen' && !jaws) fail(`${caste} should have rigged jaws`);
+  // Frames must differ: a drifted map that still names real bones would pose
+  // nothing, and only motion catches that.
+  const p1 = await shot(`${caste}-1`);
+  await page.waitForTimeout(1000);
+  const p2 = await shot(`${caste}-2`);
+  if (Buffer.compare(p1, p2) === 0) fail(`${caste} is not moving`);
+}
+if (seen.length === 3) ok(`all three castes load and animate: ${seen.join(', ')}`);
+else fail(`only ${seen.length} of 3 castes loaded`);
+
 if (badResponses.length) fail(`failed requests:\n    ${badResponses.join('\n    ')}`);
 else ok('no failed requests');
 if (errors.length) fail(`console errors:\n    ${errors.join('\n    ')}`);

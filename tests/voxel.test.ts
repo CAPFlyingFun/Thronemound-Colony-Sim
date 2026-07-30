@@ -78,6 +78,30 @@ describe('VoxelWorld', () => {
   });
 });
 
+/**
+ * Which axis a vertex's face points along, recovered from its own UVs.
+ *
+ * The normals used to give this away, but they now follow the dish, so reading
+ * the axis off them is exactly the mistake that would make these tests agree
+ * with a bug. UVs are world[axisA] and world[axisB] over TILE_VOXELS, so the
+ * two axes that match the UVs are the in-plane pair and the remaining one is
+ * the face's own.
+ */
+const faceAxisOf = (
+  p: readonly [number, number, number],
+  u: number,
+  v: number,
+): number => {
+  const inPlane = new Set<number>();
+  for (const [uv, _] of [[u, 0], [v, 1]] as const) {
+    for (let axis = 0; axis < 3; axis++) {
+      if (Math.abs(p[axis]! / TILE_VOXELS - uv) < 1e-5) { inPlane.add(axis); break; }
+    }
+  }
+  for (let axis = 0; axis < 3; axis++) if (!inPlane.has(axis)) return axis;
+  return 1;
+};
+
 describe('mesher', () => {
   it('winds every face outward', () => {
     // Cross product of the first triangle must point along the declared normal.
@@ -179,13 +203,14 @@ describe('mesher', () => {
     const cy = Math.floor(SURFACE / CHUNK);
     const data = meshChunk(world, 1, cy, 1)!;
     for (let i = 0; i < data.positions.length; i += 3) {
-      const p = [data.positions[i]!, data.positions[i + 1]!, data.positions[i + 2]!];
+      const p = [data.positions[i]!, data.positions[i + 1]!, data.positions[i + 2]!] as const;
       const n = [data.normals[i]!, data.normals[i + 1]!, data.normals[i + 2]!];
-      // Distance from the face's own lattice plane, along its normal. Positive
-      // would mean bulging out into the air.
-      const axis = n[0] !== 0 ? 0 : n[1] !== 0 ? 1 : 2;
+      const axis = faceAxisOf(p, data.uvs[(i / 3) * 2]!, data.uvs[(i / 3) * 2 + 1]!);
+      // Displacement from the face's own lattice plane. The sign of the flat
+      // face direction is recoverable from the normal's own dominant component
+      // on that axis, which stays correct however the dish tilts it.
       const plane = Math.round(p[axis]!);
-      const out = (p[axis]! - plane) * n[axis]!;
+      const out = (p[axis]! - plane) * Math.sign(n[axis]! || 1);
       expect(out).toBeLessThanOrEqual(1e-6);
       expect(out).toBeGreaterThan(-CAVITY_DISH - 1e-6);
     }
@@ -204,12 +229,11 @@ describe('mesher', () => {
     const data = meshChunk(world, 1, cy, 1)!;
     let edges = 0;
     for (let i = 0; i < data.positions.length; i += 3) {
-      const p = [data.positions[i]!, data.positions[i + 1]!, data.positions[i + 2]!];
-      const n = [data.normals[i]!, data.normals[i + 1]!, data.normals[i + 2]!];
-      const axis = n[0] !== 0 ? 0 : n[1] !== 0 ? 1 : 2;
-      const [a, b] = tangentAxes(n as [number, number, number]);
+      const p = [data.positions[i]!, data.positions[i + 1]!, data.positions[i + 2]!] as const;
+      const axis = faceAxisOf(p, data.uvs[(i / 3) * 2]!, data.uvs[(i / 3) * 2 + 1]!);
+      const inPlane = [0, 1, 2].filter((k) => k !== axis);
       // On an edge of its own face: one in-plane coordinate is on the lattice.
-      const onEdge = [a, b].some((k) => Math.abs(p[k]! - Math.round(p[k]!)) < 1e-6);
+      const onEdge = inPlane.some((k) => Math.abs(p[k]! - Math.round(p[k]!)) < 1e-6);
       if (!onEdge) continue;
       edges++;
       expect(Math.abs(p[axis]! - Math.round(p[axis]!))).toBeLessThan(1e-6);

@@ -1,13 +1,77 @@
 import { describe, expect, it } from 'vitest';
 import {
-  CADENCE, MODEL_LENGTH_UNITS, QUEEN_LENGTH_MM, QUEEN_RIG, VOXEL_MM,
-  cadenceFor, gaitPose, legPhase, legSwing, queenScale, tripodOf,
-  type LegSlot,
+  CADENCE, CASTE_LENGTH_MM, MAJOR_RIG, MODEL_LENGTH_UNITS, QUEEN_LENGTH_MM,
+  QUEEN_RIG, RIGS, VOXEL_MM, WORKER_RIG,
+  cadenceFor, gaitPose, legPhase, legSwing, queenScale, rigBones,
+  rigLengthVoxels, rigScale, tripodOf,
+  type LegSlot, type RigMap,
 } from '../src/anim/hexapod';
+
+const ALL_RIGS: RigMap[] = [QUEEN_RIG, WORKER_RIG, MAJOR_RIG];
+/** Joint counts read straight off the three GLBs. */
+const JOINTS: Record<RigMap['caste'], number> = { queen: 53, worker: 61, major: 64 };
 
 const SLOTS: LegSlot[] = [
   'frontLeft', 'frontRight', 'midLeft', 'midRight', 'rearLeft', 'rearRight',
 ];
+
+describe('every rig map', () => {
+  it('accounts for every joint in its own file, exactly once', () => {
+    /*
+     * Each map is hand-derived from that model's inverse bind matrices, because
+     * every auto-rig names its bones `Bone_000` upward with no meaning. A bone
+     * listed twice would have two parts of the gait fighting over it — the
+     * symptom is a limb that twitches rather than an error — and a bone missed
+     * is a limb that never moves.
+     */
+    for (const rig of ALL_RIGS) {
+      const all = rigBones(rig);
+      expect(new Set(all).size, `${rig.caste} has a duplicate bone`).toBe(all.length);
+      expect(all.length, `${rig.caste} joint count`).toBe(JOINTS[rig.caste]);
+    }
+  });
+
+  it('shares nothing between rigs, because auto-rigs share nothing', () => {
+    // The queen's middle-left leg is Bone_012; the worker's is Bone_014. Any
+    // temptation to reuse one map for another model is a bug waiting to happen.
+    const queenMid = QUEEN_RIG.legs.find((l) => l.slot === 'midLeft')!.bones[0];
+    const workerMid = WORKER_RIG.legs.find((l) => l.slot === 'midLeft')!.bones[0];
+    expect(queenMid).not.toBe(workerMid);
+  });
+
+  it('gives six legs with matching sides to all three', () => {
+    for (const rig of ALL_RIGS) {
+      expect(rig.legs, `${rig.caste} leg count`).toHaveLength(6);
+      expect(rig.legs.map((l) => l.slot).sort()).toEqual([...SLOTS].sort());
+      for (const leg of rig.legs) {
+        expect(leg.side).toBe(leg.slot.endsWith('Left') ? -1 : 1);
+        expect(leg.bones.length, `${rig.caste} ${leg.slot}`).toBeGreaterThanOrEqual(4);
+      }
+    }
+  });
+
+  it('gives the workers jaws and the queen none', () => {
+    /*
+     * The whole reason mandibles are OPTIONAL. Assuming every ant has them
+     * would have broken the moment the second model arrived; assuming none do
+     * would waste the jaws the workers actually came with.
+     */
+    expect(QUEEN_RIG.mandibleLeft).toBeUndefined();
+    expect(QUEEN_RIG.mandibleRight).toBeUndefined();
+    for (const rig of [WORKER_RIG, MAJOR_RIG]) {
+      expect(rig.mandibleLeft, `${rig.caste} left jaw`).toBeDefined();
+      expect(rig.mandibleRight, `${rig.caste} right jaw`).toBeDefined();
+      expect(rig.mandibleLeft!.length).toBe(rig.mandibleRight!.length);
+    }
+  });
+
+  it('is reachable by caste, and every caste has a rig', () => {
+    for (const caste of ['queen', 'worker', 'major'] as const) {
+      expect(RIGS[caste].caste).toBe(caste);
+      expect(CASTE_LENGTH_MM[caste]).toBeGreaterThan(0);
+    }
+  });
+});
 
 describe('queen rig map', () => {
   it('names every bone exactly once', () => {
@@ -129,6 +193,70 @@ describe('cadence', () => {
 describe('gait pose', () => {
   const base = { clock: 0, speed: 0, turn: 0, digging: 0, carrying: 0 };
 
+  it('drives every rig without touching a bone it does not own', () => {
+    /*
+     * Run all three through the gait. Anything it does not mention keeps its
+     * rest pose, which is what leaves the queen's unrigged mouthparts alone —
+     * and a bone from ANOTHER caste's map appearing here would mean the gait
+     * had a hard-coded name left in it.
+     */
+    for (const rig of ALL_RIGS) {
+      const known = new Set(rigBones(rig));
+      for (let clock = 0; clock < 3; clock += 0.25) {
+        const pose = gaitPose(
+          { clock, speed: 2, turn: 0.3, digging: 0.7, carrying: 0.4 },
+          rig,
+        );
+        for (const bone of pose.rotations.keys()) {
+          expect(known.has(bone), `${rig.caste} touched a foreign bone ${bone}`).toBe(true);
+        }
+      }
+    }
+  });
+
+  it('works the jaws when they exist and the head when they do not', () => {
+    for (const rig of [WORKER_RIG, MAJOR_RIG]) {
+      let widest = 0;
+      for (let clock = 0; clock < 2; clock += 0.01) {
+        const pose = gaitPose({ ...base, clock, digging: 1 }, rig);
+        const left = pose.rotations.get(rig.mandibleLeft![0]!)!;
+        const right = pose.rotations.get(rig.mandibleRight![0]!)!;
+        // Jaws work in OPPOSITION: same angle, opposite sign. Driving both the
+        // same way swings the pair sideways like wipers.
+        expect(left[1]).toBeCloseTo(-right[1], 6);
+        widest = Math.max(widest, Math.abs(left[1]));
+      }
+      expect(widest, `${rig.caste} jaws never opened`).toBeGreaterThan(0.2);
+    }
+    // The jawless queen digs harder with her head to compensate.
+    const head = (rig: RigMap) => gaitPose({ ...base, digging: 1 }, rig)
+      .rotations.get(rig.thorax[rig.thorax.length - 1]!)![0];
+    expect(head(QUEEN_RIG)).toBeGreaterThan(head(WORKER_RIG));
+  });
+
+  it('holds the jaws shut on a carried load rather than chewing it', () => {
+    /*
+     * Asserted as OPPOSITE SIGNS rather than a fixed direction, because which
+     * way is "closed" depends on the rig's own axis convention — pinning a sign
+     * here tests my guess about the model, not the behaviour. What matters is
+     * that gripping a load and biting at a face are opposite motions, and that
+     * a held load does not chew.
+     */
+    const jaw = WORKER_RIG.mandibleLeft![0]!;
+    const carry = gaitPose({ ...base, carrying: 1 }, WORKER_RIG).rotations.get(jaw)![1];
+    let widestBite = 0;
+    for (let clock = 0; clock < 2; clock += 0.01) {
+      const open = gaitPose({ ...base, clock, digging: 1 }, WORKER_RIG).rotations.get(jaw)![1];
+      if (Math.abs(open) > Math.abs(widestBite)) widestBite = open;
+    }
+    expect(Math.sign(carry)).toBe(-Math.sign(widestBite));
+
+    // And a carried load is HELD: the angle does not vary with the clock.
+    const later = gaitPose({ ...base, clock: 1.3, carrying: 1 }, WORKER_RIG)
+      .rotations.get(jaw)![1];
+    expect(later).toBeCloseTo(carry, 6);
+  });
+
   it('is deterministic — same input, same pose', () => {
     const a = gaitPose({ ...base, clock: 1.7, speed: 2 });
     const b = gaitPose({ ...base, clock: 1.7, speed: 2 });
@@ -214,6 +342,36 @@ describe('gait pose', () => {
     }
     expect(frontLift).toBeCloseTo(0, 6);
     expect(rearLift).toBeGreaterThan(0.1);
+  });
+});
+
+describe('caste scale', () => {
+  it('scales each model from its OWN length, not a shared constant', () => {
+    /*
+     * The trap this closes. All three exports are height-normalised to 1.7, so
+     * a major measures FEWER units than a worker while being the larger animal.
+     * A shared scale would have made every ant the same size and hidden it
+     * behind numbers that looked plausible.
+     */
+    expect(MAJOR_RIG.lengthUnits).toBeLessThan(WORKER_RIG.lengthUnits);
+    expect(CASTE_LENGTH_MM.major).toBeGreaterThan(CASTE_LENGTH_MM.worker);
+    for (const rig of ALL_RIGS) {
+      expect(rigScale(rig) * rig.lengthUnits).toBeCloseTo(rigLengthVoxels(rig), 6);
+    }
+  });
+
+  it('orders the castes the way real fire ants are ordered', () => {
+    // Workers are polymorphic 3-6mm, majors at the top of that, a mated queen
+    // about 9. If these ever stop being ordered, something is wrong.
+    expect(CASTE_LENGTH_MM.worker).toBeLessThan(CASTE_LENGTH_MM.major);
+    expect(CASTE_LENGTH_MM.major).toBeLessThan(CASTE_LENGTH_MM.queen);
+  });
+
+  it('keeps every caste under two voxels, so passages stay diggable', () => {
+    for (const rig of ALL_RIGS) {
+      expect(rigLengthVoxels(rig), `${rig.caste}`).toBeLessThan(2);
+      expect(rigLengthVoxels(rig), `${rig.caste}`).toBeGreaterThan(0.5);
+    }
   });
 });
 

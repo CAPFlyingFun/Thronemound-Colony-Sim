@@ -1,5 +1,5 @@
 /**
- * Load the queen and drive her gait.
+ * Load an ant and drive its gait.
  *
  * The three.js half of the hexapod: `hexapod.ts` decides what every bone should
  * do and this applies it. Kept apart so the gait itself stays testable without
@@ -9,7 +9,10 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
-import { QUEEN_RIG, gaitPose, queenScale, type GaitInput } from './hexapod';
+import {
+  QUEEN_RIG, RIGS, gaitPose, rigBones, rigLengthVoxels, rigScale,
+  type GaitInput, type RigMap,
+} from './hexapod';
 
 /**
  * Meshopt, not Draco.
@@ -22,12 +25,22 @@ import { QUEEN_RIG, gaitPose, queenScale, type GaitInput } from './hexapod';
  *
  * The textures are WebP, decoded by the browser with no extension needed.
  */
-export const QUEEN_MODEL_URL = `${import.meta.env.BASE_URL}models/queen.glb`;
+export const MODEL_URLS: Record<RigMap['caste'], string> = {
+  queen: `${import.meta.env.BASE_URL}models/queen.glb`,
+  worker: `${import.meta.env.BASE_URL}models/worker.glb`,
+  major: `${import.meta.env.BASE_URL}models/major.glb`,
+};
+/** Kept so existing callers keep working. */
+export const QUEEN_MODEL_URL = MODEL_URLS.queen;
 
 export interface QueenPoseInput extends Omit<GaitInput, 'clock'> {}
 
 export class QueenModel {
   readonly root = new THREE.Group();
+  /** Which ant this instance is wearing. */
+  readonly rig: RigMap;
+  /** Bones the rig map names that the FILE does not have. Should be empty. */
+  readonly missing: string[] = [];
   private bones = new Map<string, THREE.Bone>();
   /** Rest rotation per bone, so every frame is an offset and never accumulates. */
   private rest = new Map<string, THREE.Quaternion>();
@@ -36,9 +49,13 @@ export class QueenModel {
   private bodyRoot: THREE.Object3D | null = null;
   private baseY = 0;
 
+  constructor(caste: RigMap['caste'] = 'queen') {
+    this.rig = RIGS[caste];
+  }
+
   /** How far she measures along Z once scaled, in voxels. */
   get lengthVoxels(): number {
-    return queenScale() * 4.49;
+    return rigLengthVoxels(this.rig);
   }
 
   get ready(): boolean {
@@ -51,7 +68,7 @@ export class QueenModel {
    * Resolves even on failure — a missing model must not take the scene down
    * with it. The caller checks `ready` and can carry on without her.
    */
-  async load(url = QUEEN_MODEL_URL): Promise<boolean> {
+  async load(url = MODEL_URLS[this.rig.caste]): Promise<boolean> {
     const loader = new GLTFLoader();
     loader.setMeshoptDecoder(MeshoptDecoder);
     try {
@@ -73,10 +90,21 @@ export class QueenModel {
           mesh.castShadow = true;
         }
       });
-      const s = queenScale();
-      scene.scale.setScalar(s);
+      scene.scale.setScalar(rigScale(this.rig));
       this.root.add(scene);
-      this.bodyRoot = this.bones.get(QUEEN_RIG.body[0]!) ?? null;
+      /*
+       * Check the map against the FILE, and keep the answer.
+       *
+       * The bone names carry no meaning, so a re-export that renumbers them
+       * would leave the gait addressing bones that are not there — the ant would
+       * stand perfectly still, render perfectly well, and throw nothing. This is
+       * the only place that discrepancy is visible.
+       */
+      this.missing.length = 0;
+      for (const bone of rigBones(this.rig)) {
+        if (!this.bones.has(bone)) this.missing.push(bone);
+      }
+      this.bodyRoot = this.bones.get(this.rig.body[0]!) ?? null;
       this.baseY = this.bodyRoot?.position.y ?? 0;
       this.loaded = true;
       return true;
@@ -96,7 +124,7 @@ export class QueenModel {
   update(dt: number, input: QueenPoseInput): void {
     if (!this.loaded) return;
     this.clock += dt;
-    const pose = gaitPose({ ...input, clock: this.clock });
+    const pose = gaitPose({ ...input, clock: this.clock }, this.rig);
 
     for (const [name, euler] of pose.rotations) {
       const bone = this.bones.get(name);

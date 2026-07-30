@@ -67,7 +67,7 @@ export const FACES: readonly Face[] = [
  * collision is axis-separated AABBs, both against the true grid — geometry in
  * front of that plane is rock you can walk your face through.
  */
-export const CAVITY_DISH = 0.12;
+export const CAVITY_DISH = 0.16;
 /** Subdivisions per axis on a dished face. Nine quads instead of one. */
 export const DISH_CELLS = 3;
 /**
@@ -239,6 +239,14 @@ export function meshChunk(
               (ao[0]! * (1 - u) + ao[1]! * u) * (1 - v)
               + (ao[3]! * (1 - u) + ao[2]! * u) * v
             );
+            /*
+             * The quad's own edge vectors, for the surface tangents below.
+             * Taken from the corners rather than from the axis indices, because
+             * some faces traverse their in-plane axes backwards and the sign
+             * matters for the cross product.
+             */
+            const dU = [c[1][0] - c[0][0], c[1][1] - c[0][1], c[1][2] - c[0][2]];
+            const dV = [c[3][0] - c[0][0], c[3][1] - c[0][1], c[3][2] - c[0][2]];
             const gridFirst = positions.length / 3;
             for (let iv = 0; iv <= DISH_CELLS; iv++) {
               for (let iu = 0; iu <= DISH_CELLS; iu++) {
@@ -252,9 +260,54 @@ export function meshChunk(
                 const wy = y + lerp3(u, v, 1) - ny * back;
                 const wz = z + lerp3(u, v, 2) - nz * back;
                 positions.push(wx, wy, wz);
-                normals.push(nx, ny, nz);
+
+                /*
+                 * Normals have to FOLLOW the dish, or none of it is visible.
+                 *
+                 * This is the bug that made the whole thing look like it had
+                 * not been applied: every subdivided vertex kept the flat face
+                 * normal, so the geometry curved while the shading stayed
+                 * uniform — and a wall seen face-on is nothing BUT its shading.
+                 * The silhouette bent, which you can only notice at a grazing
+                 * angle, and the surface read exactly as square as before.
+                 *
+                 * Differentiating the displacement analytically: the surface is
+                 * the flat quad minus n * dish * sin(pi u) * sin(pi v), so each
+                 * tangent picks up a term along the normal.
+                 */
+                const du = -dish * Math.PI * Math.cos(Math.PI * u) * Math.sin(Math.PI * v);
+                const dv = -dish * Math.PI * Math.sin(Math.PI * u) * Math.cos(Math.PI * v);
+                const tu = [dU[0]! - nx * du, dU[1]! - ny * du, dU[2]! - nz * du];
+                const tv = [dV[0]! - nx * dv, dV[1]! - ny * dv, dV[2]! - nz * dv];
+                let cx2 = tu[1]! * tv[2]! - tu[2]! * tv[1]!;
+                let cy2 = tu[2]! * tv[0]! - tu[0]! * tv[2]!;
+                let cz2 = tu[0]! * tv[1]! - tu[1]! * tv[0]!;
+                // Point it the same way the face does; corner winding decides
+                // which way the cross product came out.
+                if (cx2 * nx + cy2 * ny + cz2 * nz < 0) {
+                  cx2 = -cx2; cy2 = -cy2; cz2 = -cz2;
+                }
+                const len = Math.hypot(cx2, cy2, cz2) || 1;
+                const rx = cx2 / len;
+                const ry = cy2 / len;
+                const rz = cz2 / len;
+                normals.push(rx, ry, rz);
                 layers.push(voxel);
-                tangents.push(tangent[0], tangent[1], tangent[2]);
+                /*
+                 * Tangent re-orthogonalised against the DISHED normal.
+                 *
+                 * Tangent-space normal mapping assumes the tangent is
+                 * perpendicular to the shading normal. Once the normal follows
+                 * the curve, the flat face tangent no longer is, and every
+                 * normal-mapped detail on a dished wall is lit off a skewed
+                 * basis. One Gram-Schmidt step fixes it.
+                 */
+                const tdot = tangent[0] * rx + tangent[1] * ry + tangent[2] * rz;
+                const ox = tangent[0] - rx * tdot;
+                const oy = tangent[1] - ry * tdot;
+                const oz = tangent[2] - rz * tdot;
+                const olen = Math.hypot(ox, oy, oz) || 1;
+                tangents.push(ox / olen, oy / olen, oz / olen);
                 const w = [wx, wy, wz] as const;
                 uvs.push(w[axisA]! / TILE_VOXELS, w[axisB]! / TILE_VOXELS);
                 const shade = AO_LEVELS[Math.round(aoAt(u, v))]! * tint;

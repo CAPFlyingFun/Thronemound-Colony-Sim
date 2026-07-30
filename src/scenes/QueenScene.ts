@@ -13,14 +13,15 @@
 
 import * as THREE from 'three';
 import { QueenModel } from '../anim/QueenModel';
-import { VOXEL_MM } from '../anim/hexapod';
+import { CASTE_LENGTH_MM, VOXEL_MM, type RigMap } from '../anim/hexapod';
 
 export class QueenScene {
   private readonly host: HTMLElement;
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
-  private readonly queen = new QueenModel();
+  private queen: QueenModel;
+  private caste: RigMap['caste'] = 'queen';
   private readonly readout: HTMLDivElement;
 
   private speed = 2;
@@ -59,6 +60,7 @@ export class QueenScene {
     // asserted — this is the whole reason the preview exists at real scale.
     const grid = new THREE.GridHelper(20, 20, 0x4a4f57, 0x2e3238);
     this.scene.add(grid);
+    this.queen = new QueenModel(this.caste);
     this.scene.add(this.queen.root);
 
     this.readout = document.createElement('div');
@@ -110,8 +112,39 @@ export class QueenScene {
     add('dig', 0, 1, this.digging, (v) => { this.digging = v; });
     add('carry', 0, 1, this.carrying, (v) => { this.carrying = v; });
     add('zoom', 1, 12, this.distance, (v) => { this.distance = v; });
+
+    /*
+     * Caste switch. All three ants share one gait and one loader, so this is
+     * also the check that they DO — a rig map that has drifted from its file
+     * shows up here as an ant standing perfectly still.
+     */
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:6px;margin-top:2px';
+    for (const caste of ['queen', 'worker', 'major'] as const) {
+      const button = document.createElement('button');
+      button.textContent = caste;
+      button.dataset.caste = caste;
+      button.style.cssText = 'flex:1;font:12px ui-monospace,monospace;padding:5px 6px;'
+        + 'border-radius:6px;border:1px solid #4a4f57;background:#2a2e35;color:#e8e2d4';
+      button.addEventListener('click', () => this.swap(caste));
+      row.appendChild(button);
+    }
+    panel.appendChild(row);
     host.appendChild(panel);
     this.cleanups.push(() => panel.remove());
+  }
+
+  /** Swap which ant is on the turntable. One loader, one gait, three tables. */
+  private swap(caste: RigMap['caste']): void {
+    if (caste === this.caste) return;
+    this.caste = caste;
+    this.scene.remove(this.queen.root);
+    this.queen.dispose();
+    this.queen = new QueenModel(caste);
+    this.scene.add(this.queen.root);
+    void this.queen.load().then((ok) => {
+      if (!ok) this.readout.textContent = `${caste} model failed to load.`;
+    });
   }
 
   private bindInput(): void {
@@ -184,10 +217,17 @@ export class QueenScene {
     this.camera.lookAt(0, centre, 0);
 
     if (++this.frames % 12 === 0) {
-      const mm = (this.queen.lengthVoxels * VOXEL_MM).toFixed(1);
+      const rig = this.queen.rig;
+      const jaws = rig.mandibleLeft ? 'jaws rigged' : 'no jaws (head dip)';
+      // A rig map that has drifted from its file is invisible except here: the
+      // ant would stand still and render perfectly.
+      const missing = this.queen.missing.length > 0
+        ? ` · <b>${this.queen.missing.length} BONES MISSING</b>`
+        : '';
       this.readout.innerHTML = `
-        <b>Queen</b> &nbsp; ${this.queen.ready ? 'loaded' : 'loading…'} &nbsp;
-        <b>${this.queen.lengthVoxels.toFixed(2)}</b> voxels (${mm} mm)<br>
+        <b>${rig.caste}</b> &nbsp; ${this.queen.ready ? 'loaded' : 'loading…'} &nbsp;
+        <b>${this.queen.lengthVoxels.toFixed(2)}</b> voxels
+        (${CASTE_LENGTH_MM[rig.caste]} mm) · ${rig.legs.length} legs · ${jaws}${missing}<br>
         <span class="dim">v${__APP_VERSION__} · ${__BUILD_TIME__} · drag to orbit ·
         1 grid square = 1 voxel = ${VOXEL_MM} mm</span>
       `;

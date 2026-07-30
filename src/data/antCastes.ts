@@ -3,6 +3,19 @@ export type AntCasteId = 'minor' | 'worker' | 'major' | 'superMajor';
 export interface AntCaste {
   id: AntCasteId;
   label: string;
+  /**
+   * Relative size multiplier, and NOT the source of how big an ant is drawn.
+   *
+   * A leftover from the 2D prototype, where it scaled a sprite. Real sizes now
+   * live in `CASTE_LENGTH_MM` in src/anim/hexapod.ts, in millimetres, because a
+   * model has to be scaled from its own measured length and a multiplier cannot
+   * express that. Kept only for relative combat/roster ordering — if you need a
+   * SIZE, take it from there, and do not add a second one here.
+   *
+   * The two taxonomies also differ: rigs exist for queen, worker and major;
+   * this table has minor, worker, major and superMajor. Reconciling them is a
+   * job for when the colony sim is wired up, not a thing to guess at now.
+   */
   scale: number;
   speed: number;
   maxHealth: number;
