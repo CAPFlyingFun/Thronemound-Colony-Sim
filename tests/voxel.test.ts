@@ -1410,7 +1410,7 @@ describe('fracture', () => {
     expect(mid).toBeGreaterThan(early);
     expect(late).toBeGreaterThan(mid);
     const open = allCracks(pattern).filter((c) => 0.95 >= c.at - 1e-4).length;
-    expect(late).toBe(6 + open);
+    expect(late).toBe(26 + open);
   });
 
   it('starts every crack at the point she struck', () => {
@@ -1484,7 +1484,10 @@ describe('fracture', () => {
      * faces and there are no interior seams for a grid to show through.
      */
     const pattern = buildFracture(11, S, 23, TOPSOIL);
-    // Sampled before the first crack opens, so this counts the LUMP alone.
+    /*
+     * Sampled before the first HIT lands, so this counts the lump alone and
+     * unbevelled: six faces, no interior seams for a grid to show through.
+     */
     expect(chipMeshData(pattern, 11, S, 23, CRACK_START - 0.01)!.quadCount).toBe(6);
     /*
      * And whatever grows after that is cracks on its surface, never more lumps.
@@ -1495,7 +1498,12 @@ describe('fracture', () => {
     const late = 0.9;
     const open = allCracks(pattern).filter((c) => late >= c.at - 1e-4).length;
     expect(open).toBeGreaterThan(0);
-    expect(chipMeshData(pattern, 11, S, 23, late)!.quadCount - open).toBe(6);
+    /*
+     * Once she has been hitting it, the lump is a chamfered box — 6 faces, 12
+     * edge bevels, 8 corner triangles — because the corners are knocked back a
+     * step per hit. Still ONE lump: no extra bodies, just a rounder one.
+     */
+    expect(chipMeshData(pattern, 11, S, 23, late)!.quadCount - open).toBe(26);
   });
 
   it('frees every piece, because nothing is deleted any more', () => {
@@ -1660,9 +1668,10 @@ describe('fracture', () => {
       worst = Math.max(worst, data?.quadCount ?? 0);
     }
     const pattern = buildFracture(2, S, 3, TOPSOIL);
-    expect(worst).toBeLessThanOrEqual(CELL_COUNT * 6 + allCracks(pattern).length);
-    // Six faces of cracks on ONE cell, and only ever one cell is being worked.
-    expect(worst).toBeLessThan(130);
+    // A chamfered box (26) plus six faces of cracks, on ONE cell — and only
+    // ever one cell is being worked, so this is the whole per-dig budget.
+    expect(worst).toBeLessThanOrEqual(26 + allCracks(pattern).length);
+    expect(worst).toBeLessThan(180);
   });
 
   it('cannot mint soil by cancelling half way through', () => {

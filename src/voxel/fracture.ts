@@ -94,6 +94,16 @@ const SHRINK_LAG = 2;
  */
 export const HIT_COUNT = 12;
 
+/**
+ * How far the corners are cut back by the time the block gives.
+ *
+ * Applied per HIT like everything else, so the lump visibly rounds off as it is
+ * worked: sharp when she starts, knocked down at the corners by the end. Real
+ * soil does not stay a crisp cube while being hit, and this is the cheapest
+ * honest way to say so — the corners are where damage shows first.
+ */
+const HIT_BEVEL = 0.3;
+
 /** How hard the block jolts on a hit, and how fast that dies away. */
 const HIT_SHAKE = 0.055;
 const HIT_SHAKE_DECAY = 9;
@@ -453,7 +463,7 @@ export function eventsBetween(
  * same cell cracks the same way across a cancel, a reload or a save.
  */
 export const CRACK_BRANCHES = 7;
-export const CRACK_JOINTS = 4;
+export const CRACK_JOINTS = 5;
 /**
  * Progress before the first crack shows. Almost nothing.
  *
@@ -538,7 +548,15 @@ export function crackSegments(pattern: FracturePattern, face = -1): CrackSegment
   const span = 0.86 - CRACK_START - delay;
   for (let b = 0; b < branches; b++) {
     let angle = (b / branches) * Math.PI * 2 + rand() * 0.9;
-    const reach = 0.35 + rand() * 0.5;
+    /*
+     * Long enough to cross the face rather than cluster round the blow.
+     *
+     * Face-local runs -1..1, so a reach of 0.85 covered barely a fifth of the
+     * face and the damage sat in a knot in the middle. Lengthening the branches
+     * spreads the same number of quads over far more area, which is cheaper
+     * than adding more of them.
+     */
+    const reach = 0.7 + rand() * 0.9;
     let px = su;
     let py = sv;
     // Branches stagger their start, so they do not all appear on one frame.
@@ -700,6 +718,8 @@ export function chipMeshData(
      * cancelled — there is no separate clock to leave running.
      */
     const jolt = hits > 0 ? Math.exp(-since * HIT_SHAKE_DECAY) * HIT_SHAKE : 0;
+    // Corners knocked back one step per hit, like the size.
+    const bevel = (hits / HIT_COUNT) * HIT_BEVEL * half;
     const midX = (cx + 0.5) * size + jx * drift + jx * jolt;
     const midY = (cy + 0.5) * size + jy * drift + jy * jolt;
     const midZ = (cz + 0.5) * size + jz * drift + jz * jolt;
@@ -760,11 +780,18 @@ export function chipMeshData(
       // reading as a cube cut on clean planes.
       const rn = spinVec(nx, ny, nz);
       for (const corner of face.corners) {
-        const local = spinVec(
-          (corner[0] * 2 - 1) * half,
-          (corner[1] * 2 - 1) * half,
-          (corner[2] * 2 - 1) * half,
-        );
+        /*
+         * Pull the corner in by however much has been knocked off so far.
+         *
+         * Only the two IN-PLANE axes move: the face itself stays on its own
+         * plane, so the square shrinks while the block keeps its size. The
+         * bevels and corner triangles below start from exactly these points.
+         */
+        const c3 = [(corner[0] * 2 - 1) * half, (corner[1] * 2 - 1) * half,
+          (corner[2] * 2 - 1) * half];
+        c3[axisA] = c3[axisA]! - Math.sign(c3[axisA]!) * bevel;
+        c3[axisB] = c3[axisB]! - Math.sign(c3[axisB]!) * bevel;
+        const local = spinVec(c3[0]!, c3[1]!, c3[2]!);
         const wx = x + midX + local[0];
         const wy = y + midY + local[1];
         const wz = z + midZ + local[2];
@@ -784,6 +811,84 @@ export function chipMeshData(
 
       indices.push(first, first + 1, first + 2, first, first + 2, first + 3);
       quadCount++;
+    }
+
+    /*
+     * The chamfer: one bevel per edge, one triangle per corner.
+     *
+     * The chip cube is a free-standing lump, so unlike the terrain mesher there
+     * are no neighbours to agree with and every corner is always cut — which
+     * makes this the simple case of the same shape, a rhombicuboctahedron.
+     */
+    if (bevel > 1e-6) {
+      const emitPoly = (pts: readonly (readonly [number, number, number])[], n: readonly [number, number, number]) => {
+        const nl = Math.hypot(n[0], n[1], n[2]) || 1;
+        const rn2 = spinVec(n[0] / nl, n[1] / nl, n[2] / nl);
+        const base = positions.length / 3;
+        const spun = pts.map((q) => spinVec(q[0], q[1], q[2]));
+        const [ua, va] = tangentAxes([rn2[0], rn2[1], rn2[2]]);
+        const tan: [number, number, number] = [0, 0, 0];
+        tan[ua] = 1;
+        for (const q of spun) {
+          const wx = x + midX + q[0];
+          const wy = y + midY + q[1];
+          const wz = z + midZ + q[2];
+          positions.push(wx, wy, wz);
+          normals.push(rn2[0], rn2[1], rn2[2]);
+          layers.push(pattern.voxel);
+          tangents.push(tan[0], tan[1], tan[2]);
+          const w = [wx, wy, wz] as const;
+          uvs.push(w[ua]! / TILE_VOXELS, w[va]! / TILE_VOXELS);
+          // A knocked-off corner is fresh soil, so it reads a shade lighter
+          // than the weathered faces around it.
+          const lit = 1.02 * tint * occlusion * 0.86;
+          colors.push(lit, lit, lit);
+        }
+        // Winding from the cross product, never assumed — the same trap that
+        // ate the crack quads and the hex room's walls.
+        const e1 = [spun[1]![0] - spun[0]![0], spun[1]![1] - spun[0]![1], spun[1]![2] - spun[0]![2]];
+        const e2 = [spun[2]![0] - spun[0]![0], spun[2]![1] - spun[0]![1], spun[2]![2] - spun[0]![2]];
+        const facing = (e1[1]! * e2[2]! - e1[2]! * e2[1]!) * rn2[0]
+          + (e1[2]! * e2[0]! - e1[0]! * e2[2]!) * rn2[1]
+          + (e1[0]! * e2[1]! - e1[1]! * e2[0]!) * rn2[2];
+        for (let k = 1; k + 1 < spun.length; k++) {
+          if (facing >= 0) indices.push(base, base + k, base + k + 1);
+          else indices.push(base, base + k + 1, base + k);
+        }
+        quadCount++;
+      };
+      const on = half;
+      const back = half - bevel;
+      for (let af = 0; af < 3; af++) {
+        for (const sf of [1, -1] as const) {
+          for (let ag = af + 1; ag < 3; ag++) {
+            for (const sg of [1, -1] as const) {
+              const ac = 3 - af - ag;
+              const pt = (fOn: boolean, t: number): [number, number, number] => {
+                const q: [number, number, number] = [0, 0, 0];
+                q[af] = sf * (fOn ? on : back);
+                q[ag] = sg * (fOn ? back : on);
+                q[ac] = t;
+                return q;
+              };
+              const n: [number, number, number] = [0, 0, 0];
+              n[af] = sf; n[ag] = sg;
+              emitPoly([pt(true, -back), pt(true, back), pt(false, back), pt(false, -back)], n);
+            }
+          }
+        }
+      }
+      for (const sx of [1, -1] as const) {
+        for (const sy of [1, -1] as const) {
+          for (const sz of [1, -1] as const) {
+            emitPoly([
+              [sx * on, sy * back, sz * back],
+              [sx * back, sy * on, sz * back],
+              [sx * back, sy * back, sz * on],
+            ], [sx, sy, sz]);
+          }
+        }
+      }
     }
 
     /*
