@@ -436,6 +436,8 @@ export class DigScene {
   private blockedFor = 0;
   /** Sheets off the last cube worked, for the objective line. */
   private sheetsMessage = 0;
+  /** Thinnest axis of the target outline. Debug-only; proves the box shrinks. */
+  private highlightDepth = 1;
   /** Outward normal of the wall currently being pushed into, if any. */
   private readonly wallNormal = new THREE.Vector3();
   private hasWall = false;
@@ -2502,7 +2504,30 @@ export class DigScene {
       this.highlight.visible = false;
       return;
     }
-    this.highlight.position.set(shown.x + 0.5, shown.y + 0.5, shown.z + 0.5);
+    /*
+     * The box tracks the soil that is actually LEFT, not the cell it sits in.
+     *
+     * A cube is cut in four sheets, so after one press a quarter of it is gone
+     * and a full-size outline claims a boundary that no longer has anything
+     * behind it. Shrinking it along the axis the sheets came off — and sliding
+     * it away from the worked face by half of what was removed — makes the
+     * outline mean "this is what is still there".
+     */
+    const sheets = this.session.sheetsDone(shown.x, shown.y, shown.z);
+    const chip = this.chips.get(DigScene.chipKey(shown.x, shown.y, shown.z));
+    const scale = { x: 1, y: 1, z: 1 };
+    const centre = { x: shown.x + 0.5, y: shown.y + 0.5, z: shown.z + 0.5 };
+    if (chip && sheets > 0) {
+      const axis = (['x', 'y', 'z'] as const)[chip.pattern.strikeAxis]!;
+      const gone = sheets / LAYER_COUNT;
+      scale[axis] = 1 - gone;
+      // Remaining soil sits on the far side from the strike, so the outline's
+      // centre moves away from the face by half the depth taken off.
+      centre[axis] -= chip.pattern.strikeSign * gone * 0.5;
+    }
+    this.highlight.scale.set(scale.x, scale.y, scale.z);
+    this.highlight.position.set(centre.x, centre.y, centre.z);
+    this.highlightDepth = Math.min(scale.x, scale.y, scale.z);
     this.highlight.visible = true;
   }
 
@@ -2640,7 +2665,9 @@ export class DigScene {
     // Part-dug cubes still being drawn. One that stops being masked while it
     // is still part dug IS the "outer wall grows back" bug, and this is the
     // only handle a headless test has on it.
-    const drawn = this.debug ? ` \u00B7 chips ${this.chips.size}` : '';
+    const drawn = this.debug
+      ? ` \u00B7 chips ${this.chips.size} \u00B7 box ${this.highlightDepth.toFixed(2)}`
+      : '';
     const chipping = this.debug && this.active
       ? ` \u00B7 chip ${CELL_COUNT - removedAt(this.active.pattern, this.active.progress)}/${CELL_COUNT}`
         + ` \u00B7 spill ${this.active.spilled}`

@@ -83,6 +83,7 @@ const hud = async () => {
     chipTotal: Number(/chip \d+\/(\d+)/.exec(t)?.[1] ?? 'NaN'),
     spill: Number(/spill (\d+)/.exec(t)?.[1] ?? 'NaN'),
     chips: Number(/chips (\d+)/.exec(t)?.[1] ?? '0'),
+    box: Number(/box ([\d.]+)/.exec(t)?.[1] ?? '1'),
   };
 };
 /**
@@ -231,10 +232,19 @@ for (let sheet = 1; sheet <= 4; sheet++) {
    * wall grows back: you cannot see your own dig until the whole cube is out,
    * and it flickers back into view every time you press.
    */
-  if ((await hud()).chips < 1) {
+  const between = await hud();
+  if (between.chips < 1) {
     fail(`the hole closed up after sheet ${sheet} — the part-dug cube stopped being drawn`);
   } else if (sheet === 1) {
     ok('the hole stays open between presses');
+  }
+  // The outline has to shrink with the soil, or it claims a boundary with
+  // nothing behind it.
+  const want = (4 - sheet) / 4;
+  if (Math.abs(between.box - want) > 0.01) {
+    fail(`target outline is ${between.box} deep after ${sheet} sheet(s), expected ${want}`);
+  } else if (sheet === 1) {
+    ok(`the target outline shrinks with the soil (${between.box} after one sheet)`);
   }
 
   /*
