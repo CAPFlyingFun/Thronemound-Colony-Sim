@@ -227,8 +227,8 @@ export function meshChunk(
             const p: [number, number, number] = [corner[0], corner[1], corner[2]];
             const ia = corner[axisA] === 1 ? 1 : -1;
             const ib = corner[axisB] === 1 ? 1 : -1;
-            if (openDir(axisA, ia)) p[axisA] -= ia * EDGE_CHAMFER;
-            if (openDir(axisB, ib)) p[axisB] -= ib * EDGE_CHAMFER;
+            if (openDir(axisA, ia)) p[axisA] = p[axisA]! - ia * EDGE_CHAMFER;
+            if (openDir(axisB, ib)) p[axisB] = p[axisB]! - ib * EDGE_CHAMFER;
             return p;
           };
           const inset = face.corners.map(insetCorner) as [
