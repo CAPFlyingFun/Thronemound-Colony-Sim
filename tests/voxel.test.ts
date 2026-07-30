@@ -160,6 +160,61 @@ describe('mesher', () => {
     expect(data.indices.length).toBe(6 * 6 + 12 * 6 + 8 * 3);
   });
 
+  it('leaves no hole where cut and uncut vertices meet', () => {
+    /*
+     * The case the lone-voxel census could never see, and the one that shipped
+     * broken: every vertex of a lone voxel is cut, so nothing there ever has to
+     * agree with a neighbour that did NOT chamfer.
+     *
+     * A domino and a 2x2x2 block are the smallest CLOSED surfaces carrying both
+     * kinds of vertex — the outward corners are cut, the ones facing the other
+     * voxels are not — so a disagreement surfaces here as an unpaired edge
+     * rather than as sky seen through the ground two commits later.
+     */
+    const domino = {
+      get: (x: number, y: number, z: number) => (
+        y === 5 && z === 5 && (x === 5 || x === 6) ? TOPSOIL : 0
+      ),
+    };
+    const block = {
+      get: (x: number, y: number, z: number) => (
+        x >= 5 && x <= 6 && y >= 5 && y <= 6 && z >= 5 && z <= 6 ? TOPSOIL : 0
+      ),
+    };
+    for (const shape of [domino, block]) {
+      const counts = edgeCensus(meshChunk(shape, 0, 0, 0)!);
+      expect([...counts.entries()].filter(([, n]) => n !== 2)).toEqual([]);
+    }
+  });
+
+  it('opens no hole at the corners of a dug pit', () => {
+    /*
+     * The exact shape of the shipped bug, kept as a regression. At a pit corner
+     * three top faces meet: the two bordering the pit pulled their corner in,
+     * the diagonal one did not, and the wedge between them was open sky.
+     *
+     * Measured as upward-facing area rather than by edge census, because a
+     * chunk's mesh is not a closed surface — it ends at the chunk seam, where
+     * unpaired edges are legitimate. The ground is flat, so the area facing the
+     * sky must come to exactly the number of columns still covered.
+     */
+    const world = makeWorld();
+    const cy = Math.floor(SURFACE / CHUNK);
+    world.dig(40, SURFACE, 40);
+    const data = meshChunk(world, 1, cy, 1)!;
+    let up = 0;
+    for (let t = 0; t < data.indices.length; t += 3) {
+      const [i, j, k] = [data.indices[t]!, data.indices[t + 1]!, data.indices[t + 2]!];
+      const p = (n: number) => [data.positions[n * 3]!, data.positions[n * 3 + 2]!];
+      const [a, b, c] = [p(i), p(j), p(k)];
+      // Signed area projected onto the ground plane, upward-facing only.
+      const area = ((b[0]! - a[0]!) * (c[1]! - a[1]!) - (c[0]! - a[0]!) * (b[1]! - a[1]!)) / 2;
+      if (data.normals[i * 3 + 1]! > 0.5) up += Math.abs(area);
+    }
+    // 32x32 columns less the one dug away. A corner hole is a shortfall here.
+    expect(up).toBeCloseTo(CHUNK * CHUNK - 1, 4);
+  });
+
   it('leaves no slit anywhere in the chamfered surface', () => {
     /*
      * The whole risk of insetting a face is that its neighbours no longer meet
@@ -271,16 +326,19 @@ describe('mesher', () => {
      */
     const cell = DISH_CELLS * DISH_CELLS;
     /*
-     * Plus four bevels, one per rim voxel.
+     * And no chamfer at all.
      *
-     * Each of the pit's four lateral neighbours now shows TWO faces — its sky
-     * face and the new pit wall — and those are perpendicular, so the edge
-     * between them is convex and gets chamfered. This is the rim of the hole
-     * being rounded off, and it is the whole point: a dug pit reads as a socket
-     * with a soft lip rather than a square cut. No corner triangles, because
-     * that needs three open faces meeting and these voxels only have two.
+     * Each rim voxel does show two perpendicular faces, so the edge between
+     * them is convex — but BOTH its ends run on into solid rim, so neither end
+     * vertex is cut and the bevel would have nothing to taper to. Chamfering it
+     * anyway is what punched sky-holes through the corners of the pit.
+     *
+     * So a one-voxel pit is drawn exactly as it was before the chamfer existed.
+     * Rounding a rim properly needs the cut to run ALONG the convex edge across
+     * several voxels and taper only at its true ends, which needs the face
+     * boundary subdivided; see the note on EDGE_CHAMFER.
      */
-    expect(after).toBe(before - 1 + 4 * cell + 4);
+    expect(after).toBe(before - 1 + 4 * cell);
     // The pit's floor belongs to the chunk BELOW — SURFACE is the first voxel
     // row of chunk cy, so y-1 is across the seam. That is exactly why set()
     // dirties the neighbouring chunk as well.
@@ -349,34 +407,44 @@ describe('mesher', () => {
      * and each dished face stops short of its own bevel, opening a hairline slit
      * at every rounded edge — the same trap the hex mesher had.
      *
-     * A stepped tunnel is the smallest shape with both: the standing voxel at
-     * (7,5,5) shows two perpendicular faces, both facing enclosed air.
+     * The two want different neighbourhoods, so the shape has to satisfy both.
+     * Dishing needs the AIR to be walled in on three sides or more; a cut vertex
+     * needs three of the SOLID voxel's faces open. Three single air cells poked
+     * into solid rock along +X, +Y and +Z from (6,5,6) does both: each pocket is
+     * enclosed on all six sides bar one, and (6,5,6) has exactly one cut vertex,
+     * at (+1,+1,+1).
      */
-    const step = {
-      get: (x: number, y: number, z: number) => {
-        const lower = y === 5 && z === 5 && x >= 4 && x <= 6;
-        const upper = y === 6 && z === 5 && x >= 7 && x <= 9;
-        return lower || upper ? 0 : TOPSOIL;
-      },
+    const pockets = {
+      get: (x: number, y: number, z: number) => (
+        (x === 7 && y === 5 && z === 6)
+        || (x === 6 && y === 6 && z === 6)
+        || (x === 6 && y === 5 && z === 7) ? 0 : TOPSOIL
+      ),
     };
-    const data = meshChunk(step, 0, 0, 0)!;
-    // Everything drawn on or just behind the plane x=7 inside that voxel: the
-    // dished face, plus the bevel that shares its upper edge.
-    const onFace = [];
+    const data = meshChunk(pockets, 0, 0, 0)!;
+    // The +X face of (6,5,6): on the plane x=7, dished back along -X.
+    const onFace: number[][] = [];
     for (let i = 0; i < data.positions.length; i += 3) {
       const [px, py, pz] = [data.positions[i]!, data.positions[i + 1]!, data.positions[i + 2]!];
-      if (px >= 7 - 1e-6 && px <= 7 + CAVITY_DISH + 1e-6
-        && py >= 5 - 1e-6 && py <= 6 + 1e-6 && pz >= 5 - 1e-6 && pz <= 6 + 1e-6
-        && data.normals[i]! < 0) onFace.push(py);
+      if (px <= 7 + 1e-6 && px >= 7 - CAVITY_DISH - 1e-6
+        && py >= 5 - 1e-6 && py <= 6 + 1e-6 && pz >= 6 - 1e-6 && pz <= 7 + 1e-6
+        && data.normals[i]! > 0) onFace.push([py, pz]);
     }
     expect(onFace.length).toBeGreaterThanOrEqual((DISH_CELLS + 1) ** 2);
     /*
-     * +Y is open (the step continues upward), so that edge is cut back by
-     * exactly one chamfer and NOTHING is drawn above it — that strip is where
-     * the bevel goes. -Y is solid, so that edge stays on the lattice.
+     * And the face's top edge TAPERS along its length, which is the whole point
+     * of deciding this per vertex.
+     *
+     * Only the (+1,+1,+1) end of that edge is cut — the other end runs on into
+     * solid soil at -Z, so it stays on the lattice and the bevel narrows to a
+     * point there. Cutting the edge back uniformly is what tore holes at the
+     * corners of a dug pit.
      */
-    expect(Math.max(...onFace)).toBeCloseTo(6 - EDGE_CHAMFER, 5);
-    expect(Math.min(...onFace)).toBeCloseTo(5, 5);
+    const near = onFace.filter(([, pz]) => pz! >= 6.5).map(([py]) => py!);
+    const far = onFace.filter(([, pz]) => pz! <= 6.05).map(([py]) => py!);
+    expect(Math.max(...near)).toBeCloseTo(6 - EDGE_CHAMFER, 5);
+    expect(Math.max(...far)).toBeCloseTo(6, 5);
+    expect(Math.min(...onFace.map(([py]) => py!))).toBeCloseTo(5, 5);
   });
 
   it('leaves no orphaned vertices in the buffer', () => {

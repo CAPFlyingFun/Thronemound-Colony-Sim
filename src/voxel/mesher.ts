@@ -185,6 +185,32 @@ export function meshChunk(
           open.push(!sample(x + probe.normal[0], y + probe.normal[1], z + probe.normal[2]));
         }
         const openDir = (axis: number, sign: number) => open[faceIndex(axis, sign)]!;
+        /*
+         * A cube VERTEX is cut only when all three faces meeting at it are open.
+         *
+         * Deciding this per EDGE instead opens holes, and the failure is worth
+         * recording because it is not obvious from the code. At the corner of a
+         * dug pit three voxels' top faces meet: the two bordering the pit each
+         * pull their corner in, while the third — diagonal to the pit, so both
+         * ITS lateral neighbours are solid — does not. A bevel can only fill the
+         * gap between two faces of the SAME voxel, so nothing covers the wedge
+         * between the two that moved and the one that did not, and you see sky
+         * through a triangular hole at every pit corner.
+         *
+         * Per vertex there is ONE decision instead of three, so the three faces
+         * meeting there cannot disagree: each pulls its corner to one of the
+         * three points the corner triangle spans.
+         */
+        const cutAt = (sx: number, sy: number, sz: number) => (
+          openDir(0, sx) && openDir(1, sy) && openDir(2, sz)
+        );
+        const cutVertex = (
+          a1: number, s1: number, a2: number, s2: number, a3: number, s3: number,
+        ) => {
+          const s = [0, 0, 0];
+          s[a1] = s1; s[a2] = s2; s[a3] = s3;
+          return cutAt(s[0]!, s[1]!, s[2]!);
+        };
 
         for (const face of FACES) {
           const [nx, ny, nz] = face.normal;
@@ -217,18 +243,22 @@ export function meshChunk(
           const dish = enclosure >= CAVITY_ENCLOSURE ? CAVITY_DISH : 0;
 
           /*
-           * Pull a corner in along whichever of its two in-plane edges is
-           * convex. The bevel quads and corner triangles below are generated
-           * from the same constant and the same test, so the point this lands
-           * on is byte-for-byte the point they start from — that is what makes
-           * the result watertight instead of a mesh full of hairline slits.
+           * A corner moves only if its cube VERTEX is cut, and then it moves in
+           * BOTH in-plane axes at once. The bevels and corner triangles below
+           * ask the same question of the same vertex, so the point this lands on
+           * is byte-for-byte the point they start from — which is what makes the
+           * surface watertight rather than a mesh full of slits and wedges.
            */
+          const nAxis = nx !== 0 ? 0 : ny !== 0 ? 1 : 2;
+          const nSign = nx || ny || nz;
           const insetCorner = (corner: Vec3): [number, number, number] => {
             const p: [number, number, number] = [corner[0], corner[1], corner[2]];
             const ia = corner[axisA] === 1 ? 1 : -1;
             const ib = corner[axisB] === 1 ? 1 : -1;
-            if (openDir(axisA, ia)) p[axisA] = p[axisA]! - ia * EDGE_CHAMFER;
-            if (openDir(axisB, ib)) p[axisB] = p[axisB]! - ib * EDGE_CHAMFER;
+            if (cutVertex(nAxis, nSign, axisA, ia, axisB, ib)) {
+              p[axisA] = p[axisA]! - ia * EDGE_CHAMFER;
+              p[axisB] = p[axisB]! - ib * EDGE_CHAMFER;
+            }
             return p;
           };
           const inset = face.corners.map(insetCorner) as [
@@ -482,8 +512,16 @@ export function meshChunk(
             quadCount++;
           };
 
-          // One bevel per convex edge. af < ag visits each perpendicular pair
-          // once, so no edge is emitted twice.
+          /*
+           * One bevel per convex edge that has at least one cut end. af < ag
+           * visits each perpendicular pair once, so no edge is emitted twice.
+           *
+           * Where the edge runs on into solid soil its end is NOT cut, and the
+           * bevel has to taper to a point on the lattice rather than stop with a
+           * square end — a square end leaves the two faces diverging from a
+           * corner they no longer share, which is a wedge-shaped hole. Tapered,
+           * the bevel is a triangle and both faces run into its far vertex.
+           */
           for (let af = 0; af < 3; af++) {
             for (const sf of [1, -1] as const) {
               if (!openDir(af, sf)) continue;
@@ -491,35 +529,44 @@ export function meshChunk(
                 for (const sg of [1, -1] as const) {
                   if (!openDir(ag, sg)) continue;
                   const ac = 3 - af - ag;
-                  // The bevel's ends stop short wherever the edge running into
-                  // them is also convex, leaving room for the corner triangle.
-                  const eLo = openDir(ac, -1) ? lo : 0;
-                  const eHi = openDir(ac, 1) ? hi : 1;
-                  const point = (onF: boolean, along: number) => {
+                  const cutLo = cutVertex(af, sf, ag, sg, ac, -1);
+                  const cutHi = cutVertex(af, sf, ag, sg, ac, 1);
+                  if (!cutLo && !cutHi) continue;
+                  /** On face f's plane, cut back toward g. */
+                  const onF = (along: number) => {
                     const p: [number, number, number] = [0, 0, 0];
-                    p[af] = onF ? at(sf) : back(sf);
-                    p[ag] = onF ? back(sg) : at(sg);
-                    p[ac] = along;
+                    p[af] = at(sf); p[ag] = back(sg); p[ac] = along;
+                    return p;
+                  };
+                  /** On face g's plane, cut back toward f. */
+                  const onG = (along: number) => {
+                    const p: [number, number, number] = [0, 0, 0];
+                    p[af] = back(sf); p[ag] = at(sg); p[ac] = along;
+                    return p;
+                  };
+                  /** The untouched lattice vertex both faces still share. */
+                  const corner = (along: number) => {
+                    const p: [number, number, number] = [0, 0, 0];
+                    p[af] = at(sf); p[ag] = at(sg); p[ac] = along;
                     return p;
                   };
                   const n: [number, number, number] = [0, 0, 0];
                   n[af] = sf;
                   n[ag] = sg;
-                  emit(
-                    [point(true, eLo), point(true, eHi), point(false, eHi), point(false, eLo)],
-                    n,
-                  );
+                  if (cutLo && cutHi) emit([onF(lo), onF(hi), onG(hi), onG(lo)], n);
+                  else if (cutLo) emit([onF(lo), corner(1), onG(lo)], n);
+                  else emit([onF(hi), onG(hi), corner(0)], n);
                 }
               }
             }
           }
 
-          // One triangle per convex corner, closing the three bevels that meet
-          // there. Its vertices are the bevels' own end points, exactly.
+          // One triangle per cut vertex, closing the three bevels that meet
+          // there. Its corners are the bevels' own end points, exactly.
           for (const sx of [1, -1] as const) {
             for (const sy of [1, -1] as const) {
               for (const sz of [1, -1] as const) {
-                if (!openDir(0, sx) || !openDir(1, sy) || !openDir(2, sz)) continue;
+                if (!cutAt(sx, sy, sz)) continue;
                 emit(
                   [
                     [at(sx), back(sy), back(sz)],
