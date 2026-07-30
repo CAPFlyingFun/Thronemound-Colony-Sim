@@ -49,21 +49,43 @@ export const SKY_PHASES: readonly SkyPhase[] = [
   {
     name: 'night',
     at: 0,
-    image: null,
-    background: 0.06,
-    environment: 0.12,
-    hemisphere: 0.22,
-    sun: [0.44, 0.52, 0.78],
-    sunIntensity: 0.25,
-    elevation: -0.25,
+    /*
+     * A real night sky, so it is barely graded at all.
+     *
+     * The first pass faked night by driving a DAYLIGHT sky down to 0.05, which
+     * is why it needed such a violent multiplier. This one is already night, so
+     * pushing it further would only crush the moon — and the moon is the point:
+     * it is a directional source the way the sun is, and it will read through
+     * anything tall we put on the surface later.
+     *
+     * The "sun" here IS the moon. Cool and weak, but still directional, which
+     * is what separates a moonlit night from a night that is merely dark.
+     */
+    image: 'qwantani_night_puresky_2k.hdr',
+    /*
+     * The GROUND is what makes it read as night, not the sky.
+     *
+     * At environment 0.7 this looked like daylight with stars in it. The sky
+     * only loses a quarter here — the stars are worth keeping and dimming the
+     * image is what would lose them — while the light it casts is cut to well
+     * under half, which is the number the eye actually reads as darkness.
+     */
+    background: 0.75,
+    environment: 0.26,
+    hemisphere: 0.10,
+    sun: [0.55, 0.62, 0.85],
+    sunIntensity: 0.22,
+    elevation: 0.75,
     horizon: [0.05, 0.06, 0.11],
   },
   {
     name: 'sunrise',
     at: 6,
-    image: null,
-    background: 0.55,
-    environment: 0.55,
+    image: 'kloppenheim_06_puresky_2k.hdr',
+    // Near 1: a real HDRI already carries its own mood, and grading it a second
+    // time on top of that is what makes a dusk sky look like a broken day sky.
+    background: 1,
+    environment: 0.85,
     hemisphere: 0.34,
     sun: [1, 0.62, 0.36],
     sunIntensity: 1.5,
@@ -73,9 +95,7 @@ export const SKY_PHASES: readonly SkyPhase[] = [
   {
     name: 'noon',
     at: 12,
-    // The brighter, bluer of the two we have — the one worth the extra 350 KB
-    // is the one you spend the most daylight looking at.
-    image: 'daysky_2k.jpg',
+    image: 'kloppenheim_05_puresky_2k.hdr',
     background: 1,
     environment: 1,
     hemisphere: 0.28,
@@ -87,9 +107,9 @@ export const SKY_PHASES: readonly SkyPhase[] = [
   {
     name: 'sunset',
     at: 19,
-    image: null,
-    background: 0.5,
-    environment: 0.5,
+    image: 'qwantani_dusk_2_puresky_2k.hdr',
+    background: 1,
+    environment: 0.8,
     hemisphere: 0.32,
     sun: [1, 0.5, 0.26],
     sunIntensity: 1.4,

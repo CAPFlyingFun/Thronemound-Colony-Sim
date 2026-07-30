@@ -28,6 +28,7 @@ import {
 } from '../voxel/LooseSoil';
 import { raycastVoxel } from '../voxel/raycast';
 import { DAY_HOURS, SKY_PHASES, packColor, skyAt } from '../voxel/daylight';
+import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
 import { DigSession } from '../voxel/DigSession';
 import { createVoxelMaterial, type VoxelMaterialBundle } from '../voxel/voxelMaterial';
 import { DEN_MIN_CHAMBER, DEN_MIN_DEPTH, QueenFounding } from '../voxel/QueenFounding';
@@ -370,6 +371,8 @@ export class DigScene {
   private readonly skies = new Map<string, {
     texture: THREE.Texture; environment: THREE.Texture;
   }>();
+  /** In flight, so an hour ticking past does not queue the same file twice. */
+  private readonly skyPending = new Set<string>();
   private environment: THREE.Texture | null = null;
   private readonly hemisphere: THREE.HemisphereLight;
   private readonly sun: THREE.DirectionalLight;
@@ -811,16 +814,13 @@ export class DigScene {
    */
   private loadSky(): void {
     /*
-     * Every distinct image named by a phase, plus the shared fallback.
+     * Only the shared fallback is fetched up front.
      *
-     * Loaded as a set rather than one at a time because the irradiance map has
-     * to be built per image: assigning a raw equirectangular texture to
-     * `environment` gives a hard, sparkly result, so each one needs its own
-     * PMREM pass and there is no cheap way to do that lazily mid-flight.
+     * The per-phase skies are true .hdr at 4 to 5 MB each, so fetching all of
+     * them would be 18 MB before the first frame to show one. They are pulled
+     * in on demand instead — see requestSky — which costs one file for the hour
+     * you are actually in.
      */
-    const wanted = new Set<string>();
-    for (const phase of SKY_PHASES) if (phase.image) wanted.add(phase.image);
-    for (const name of wanted) this.loadSkyImage(name);
     new THREE.TextureLoader().load(SKY_URL, (texture) => {
       if (this.disposed) return;
       texture.mapping = THREE.EquirectangularReflectionMapping;
@@ -853,9 +853,19 @@ export class DigScene {
     });
   }
 
-  /** One named sky, kept alongside its irradiance map. */
-  private loadSkyImage(name: string): void {
-    new THREE.TextureLoader().load(`${import.meta.env.BASE_URL}sky/${name}`, (texture) => {
+  /**
+   * Fetch a sky if it is not already here or on its way.
+   *
+   * Radiance .hdr rather than JPEG, on purpose: the irradiance map is built
+   * from this, and a true HDR keeps the sun's real intensity instead of the
+   * clipped white blob a JPEG flattens it to. That is most of why the lighting
+   * has direction at all.
+   */
+  private requestSky(name: string): void {
+    if (this.skies.has(name) || this.skyPending.has(name)) return;
+    this.skyPending.add(name);
+    const loader = name.endsWith('.hdr') ? new RGBELoader() : new THREE.TextureLoader();
+    loader.load(`${import.meta.env.BASE_URL}sky/${name}`, (texture) => {
       if (this.disposed) return;
       texture.mapping = THREE.EquirectangularReflectionMapping;
       texture.colorSpace = THREE.SRGBColorSpace;
@@ -866,6 +876,7 @@ export class DigScene {
       this.applyDaylight();
     }, undefined, () => {
       // A phase whose image is missing simply falls back to the shared sky.
+      this.skyPending.delete(name);
     });
   }
 
@@ -2680,6 +2691,10 @@ export class DigScene {
      * a change that is already happening rather than as a jump on its own.
      */
     const near = grade.blend < 0.5 ? grade.from : grade.to;
+    // Ask for the one in use AND the one coming, so the swap has its image in
+    // hand rather than falling back to the shared sky for a second mid-change.
+    if (near.image) this.requestSky(near.image);
+    if (grade.to.image) this.requestSky(grade.to.image);
     const named = near.image ? this.skies.get(near.image) : undefined;
     const texture = named?.texture ?? this.sky;
     const environment = named?.environment ?? this.environment;
