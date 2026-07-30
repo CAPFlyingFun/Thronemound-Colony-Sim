@@ -17,7 +17,15 @@ const browser = await chromium.launch({
   executablePath: process.env.CHROME_PATH ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
   args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'],
 });
-const page = await browser.newPage({ viewport: { width: 1100, height: 800 }, deviceScaleFactor: 1 });
+/*
+ * deviceScaleFactor 3, deliberately — a PHONE, not a desktop.
+ *
+ * The canvas-sizing bug this suite missed the first time only exists above
+ * ratio 1: the draw buffer was set without the CSS size, so the element laid
+ * out at twice the viewport and you saw the top-left quarter with the queen off
+ * in the corner. At ratio 1 the two happen to agree and everything looks fine.
+ */
+const page = await browser.newPage({ viewport: { width: 900, height: 420 }, deviceScaleFactor: 3 });
 
 const errors = [];
 const badResponses = [];
@@ -40,6 +48,45 @@ if (!loaded) fail(`the queen never loaded — "${(await page.textContent('.dig-h
 else ok('the GLB loads: meshopt decoder resolved and WebP textures decoded');
 
 const readout = (await page.textContent('.dig-hud'))?.replace(/\s+/g, ' ').trim() ?? '';
+
+/*
+ * 1b. The canvas fills its host, in CSS pixels.
+ *
+ * This is the assertion that catches the off-centre queen directly, rather than
+ * through a screenshot: if the element is laid out larger than the viewport,
+ * the visible region is a crop and nothing is where the camera aimed it.
+ */
+const box = await page.evaluate(() => {
+  const c = document.querySelector('canvas');
+  const host = document.getElementById('app');
+  if (!c || !host) return null;
+  const r = c.getBoundingClientRect();
+  return { cw: Math.round(r.width), ch: Math.round(r.height),
+    hw: host.clientWidth, hh: host.clientHeight, dpr: window.devicePixelRatio };
+});
+if (!box) fail('no canvas to measure');
+else if (Math.abs(box.cw - box.hw) > 2 || Math.abs(box.ch - box.hh) > 2) {
+  fail(`canvas is ${box.cw}x${box.ch} CSS px in a ${box.hw}x${box.hh} host `
+    + `at dpr ${box.dpr} — the view is a crop, so nothing is centred`);
+} else ok(`canvas fills its host at dpr ${box.dpr} (${box.cw}x${box.ch})`);
+
+/*
+ * 1c. She is actually in the MIDDLE of the frame.
+ *
+ * Sizing can be right and the framing still wrong. A crop of the centre has to
+ * carry detail; the same-sized crop of a corner is background. Compared as
+ * compressed PNG size, the way the dig suite already tells a rendered frame
+ * from a flat one — a lone brown wash packs down to almost nothing.
+ */
+const size = { width: Math.round(box.hw / 4), height: Math.round(box.hh / 4) };
+const middle = await page.screenshot({
+  clip: { x: (box.hw - size.width) / 2, y: (box.hh - size.height) / 2, ...size },
+});
+const corner = await page.screenshot({ clip: { x: 0, y: 0, ...size } });
+if (middle.length <= corner.length) {
+  fail(`the centre of the frame is as empty as the corner `
+    + `(${middle.length} B vs ${corner.length} B) — she is not centred`);
+} else ok(`she is in the middle of the frame (${middle.length} B vs ${corner.length} B corner)`);
 
 // 2. She is the size of a real ant, not of whatever the modeller exported.
 const mm = Number(/\(([\d.]+) mm\)/.exec(readout)?.[1] ?? '0');

@@ -16,6 +16,7 @@ import { QueenModel } from '../anim/QueenModel';
 import { VOXEL_MM } from '../anim/hexapod';
 
 export class QueenScene {
+  private readonly host: HTMLElement;
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
@@ -36,6 +37,7 @@ export class QueenScene {
   private readonly cleanups: (() => void)[] = [];
 
   constructor(host: HTMLElement) {
+    this.host = host;
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.domElement.style.touchAction = 'none';
@@ -134,10 +136,21 @@ export class QueenScene {
   }
 
   private resize(): void {
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    this.renderer.setSize(w, h, false);
-    this.camera.aspect = w / h;
+    const width = this.host.clientWidth || window.innerWidth;
+    const height = this.host.clientHeight || window.innerHeight;
+    /*
+     * updateStyle must stay ON, and the size must come from the HOST.
+     *
+     * Passing `false` sets the draw buffer but leaves the canvas element with
+     * no CSS size, so it lays out at its attribute size in CSS pixels — which
+     * at a device pixel ratio of 2 is TWICE the viewport. You then see the
+     * top-left quarter of the render and the subject sits off in the corner.
+     * Invisible on a desktop at ratio 1, which is exactly why the headless
+     * check now runs at 3.
+     */
+    this.renderer.setSize(width, height);
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.camera.aspect = width / Math.max(1, height);
     this.camera.updateProjectionMatrix();
   }
 
@@ -156,13 +169,19 @@ export class QueenScene {
     });
     if (!this.orbitting) this.orbit += dt * 0.25;
 
-    const height = this.distance * 0.42;
+    /*
+     * Framed from her own bounding box, so "zoom" is a multiple of however big
+     * she happens to be. Hard-coding a distance meant every change to
+     * QUEEN_LENGTH_MM silently re-framed the shot.
+     */
+    const reach = Math.max(0.4, this.queen.lengthVoxels) * this.distance * 0.75;
+    const centre = this.queen.lengthVoxels * 0.18;
     this.camera.position.set(
-      Math.sin(this.orbit) * this.distance,
-      height,
-      Math.cos(this.orbit) * this.distance,
+      Math.sin(this.orbit) * reach,
+      centre + reach * 0.38,
+      Math.cos(this.orbit) * reach,
     );
-    this.camera.lookAt(0, this.distance * 0.09, 0);
+    this.camera.lookAt(0, centre, 0);
 
     if (++this.frames % 12 === 0) {
       const mm = (this.queen.lengthVoxels * VOXEL_MM).toFixed(1);

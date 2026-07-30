@@ -1,7 +1,7 @@
 {
   "name": "thronemound-colony-sim",
   "private": true,
-  "version": "0.24.0",
+  "version": "0.25.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,7 +16,6 @@
     "smoke:model": "node scripts/smoke-model.mjs"
   },
   "dependencies": {
-    "phaser": "^3.90.0",
     "three": "^0.180.0"
   },
   "devDependencies": {

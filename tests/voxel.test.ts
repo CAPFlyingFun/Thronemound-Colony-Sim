@@ -3,7 +3,7 @@ import {
   AIR, CHUNK, CLAY, SAND, STONE, TOPSOIL, VoxelWorld,
   isSolid, layeredGenerator, materialOf,
 } from '../src/voxel/VoxelWorld';
-import { FACES, meshChunk } from '../src/voxel/mesher';
+import { CAVITY_DISH, DISH_CELLS, FACES, meshChunk, tangentAxes } from '../src/voxel/mesher';
 import { MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES } from '../src/voxel/LooseSoil';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
@@ -132,14 +132,89 @@ describe('mesher', () => {
     const before = meshChunk(world, 1, cy, 1)!.quadCount;
     world.dig(40, SURFACE, 40);
     const after = meshChunk(world, 1, cy, 1)!.quadCount;
-    // Within THIS chunk: lose one top face, gain four side walls. The pit's
-    // floor face belongs to the chunk below — SURFACE is the first voxel row
-    // of chunk cy, so y-1 is across the seam. That's exactly why set() dirties
-    // the neighbouring chunk as well.
-    expect(after).toBe(before + 3);
+    /*
+     * Within THIS chunk: lose one top face, gain four side walls — and those
+     * walls face a CAVITY, so each is subdivided into DISH_CELLS² quads to be
+     * bowed into the soil. The open sky face that went was a single quad,
+     * because open ground is never dished.
+     */
+    const cell = DISH_CELLS * DISH_CELLS;
+    expect(after).toBe(before - 1 + 4 * cell);
+    // The pit's floor belongs to the chunk BELOW — SURFACE is the first voxel
+    // row of chunk cy, so y-1 is across the seam. That is exactly why set()
+    // dirties the neighbouring chunk as well.
     const below = meshChunk(world, 1, cy - 1, 1);
     expect(below).not.toBeNull();
-    expect(below!.quadCount).toBe(1);
+    expect(below!.quadCount).toBe(cell);
+  });
+
+  it('leaves open ground flat and dishes only cavity walls', () => {
+    /*
+     * The hex room's rounded sockets, brought across to the cube world — but
+     * only where they belong. Dishing the open plain would make the ground
+     * read as bumpy and would multiply every visible quad on the surface by
+     * nine for nothing.
+     */
+    const world = makeWorld();
+    const cy = Math.floor(SURFACE / CHUNK);
+    const flat = meshChunk(world, 1, cy, 1)!;
+    // Untouched ground: every emitted quad is a whole face, none subdivided.
+    for (let i = 0; i < flat.positions.length; i += 3) {
+      const y = flat.positions[i + 1]!;
+      // A dished vertex sits off the voxel lattice; a flat one never does.
+      expect(Math.abs(y - Math.round(y))).toBeLessThan(1e-6);
+    }
+  });
+
+  it('dishes into the soil and never toward the player', () => {
+    /*
+     * Targeting is a DDA raycast and collision is axis-separated AABBs, both
+     * against the true grid. Drawn geometry in FRONT of that plane is rock you
+     * can walk your face through, so every displaced vertex has to sit on the
+     * face plane or behind it.
+     */
+    const world = makeWorld();
+    world.dig(40, SURFACE, 40);
+    world.dig(40, SURFACE - 1, 40);
+    const cy = Math.floor(SURFACE / CHUNK);
+    const data = meshChunk(world, 1, cy, 1)!;
+    for (let i = 0; i < data.positions.length; i += 3) {
+      const p = [data.positions[i]!, data.positions[i + 1]!, data.positions[i + 2]!];
+      const n = [data.normals[i]!, data.normals[i + 1]!, data.normals[i + 2]!];
+      // Distance from the face's own lattice plane, along its normal. Positive
+      // would mean bulging out into the air.
+      const axis = n[0] !== 0 ? 0 : n[1] !== 0 ? 1 : 2;
+      const plane = Math.round(p[axis]!);
+      const out = (p[axis]! - plane) * n[axis]!;
+      expect(out).toBeLessThanOrEqual(1e-6);
+      expect(out).toBeGreaterThan(-CAVITY_DISH - 1e-6);
+    }
+  });
+
+  it('holds the dish at zero along every face edge, so no slit opens', () => {
+    /*
+     * The dish MUST vanish at the edges. Carry it into them and each face is
+     * inset from its neighbours, opening a hairline gap at every corner of
+     * every tunnel that you can see straight through — the same trap the hex
+     * mesher had.
+     */
+    const world = makeWorld();
+    world.dig(40, SURFACE, 40);
+    const cy = Math.floor(SURFACE / CHUNK);
+    const data = meshChunk(world, 1, cy, 1)!;
+    let edges = 0;
+    for (let i = 0; i < data.positions.length; i += 3) {
+      const p = [data.positions[i]!, data.positions[i + 1]!, data.positions[i + 2]!];
+      const n = [data.normals[i]!, data.normals[i + 1]!, data.normals[i + 2]!];
+      const axis = n[0] !== 0 ? 0 : n[1] !== 0 ? 1 : 2;
+      const [a, b] = tangentAxes(n as [number, number, number]);
+      // On an edge of its own face: one in-plane coordinate is on the lattice.
+      const onEdge = [a, b].some((k) => Math.abs(p[k]! - Math.round(p[k]!)) < 1e-6);
+      if (!onEdge) continue;
+      edges++;
+      expect(Math.abs(p[axis]! - Math.round(p[axis]!))).toBeLessThan(1e-6);
+    }
+    expect(edges).toBeGreaterThan(20);
   });
 });
 

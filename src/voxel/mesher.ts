@@ -49,6 +49,38 @@ export const FACES: readonly Face[] = [
   { normal: [0, 0, -1], corners: [[1, 0, 0], [0, 0, 0], [0, 1, 0], [1, 1, 0]] },
 ];
 
+/**
+ * How far a CAVITY wall dishes back into the soil at its middle.
+ *
+ * Carried over from the hex room, which is the one thing that room did better
+ * than this one: bow the middle of each exposed face away from the air and a
+ * dug pocket reads as a rounded socket instead of six flat panels meeting at
+ * hard creases.
+ *
+ * A cube's own geometry says 0.207 — the gap between a square cross-section's
+ * half-width and its corner — which would take a one-voxel bore out to 1.41
+ * voxels round. Far too much: the drawn wall would sit visibly behind where
+ * collision stops you. This rounds the creases off without the cavity
+ * ballooning, and at 0.6 mm the gap between drawn and solid is not noticeable.
+ *
+ * ALWAYS into the soil, never toward the air. Targeting is a DDA raycast and
+ * collision is axis-separated AABBs, both against the true grid — geometry in
+ * front of that plane is rock you can walk your face through.
+ */
+export const CAVITY_DISH = 0.12;
+/** Subdivisions per axis on a dished face. Nine quads instead of one. */
+export const DISH_CELLS = 3;
+/**
+ * Solid neighbours the AIR side needs before its wall is treated as a cavity.
+ *
+ * This is what keeps the open plain flat. The air above open ground has one
+ * solid neighbour beneath it and nothing else, so it never qualifies; the air
+ * inside a tunnel is walled on four or five sides and always does. It also
+ * means only the faces you actually look at underground pay the subdivision —
+ * dishing the whole world would multiply every visible quad by nine.
+ */
+export const CAVITY_ENCLOSURE = 3;
+
 /** Brightness multiplier per AO level, darkest (fully enclosed corner) first. */
 const AO_LEVELS = [0.45, 0.62, 0.8, 1.0] as const;
 
@@ -126,6 +158,23 @@ export function meshChunk(
           const tangent: [number, number, number] = [0, 0, 0];
           tangent[axisA] = 1;
 
+          /*
+           * Is the air on the other side a CAVITY, or open sky?
+           *
+           * Counted on the AIR voxel, not this one: a tunnel's air is walled on
+           * most sides, open ground's air has only the floor under it. Cheap —
+           * six samples, and only for faces that are actually emitted.
+           */
+          let enclosure = 0;
+          for (const probe of FACES) {
+            if (sample(
+              x + nx + probe.normal[0],
+              y + ny + probe.normal[1],
+              z + nz + probe.normal[2],
+            )) enclosure++;
+          }
+          const dish = enclosure >= CAVITY_ENCLOSURE ? CAVITY_DISH : 0;
+
           for (const corner of face.corners) {
             const wx = x + corner[0];
             const wy = y + corner[1];
@@ -165,6 +214,62 @@ export function meshChunk(
             ao.push(level);
             const shade = AO_LEVELS[level]! * tint;
             colors.push(shade, shade, shade);
+          }
+
+          if (dish > 0) {
+            /*
+             * Subdivide and bow the middle in.
+             *
+             * The four corner vertices just pushed stay exactly where they are —
+             * the dish falls to zero along every edge, so neighbouring faces
+             * still meet vertex for vertex. Carrying it into the edges would
+             * inset this face from its neighbours and open a hairline slit at
+             * every corner of every tunnel, which you can see straight through.
+             *
+             * Interior samples are bilinear across the quad: position, UV and
+             * AO alike, so the shading follows the geometry rather than being
+             * recomputed per sample against neighbours that have not changed.
+             */
+            const c = face.corners;
+            const lerp3 = (u: number, v: number, axis: number) => (
+              (c[0][axis]! * (1 - u) + c[1][axis]! * u) * (1 - v)
+              + (c[3][axis]! * (1 - u) + c[2][axis]! * u) * v
+            );
+            const aoAt = (u: number, v: number) => (
+              (ao[0]! * (1 - u) + ao[1]! * u) * (1 - v)
+              + (ao[3]! * (1 - u) + ao[2]! * u) * v
+            );
+            const gridFirst = positions.length / 3;
+            for (let iv = 0; iv <= DISH_CELLS; iv++) {
+              for (let iu = 0; iu <= DISH_CELLS; iu++) {
+                const u = iu / DISH_CELLS;
+                const v = iv / DISH_CELLS;
+                // Zero on every edge, full at the middle. Backwards along the
+                // normal, so the wall recedes into the soil and never toward
+                // the player.
+                const back = dish * Math.sin(Math.PI * u) * Math.sin(Math.PI * v);
+                const wx = x + lerp3(u, v, 0) - nx * back;
+                const wy = y + lerp3(u, v, 1) - ny * back;
+                const wz = z + lerp3(u, v, 2) - nz * back;
+                positions.push(wx, wy, wz);
+                normals.push(nx, ny, nz);
+                layers.push(voxel);
+                tangents.push(tangent[0], tangent[1], tangent[2]);
+                const w = [wx, wy, wz] as const;
+                uvs.push(w[axisA]! / TILE_VOXELS, w[axisB]! / TILE_VOXELS);
+                const shade = AO_LEVELS[Math.round(aoAt(u, v))]! * tint;
+                colors.push(shade, shade, shade);
+              }
+            }
+            const stride = DISH_CELLS + 1;
+            for (let iv = 0; iv < DISH_CELLS; iv++) {
+              for (let iu = 0; iu < DISH_CELLS; iu++) {
+                const a = gridFirst + iv * stride + iu;
+                indices.push(a, a + 1, a + stride + 1, a, a + stride + 1, a + stride);
+                quadCount++;
+              }
+            }
+            continue;
           }
 
           // Flip the split so the darker corner pair shares the seam; without
