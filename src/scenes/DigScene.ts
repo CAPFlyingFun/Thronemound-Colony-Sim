@@ -17,7 +17,7 @@ import {
 import { meshChunk } from '../voxel/mesher';
 import {
   buildFracture, cellCentre, chipMeshData, eventsBetween, hashVoxel, releasedBetween, removedAt,
-  CELL_COUNT, LAYER_CELLS, LAYER_COUNT, type DigEvent, type DigEventKind, type FracturePattern,
+  CELL_COUNT, type DigEvent, type DigEventKind, type FracturePattern,
 } from '../voxel/fracture';
 import {
   SOIL_CLOD_VARIANT_COUNT, buildClodShape, clodFeel, clodRadius, pieceSource, styleForVoxel,
@@ -435,7 +435,6 @@ export class DigScene {
   /** Seconds left on the "clear the spoil first" nudge. */
   private blockedFor = 0;
   /** Sheets off the last cube worked, for the objective line. */
-  private sheetsMessage = 0;
   /** Thinnest axis of the target outline. Debug-only; proves the box shrinks. */
   private highlightDepth = 1;
   /** Outward normal of the wall currently being pushed into, if any. */
@@ -884,23 +883,19 @@ export class DigScene {
       return;
     }
 
+    /*
+     * A cancel now takes the cell all the way back to untouched.
+     *
+     * This used to wind the visual back to the last FINISHED sheet, because a
+     * cube was four presses and the earlier ones had really happened. One press
+     * is the whole cell, so there is no such thing as a partly dug cell: either
+     * she finished and it is gone, or she stopped and it is whole. Any soil this
+     * visual handed out early is reclaimed here, which is the same test as
+     * before — the cell still being solid IS the proof she did not finish.
+     */
     for (const piece of chip.dropped) this.soil.remove(piece);
     chip.dropped.length = 0;
-
-    // Wind the visual back to the last FINISHED sheet, so what is drawn is
-    // exactly what has actually been taken away.
-    const sheets = this.session.sheetsDone(x, y, z);
-    const settled = sheets / LAYER_COUNT;
-    chip.progress = settled;
-    chip.lastProgress = settled;
-    chip.spilled = removedAt(chip.pattern, settled);
-    if (sheets === 0) {
-      // Untouched again: nothing to show, so let the terrain draw it whole.
-      this.disposeChip(chip);
-      return;
-    }
-    chip.builtRemoved = -1;
-    this.refreshChipMesh(chip);
+    this.disposeChip(chip);
   }
 
   /** Drop a chipped visual entirely and put the terrain path back in charge. */
@@ -1633,40 +1628,14 @@ export class DigScene {
   /**
    * Is the face she wants to cut buried under its own spoil?
    *
-   * A sheet has to be hauled away before the next one can be cut, which is
-   * what turns digging into the ant loop — cut, clear, cut — rather than a
-   * progress bar you hold. Measured against the cube's own centre, so it is
-   * the working face that has to be clear and not the whole room.
+   * A pellet has to be hauled away before the cell behind it can be cut, which
+   * is what turns digging into the ant loop — cut, clear, cut — rather than a
+   * progress bar you hold. Measured against the cell's own centre, so it is the
+   * working face that has to be clear and not the whole room.
    */
   private faceBlocked(x: number, y: number, z: number): boolean {
     if (this.session.isDigging(x, y, z)) return false; // cancelling is always allowed
     return this.soil.scoop({ x: x + 0.5, y: y + 0.5, z: z + 0.5 }, 1, FACE_CLEAR).length > 0;
-  }
-
-  /** A sheet came away. She stops here; the next one needs another press. */
-  private onSheetFreed(cell: { x: number; y: number; z: number }, done: number): void {
-    const chip = this.active;
-    if (chip && chip.voxel.x === cell.x && chip.voxel.y === cell.y && chip.voxel.z === cell.z) {
-      /*
-       * Flush this sheet, then hand its pieces over for good.
-       *
-       * tickDig completes the sheet and clears the target in the same call, so
-       * by the time updateChip next runs there is no target and chewRatio
-       * reads zero — the sheet's last pieces would never be released at all.
-       * And clearing `dropped` matters just as much: endChip reclaims that
-       * list when the cube is still solid, which is right for a cancelled
-       * sheet and would be theft for a finished one.
-       */
-      const upto = done / LAYER_COUNT;
-      const owed = releasedBetween(chip.pattern, chip.progress, upto);
-      if (owed.length > 0) this.spillPieces(chip, owed);
-      chip.progress = upto;
-      chip.lastProgress = upto;
-      chip.dropped.length = 0;
-    }
-    this.digAudio?.('DIG_CRACK', new THREE.Vector3(cell.x + 0.5, cell.y + 0.5, cell.z + 0.5));
-    this.soil.wakeNear({ x: cell.x + 0.5, y: cell.y + 0.5, z: cell.z + 0.5 }, WAKE_RADIUS);
-    this.sheetsMessage = done;
   }
 
   private showStick(visible: boolean): void {
@@ -1703,14 +1672,12 @@ export class DigScene {
 
   private refreshActionButton(): void {
     const mode = this.actionMode();
-    // DIG says which sheet is next, because a cube is four presses now and
-    // "press it again" is only obvious if the button admits there is a count.
-    const hit = mode === 'dig' ? this.currentTarget() : null;
-    const sheets = hit ? this.session.sheetsDone(hit.x, hit.y, hit.z) : 0;
+    // No count on DIG any more: a press is the whole cell, so there is nothing
+    // to be part-way through and "1/4" would be claiming a stage that is gone.
     const label = mode === 'cancel' ? '\u2715 CANCEL'
       : mode === 'drop' ? '\u2935 DROP'
         : mode === 'carry' ? '\u2934 CARRY'
-          : `\u26cf DIG ${sheets + 1}/${LAYER_COUNT}`;
+          : '\u26cf DIG';
     if (this.actionButton.textContent !== label) this.actionButton.textContent = label;
     this.actionButton.classList.toggle('is-cancel', mode === 'cancel');
     this.actionButton.classList.toggle('is-carry', mode === 'carry');
@@ -2490,7 +2457,6 @@ export class DigScene {
             WAKE_RADIUS,
           );
         }
-        if (outcome.kind === 'layer') this.onSheetFreed(digging, outcome.done);
       } else this.session.cancelDig();
     }
     this.syncChip();
@@ -2505,26 +2471,15 @@ export class DigScene {
       return;
     }
     /*
-     * The box tracks the soil that is actually LEFT, not the cell it sits in.
+     * The box is the cell, full size, always.
      *
-     * A cube is cut in four sheets, so after one press a quarter of it is gone
-     * and a full-size outline claims a boundary that no longer has anything
-     * behind it. Shrinking it along the axis the sheets came off — and sliding
-     * it away from the worked face by half of what was removed — makes the
-     * outline mean "this is what is still there".
+     * It used to shrink along the strike axis as sheets came off, because a
+     * quarter of the cube really had gone and a full-size outline claimed a
+     * boundary with nothing behind it. One press is the whole cell now, so the
+     * soil inside the box is either all there or the box is gone with it.
      */
-    const sheets = this.session.sheetsDone(shown.x, shown.y, shown.z);
-    const chip = this.chips.get(DigScene.chipKey(shown.x, shown.y, shown.z));
     const scale = { x: 1, y: 1, z: 1 };
     const centre = { x: shown.x + 0.5, y: shown.y + 0.5, z: shown.z + 0.5 };
-    if (chip && sheets > 0) {
-      const axis = (['x', 'y', 'z'] as const)[chip.pattern.strikeAxis]!;
-      const gone = sheets / LAYER_COUNT;
-      scale[axis] = 1 - gone;
-      // Remaining soil sits on the far side from the strike, so the outline's
-      // centre moves away from the face by half the depth taken off.
-      centre[axis] -= chip.pattern.strikeSign * gone * 0.5;
-    }
     this.highlight.scale.set(scale.x, scale.y, scale.z);
     this.highlight.position.set(centre.x, centre.y, centre.z);
     this.highlightDepth = Math.min(scale.x, scale.y, scale.z);
@@ -2675,7 +2630,7 @@ export class DigScene {
     const chamber = status.depthMet ? ` \u00b7 Chamber ${status.chamber}/${DEN_MIN_CHAMBER}` : '';
     readout.innerHTML = `
       <b>Depth</b> ${status.depth > 0 ? `${status.depthMm} mm` : 'surface'} &nbsp;
-      <b>Carrying</b> ${this.session.carriedScoops}/4 scoops &nbsp;
+      <b>Carrying</b> ${this.session.carried}/${this.session.capacity} pellets &nbsp;
       <b>Loose</b> ${this.soil.count} &nbsp;
       <b>Dug</b> ${this.world.excavated}<br>
       <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 ` : ''}${this.weightless ? '\u{1FAB5} weightless \u00b7 ' : this.surface.mode === 'attached' ? '\u{1F9D7} gripping \u00b7 ' : ''}Target: ${targetName}${bar}${chamber}${skill}${held}${drawn}${chipping} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>

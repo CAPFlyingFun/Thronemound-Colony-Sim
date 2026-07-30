@@ -9,7 +9,7 @@ import {
 import { MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES } from '../src/voxel/LooseSoil';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
-import { CELL_COUNT, CHIP_CELLS, LAYER_CELLS, LAYER_COUNT, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
+import { CELL_COUNT, CHIP_CELLS, PIECES_PER_VOXEL, releasedBetween, MAX_REMOVED, buildFracture, cellCentre, cellSurvives, chipMeshData, erosionAt, erosionFor, eventsBetween, feelFor, hashVoxel, removedAt } from '../src/voxel/fracture';
 import { raycastVoxel } from '../src/voxel/raycast';
 import { DIG_FLOOR, DIG_START, DIG_STEP, DigSession } from '../src/voxel/DigSession';
 import { TILE_MM, TILE_VOXELS, buildTileArrays, generateTile } from '../src/voxel/tileTextures';
@@ -494,85 +494,73 @@ describe('raycastVoxel', () => {
 });
 
 /**
- * Dig a whole cube out — all four sheets.
- *
- * A dig is ONE sheet and then she stops, so a cube is four presses. Every
- * test that just wants the cube gone goes through here.
+ * Dig a cell out. ONE press — kept as a helper so the tests that only want the
+ * cell gone still read the same as they did when it took four.
  */
 const digOut = (session: DigSession, x: number, y: number, z: number) => {
-  let outcome = session.tickDig(0);
-  for (let sheet = 0; sheet < LAYER_COUNT; sheet++) {
-    session.beginDig(x, y, z);
-    outcome = session.tickDig(999);
-  }
-  return outcome;
+  session.beginDig(x, y, z);
+  return session.tickDig(999);
 };
 
 describe('DigSession', () => {
-  it('takes four presses to pop a voxel, one sheet each', () => {
+  it('pops a voxel in ONE press, whole', () => {
     /*
-     * A cube is four sheets and she stops after every one, which is what makes
-     * hauling the spoil part of digging rather than something you do
-     * afterwards. Running the timer past a sheet must NOT roll into the next.
+     * It used to take four, a sheet at a time. That existed to make one voxel
+     * feel like more than one object, and it cost a cell that could be solid in
+     * the world while having already handed the player its soil — the state
+     * every conservation bug lived in. The cell is the unit now: either she
+     * finishes and it is gone, or she stops and it is untouched.
      */
     const world = makeWorld();
     const session = new DigSession(world);
-    const sheet = session.secondsFor(TOPSOIL) / LAYER_COUNT;
+    const full = session.secondsFor(TOPSOIL);
 
     session.beginDig(20, SURFACE, 20);
-    expect(session.tickDig(sheet * 0.5).kind).toBe('progress');
-    expect(session.tickDig(sheet * 0.6).kind).toBe('layer');
-    expect(session.sheetsDone(20, SURFACE, 20)).toBe(1);
-    // She stopped: holding the timer open digs nothing more.
-    expect(session.digging).toBeNull();
-    expect(session.tickDig(999).kind).toBe('none');
+    expect(session.tickDig(full * 0.5).kind).toBe('progress');
     expect(world.get(20, SURFACE, 20)).toBe(TOPSOIL);
-
-    for (let i = 0; i < LAYER_COUNT - 2; i++) {
-      session.beginDig(20, SURFACE, 20);
-      expect(session.tickDig(999).kind).toBe('layer');
-    }
-    session.beginDig(20, SURFACE, 20);
-    expect(session.tickDig(999).kind).toBe('dug');
+    expect(session.tickDig(full * 0.6).kind).toBe('dug');
     expect(world.get(20, SURFACE, 20)).toBe(AIR);
-    expect(session.sheetsDone(20, SURFACE, 20)).toBe(0);
+    expect(session.digging).toBeNull();
+    expect(session.carried).toBe(1);
   });
 
-  it('remembers sheets per cube, so wandering off does not restart one', () => {
+  it('leaves nothing behind when a dig is cancelled part way', () => {
     /*
-     * The trap: sheets already off have already spilled their soil into the
-     * world. Forgetting them would let the same cube spill twice, which is
-     * soil minted from nothing.
+     * The half-dug cube is gone as a concept, so this is a statement about the
+     * whole model: stopping mid-press excavates nothing, spills nothing and
+     * credits no practice. There is no partial state to carry between presses,
+     * so nothing can spill its soil a second time.
      */
     const world = makeWorld();
     const session = new DigSession(world);
     session.beginDig(20, SURFACE, 20);
-    session.tickDig(999);
-    session.beginDig(25, SURFACE, 25);
-    session.tickDig(999);
-    expect(session.sheetsDone(20, SURFACE, 20)).toBe(1);
-    expect(session.sheetsDone(25, SURFACE, 25)).toBe(1);
-    // And a part-dug cube counts its sheets as excavated, because they are.
-    expect(session.excavatedPieces).toBe(2 * LAYER_CELLS);
+    session.tickDig(session.secondsFor(TOPSOIL) * 0.9);
+    session.cancelDig();
+    expect(world.get(20, SURFACE, 20)).toBe(TOPSOIL);
+    expect(session.carried).toBe(0);
+    expect(session.excavatedPieces).toBe(0);
+    expect(session.practiced).toBe(0);
+    session.beginDig(20, SURFACE, 20);
+    expect(session.chewRatio).toBe(0);
   });
 
   it('holds its target so the camera can look away mid-dig', () => {
     const world = makeWorld();
     const session = new DigSession(world);
-    const sheet = session.secondsFor(TOPSOIL) / LAYER_COUNT;
+    const full = session.secondsFor(TOPSOIL);
     session.beginDig(20, SURFACE, 20);
-    session.tickDig(sheet * 0.9);
+    session.tickDig(full * 0.9);
     // Nothing re-aims it — the locked cube is the only thing tickDig knows
     // about, which is what removed the old thumb-drift progress reset.
     expect(session.digging).toEqual({ x: 20, y: SURFACE, z: 20 });
-    expect(session.tickDig(sheet * 0.2).kind).toBe('layer');
+    expect(session.tickDig(full * 0.2).kind).toBe('dug');
   });
 
   it('tapping the cube being dug cancels it and discards progress', () => {
     const world = makeWorld();
     const session = new DigSession(world);
     session.toggleDig(20, SURFACE, 20);
-    session.tickDig((session.secondsFor(TOPSOIL) / LAYER_COUNT) * 0.9);
+    session.tickDig(session.secondsFor(TOPSOIL) * 0.9);
     expect(session.toggleDig(20, SURFACE, 20).kind).toBe('cancelled');
     expect(session.digging).toBeNull();
     expect(session.chewRatio).toBe(0);
@@ -1293,13 +1281,18 @@ describe('fracture', () => {
     expect(hashVoxel(12, 34, 56, TOPSOIL)).not.toBe(hashVoxel(12, 34, 56, CLAY));
   });
 
-  it('gives neighbouring voxels different patterns', () => {
-    // Not "always" — 27! orderings means collisions are possible in principle.
-    // What matters is that a wall of soil doesn't chip in lockstep.
+  it('gives neighbouring voxels different shapes', () => {
+    /*
+     * A wall of soil must not wobble in lockstep. This used to compare removal
+     * ORDER across cells, which was the only per-voxel variation a 64-piece
+     * cube had; a cell has one piece now, so the variation lives entirely in
+     * the jitter and spin. Same guarantee, read off what still carries it.
+     */
     const seen = new Set<string>();
     for (let x = 0; x < 6; x++) {
       for (let z = 0; z < 6; z++) {
-        seen.add(buildFracture(x, S, z, TOPSOIL).order.join(','));
+        const f = buildFracture(x, S, z, TOPSOIL);
+        seen.add([...f.jitter, ...f.spin].map((v) => v.toFixed(4)).join(','));
       }
     }
     expect(seen.size).toBe(36);
@@ -1322,78 +1315,16 @@ describe('fracture', () => {
     }
   });
 
-  it('loosens exactly one sheet at a time, never the whole cube', () => {
+  it('draws the cell as ONE lump, not a cluster', () => {
     /*
-     * The complaint this fixes: erosion used to be global, so every piece
-     * loosened by the same amount at once and the lattice read as an evenly
-     * dissolving grid. Damage has to be LOCAL — and under the layer model
-     * "local" has an exact meaning, so this asserts it exactly rather than by
-     * proportion: everything eroding at any moment belongs to ONE layer, the
-     * one under her mandibles.
+     * The complaint that started the rework: it read as one large cube breaking
+     * apart, because it WAS — a 4x4x4 cluster of crumbs pretending to be a
+     * voxel. One cell is one lump, so the chip mesh is one cube's worth of
+     * faces and there are no interior seams for a grid to show through.
      */
-    const pattern = buildFracture(11, S, 23, TOPSOIL, { x: 0, y: 1, z: 0 });
-    for (let progress = 0.05; progress < 1; progress += 0.05) {
-      const working = new Set<number>();
-      let touched = 0;
-      for (let cell = 0; cell < CELL_COUNT; cell++) {
-        if (!cellSurvives(pattern, cell, progress)) continue;
-        if (erosionFor(pattern, cell, progress) <= 0) continue;
-        working.add(pattern.layer[cell]!);
-        touched++;
-      }
-      // Something is always being worked — no dead stretch between sheets.
-      expect(touched).toBeGreaterThan(0);
-      /*
-       * At most TWO sheets, and only ever adjacent ones. The second is the
-       * hand-over: the stagger that lets sand trickle means the next sheet
-       * begins to give as the last pieces of the current one drop, which is
-       * what keeps the dig continuous instead of stepping. Three sheets at
-       * once would be the whole cube dissolving again.
-       */
-      const sheets = [...working].sort((a, b) => a - b);
-      expect(sheets.length).toBeLessThanOrEqual(2);
-      if (sheets.length === 2) expect(sheets[1]! - sheets[0]!).toBe(1);
-    }
-  });
-
-  it('keeps untouched neighbours fused, so no grid shows through', () => {
     const pattern = buildFracture(11, S, 23, TOPSOIL);
-    // Interior faces only appear where soil has actually started to loosen. If
-    // every crumb emitted all six faces the cube would read as a stack of
-    // blocks even before anything broke.
-    const early = chipMeshData(pattern, 11, S, 23, 0.2)!;
-    const worst = CELL_COUNT * 6;
-    expect(early.quadCount).toBeLessThan(worst * 0.5);
-  });
-
-  it('peels sheet by sheet from the face she is working', () => {
-    /*
-     * Layers, not a crater. Ranking every piece by distance from one strike
-     * point takes a bite out of the middle of the face and leaves a rim; an
-     * ant shaves the surface off. It also makes each quarter of the progress
-     * bar exactly one visible sheet, which is exactly one scoop.
-     */
-    for (const face of [{ x: 0, y: 1, z: 0 }, { x: 1, y: 0, z: 0 }, { x: 0, y: 0, z: -1 }]) {
-      const pattern = buildFracture(4, S, 6, TOPSOIL, face);
-      // Every piece belongs to a sheet, and the sheets are all the same size.
-      const sizes = new Map<number, number>();
-      for (let cell = 0; cell < CELL_COUNT; cell++) {
-        const l = pattern.layer[cell]!;
-        sizes.set(l, (sizes.get(l) ?? 0) + 1);
-      }
-      expect(sizes.size).toBe(CHIP_CELLS);
-      for (const n of sizes.values()) expect(n).toBe(LAYER_CELLS);
-
-      // The removal queue never revisits a sheet it has finished.
-      let previous = 0;
-      for (let i = 0; i < CELL_COUNT; i++) {
-        const l = pattern.layer[pattern.order[i]!]!;
-        expect(l).toBeGreaterThanOrEqual(previous);
-        previous = l;
-      }
-      // And sheet 0 is the one against her mandibles.
-      expect(pattern.layer[pattern.order[0]!]).toBe(0);
-    }
+    expect(chipMeshData(pattern, 11, S, 23, 0.2)!.quadCount).toBe(6);
+    expect(chipMeshData(pattern, 11, S, 23, 0.9)!.quadCount).toBe(6);
   });
 
   it('frees every piece, because nothing is deleted any more', () => {
@@ -1430,8 +1361,10 @@ describe('fracture', () => {
     // Nothing between two points with no crumb boundary between them.
     expect(eventsBetween(pattern, 0, 0)).toEqual([]);
     const all = eventsBetween(pattern, 0, 1);
+    // DIG_CRACK went with the sheets: a crack marked a scoop's worth of soil
+    // coming loose while the cube still stood, and there is no such moment now.
     expect(all.some((e) => e.kind === 'DIG_RELEASE')).toBe(true);
-    expect(all.some((e) => e.kind === 'DIG_CRACK')).toBe(true);
+    expect(all.some((e) => e.kind === 'DIG_CRACK')).toBe(false);
     // And the release fires once, at the end, not repeatedly.
     expect(eventsBetween(pattern, 1, 1).length).toBe(0);
   });
@@ -1454,28 +1387,24 @@ describe('fracture', () => {
 
   it('cannot mint soil by cancelling half way through', () => {
     /*
-     * The trap the new model opens. Pieces are handed to the world a sheet at
-     * a time, so a dig stopped half way leaves loose soil on the floor while
-     * the cube it came from is still standing in the grid — soil out of
-     * nothing. The scene takes them back on cancel, and the discriminator is
-     * that the voxel is still solid, because a completed dig has removed it.
+     * The trap the old model opened, kept because the property still matters.
+     * Pieces used to be handed to the world a sheet at a time while the cube
+     * was still standing, so a cancel had to reclaim whatever had already gone
+     * out or the same cube could spill twice.
+     *
+     * There is no window to reclaim any more: one press is the whole cell, so
+     * until it lands nothing has been issued at all. Asserted from the outside,
+     * against the world, so it stays true however the visual is built.
      */
     const world = makeWorld();
     const session = new DigSession(world);
-    const pattern = buildFracture(20, S, 20, TOPSOIL, { x: 0, y: 1, z: 0 });
-
-    // Part way through the FIRST sheet: some of its pieces are already out.
-    session.beginDig(20, S, 20);
-    session.tickDig((session.secondsFor(TOPSOIL) / LAYER_COUNT) * 0.96);
-    const partial = releasedBetween(pattern, 0, session.chewRatio);
-    expect(partial.length).toBeGreaterThan(0);
-    expect(partial.length).toBeLessThan(LAYER_CELLS);
-
+    const before = world.excavated;
+    session.beginDig(20, SURFACE, 20);
+    session.tickDig(session.secondsFor(TOPSOIL) * 0.96);
+    expect(world.excavated).toBe(before);
+    expect(session.excavatedPieces).toBe(before * PIECES_PER_VOXEL);
     session.cancelDig();
-    // Nothing was excavated, so nothing may be lying loose: the scene's reclaim
-    // has to bring back exactly what it handed out.
-    expect(world.excavated).toBe(0);
-    expect(world.get(20, S, 20)).toBe(TOPSOIL);
+    expect(world.excavated).toBe(before);
     expect(session.carried).toBe(0);
   });
 
@@ -1685,41 +1614,49 @@ describe('loose soil', () => {
     expect(worstTaken).toBeLessThanOrEqual(bestLeft);
   });
 
-  it('gives a short scoop rather than a phantom one when soil runs out', () => {
-    // Soil conservation again: a scoop must never hand back more pieces than
-    // are actually lying there.
+  it('gives a short grab rather than a phantom one when soil runs out', () => {
+    // Soil conservation again: a grab must never hand back more pellets than
+    // are actually lying there, however many the caller asks for.
     const soil = new LooseSoil();
-    for (let i = 0; i < 5; i++) soil.drop({ x: 20, y: S, z: 20 }, TOPSOIL, { x: i, y: S, z: 20 });
-    expect(soil.scoop({ x: 20, y: S, z: 20 }, SCOOP_PIECES, 2)).toHaveLength(5);
-    expect(soil.scoop({ x: 40, y: S, z: 40 }, SCOOP_PIECES, 2)).toHaveLength(0);
+    for (let i = 0; i < 3; i++) soil.drop({ x: 20, y: S, z: 20 }, TOPSOIL, { x: i, y: S, z: 20 });
+    expect(soil.scoop({ x: 20, y: S, z: 20 }, 5, 2)).toHaveLength(3);
+    expect(soil.scoop({ x: 40, y: S, z: 40 }, 5, 2)).toHaveLength(0);
   });
 
-  it('holds a whole voxel as four scoops', () => {
-    // The scoop is the granularity of a GRAB, not a change to the economy: a
-    // cube is still a cube, and it still takes a cube's worth to place one.
-    expect(PIECES_PER_VOXEL).toBe(SCOOP_PIECES * 4);
+  it('holds a whole voxel as ONE pellet', () => {
+    /*
+     * A cube was four scoops of sixteen pieces. Cell, pellet and grab are all
+     * the same object now, which is the point: there is no second unit for
+     * conservation to drift between. The economy is unchanged — it still takes
+     * a cube's worth to pack a cube.
+     */
+    expect(PIECES_PER_VOXEL).toBe(1);
+    expect(SCOOP_PIECES).toBe(1);
     const world = makeWorld();
     const session = new DigSession(world, { capacityVoxels: 1 });
     digOut(session, 20, S, 20);
-    expect(session.carriedScoops).toBe(4);
     expect(session.carriedVoxels).toBe(1);
 
-    // Three scoops out is not enough to pack a cube; the fourth is.
-    for (let i = 0; i < 3; i++) session.release(SCOOP_PIECES);
+    // Put the one pellet down and there is nothing left to pack a cube with.
+    session.release(1);
     expect(session.place(20, S + 2, 20).kind).toBe('empty');
     expect(world.deposited).toBe(0);
   });
 
-  it('builds a different lump for every piece of one voxel', () => {
-    // Sixty-four pieces out of one cube have to be sixty-four different lumps,
-    // and the same sixty-four after a reload — so the piece index rides in the
-    // coordinate the shape is hashed from.
+  it('builds a different lump for every cell it came out of', () => {
+    /*
+     * A pellet's shape is a pure function of its ORIGIN, so the same soil looks
+     * the same lump from excavation through carrying to being put down, and the
+     * same again after a reload. This used to vary the piece index within one
+     * cube; a cube is one pellet now, so the variation that matters is between
+     * neighbouring cells.
+     */
     const variants = new Set<number>();
-    for (let cell = 0; cell < PIECES_PER_VOXEL; cell++) {
-      const src = pieceSource(20, S, 20, cell);
+    for (let i = 0; i < 12; i++) {
+      const src = pieceSource(20 + i, S, 20, 0);
       variants.add(styleForVoxel(src.x, src.y, src.z, TOPSOIL).variant);
       // Deterministic: same cell, same answer.
-      expect(pieceSource(20, S, 20, cell)).toEqual(src);
+      expect(pieceSource(20 + i, S, 20, 0)).toEqual(src);
     }
     // Not all 12, but nothing like all-the-same either.
     expect(variants.size).toBeGreaterThan(6);

@@ -19,29 +19,41 @@
 import { isSolid, type VoxelId } from './VoxelWorld';
 
 /**
- * How big one PIECE is for collision.
+ * How big one PELLET is for collision.
  *
- * A voxel breaks into 4x4x4 of these, so a piece is a quarter of a cube across
- * — 1.25mm at this scale, about the size of an ant's head, which is roughly
- * what a real one carries. Kept a shade under the true eighth-radius so a
- * tunnel does not jam solid the moment a few roll into it: an ant can still
- * squeeze past, which makes a blocked tunnel a nuisance rather than a dead end.
+ * One cell is now one pellet, so this is a whole voxel's worth of soil rather
+ * than a sixty-fourth. It is deliberately well under the half-voxel that would
+ * fill the cell it came out of: a pellet has to be able to lie in a one-cell
+ * bore with room for an ant to squeeze past, or a dropped load seals the tunnel
+ * behind the player. The old piece was a 1.25mm grain — that is sand, and it is
+ * why the chipping read as dust rather than as soil being moved.
  */
-export const CLOD_RADIUS = 0.1;
-
-/** How many pieces make one voxel of soil, and how many make one scoop. */
-export const PIECES_PER_VOXEL = 64;
-export const SCOOP_PIECES = 16;
+export const CLOD_RADIUS = 0.3;
 
 /**
- * Hard ceiling, in pieces.
+ * One cell, one pellet.
  *
- * Twelve voxels' worth. It used to be 256 whole clods, which under the new
- * grid would be four dug cubes before spoil started refusing to appear.
- * Settled pieces sleep and cost a matrix each, so the per-frame price is the
- * handful still moving, not this number.
+ * These were 64 and 16: a voxel broke into 64 pieces and an ant gathered a
+ * scoop of 16. Both are 1 now, which is what makes the piece and the cell the
+ * same object — there is no second unit for conservation to drift between.
+ * They are kept as named constants rather than inlined because the carry
+ * boundary still states capacity in voxels, and a bare 1 at a call site loses
+ * which of the two it meant.
  */
-export const MAX_LOOSE_CLODS = 768;
+export const PIECES_PER_VOXEL = 1;
+export const SCOOP_PIECES = 1;
+
+/**
+ * Hard ceiling, in pellets.
+ *
+ * DOWN from 768, not up. A pellet is a whole cell now rather than a
+ * sixty-fourth of one, so 256 of them is four times the SOIL the old cap held
+ * while simulating a third as many objects. At 768 pieces the old cap could not
+ * even hold the spoil from founding the den, which is why soil kept having to
+ * be cleared mid-dig. Settled pellets sleep and cost a matrix each, so the
+ * per-frame price is the handful still moving, not this number.
+ */
+export const MAX_LOOSE_CLODS = 256;
 
 /** Below this speed for REST_TIME seconds, a clod stops being simulated. */
 const SLEEP_SPEED = 0.35;

@@ -25,21 +25,25 @@ import { TILE_VOXELS } from './tileTextures';
 import { CLAY, SAND, type VoxelId } from './VoxelWorld';
 
 /**
- * Pieces per axis. Four, because it divides.
+ * Pieces per axis. ONE — a cell is not subdivided at all any more.
  *
- * This used to be five, chosen ODD so a crater had a middle cell to open from.
- * That reasoning died with the crater: a voxel is no longer eaten outward from
- * a strike point, it is peeled off in LAYERS, and nothing is deleted — every
- * piece becomes a real lump of soil lying in the hole. Four gives 64 pieces in
- * four layers of sixteen, and sixteen is a scoop: what an ant carries in one
- * trip. A quarter-voxel piece is 1.25mm at this scale, about the size of its
- * head.
+ * It was five (a crater eaten outward from a strike point), then four (64
+ * pieces peeled off as four sheets of sixteen, a sheet per press). Both were
+ * ways of making one voxel feel like more than one thing, and both had the same
+ * tell: it read as one large cube breaking apart, because that is exactly what
+ * it was. The sub-pieces were a PRESENTATION of a single authoritative unit
+ * rather than units in their own right, which is also where every
+ * soil-accounting bug came from — a voxel could be solid in the world and have
+ * already issued pieces to the player, and reconciling those two views is what
+ * `releaseActive`, `onSheetFreed` and the sheet bookkeeping all existed to do.
+ *
+ * So the cell IS the unit. One press takes one cell, the whole cell becomes one
+ * pellet, and the sense of progress comes from watching it crack and shift in
+ * place rather than from counting quarters off it. Nothing subdivides, so
+ * nothing can disagree about how much soil exists.
  */
-export const CHIP_CELLS = 4;
+export const CHIP_CELLS = 1;
 export const CELL_COUNT = CHIP_CELLS * CHIP_CELLS * CHIP_CELLS;
-/** One layer, and one scoop. The two are the same number on purpose. */
-export const LAYER_CELLS = CHIP_CELLS * CHIP_CELLS;
-export const LAYER_COUNT = CHIP_CELLS;
 /** Pieces a whole voxel is worth. Soil conservation counts in these. */
 export const PIECES_PER_VOXEL = CELL_COUNT;
 
@@ -48,26 +52,20 @@ export const MAX_REMOVED = CELL_COUNT;
 
 
 /**
- * How far ahead of its own turn a piece starts to loosen — exactly one layer.
+ * How far ahead of its own turn a piece starts to loosen — the whole dig.
  *
- * Derived, not tuned. A sheet becomes the working face the instant the one
- * above it goes, and it should be visibly chewed from that moment until it
- * comes away: the green layer in the diagram is the layer being worked, the
- * whole time. At the old 0.13 there was a dead stretch after each sheet left
- * where nothing was loosening yet and the dig looked paused.
- *
- * It also keeps damage LOCAL, which was the original point: only the working
- * sheet is ever eroding, so the rest of the cube stays fused and solid instead
- * of dissolving evenly like a grid.
+ * With one cell per press the cell is visibly cracking and shifting from the
+ * first moment she strikes it until it lets go, and that IS the progress
+ * readout now. Anything less leaves a dead stretch at the start where the dig
+ * reads as not having begun.
  */
-const EROSION_LEAD = 1 / LAYER_COUNT;
+const EROSION_LEAD = 1;
 
 /**
- * How long a sheet takes to let go, as a fraction of the whole dig.
+ * How long the cell takes to let go, as a fraction of the whole dig.
  *
- * Divided by the material's clumping, so clay comes off as a slab and sand
- * trickles. Kept well under a layer's quarter so one sheet is always clear
- * before the next starts being worked.
+ * Divided by the material's clumping, so clay lets go as a slab and sand
+ * crumbles a fraction earlier.
  */
 const LAYER_STAGGER = 0.05;
 export const EROSION_MAX = 0.55;
@@ -263,36 +261,18 @@ export function buildFracture(
   const rank = new Int32Array(CELL_COUNT);
   for (let i = 0; i < CELL_COUNT; i++) rank[order[i]!] = i;
 
-  /*
-   * Thresholds, quantised to the LAYER.
-   *
-   * A sheet has to be off before the next one can be worked, so all sixteen of
-   * a layer come away at the end of that layer's quarter rather than trickling
-   * across the whole dig. Spreading them evenly over 64 slots — which is what
-   * this did — meant the cube was always half-eaten everywhere instead of
-   * being shaved down one face at a time, and there was no moment where a
-   * sheet was gone.
-   *
-   * Clumping survives as a small stagger INSIDE the sheet: clay's sixteen let
-   * go as one slab, sand's trickle over a fraction of a second. The stagger is
-   * far smaller than a layer window, so the ordering rule still holds.
-   */
-  /*
-   * Sheet k is due at exactly (k+1)/LAYER_COUNT — the moment that sheet's own
-   * timer runs out. These used to be squeezed into a [0.06, 0.99] window, a
-   * leftover from when pieces trickled across the whole dig, which put every
-   * sheet's soil a quarter of a cube LATE: sheet 0's pieces were not due until
-   * partway through sheet 1, so pressing dig, watching a sheet finish, and
-   * cancelling produced nothing at all.
-   */
   const thresholds = new Float32Array(CELL_COUNT);
+  /*
+   * One cell, due at the end of the dig.
+   *
+   * This was a per-sheet table with an ordering rule and an off-by-a-sheet bug
+   * worth remembering: the thresholds were once squeezed into a [0.06, 0.99]
+   * window, which put every sheet's soil a quarter of a cube late, so pressing
+   * dig, watching a sheet finish and cancelling produced no soil at all. There
+   * is nothing left to get out of order — the cell is due when the dig is done.
+   */
   const stagger = LAYER_STAGGER / Math.max(1, feel.clumping);
-  for (let i = 0; i < CELL_COUNT; i++) {
-    const sheet = Math.floor(i / LAYER_CELLS);
-    const within = i % LAYER_CELLS;
-    const due = (sheet + 1) / LAYER_COUNT;
-    thresholds[i] = due - stagger * (1 - (within + 1) / LAYER_CELLS);
-  }
+  for (let i = 0; i < CELL_COUNT; i++) thresholds[i] = 1 - stagger;
 
   const jitter = new Float32Array(CELL_COUNT * 4);
   const spin = new Float32Array(CELL_COUNT * 3);
@@ -388,16 +368,6 @@ export function eventsBetween(
     const crumbs = after - before;
     const at = cellCentre(pattern.order[after - 1]!);
     events.push({ kind: crumbs >= 2 ? 'DIG_CHIP_LARGE' : 'DIG_CHIP_SMALL', at, crumbs });
-  }
-
-  // A whole sheet finishing is its own beat — the moment a scoop's worth of
-  // soil is lying loose in the hole.
-  const layerBefore = Math.floor(before / LAYER_CELLS);
-  // Clamped, so the LAST sheet finishing does not fire a crack of its own —
-  // that moment is the cube coming free, and DIG_RELEASE already owns it.
-  const layerAfter = Math.min(Math.floor(after / LAYER_CELLS), LAYER_COUNT - 1);
-  if (layerAfter > layerBefore) {
-    events.push({ kind: 'DIG_CRACK', at: cellCentre(pattern.order[after - 1]!), crumbs: LAYER_CELLS });
   }
 
   if (from < 1 && to >= 1) {

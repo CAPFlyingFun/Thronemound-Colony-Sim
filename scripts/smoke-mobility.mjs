@@ -82,8 +82,8 @@ const ok = (m) => console.log(`  ok  ${m}`);
     const t = (await page.textContent('#dig-readout'))?.replace(/\s+/g, ' ') ?? '';
     return {
       text: t.trim(),
-      scoops: Number(/Carrying (\d+)\/4 scoops/.exec(t)?.[1] ?? '0'),
-      capacity: Number(/Carrying \d+\/(\d+) scoops/.exec(t)?.[1] ?? '0'),
+      scoops: Number(/Carrying (\d+)\/\d+ pellets/.exec(t)?.[1] ?? '0'),
+      capacity: Number(/Carrying \d+\/(\d+) pellets/.exec(t)?.[1] ?? '0'),
       pieces: Number(/pieces (\d+)/.exec(t)?.[1] ?? '0'),
       dug: Number(/Dug (\d+)/.exec(t)?.[1] ?? '0'),
       loose: Number(/Loose (\d+)/.exec(t)?.[1] ?? '0'),
@@ -122,8 +122,8 @@ const ok = (m) => console.log(`  ok  ${m}`);
     ev('pointerup');
   }, [x, y]);
 
-  // One voxel of soil, held as four scoops of sixteen pieces.
-  if ((await hud()).capacity !== 4) fail(`capacity should be 4 scoops, got ${(await hud()).capacity}`);
+  // One voxel of soil, and one voxel is one pellet.
+  if ((await hud()).capacity !== 1) fail(`capacity should be 1 pellet, got ${(await hud()).capacity}`);
   else ok('carries one cube at a time');
 
   // Reach: distant soil must be unreachable, the cube underfoot must not be.
@@ -141,37 +141,25 @@ const ok = (m) => console.log(`  ok  ${m}`);
 
   const standing = await hud();
   /*
-   * A cube is FOUR presses now, one sheet each, and she cannot cut into her
-   * own spoil — so each sheet has to be scooped and tipped aside before the
-   * next. That is the loop; this suite only needs the cube gone at the end of
-   * it, so the haul is kept as short as it can be while still clearing the
-   * face.
+   * ONE press takes the whole cell. It used to be four, a sheet at a time, with
+   * the spoil hauled clear between them; this suite only ever needed the cell
+   * gone, so what was a four-round haul is now a single press.
    */
-  for (let sheet = 1; sheet <= 4; sheet++) {
-    const b = await hud();
-    await look(700, 1180);
-    await page.waitForTimeout(700);
-    await page.click('.dig-action');
-    await until(`sheet ${sheet}`, (s) => s.loose + s.pieces >= b.loose + b.pieces + 16 || s.dug >= 1, 300000);
-    if (sheet === 4) break;
-    await page.click('.dig-action'); // CARRY: the sheet is on the face
-    await until('the sheet to be scooped', (s) => s.pieces >= 16, 60000);
-    await look(1180, 700); // level out, or DROP tips it back in
-    await page.waitForTimeout(800);
-    await page.click('.dig-action'); // DROP
-    await until('the spoil to be put down', (s) => s.pieces === 0, 60000);
-  }
+  await look(700, 1180);
+  await page.waitForTimeout(700);
+  await page.click('.dig-action');
+  await until('the cell to come away', (s) => s.dug >= 1, 300000);
   const first = await until('the first cube', (s) => s.dug >= 1, 60000);
   if (first.dug !== 1) fail(`expected exactly one cube dug, got ${JSON.stringify(first)}`);
-  else ok('four presses, one sheet each, dig exactly one cube');
+  else ok('one press digs exactly one cell');
 
   // Digging FREES the soil rather than loading her, so she is empty-handed and
   // the spoil is lying in the hole.
-  const spilled = await until('the freed cube to become loose soil',
-    (s) => s.loose + s.pieces >= 64, 40000);
-  if (spilled.loose + spilled.pieces !== 64) {
-    fail(`digging should account for 64 pieces: ${JSON.stringify(spilled)}`);
-  } else ok(`the freed cube is 64 pieces (${spilled.loose} loose, ${spilled.pieces} held)`);
+  const spilled = await until('the freed cell to become loose soil',
+    (s) => s.loose + s.pieces >= 1, 40000);
+  if (spilled.loose + spilled.pieces !== 1) {
+    fail(`digging should account for exactly one pellet: ${JSON.stringify(spilled)}`);
+  } else ok(`the freed cell is one pellet (${spilled.loose} loose, ${spilled.pieces} held)`);
 
   /*
    * Dig the floor out from under yourself and you must end up ON the new floor,
@@ -209,7 +197,7 @@ const ok = (m) => console.log(`  ok  ${m}`);
   await page.waitForTimeout(1500);
   await page.click('.dig-action');
   const done = await until('the round trip to settle', (s) => s.loose >= 1, 40000);
-  if (done.dug * 64 !== done.pieces + done.loose) fail(`soil not conserved: ${JSON.stringify(done)}`);
+  if (done.dug !== done.pieces + done.loose) fail(`soil not conserved: ${JSON.stringify(done)}`);
   else ok(`soil conserved: ${done.dug} cube = ${done.pieces} held + ${done.loose} loose`);
 
   if (errors.length) fail(`page errors: ${errors.join(' | ')}`);

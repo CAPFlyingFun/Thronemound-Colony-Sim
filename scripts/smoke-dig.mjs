@@ -73,7 +73,7 @@ const hud = async () => {
   return {
     text: t.trim(),
     dug: Number(/Dug (\d+)/.exec(t)?.[1] ?? '0'),
-    scoops: Number(/Carrying (\d+)\/4 scoops/.exec(t)?.[1] ?? '0'),
+    scoops: Number(/Carrying (\d+)\// .exec(t)?.[1] ?? '0'),
     pieces: Number(/pieces (\d+)/.exec(t)?.[1] ?? '0'),
     loose: Number(/Loose (\d+)/.exec(t)?.[1] ?? '0'),
     seconds: Number(/([\d.]+)s\/cube/.exec(t)?.[1] ?? '0'),
@@ -163,16 +163,17 @@ if (afterCancel.seconds < 12.4) fail('a cancelled dig credited practice — tap-
 else ok('a cancelled dig credits no practice');
 
 /*
- * 5. Four presses, one sheet each, hauling the spoil between them.
+ * 5. ONE press takes the whole cell.
  *
- * A cube is no longer one press. She cuts a sheet of sixteen, stops, and
- * cannot cut the next until its spoil is out of the way — which is the whole
- * loop: cut, clear, cut. Sim time runs at roughly 0.15x wall here (dt clamped
- * to 50 ms, ~3 fps under software rendering), so a 3.1 second sheet is about
- * twenty seconds of waiting.
+ * It used to be four, a sheet of sixteen at a time, with the spoil hauled out
+ * between them. The cell is the unit now: one press, one pellet, and nothing
+ * is part-dug in between — so the things this used to check (a shrinking
+ * outline, a hole that survives between presses, a face buried in its own
+ * spoil) describe a stage that no longer exists. Sim time runs at roughly
+ * 0.15x wall here (dt clamped to 50 ms, ~3 fps under software rendering), so a
+ * 12.5 second cell is a long wait.
  */
 const label = async () => (await page.textContent('.dig-action')) ?? '';
-const objective = async () => (await page.textContent('#dig-objective')) ?? '';
 
 // Aim back down at the cube after any detour.
 const aimDown = async () => {
@@ -180,116 +181,49 @@ const aimDown = async () => {
   await page.waitForTimeout(800);
 };
 
-let sheetsCut = 0;
-let refusedSeen = false;
-for (let sheet = 1; sheet <= 4; sheet++) {
-  await aimDown();
-  // Count what is in her JAWS too: a stray piece scooped up is still soil that
-  // came off the cube, and measuring loose alone made a finished sheet look
-  // short by however many she happened to be holding.
-  const b = await hud();
-  const before = b.loose + b.pieces;
+await aimDown();
+// POLLED, not sampled once: the HUD and the button repaint every 6th frame, so
+// reading immediately after aiming catches the previous label.
+if (!await untilLabel('DIG', 15000)) {
+  fail(`expected the button to offer DIG, got "${(await label()).trim()}"`);
+} else ok('the button offers DIG, with no sheet count to be part-way through');
 
-  // POLLED, not sampled once. The HUD and the button repaint every 6th frame,
-  // so reading immediately after aiming catches the previous label — and
-  // reading it a second time for the error message showed the correct one,
-  // which made the failure look like "expected X, got X".
-  if (!await untilLabel(`DIG ${sheet}/4`, 15000)) {
-    fail(`expected the button to offer DIG ${sheet}/4, got "${(await label()).trim()}"`);
-    break;
-  }
-  await page.click('.dig-action');
-  const cut = await until(
-    `sheet ${sheet} to come away`,
-    (s) => s.loose + s.pieces >= before + 16 || s.dug >= 1,
-    300000,
-  );
-  if (cut.loose + cut.pieces < before + 16 && cut.dug < 1) break;
-  sheetsCut++;
+const beforeDig = await hud();
+await page.click('.dig-action');
 
-  // She STOPPED. One press is one sheet, not a cube.
-  if (sheet < 4 && cut.dug !== 0) {
-    fail(`the whole cube went on press ${sheet} — a press should cut one sheet`);
-    break;
-  }
+/*
+ * Nothing comes away until the cell does.
+ *
+ * The old model handed out a scoop of soil per sheet while the cube was still
+ * standing, which is the state every conservation bug lived in. Sampled
+ * part-way through: the world must be exactly as it was.
+ */
+await page.waitForTimeout(6000);
+const midway = await hud();
+if (midway.dug !== beforeDig.dug || midway.loose + midway.pieces !== beforeDig.loose + beforeDig.pieces) {
+  fail(`soil moved mid-press: dug ${midway.dug}, ${midway.loose + midway.pieces} pieces`);
+} else ok('a press in progress has issued no soil at all');
 
-  if (sheet === 4) break;
-
-  /*
-   * You cannot cut into your own spoil. The button says CARRY, not DIG —
-   * which is a better answer than a refusal, because it names the thing you
-   * have to do next instead of just saying no.
-   */
-  if ((await label()).includes('DIG')) {
-    fail(`spoil is on the face but the button still offered "${(await label()).trim()}"`);
-  } else refusedSeen = true;
-
-  /*
-   * The hole has to STAY between presses.
-   *
-   * A part-dug cube is still solid in the grid, so the sheets she has taken
-   * off exist only in the chipped visual. Drop it when she stops and the outer
-   * wall grows back: you cannot see your own dig until the whole cube is out,
-   * and it flickers back into view every time you press.
-   */
-  const between = await hud();
-  if (between.chips < 1) {
-    fail(`the hole closed up after sheet ${sheet} — the part-dug cube stopped being drawn`);
-  } else if (sheet === 1) {
-    ok('the hole stays open between presses');
-  }
-  // The outline has to shrink with the soil, or it claims a boundary with
-  // nothing behind it.
-  const want = (4 - sheet) / 4;
-  if (Math.abs(between.box - want) > 0.01) {
-    fail(`target outline is ${between.box} deep after ${sheet} sheet(s), expected ${want}`);
-  } else if (sheet === 1) {
-    ok(`the target outline shrinks with the soil (${between.box} after one sheet)`);
-  }
-
-  /*
-   * Clear it: scoop the sheet and tip it ahead of her.
-   *
-   * Deliberately WITHOUT walking. Walking out and back sounds more like the
-   * real loop, but W and S for the same duration do not land her back on the
-   * same cube — she falls into the shaft, the return is blocked, and the next
-   * press lands on a different cube whose sheet count is zero. Since sheets
-   * are tracked per cell, that reads as the count resetting when nothing is
-   * wrong. Tipping the load forward clears the face just as well and keeps the
-   * test measuring the rule instead of the pathfinding.
-   */
-  await page.click('.dig-action');
-  const carried = await until('the sheet to be scooped', (s) => s.pieces >= 16, 60000);
-  if (carried.pieces < 16) { fail('could not scoop the sheet away'); break; }
-  await swipeLook(1180, 700); // level out, or DROP aims back into the hole
-  await page.waitForTimeout(900);
-  await page.click('.dig-action');
-  await until('the spoil to be put down', (s) => s.pieces === 0, 60000);
-}
-
-if (sheetsCut === 4) ok('four presses, one sheet each, cut the cube');
-else fail(`only ${sheetsCut} of 4 sheets were cut`);
-if (refusedSeen) ok('a buried face offers CARRY, never DIG — clear it before cutting on');
-else fail('the button offered DIG straight into a pile of spoil');
+const cut = await until('the cell to come away', (s) => s.dug >= 1, 300000);
+if (cut.dug < 1) fail('the cell never came away');
+else ok('one press took the whole cell');
 
 const dug = await hud();
-if (dug.dug < 1) fail(`nothing was excavated — "${dug.text}"`);
-else ok(`excavated ${dug.dug}, holding ${dug.pieces} pieces`);
 if (dug.seconds > 12.4) fail(`practice did not advance after a completed dig (${dug.seconds}s)`);
 else ok(`practice advanced: now ${dug.seconds}s/cube`);
 
-// Conservation counts PIECES, and part-dug cubes count their finished sheets.
+// One cell is one pellet, so the whole cube is accounted for by a single piece.
 const settled = await until('the spoil to settle', (s) => s.speed < 0.2, 30000);
-if (settled.pieces + settled.loose < 64) {
+if (settled.pieces + settled.loose < 1) {
   fail(`soil went missing: ${settled.pieces} held + ${settled.loose} loose`);
-} else ok(`a cube's worth of soil is accounted for (${settled.pieces} held + ${settled.loose} loose)`);
+} else ok(`the cell's soil is accounted for (${settled.pieces} held + ${settled.loose} loose)`);
 
 // Completing must tear the chip down, leaving the normal terrain path to draw
-// the (now removed) voxel. A leftover crumb cluster would float in the hole.
+// the (now removed) voxel. A leftover crumb would float in the hole.
 const afterDig = await until('the chipped visual to be torn down on completion',
   (s) => s.chips === 0, 20000);
 if (afterDig.chips !== 0) fail(`completion left a chipped visual behind — "${afterDig.text}"`);
-else ok('completing a cube removes the temporary visual');
+else ok('completing a cell removes the temporary visual');
 
 const dugShot = await shot('2-dug');
 if (Buffer.compare(surfaceShot, dugShot) === 0) fail('frame did not change after digging');
@@ -299,13 +233,15 @@ else ok('rendered frame changed after digging');
  * 6. Soil conservation, end to end, in PIECES.
  *
  * The cube is gone and every piece of it is either in her jaws or lying on the
- * ground. Counted in pieces because a cube is 64 of them and the scoop is 16 —
+ * ground. Counted in pellets, and a cell is exactly one — which is the point of
+ * the rework: cell, pellet and grab are one object, so there is no second unit
+ * for the count to drift between. It used to be 64 pieces and a scoop of 16 —
  * the cube figure alone cannot see a sheet going missing.
  */
 const placed = await hud();
-if (placed.dug * 64 !== placed.pieces + placed.loose) {
-  fail(`soil not conserved: dug ${placed.dug} x64 != held ${placed.pieces} + loose ${placed.loose}`);
-} else ok(`soil conserved end to end: ${placed.dug} cube = ${placed.pieces} held + ${placed.loose} loose`);
+if (placed.dug !== placed.pieces + placed.loose) {
+  fail(`soil not conserved: dug ${placed.dug} != held ${placed.pieces} + loose ${placed.loose}`);
+} else ok(`soil conserved end to end: ${placed.dug} cell = ${placed.pieces} held + ${placed.loose} loose`);
 
 await shot('3-placed');
 
