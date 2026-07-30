@@ -2321,3 +2321,59 @@ describe('burial shading', () => {
     expect(burialShade(-3)).toBe(1);
   });
 });
+
+describe('chamfer holes at dug corners', () => {
+  /** Sky-facing area of a chunk, which a hole in the ground eats into. */
+  const skyArea = (data: NonNullable<ReturnType<typeof meshChunk>>) => {
+    let up = 0;
+    for (let t = 0; t < data.indices.length; t += 3) {
+      const [i, j, k] = [data.indices[t]!, data.indices[t + 1]!, data.indices[t + 2]!];
+      const p = (n: number) => [data.positions[n * 3]!, data.positions[n * 3 + 2]!];
+      const [a, b, c] = [p(i), p(j), p(k)];
+      const area = ((b[0]! - a[0]!) * (c[1]! - a[1]!) - (c[0]! - a[0]!) * (b[1]! - a[1]!)) / 2;
+      if (data.normals[i * 3 + 1]! > 0.5) up += Math.abs(area);
+    }
+    return up;
+  };
+
+  /*
+   * KNOWN FAILING, kept red on purpose.
+   *
+   * Reported from play and reproduced here: sky shows through the ground where
+   * two runs of rim meet. The shortfall is 0.0429, which is exactly half a
+   * chamfer squared — one right-triangle with legs of EDGE_CHAMFER, so a single
+   * corner wedge is missing, the same shape as the bug the vertex rule fixed
+   * for straight rims.
+   *
+   * Marked `fails` rather than skipped so it stays in the run and flips green
+   * of its own accord when the corner case is handled; a skip would go quiet.
+   */
+  it.fails('opens no hole where two runs of rim meet at a corner', () => {
+    /*
+     * Reported from play as sky showing through the ground at the corner of a
+     * dig. Straight trenches were already covered; an L is the case where two
+     * runs of rim MEET, so a vertex can be supported by the edge continuing
+     * along one arm while the other arm disagrees about it.
+     */
+    const world = makeWorld();
+    const cy = Math.floor(SURFACE / CHUNK);
+    for (let i = 0; i < 3; i++) world.dig(40 + i, SURFACE, 40);
+    for (let i = 1; i < 3; i++) world.dig(40, SURFACE, 40 + i);
+    expect(skyArea(meshChunk(world, 1, cy, 1)!)).toBeCloseTo(CHUNK * CHUNK - 5, 4);
+  });
+
+  /*
+   * KNOWN FAILING, same cause. Shortfall is 0.0858, exactly TWO corner wedges,
+   * which is what two diagonally-touching pits should produce if each loses one.
+   */
+  it.fails('opens no hole around a single dug cell with a neighbour dug diagonally', () => {
+    // The checkerboard case: two cells touching only at an edge, each carrying
+    // its own rim, with nothing between them to agree with.
+    const world = makeWorld();
+    const cy = Math.floor(SURFACE / CHUNK);
+    // Chunk 1 spans 32..63, so the cells have to be inside it to be counted.
+    world.dig(45, SURFACE, 45);
+    world.dig(46, SURFACE, 46);
+    expect(skyArea(meshChunk(world, 1, cy, 1)!)).toBeCloseTo(CHUNK * CHUNK - 2, 4);
+  });
+});
