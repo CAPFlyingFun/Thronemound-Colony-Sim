@@ -31,17 +31,47 @@ export interface FollowCameraOptions {
   /** Height above her the eye sits when the rig falls back to first person. */
   eyeHeight: number;
   maxDistance: number;
+  /** Starting first-person eye offset in her frame. See `FollowCamera.eye`. */
+  eye?: { x: number; y: number; z: number };
   /** Clearance kept between the camera and the soil. */
   clearance: number;
   /** How fast the rig catches up, per second. */
   ease: number;
 }
 
+/**
+ * Which view the player wants.
+ *
+ * `auto` is the one worth explaining: third person above ground, where seeing
+ * her walk is the point, and first person the moment she is under it, where
+ * seeing her is impossible anyway and what you need is to know where the jaws
+ * are pointed. Digging from behind her shoulder means aiming a tunnel you
+ * cannot see the end of.
+ */
+export type CameraMode = 'first' | 'auto' | 'third';
+
 export class FollowCamera {
   /** Where the camera looks. The caller keeps this on the ant. */
   readonly target = new THREE.Vector3();
   /** Which way is up for the rig — the ant's own up, so it rolls with her. */
   readonly up = new THREE.Vector3(0, 1, 0);
+  /**
+   * Where the first-person eye sits, IN HER FRAME: x to her right, y up, z
+   * forward along her heading.
+   *
+   * Adjustable at runtime rather than tuned in the source, because "on the
+   * queen's head" is not a number anyone can derive — it depends on the model,
+   * on how much of her you want in shot, and on taste. The rig is a different
+   * shape at every caste, so a constant here would be wrong for two of the
+   * three ants that will eventually use it.
+   */
+  readonly eye = new THREE.Vector3(0, 0.55, 0.35);
+  /**
+   * The view the player has chosen, and whether she is currently underground.
+   * `auto` reads both.
+   */
+  mode: CameraMode = 'auto';
+  submerged = false;
 
   /**
    * The player's look, as an offset from her heading rather than as a world
@@ -64,6 +94,7 @@ export class FollowCamera {
     private readonly options: FollowCameraOptions,
   ) {
     this.distance = options.distance;
+    if (options.eye) this.eye.set(options.eye.x, options.eye.y, options.eye.z);
   }
 
   /** Radians per pixel is the caller's business; this takes radians. */
@@ -151,10 +182,26 @@ export class FollowCamera {
      * bore, over her shoulder is where you want to be anyway: it is the view
      * the thing being driven actually has.
      */
-    this.onboard = clear < this.options.minDistance;
+    /*
+     * Three ways to end up in first person, and they are not the same thing.
+     * The player may have asked for it outright; `auto` gives it to them the
+     * moment she goes under; and whatever the setting, there may simply be no
+     * room for a shot of her — that last one is the fallback the rig has always
+     * had, and it stays, because "third person" cannot be honoured inside a
+     * 4 mm tunnel however firmly it is requested.
+     */
+    const noRoom = clear < this.options.minDistance;
+    this.onboard = this.mode === 'first'
+      || (this.mode === 'auto' && this.submerged)
+      || noRoom;
+    const right = new THREE.Vector3().crossVectors(up, forward).normalize();
     const wanted = this.onboard
-      ? this.target.clone().addScaledVector(up, this.options.eyeHeight)
-        .addScaledVector(forward, this.options.eyeHeight * 0.5)
+      // Her frame, so the offset means the same thing whichever way she faces
+      // and whatever she is standing on.
+      ? this.target.clone()
+        .addScaledVector(right, this.eye.x)
+        .addScaledVector(up, this.eye.y)
+        .addScaledVector(forward, this.eye.z)
       : this.target.clone().addScaledVector(back, Math.max(clear, this.options.minDistance));
 
     /*

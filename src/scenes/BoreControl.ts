@@ -89,6 +89,20 @@ export class BoreRig {
   }
 
   /**
+   * Swing the heading directly, for the first-person look.
+   *
+   * From her own eyes a look-drag is not a camera orbit, it is her turning —
+   * so it moves the same heading the joystick moves, rather than a separate
+   * camera angle that would let the view and the bore disagree about which way
+   * she is pointed.
+   */
+  turn(radians: number): void {
+    this.heading += radians;
+    if (this.heading > Math.PI) this.heading -= Math.PI * 2;
+    if (this.heading < -Math.PI) this.heading += Math.PI * 2;
+  }
+
+  /**
    * Aim one step further down or up. Discrete, because the specification is in
    * ten-degree increments and a swept angle cannot be read off a gauge or
    * repeated between runs.

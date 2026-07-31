@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { QueenModel } from '../anim/QueenModel';
 import { BoreRig, DIG_YAW_RATE, YAW_RATE } from './BoreControl';
 import { clampStickOrigin, stickVector } from '../voxel/locomotion';
-import { FollowCamera } from './FollowCamera';
+import { FollowCamera, type CameraMode } from './FollowCamera';
 import { TripodGait } from '../anim/tripod';
 import { CASTE_LENGTH_MM } from '../anim/hexapod';
 import { buildSurfaceNets } from '../density/SurfaceNets';
@@ -218,6 +218,24 @@ const STICK_RADIUS = 70;
 /** How far the camera swings per pixel dragged. */
 const LOOK_PER_PIXEL = 0.006;
 
+/**
+ * How far a first-person look-drag must travel to click the pitch dial one
+ * ten-degree step.
+ *
+ * The dial is discrete and the drag is not, so something has to decide where
+ * the notches are. Matching the step to the angle itself would make the aim
+ * one-to-one with the view, which sounds right and is not: you would be unable
+ * to look at the ceiling without aiming at it.
+ */
+const AIM_PER_STEP = 0.28;
+
+/** How much one nudge moves the first-person eye, in world units. */
+const EYE_NUDGE = 0.5 / WORLD_UNIT_MM;
+/** Where the eye may be placed, either side of her origin. */
+const EYE_RANGE = 12 / WORLD_UNIT_MM;
+/** Local-storage key for the camera settings, so a placement survives a reload. */
+const CAMERA_PREFS = 'thronemound.lab.camera';
+
 /** Scratch for the camera sight-line march, so it allocates nothing. */
 const PROBE = new THREE.Vector3();
 const SPEED_EASE = 7;
@@ -398,6 +416,15 @@ export class DensityTerrainLabScene {
   private readonly status: HTMLDivElement;
   private readonly digButton: HTMLButtonElement;
   private readonly resetButton: HTMLButtonElement;
+  private camButton!: HTMLButtonElement;
+  private camPanel!: HTMLDivElement;
+  /** Redraws for the eye readouts, so a recentre updates all three. */
+  private readonly camReads: Array<() => void> = [];
+  /** Look-drag accumulated toward the next pitch notch. See `AIM_PER_STEP`. */
+  private aimDrag = 0;
+  /** True once the player has moved the eye, so the rig default stops applying. */
+  private eyePlaced = false;
+  private repaintCamera: (() => void) | null = null;
   private readonly walkButton: HTMLButtonElement;
   private readonly gaugeAnt: HTMLSpanElement;
   private readonly gaugeRead: HTMLDivElement;
@@ -438,6 +465,9 @@ export class DensityTerrainLabScene {
       (window as unknown as { labScene?: unknown }).labScene = this;
       this.queenReady = ok;
       if (!ok) this.status.dataset.message = 'Queen model failed to load';
+      // The rig has to exist before its head can be found, so the first-person
+      // default is seated here rather than when the panel was built.
+      this.seatEyeOnHead();
       this.updateStatus();
     });
 
@@ -553,6 +583,8 @@ export class DensityTerrainLabScene {
     });
     actions.appendChild(this.walkButton);
 
+    this.buildCameraPanel(hud, actions);
+
     this.resetButton = document.createElement('button');
     this.resetButton.className = 'density-lab-button density-lab-reset';
     this.resetButton.textContent = 'RESET';
@@ -617,6 +649,163 @@ export class DensityTerrainLabScene {
    * the feel of driving an ant is one implementation rather than two that
    * drift apart.
    */
+  /**
+   * The camera settings: which view, and exactly where the first-person eye
+   * sits on her.
+   *
+   * The eye is nudged rather than typed because there is no number anybody can
+   * derive for "on the queen's head" — it depends on the model, on how much of
+   * her you want in shot, and on taste. Nudging while looking at the result is
+   * the only way to find it, and it is saved so the answer only has to be found
+   * once.
+   */
+  private buildCameraPanel(hud: HTMLElement, actions: HTMLElement): void {
+    this.camButton = document.createElement('button');
+    this.camButton.className = 'density-lab-button density-lab-cam';
+    this.camButton.textContent = 'CAM';
+    this.camButton.setAttribute('aria-label', 'Camera settings');
+    this.camButton.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      this.camPanel.classList.toggle('is-open');
+    });
+    actions.appendChild(this.camButton);
+
+    this.camPanel = document.createElement('div');
+    this.camPanel.className = 'density-lab-cam-panel';
+
+    const modeRow = document.createElement('button');
+    modeRow.className = 'density-lab-cam-mode';
+    const paintMode = (): void => {
+      const label: Record<CameraMode, string> = {
+        first: 'FIRST PERSON',
+        auto: 'FIRST UNDER · THIRD ABOVE',
+        third: 'THIRD PERSON',
+      };
+      modeRow.textContent = label[this.follow.mode];
+    };
+    modeRow.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      const order: CameraMode[] = ['auto', 'first', 'third'];
+      const next = order[(order.indexOf(this.follow.mode) + 1) % order.length]!;
+      this.follow.mode = next;
+      paintMode();
+      this.saveCameraPrefs();
+    });
+    this.camPanel.appendChild(modeRow);
+
+    /*
+     * Three axes, in HER frame and labelled the way you would think about
+     * them rather than by coordinate: across her, up her, and along her nose.
+     */
+    const axes: Array<[string, 'x' | 'y' | 'z', string]> = [
+      ['SIDE', 'x', 'left and right across her'],
+      ['RISE', 'y', 'up and down'],
+      ['FWD', 'z', 'forward and back along her nose'],
+    ];
+    for (const [label, axis, hint] of axes) {
+      const row = document.createElement('div');
+      row.className = 'density-lab-cam-row';
+      const name = document.createElement('span');
+      name.className = 'density-lab-cam-name';
+      name.textContent = label;
+      const read = document.createElement('span');
+      read.className = 'density-lab-cam-read';
+      const paint = (): void => {
+        read.textContent = `${(this.follow.eye[axis] * WORLD_UNIT_MM).toFixed(1)} mm`;
+      };
+      paint();
+      this.camReads.push(paint);
+      row.appendChild(name);
+      for (const step of [-1, 1]) {
+        const key = document.createElement('button');
+        key.className = 'density-lab-cam-key';
+        key.textContent = step < 0 ? '−' : '+';
+        key.setAttribute('aria-label', `Move the eye ${step < 0 ? 'back' : 'forward'} ${hint}`);
+        key.addEventListener('pointerdown', (event) => {
+          event.preventDefault();
+          this.follow.eye[axis] = THREE.MathUtils.clamp(
+            this.follow.eye[axis] + step * EYE_NUDGE, -EYE_RANGE, EYE_RANGE,
+          );
+          paint();
+          this.eyePlaced = true;
+          this.saveCameraPrefs();
+        });
+        row.appendChild(key);
+      }
+      row.appendChild(read);
+      this.camPanel.appendChild(row);
+    }
+
+    const centre = document.createElement('button');
+    centre.className = 'density-lab-cam-mode';
+    centre.textContent = 'RECENTRE EYE';
+    centre.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      this.eyePlaced = false;
+      this.seatEyeOnHead();
+      this.eyePlaced = true;
+      this.saveCameraPrefs();
+    });
+    this.camPanel.appendChild(centre);
+
+    paintMode();
+    hud.appendChild(this.camPanel);
+    this.repaintCamera = () => { paintMode(); for (const p of this.camReads) p(); };
+    this.loadCameraPrefs();
+    this.repaintCamera();
+  }
+
+  /**
+   * Put the eye on her HEAD, from the rig.
+   *
+   * The default used to be a pair of constants, and they sat her camera in the
+   * middle of her own thorax: the first-person shot was a wall of her legs
+   * swinging past the lens. "On the head" is a different offset for every caste
+   * and cannot be one number, so it is read off the mouth bone — and only when
+   * the player has not already placed the eye themselves, since a saved
+   * placement is a decision and this is only a starting guess.
+   */
+  private seatEyeOnHead(): void {
+    if (this.eyePlaced || !this.queenReady) return;
+    const head = this.queen.headOffset();
+    if (!head) return;
+    this.follow.eye.set(head[0], head[1], head[2]);
+    this.repaintCamera?.();
+  }
+
+  private saveCameraPrefs(): void {
+    try {
+      window.localStorage.setItem(CAMERA_PREFS, JSON.stringify({
+        mode: this.follow.mode,
+        eye: [this.follow.eye.x, this.follow.eye.y, this.follow.eye.z],
+      }));
+    } catch {
+      // A browser with storage denied is not a reason to lose the camera.
+    }
+  }
+
+  private loadCameraPrefs(): void {
+    try {
+      const raw = window.localStorage.getItem(CAMERA_PREFS);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as { mode?: CameraMode; eye?: number[] };
+      if (saved.mode === 'first' || saved.mode === 'auto' || saved.mode === 'third') {
+        this.follow.mode = saved.mode;
+      }
+      const eye = saved.eye;
+      if (Array.isArray(eye) && eye.length === 3 && eye.every((n) => Number.isFinite(n))) {
+        this.follow.eye.set(
+          THREE.MathUtils.clamp(eye[0]!, -EYE_RANGE, EYE_RANGE),
+          THREE.MathUtils.clamp(eye[1]!, -EYE_RANGE, EYE_RANGE),
+          THREE.MathUtils.clamp(eye[2]!, -EYE_RANGE, EYE_RANGE),
+        );
+        this.eyePlaced = true;
+      }
+    } catch {
+      // Corrupt settings are the same as no settings.
+    }
+  }
+
   private buildStick(hud: HTMLElement): void {
     this.stick.className = 'density-lab-stick';
     this.stickKnob.className = 'density-lab-stick-knob';
@@ -1720,6 +1909,24 @@ export class DensityTerrainLabScene {
       return;
     }
     this.lastPinch = 0;
+    if (this.follow.firstPerson) {
+      /*
+       * From her own eyes, looking IS aiming. The whole point of the view is
+       * that you can see where you are about to dig, and a camera that orbits
+       * independently of her head shows you somewhere she is not pointed.
+       *
+       * So the drag turns HER and the aim follows: sideways swings her heading,
+       * up and down clicks the pitch dial through its ten-degree steps. The
+       * dial stays the only authority on pitch, so the gauge still tells the
+       * truth and there is no second copy of the number to disagree with it.
+       */
+      this.bore.turn(-dx * LOOK_PER_PIXEL);
+      this.aimDrag += dy * LOOK_PER_PIXEL;
+      while (this.aimDrag >= AIM_PER_STEP) { this.bore.aim(-1); this.aimDrag -= AIM_PER_STEP; }
+      while (this.aimDrag <= -AIM_PER_STEP) { this.bore.aim(1); this.aimDrag += AIM_PER_STEP; }
+      this.updateGauge();
+      return;
+    }
     this.follow.orbit(-dx * LOOK_PER_PIXEL, -dy * LOOK_PER_PIXEL);
   };
 
@@ -1893,6 +2100,12 @@ export class DensityTerrainLabScene {
      * points the collision probe straight into the floor.
      */
     this.follow.up.copy(this.up);
+    /*
+     * What `auto` switches on. Digging counts as under before she is buried:
+     * the moment the bore is armed you want to be looking down it, and waiting
+     * for soil to close over her head flips the view halfway into the stroke.
+     */
+    this.follow.submerged = this.underground || this.bore.digging;
     this.follow.target.copy(this.antPosition).addScaledVector(this.up, CAMERA_LOOK_AT);
     this.follow.update(
       delta, this.facing, (point) => this.solidAt(point), CELL_SIZE * 2,

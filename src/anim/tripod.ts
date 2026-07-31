@@ -114,8 +114,25 @@ export interface Stride {
 /** Ground height at a world x and z. The stepper puts feet ON the ground. */
 export type GroundAt = (x: number, z: number) => number;
 
-/** Below this she is standing, and standing feet do not step. */
+/**
+ * Below this she counts as standing, for pacing a swing only.
+ *
+ * It used to gate the STEP TRIGGER too, and that was wrong twice over. A foot
+ * that has trailed past its limit needs to move whatever the speedometer says,
+ * and the speedometer is her walking velocity — which reads near zero while
+ * she is being carried by gravity or pushed out of a shaft, exactly the moments
+ * her feet were left behind. The geometry already knows when she is standing
+ * still: nothing trails, so nothing steps. A separate speed test could only
+ * ever disagree with it.
+ */
 const IDLE_SPEED = 0.05;
+
+/**
+ * How much of a leg's length its foot may stray from the shoulder before the
+ * step is forced. Just under one, so a leg is never asked to reach further than
+ * it is long.
+ */
+const OVERREACH = 0.9;
 
 export class TripodGait {
   private readonly legs: Leg[];
@@ -167,13 +184,28 @@ export class TripodGait {
      * leg that has drifted sideways has not taken a step — she may have turned,
      * or be walking a slope, and neither is a reason to pick a foot up.
      */
-    if (!airborne && Math.abs(stride.speed) > IDLE_SPEED) {
+    if (!airborne) {
       const due = this.last === 0 ? 1 : 0;
       let worst = 0;
+      let stranded = false;
       for (const leg of this.legs) {
         if (tripodOf(leg.slot) !== due) continue;
         worst = Math.max(worst, -this.trail(leg, stride));
+        stranded = stranded || this.outOfReach(leg, stride);
       }
+      /*
+       * A foot further from its shoulder than the leg is long has to move NOW,
+       * whichever way it is trailing and whether or not she is walking.
+       *
+       * Nothing in the normal rules covers it, because the normal rules assume
+       * she got here by walking: the anchor drifts backwards a little each
+       * frame and trips the trigger long before it is out of range. Surfacing
+       * from a burrow is not walking — the stepper is off underground and
+       * restarts when she comes up, and she can be metres from where her feet
+       * were left. She came out of a hole with her legs stretched out behind
+       * her like a landed spider.
+       */
+      if (stranded) { this.begin(due, stride, groundAt); return this.legs.map((l) => this.stateOf(l, stride)); }
       /*
        * One number for the whole tripod. Stepping legs individually as each
        * one passes its own limit is a smoother-looking rule and a worse one:
@@ -196,6 +228,19 @@ export class TripodGait {
       stride.position[1] + leg.home[1],
       stride.position[2] - leg.home[0] * sin + leg.home[2] * cos,
     ];
+  }
+
+  /**
+   * Is this foot stranded — further from where the leg hangs than the leg can
+   * stretch? Measured in the horizontal plane, since a step is a step whichever
+   * direction the foot has been left in.
+   */
+  private outOfReach(leg: Leg, stride: Stride): boolean {
+    const anchor = this.anchor.get(leg.slot);
+    if (!anchor) return false;
+    const home = this.homeOf(leg, stride);
+    const span = Math.hypot(anchor[0] - home[0], anchor[2] - home[2]);
+    return span > leg.reach * OVERREACH;
   }
 
   /** Signed distance of the anchor ahead of home, along her heading. */

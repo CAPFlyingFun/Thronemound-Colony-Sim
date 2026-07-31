@@ -172,6 +172,8 @@ export class QueenModel {
   private readonly boneMobility = new Map<string, number>();
   /** Neutral foot position and reach per leg. See `legPlan`. */
   private readonly legHome: Array<{ slot: string; home: Vec3; reach: number }> = [];
+  /** Her head in her own frame. See `headOffset`. */
+  private head: Vec3 | null = null;
   private clock = 0;
   /** Gait revolutions, integrated. See `GaitInput.cycle`. */
   private cycle = 0;
@@ -239,6 +241,7 @@ export class QueenModel {
       this.baseY = this.bodyRoot?.position.y ?? 0;
       this.measureLimbs();
       this.measureLegPlan();
+      this.measureHead();
       this.loaded = true;
       return true;
     } catch {
@@ -580,6 +583,31 @@ export class QueenModel {
    */
   legPlan(): Array<{ slot: string; home: Vec3; reach: number }> {
     return this.legHome.slice();
+  }
+
+  /**
+   * Where her head is, in her own frame — the honest place to put a
+   * first-person eye.
+   *
+   * Taken from the rig rather than chosen, because "on the queen's head" is a
+   * different offset on every caste and picking a constant means picking one
+   * that is wrong for the other two. Measured off the bind pose, like the leg
+   * plan, so the root's transform is not in it.
+   *
+   * Null when the rig names no mouth, which the queen's very nearly does not —
+   * her mouthparts are barely rigged.
+   */
+  headOffset(): Vec3 | null {
+    return this.head;
+  }
+
+  private measureHead(): void {
+    this.head = null;
+    const mouth = this.rig.mouth[this.rig.mouth.length - 1];
+    const bone = mouth ? this.bones.get(mouth) : undefined;
+    if (!bone) return;
+    bone.getWorldPosition(FOOT);
+    this.head = [FOOT.x, FOOT.y, FOOT.z];
   }
 
   private measureLegPlan(): void {

@@ -194,6 +194,33 @@ describe('the stride', () => {
     expect(Math.abs(ahead + behind)).toBeLessThan(reach * 0.35);
   });
 
+  /*
+   * Surfacing from a burrow. The stepper is off underground, so it restarts
+   * with anchors from wherever it last ran — which can be a long way from where
+   * she now is. She came out of a hole with her legs stretched behind her like
+   * a landed spider, and none of the normal rules covered it: they all assume
+   * the anchor drifts back gradually and trips the trigger while still in
+   * range.
+   */
+  it('recovers when she arrives somewhere her feet are not', () => {
+    const gait = new TripodGait(LEGS);
+    walk(gait, 2);
+    // Teleport: eight body lengths on, as if she had just climbed out.
+    let z = 40;
+    const frames = [];
+    for (let i = 0; i < 120; i += 1) {
+      z += 2 / 60;
+      frames.push(gait.step(1 / 60, at(z), FLAT));
+    }
+    // Within a couple of step cycles every foot is back under her.
+    const settled = frames[frames.length - 1]!;
+    for (const leg of settled) {
+      const home = LEGS.find((l) => l.slot === leg.slot)!;
+      const span = Math.hypot(leg.target[0] - home.home[0], leg.target[2] - (z + home.home[2]));
+      expect(span, `${leg.slot} left behind`).toBeLessThan(home.reach);
+    }
+  });
+
   it('does not step at all when she is standing still', () => {
     const gait = new TripodGait(LEGS);
     gait.reset(at(0, 0), FLAT);

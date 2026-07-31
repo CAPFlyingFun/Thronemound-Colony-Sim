@@ -354,3 +354,89 @@
   border-radius: 50%;
   border: 1px dashed rgba(243, 236, 216, 0.22);
 }
+
+/* ---------------------------------------- camera settings */
+
+.density-lab-cam {
+  padding: 10px 16px;
+  background: rgba(206, 216, 240, 0.92);
+}
+
+.density-lab-cam:active {
+  transform: scale(0.96);
+  background: #dfe8fb;
+}
+
+/*
+ * Anchored to the RIGHT of the action stack rather than over it. The stack owns
+ * that column in both orientations, and a panel on top of BORE is a panel you
+ * have to close before you can dig.
+ */
+.density-lab-cam-panel {
+  position: absolute;
+  right: calc(max(16px, env(safe-area-inset-right)) + 108px);
+  bottom: max(22px, env(safe-area-inset-bottom));
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 12px;
+  background: rgba(20, 16, 11, 0.86);
+  backdrop-filter: blur(7px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.34);
+  pointer-events: auto;
+  z-index: 4;
+}
+
+.density-lab-cam-panel.is-open { display: flex; }
+
+.density-lab-cam-mode {
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.04em;
+  color: #1d160e;
+  background: rgba(206, 216, 240, 0.92);
+  touch-action: none;
+}
+
+.density-lab-cam-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.density-lab-cam-name {
+  width: 40px;
+  font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #d8b47b;
+}
+
+.density-lab-cam-key {
+  width: 34px;
+  height: 30px;
+  border: 0;
+  border-radius: 8px;
+  font: 700 16px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #1d160e;
+  background: rgba(240, 232, 212, 0.9);
+  touch-action: none;
+}
+
+.density-lab-cam-key:active { background: #f0d88e; }
+
+.density-lab-cam-read {
+  min-width: 62px;
+  text-align: right;
+  font: 500 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  color: #d8cdb8;
+}
+
+/* Landscape on a phone is 430 tall and the stack already fills it. */
+@media (max-height: 480px) {
+  .density-lab-cam { padding: 8px 13px; font-size: 11px; }
+  .density-lab-cam-key { width: 30px; height: 26px; }
+  .density-lab-cam-panel { gap: 4px; padding: 8px; }
+}
