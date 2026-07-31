@@ -117,10 +117,50 @@
   background: rgba(244, 236, 216, 0.88);
 }
 
+/*
+ * The walk pad, opposite the dig button so a two-thumb grip reaches both.
+ * A three-by-three grid gives the usual cross with no absolute positioning:
+ * forward takes the top middle cell, left and right the middle row, back the
+ * bottom middle, and the four corners stay empty.
+ */
+.density-lab-pad {
+  position: absolute;
+  left: max(16px, env(safe-area-inset-left));
+  bottom: max(22px, env(safe-area-inset-bottom));
+  display: grid;
+  grid-template-columns: repeat(3, 52px);
+  grid-template-rows: repeat(3, 52px);
+  gap: 4px;
+  pointer-events: auto;
+}
+
+.density-lab-padkey {
+  border: 0;
+  border-radius: 13px;
+  font: 700 18px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #1d160e;
+  background: rgba(244, 236, 216, 0.84);
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.28);
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.density-lab-padkey:active {
+  background: #f0d88e;
+  transform: scale(0.95);
+}
+
+.density-lab-padkey:nth-child(1) { grid-area: 1 / 2; }
+.density-lab-padkey:nth-child(2) { grid-area: 2 / 1; }
+.density-lab-padkey:nth-child(3) { grid-area: 2 / 3; }
+.density-lab-padkey:nth-child(4) { grid-area: 3 / 2; }
+
 .density-lab-hint {
   position: absolute;
   left: max(12px, env(safe-area-inset-left));
-  bottom: max(12px, env(safe-area-inset-bottom));
+  /* Clear of the pad, which owns the bottom left corner. */
+  bottom: calc(max(22px, env(safe-area-inset-bottom)) + 176px);
   color: rgba(255, 248, 228, 0.8);
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
 }
@@ -129,4 +169,8 @@
   .density-lab-hint { display: none; }
   .density-lab-status { font-size: 10.5px; }
   .density-lab-title { font-size: 11px; }
+  .density-lab-pad {
+    grid-template-columns: repeat(3, 46px);
+    grid-template-rows: repeat(3, 46px);
+  }
 }

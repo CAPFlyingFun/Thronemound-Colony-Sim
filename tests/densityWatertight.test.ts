@@ -48,138 +48,24 @@ import {
  * stays true.
  */
 
-interface Survey {
-  edges: number;
-  /** Edges with only one triangle: an actual hole in the surface. */
-  boundary: number;
-  /** Edges with three or more: the surface pinches or self-touches. */
-  nonManifold: number;
-  /** Edges whose two triangles run the SAME way: one of them is inside-out. */
-  flipped: number;
-  triangles: number;
-}
-
-function survey(mesh: SurfaceNetMesh): Survey {
-  const shared = new Map<string, number>();
-  const directed = new Map<string, number>();
-  for (let t = 0; t < mesh.indices.length; t += 3) {
-    const a = mesh.indices[t]!;
-    const b = mesh.indices[t + 1]!;
-    const c = mesh.indices[t + 2]!;
-    for (const [p, q] of [[a, b], [b, c], [c, a]] as const) {
-      const key = p < q ? `${p}|${q}` : `${q}|${p}`;
-      shared.set(key, (shared.get(key) ?? 0) + 1);
-      directed.set(`${p}>${q}`, (directed.get(`${p}>${q}`) ?? 0) + 1);
-    }
-  }
-  let boundary = 0;
-  let nonManifold = 0;
-  for (const n of shared.values()) {
-    if (n === 1) boundary++;
-    else if (n > 2) nonManifold++;
-  }
-  let flipped = 0;
-  for (const n of directed.values()) if (n > 1) flipped += n - 1;
-  return {
-    edges: shared.size, boundary, nonManifold, flipped,
-    triangles: mesh.indices.length / 3,
-  };
-}
+/*
+ * The instruments live in `meshSurvey`, because the streamed window needs the
+ * same three checks this file runs on the fixed mound, and a second copy of a
+ * measuring device is a second answer waiting to happen. Why each of the three
+ * is shaped the way it is, is documented there.
+ */
+import { eyeScan, survey } from "./meshSurvey";
 
 /**
- * Nearest triangle along a ray. `facing > 0` means it shows the ray its front,
- * and `grazing` is true when the ray meets it nearly edge-on.
+ * How far out the eyes sit, as a FRACTION of the world.
  *
- * The grazing flag exists because a silhouette is not a hole. A ray arriving
- * at 79 degrees off the normal is skimming the curve of the mound, which is
- * both where the intersection arithmetic is least trustworthy and where
- * "you can see through it" stops meaning anything to an eye. Measured on the
- * rescaled lab: one ray in 168, at 13 degrees elevation, first meeting a face
- * three quarters of a world unit PAST the crater it was aimed at.
+ * It used to be 9 world units, which was a third of the old 120 mm mound and
+ * nearly three times the width of the 16 mm one — from that far out the rays
+ * arrive almost parallel, graze the silhouette, and read as a couple of false
+ * inside-out hits. Tied to the world, the probe geometry is the same whatever
+ * the lab is scaled to.
  */
-function shoot(mesh: SurfaceNetMesh, origin: number[], dir: number[]) {
-  const P = mesh.positions;
-  const I = mesh.indices;
-  let best = Infinity;
-  let facing = 0;
-  let incidence = 1;
-  for (let t = 0; t < I.length; t += 3) {
-    const i0 = I[t]! * 3;
-    const i1 = I[t + 1]! * 3;
-    const i2 = I[t + 2]! * 3;
-    const e1 = [P[i1]! - P[i0]!, P[i1 + 1]! - P[i0 + 1]!, P[i1 + 2]! - P[i0 + 2]!];
-    const e2 = [P[i2]! - P[i0]!, P[i2 + 1]! - P[i0 + 1]!, P[i2 + 2]! - P[i0 + 2]!];
-    const p = [
-      dir[1]! * e2[2]! - dir[2]! * e2[1]!,
-      dir[2]! * e2[0]! - dir[0]! * e2[2]!,
-      dir[0]! * e2[1]! - dir[1]! * e2[0]!,
-    ];
-    const det = e1[0]! * p[0]! + e1[1]! * p[1]! + e1[2]! * p[2]!;
-    if (Math.abs(det) < 1e-12) continue;
-    const inv = 1 / det;
-    const s = [origin[0]! - P[i0]!, origin[1]! - P[i0 + 1]!, origin[2]! - P[i0 + 2]!];
-    const u = (s[0]! * p[0]! + s[1]! * p[1]! + s[2]! * p[2]!) * inv;
-    if (u < 0 || u > 1) continue;
-    const q = [
-      s[1]! * e1[2]! - s[2]! * e1[1]!,
-      s[2]! * e1[0]! - s[0]! * e1[2]!,
-      s[0]! * e1[1]! - s[1]! * e1[0]!,
-    ];
-    const w = (dir[0]! * q[0]! + dir[1]! * q[1]! + dir[2]! * q[2]!) * inv;
-    if (w < 0 || u + w > 1) continue;
-    const hit = (e2[0]! * q[0]! + e2[1]! * q[1]! + e2[2]! * q[2]!) * inv;
-    if (hit <= 1e-7 || hit >= best) continue;
-    best = hit;
-    // Moller-Trumbore's determinant is positive exactly when the triangle
-    // presents its front face to the ray.
-    facing = det;
-    const n = [
-      e1[1]! * e2[2]! - e1[2]! * e2[1]!,
-      e1[2]! * e2[0]! - e1[0]! * e2[2]!,
-      e1[0]! * e2[1]! - e1[1]! * e2[0]!,
-    ];
-    const nl = Math.hypot(n[0]!, n[1]!, n[2]!) || 1;
-    incidence = Math.abs(dir[0]! * n[0]! + dir[1]! * n[1]! + dir[2]! * n[2]!) / nl;
-  }
-  return { distance: best, facing, grazing: incidence < 0.2 };
-}
-
-/**
- * Eyes on a sphere around a point, all looking at it. Counts what sees inside.
- *
- * The range is a FRACTION of the world, not an absolute distance. It was 9
- * world units, which was a third of the old 120 mm mound and is nearly three
- * times the width of the 16 mm one — from that far out the rays arrive almost
- * parallel and graze the silhouette, which reads as a couple of false
- * inside-out hits. Tying it to the world keeps the probe's geometry the same
- * whatever the lab is scaled to.
- */
-function eyeScan(mesh: SurfaceNetMesh, at: number[], range = WORLD_WIDTH * 0.375) {
-  let probes = 0;
-  let insideOut = 0;
-  for (let a = 0; a < 24; a++) {
-    for (let e = 0; e < 7; e++) {
-      const azimuth = (a / 24) * Math.PI * 2;
-      const elevation = 0.05 + (e / 6) * 1.1;
-      const dir = [
-        Math.cos(elevation) * Math.cos(azimuth),
-        Math.sin(elevation),
-        Math.cos(elevation) * Math.sin(azimuth),
-      ];
-      const from = [
-        at[0]! + dir[0]! * range, at[1]! + dir[1]! * range, at[2]! + dir[2]! * range,
-      ];
-      const look = [-dir[0]!, -dir[1]!, -dir[2]!];
-      probes++;
-      const hit = shoot(mesh, from, look);
-      // Hitting nothing is fine here — the eye ring includes angles that
-      // legitimately clear the mound. Meeting the INSIDE of the surface first
-      // is not: that is the sky coming through.
-      if (hit.distance < range * 2 && hit.facing < 0 && !hit.grazing) insideOut++;
-    }
-  }
-  return { probes, insideOut };
-}
+const EYE_RANGE = WORLD_WIDTH * 0.375;
 
 /** Highest surface vertex near the mound's axis — where the lab aims. */
 function summitOf(mesh: SurfaceNetMesh): number[] {
@@ -218,7 +104,7 @@ describe('density terrain stays sealed', () => {
     expect(s.boundary).toBe(0);
     expect(s.nonManifold).toBe(0);
     expect(s.flipped).toBe(0);
-    const eyes = eyeScan(pristine, aim);
+    const eyes = eyeScan(pristine, aim, EYE_RANGE);
     expect(eyes.probes).toBeGreaterThan(100);
     // One grazing hit is tolerated; the failure this guards was 86 of 168.
     expect(eyes.insideOut).toBeLessThanOrEqual(1);
@@ -240,7 +126,7 @@ describe('density terrain stays sealed', () => {
      * nowhere to come from.
      */
     expect(s.flipped).toBe(0);
-    expect(eyeScan(mesh, aim).insideOut).toBe(0);
+    expect(eyeScan(mesh, aim, EYE_RANGE).insideOut).toBe(0);
   }, 60_000);
 
   it('never opens a hole however deep the shaft goes, but does pinch', () => {
@@ -288,7 +174,7 @@ describe('density terrain stays sealed', () => {
     expect(s.nonManifold).toBeLessThan(s.edges * 0.001);
     expect(s.flipped).toBeLessThan(s.edges * 0.001);
     // Nothing sees inside regardless — a weld is two walls meeting, not a gap.
-    expect(eyeScan(mesh, aim).insideOut).toBe(0);
+    expect(eyeScan(mesh, aim, EYE_RANGE).insideOut).toBe(0);
   }, 60_000);
 
   it('meshes in chunks to exactly the same surface as meshing the lot', () => {

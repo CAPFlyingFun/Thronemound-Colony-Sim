@@ -3746,7 +3746,14 @@ describe('digging keeps the smoothed surface sealed', () => {
     }
     expect(probes).toBeGreaterThan(200);
     expect(seenThrough.slice(0, 8)).toEqual([]);
-  });
+    /*
+     * An explicit budget, because this one casts a full ray grid across the
+     * whole tank and lands around four seconds — close enough to vitest's
+     * five-second default that it fails or passes depending on what else the
+     * machine is doing. It was already timing out on an untouched checkout.
+     * A test that is a coin flip is worse than a slow one.
+     */
+  }, 60000);
 });
 
 describe('ground outside the glass', () => {
