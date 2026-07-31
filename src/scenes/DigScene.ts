@@ -15,7 +15,7 @@ import {
   isSolid, layeredGenerator, materialOf, type VoxelId,
 } from '../voxel/VoxelWorld';
 import { clodMassGrams, haulFactor } from '../voxel/mass';
-import { HILL_VOXELS, groundHeight, terrainGenerator, type TerrainOptions } from '../voxel/terrain';
+import { HILL_VOXELS, VALLEY_VOXELS, groundHeight, terrainGenerator, type TerrainOptions } from '../voxel/terrain';
 import { ceilingFor, glassPass, isGlassCell, type BoxOptions } from '../voxel/formicarium';
 import { FACES, burialShade, meshChunk } from '../voxel/mesher';
 import {
@@ -141,6 +141,9 @@ const UNDERGROUND_COVER = 0.9;
 /** The world's own relief, shared by the generator, spawning and depth. */
 const TERRAIN: TerrainOptions = { surfaceY: SURFACE_Y, size: WORLD_SIZE, seed: 7 };
 /** The formicarium she lives in: the world's own walls and lid. */
+/** How thick the tank's timber is, in voxels. Chunky enough to read at a glance. */
+const FRAME_BEAM = 2.2;
+
 const BOX: BoxOptions = {
   size: WORLD_SIZE,
   ceilingY: ceilingFor(SURFACE_Y + HILL_VOXELS),
@@ -747,6 +750,7 @@ export class DigScene {
   private buildInitialMeshes(): void {
     for (const index of this.world.allMeshableChunks()) this.rebuildChunk(index);
     this.buildGlass();
+    this.buildFrame();
   }
 
   /**
@@ -832,6 +836,56 @@ export class DigScene {
     return {
       get: (x, y, z) => (isGlassCell(x, y, z, BOX) ? STONE : this.world.get(x, y, z)),
     };
+  }
+
+  /**
+   * A wooden frame around the tank, so you can SEE where the glass is.
+   *
+   * Reported from play: climbing works and the panes look right, but the edges
+   * of the box are almost impossible to make out — which is true of real glass
+   * and useless in a game, because the boundary of the world is something you
+   * need to read at a glance. Every formicarium and every aquarium solves this
+   * the same way, with a frame, so this does too.
+   *
+   * Opaque timber rather than a brighter pane: making the glass itself more
+   * visible would mean making it less like glass, and the thing that needs to
+   * be legible is the EDGE, not the surface.
+   */
+  private buildFrame(): void {
+    const texture = new THREE.TextureLoader().load(`${import.meta.env.BASE_URL}frame/walnut.jpg`);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.repeat.set(6, 6);
+    const material = new THREE.MeshStandardMaterial({ map: texture, roughness: 0.72, metalness: 0 });
+    const geometry = new THREE.BoxGeometry(1, 1, 1);
+    this.cleanups.push(() => { texture.dispose(); material.dispose(); geometry.dispose(); });
+
+    const size = WORLD_SIZE;
+    const top = BOX.ceilingY + 1;
+    // Down to the floor of the hollow, so the frame still meets the ground at
+    // the lowest point of the terrain rather than floating above it there.
+    const foot = SURFACE_Y - VALLEY_VOXELS;
+    const beam = (
+      cx: number, cy: number, cz: number, sx: number, sy: number, sz: number,
+    ) => {
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.position.set(cx, cy, cz);
+      mesh.scale.set(sx, sy, sz);
+      this.scene.add(mesh);
+      this.cleanups.push(() => this.scene.remove(mesh));
+    };
+    const T = FRAME_BEAM;
+    const mid = (foot + top) / 2;
+    for (const x of [0, size]) {
+      for (const z of [0, size]) beam(x, mid, z, T, top - foot, T);
+    }
+    // Rails along the top, and along the foot so the tank reads as sitting in
+    // the ground rather than growing out of it.
+    for (const y of [foot, top]) {
+      for (const z of [0, size]) beam(size / 2, y, z, size, T, T);
+      for (const x of [0, size]) beam(x, y, size / 2, T, T, size);
+    }
   }
 
   private static chipKey(x: number, y: number, z: number): string {
