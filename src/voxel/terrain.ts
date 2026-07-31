@@ -65,9 +65,18 @@ export const SURFACE_STEP = 1 / 8;
  * on. So a second, much larger-amplitude layer fades in with distance from the
  * walls — nothing inside the box moves, because the fade is exactly zero there.
  */
-export const FAR_RELIEF_VOXELS = 46;
-const FAR_FADE = 220;
-const FAR_CELL = 150;
+export const FAR_RELIEF_VOXELS = 30;
+/*
+ * Both of these are sized against the FOG, not against the map.
+ *
+ * The scene fogs out completely at 150 voxels — 75 cm, which at 3.5 mm off the
+ * ground is a long way — so relief that only develops over several hundred
+ * voxels would be built entirely inside the haze and never seen. The band that
+ * actually reads is roughly the first hundred voxels past the glass, so the
+ * fade and the noise cell both live in it.
+ */
+const FAR_FADE = 60;
+const FAR_CELL = 70;
 
 export interface TerrainOptions {
   /** Height the flat world used to sit at — still the reference for depth. */
@@ -263,11 +272,56 @@ export function surfaceVoxel(x: number, z: number, opts: TerrainOptions): number
  * than about the cell, and the height field does not know she has been
  * digging.
  */
+/**
+ * Which way the ground FACES here — for shading, never for geometry.
+ *
+ * The surface is a field of flat-topped cells with slivers of side wall between
+ * them, and lighting it that way is what makes a gentle slope read as a
+ * staircase: every tread lights as though it were level and every riser as
+ * though it were a wall, so a hillside comes out in hard bright and dark
+ * bands whatever the steps are worth in millimetres.
+ *
+ * The macroscopic surface is not a staircase, though — it is the height field,
+ * and this is its gradient. Hand it to the mesher as the shading normal and the
+ * treads and risers light as one continuous slope, which is what they are.
+ *
+ * Only the normal moves. The vertices stay exactly where collision, the DDA
+ * raycast and the chamfer put them, so nothing here can open a hole or draw
+ * ground in front of solid.
+ */
+export function surfaceSlope(
+  x: number,
+  z: number,
+  opts: TerrainOptions,
+): readonly [number, number, number] {
+  const dx = (groundHeight(x + 1, z, opts) - groundHeight(x - 1, z, opts)) / 2;
+  const dz = (groundHeight(x, z + 1, opts) - groundHeight(x, z - 1, opts)) / 2;
+  const len = Math.hypot(dx, 1, dz);
+  return [-dx / len, 1 / len, -dz / len];
+}
+
 export function surfaceFill(x: number, y: number, z: number, opts: TerrainOptions): number {
   const h = groundHeight(x, z, opts);
   const top = Math.ceil(h) - 1;
   if (y !== top) return 1;
   return h - top;
+}
+
+/**
+ * Is this cell the untouched top of its column?
+ *
+ * Its own function rather than `surfaceFill(...) < 1`, because those are not
+ * the same question and the difference is visible. One column in eight lands
+ * exactly on a voxel line, so its top cell is full — and asking about the fill
+ * called those cells ordinary soil and lit their edges as retaining walls,
+ * leaving a scatter of dark gashes across ground that was otherwise smooth.
+ *
+ * The distinction also keeps dug soil looking dug: the cell under one she has
+ * carried away is not the terrain's surface, whatever the height field says
+ * about the column, so it keeps the shading a cut face should have.
+ */
+export function isSurfaceCell(x: number, y: number, z: number, opts: TerrainOptions): boolean {
+  return y === Math.ceil(groundHeight(x, z, opts)) - 1;
 }
 
 /**

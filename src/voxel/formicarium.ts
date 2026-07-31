@@ -99,6 +99,8 @@ export interface Sampler {
   get(x: number, y: number, z: number): VoxelId;
   /** How full a cell is drawn; see the mesher. Absent means whole. */
   fill?(x: number, y: number, z: number): number;
+  /** Which way the ground faces at this cell, or null; see the mesher. */
+  slope?(x: number, y: number, z: number): readonly [number, number, number] | null;
 }
 
 /**
@@ -113,6 +115,7 @@ export function soilPass(world: Sampler, opts: BoxOptions): Sampler {
   return {
     get: (x, y, z) => (isGlassCell(x, y, z, opts) ? AIR : world.get(x, y, z)),
     fill: world.fill ? (x, y, z) => world.fill!(x, y, z) : undefined,
+    slope: world.slope ? (x, y, z) => world.slope!(x, y, z) : undefined,
   };
 }
 

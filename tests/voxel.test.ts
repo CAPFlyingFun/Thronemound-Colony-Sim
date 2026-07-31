@@ -10,8 +10,9 @@ import { CLOD_RADIUS, MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES, type Clod } from
 import { HAUL_FLOOR, PELLET_FILL, QUEEN_MASS_G, clodMassGrams, haulFactor } from '../src/voxel/mass';
 import {
   FAR_RELIEF_VOXELS, HILL_VOXELS, SURFACE_STEP, VALLEY_VOXELS, features, groundHeight,
-  outsideness, surfaceFill, surfaceVoxel, terrainGenerator,
+  isSurfaceCell, outsideness, surfaceFill, surfaceSlope, surfaceVoxel, terrainGenerator,
 } from '../src/voxel/terrain';
+import { SKIRT_REACH, buildSkirt, skirtHeight, skirtLines } from '../src/voxel/skirt';
 import { ceilingFor, glassPass, insideBox, isGlassCell, soilPass } from '../src/voxel/formicarium';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
@@ -3044,6 +3045,196 @@ describe('terrain smoothing', () => {
     expect(worst % SURFACE_STEP).toBeCloseTo(0, 9);
   });
 
+  it('cannot be seen through, looking level at the hillside', () => {
+    /*
+     * The reported fault — sky through the step-ups — and the third instrument
+     * it took to catch it.
+     *
+     * Ray parity down the Y axis is blind: the gap is in a VERTICAL face and a
+     * vertical face contributes nothing to a vertical ray. Parity along X and Z
+     * is blind for the opposite reason — the fix deliberately overlaps geometry
+     * inside the soil, and parity counts every crossing whether or not anything
+     * could see it, so the overlap flips it and it reports thousands of leaks
+     * that are not there. Both were tried here before this.
+     *
+     * So this asks what the eye asks: standing outside and looking at the hill,
+     * is the first surface I meet facing me? A hole is a ray that reaches soil
+     * having hit nothing at all. Overlap cannot raise a false alarm, because an
+     * extra surface can only ever block the view sooner.
+     */
+    const world = new VoxelWorld(128, 128, 128, terrainGenerator(OPTS));
+    const view = {
+      get: (x: number, y: number, z: number) => world.get(x, y, z),
+      fill: (x: number, y: number, z: number) => surfaceFill(x, y, z, OPTS),
+      slope: (x: number, y: number, z: number) => (
+        isSurfaceCell(x, y, z, OPTS) ? surfaceSlope(x, z, OPTS) : null
+      ),
+    };
+    const { hill } = features(OPTS);
+    const tris: number[][] = [];
+    for (const cx of [1, 2, 3]) {
+      for (const cz of [0, 1, 2]) {
+        for (const cy of [2, 3]) {
+          const d = meshChunk(view, cx, cy, cz);
+          if (!d) continue;
+          const p = (n: number) => [
+            d.positions[n * 3]!, d.positions[n * 3 + 1]!, d.positions[n * 3 + 2]!,
+          ];
+          for (let t = 0; t < d.indices.length; t += 3) {
+            tris.push([...p(d.indices[t]!), ...p(d.indices[t + 1]!), ...p(d.indices[t + 2]!)]);
+          }
+        }
+      }
+    }
+    /*
+     * Bucketed by the two coordinates a ray holds constant, because the honest
+     * version of this test shoots several thousand rays at ninety thousand
+     * triangles and a linear scan makes it a minute of wall clock. Each
+     * triangle goes in every integer cell its extent covers, so a ray only ever
+     * meets the handful that could possibly be in its way.
+     */
+    const bucket = (axis: number) => {
+      const other = axis === 0 ? 2 : 0;
+      const map = new Map<string, number[]>();
+      tris.forEach((t, i) => {
+        const y0 = Math.floor(Math.min(t[1]!, t[4]!, t[7]!));
+        const y1 = Math.floor(Math.max(t[1]!, t[4]!, t[7]!));
+        const o0 = Math.floor(Math.min(t[other]!, t[3 + other]!, t[6 + other]!));
+        const o1 = Math.floor(Math.max(t[other]!, t[3 + other]!, t[6 + other]!));
+        for (let yy = y0; yy <= y1; yy++) {
+          for (let oo = o0; oo <= o1; oo++) {
+            const key = `${yy},${oo}`;
+            const list = map.get(key);
+            if (list) list.push(i);
+            else map.set(key, [i]);
+          }
+        }
+      });
+      return map;
+    };
+    const buckets = [bucket(0), null, bucket(2)];
+
+    /** Nearest triangle along a ray, and whether it presents its front to it. */
+    const shoot = (o: number[], d: number[], candidates: number[]) => {
+      let best = Infinity;
+      let facing = 0;
+      for (const ti of candidates) {
+        const t = tris[ti]!;
+        const e1 = [t[3]! - t[0]!, t[4]! - t[1]!, t[5]! - t[2]!];
+        const e2 = [t[6]! - t[0]!, t[7]! - t[1]!, t[8]! - t[2]!];
+        const p = [
+          d[1]! * e2[2]! - d[2]! * e2[1]!,
+          d[2]! * e2[0]! - d[0]! * e2[2]!,
+          d[0]! * e2[1]! - d[1]! * e2[0]!,
+        ];
+        const det = e1[0]! * p[0]! + e1[1]! * p[1]! + e1[2]! * p[2]!;
+        if (Math.abs(det) < 1e-12) continue;
+        const inv = 1 / det;
+        const s = [o[0]! - t[0]!, o[1]! - t[1]!, o[2]! - t[2]!];
+        const u = (s[0]! * p[0]! + s[1]! * p[1]! + s[2]! * p[2]!) * inv;
+        if (u < 0 || u > 1) continue;
+        const q = [
+          s[1]! * e1[2]! - s[2]! * e1[1]!,
+          s[2]! * e1[0]! - s[0]! * e1[2]!,
+          s[0]! * e1[1]! - s[1]! * e1[0]!,
+        ];
+        const w = (d[0]! * q[0]! + d[1]! * q[1]! + d[2]! * q[2]!) * inv;
+        if (w < 0 || u + w > 1) continue;
+        const hit = (e2[0]! * q[0]! + e2[1]! * q[1]! + e2[2]! * q[2]!) * inv;
+        if (hit <= 1e-7 || hit >= best) continue;
+        best = hit;
+        // Moller-Trumbore's determinant is positive exactly when the triangle
+        // shows the ray its front, for the winding this mesher emits.
+        facing = det;
+      }
+      return { t: best, facing };
+    };
+    const solid = (x: number, y: number, z: number) => isSolid(
+      world.get(Math.floor(x), Math.floor(y), Math.floor(z)),
+    );
+    let probes = 0;
+    const seenThrough: string[] = [];
+    for (const [axis, sign] of [[0, 1], [0, -1], [2, 1], [2, -1]] as const) {
+      for (let a = 0; a < 90; a++) {
+        for (let b = 0; b < 60; b++) {
+          const other = axis === 0 ? 2 : 0;
+          const from = [0, 0, 0];
+          const dir = [0, 0, 0];
+          dir[axis] = sign;
+          const centre = axis === 0 ? hill.x : hill.z;
+          from[axis] = centre - sign * 24;
+          from[other] = (other === 0 ? hill.x : hill.z) - 15 + a * 0.33 + 0.0311;
+          from[1] = 96.4 + b * 0.16 + 0.0173;
+          const to = [...from];
+          to[axis] = centre;
+          if (from[0]! < 33 || from[0]! > 126 || from[2]! < 1 || from[2]! > 94) continue;
+          // Open air to well inside the hill. Anything else is not a question
+          // about seeing through the surface.
+          if (solid(from[0]!, from[1]!, from[2]!)) continue;
+          if (!solid(to[0]!, to[1]!, to[2]!)) continue;
+          if (from[1]! > groundHeight(Math.floor(to[0]!), Math.floor(to[2]!), OPTS) - 0.6) continue;
+          probes++;
+          const key = `${Math.floor(from[1]!)},${Math.floor(from[other]!)}`;
+          const hit = shoot(from, dir, buckets[axis]!.get(key) ?? []);
+          if (!(hit.t < 24)) seenThrough.push(`straight through from ${from.map((q) => q.toFixed(2))}`);
+          else if (hit.facing < 0) seenThrough.push(`inside-out at ${from.map((q) => q.toFixed(2))}`);
+        }
+      }
+    }
+    // Vacuous unless it really is shooting at the hill from all four sides.
+    expect(probes).toBeGreaterThan(3000);
+    expect(seenThrough.slice(0, 8)).toEqual([]);
+  });
+
+  it('lights every facet of the open surface', () => {
+    /*
+     * Little black triangles scattered over the slope, reported from play.
+     *
+     * They were the chamfer's own bevels. A bevel on a VERTICAL convex edge has
+     * a horizontal normal by construction — (-0.71, 0, -0.71) and its siblings —
+     * and the squash that shortens a part-full cell cannot tilt it, because
+     * scaling zero is zero. Turn one of those away from an overhead sun and it
+     * receives nothing: measured at -0.505 lambert, which is black, on a facet
+     * a millimetre and a half wide sitting in the middle of open ground.
+     *
+     * Measured against the scene's real sun rather than asserted, so it is
+     * moving the light that would have to change this, not a number here.
+     */
+    const world = new VoxelWorld(128, 128, 128, terrainGenerator(OPTS));
+    const view = {
+      get: (x: number, y: number, z: number) => world.get(x, y, z),
+      fill: (x: number, y: number, z: number) => surfaceFill(x, y, z, OPTS),
+      slope: (x: number, y: number, z: number) => (
+        isSurfaceCell(x, y, z, OPTS) ? surfaceSlope(x, z, OPTS) : null
+      ),
+    };
+    // DigScene puts its sun at (60, 120, 40).
+    const sun = [60, 120, 40];
+    const len = Math.hypot(sun[0]!, sun[1]!, sun[2]!);
+    const s = sun.map((v) => v / len);
+    let facets = 0;
+    let darkest = 1;
+    const { hill } = features(OPTS);
+    for (const cy of [2, 3]) {
+      const data = meshChunk(view, hill.x >> 5, cy, hill.z >> 5);
+      if (!data) continue;
+      for (let t = 0; t < data.indices.length; t += 3) {
+        const v = data.indices[t]!;
+        // Above the deepest ground, so this is surface and not a dug wall.
+        if (data.positions[v * 3 + 1]! <= SURFACE - VALLEY_VOXELS) continue;
+        facets++;
+        darkest = Math.min(darkest, (
+          data.normals[v * 3]! * s[0]!
+          + data.normals[v * 3 + 1]! * s[1]!
+          + data.normals[v * 3 + 2]! * s[2]!
+        ));
+      }
+    }
+    expect(facets).toBeGreaterThan(1000);
+    // Not one facet of open ground turned away from the sun. Was -0.505.
+    expect(darkest).toBeGreaterThan(0.05);
+  });
+
   it('closes every join on a real hillside where the fills disagree', () => {
     /*
      * Deliberately NOT the ray-parity check the chamfer holes use.
@@ -3171,10 +3362,17 @@ describe('terrain smoothing', () => {
         high = Math.max(high, t[i]!);
       }
     }
-    // Exactly the gap: from the short column's top to the tall one's, with no
-    // overshoot past the cell's own ceiling.
-    expect(low).toBeCloseTo(TOP + SHORT, 9);
+    /*
+     * The top is exactly the tall column's fill line. The bottom sits one
+     * chamfer BELOW the short one's, which is not slack — it is the depth of
+     * the notch the chamfer can cut out of the short column's own top, and
+     * stopping at its fill line is what let you see sky through the step-ups
+     * on the hill. See the mesher for why it is a bound rather than a match.
+     */
     expect(high).toBeCloseTo(TOP + TALL, 9);
+    expect(low).toBeCloseTo(TOP + SHORT * (1 - EDGE_CHAMFER), 5);
+    // Still inside the neighbour it is covering, never below its floor.
+    expect(low).toBeGreaterThan(TOP);
   });
 
   it('keeps the distant country outside, exactly', () => {
@@ -3192,14 +3390,122 @@ describe('terrain smoothing', () => {
     expect(outsideness(128, 128, 128)).toBe(0);
     // And it does take hold once out there, or the world ends in a plain.
     expect(outsideness(-400, 64, 128)).toBe(1);
+    /*
+     * Over the band that is actually DRAWN, not wherever the field happens to
+     * keep going. Relief built past the skirt's reach is relief nobody sees,
+     * and a test that found it out there would go on passing while the horizon
+     * outside the glass went flat.
+     */
     let far = 0;
-    for (let d = 260; d < 900; d += 7) {
+    for (let d = 1; d < SKIRT_REACH; d += 3) {
       far = Math.max(far, Math.abs(groundHeight(-d, 64, OPTS) - SURFACE));
     }
     expect(far).toBeGreaterThan(FAR_RELIEF_VOXELS / 4);
     // Continuous across the wall: the join is where a seam would show.
     expect(Math.abs(groundHeight(0, 64, OPTS) - groundHeight(-0.5, 64, OPTS)))
       .toBeLessThan(0.5);
+  });
+});
+
+describe('ground outside the glass', () => {
+  const OPTS = { surfaceY: SURFACE, size: 128, seed: 7 };
+
+  it('lays fine ground where she looks and coarse ground where she cannot', () => {
+    const lines = skirtLines(128);
+    for (let i = 1; i < lines.length; i++) {
+      expect(lines[i]!).toBeGreaterThan(lines[i - 1]!);
+    }
+    // The walls are sample lines, which is what lets the interior be cut out
+    // cleanly — no quad can straddle the boundary if the boundary is a line.
+    expect(lines).toContain(0);
+    expect(lines).toContain(128);
+    expect(lines[0]!).toBeLessThanOrEqual(-SKIRT_REACH);
+    expect(lines[lines.length - 1]!).toBeGreaterThanOrEqual(128 + SKIRT_REACH);
+    // A centimetre a quad against the glass, and metres a quad out in the fog.
+    const near = lines.find((v) => v > 0)! - 0;
+    expect(near).toBeLessThanOrEqual(2);
+    expect(lines[1]! - lines[0]!).toBeGreaterThan(20);
+  });
+
+  it('leaves a hole where the real world is, so a dug pit shows soil', () => {
+    /*
+     * A sheet stretched under the tank would be invisible right up until she
+     * dug down through the surface, and then it would be a floor hanging in the
+     * middle of her nest — the worst kind of bug to find, because nothing about
+     * building it looks wrong.
+     */
+    const mesh = buildSkirt(OPTS);
+    const inside: string[] = [];
+    for (let t = 0; t < mesh.indices.length; t += 3) {
+      let cx = 0;
+      let cz = 0;
+      for (const k of [0, 1, 2]) {
+        const v = mesh.indices[t + k]!;
+        cx += mesh.positions[v * 3]! / 3;
+        cz += mesh.positions[v * 3 + 2]! / 3;
+      }
+      if (cx > 0 && cx < 128 && cz > 0 && cz < 128) inside.push(`${cx},${cz}`);
+    }
+    expect(inside).toEqual([]);
+    // And it really does surround the tank rather than being empty.
+    expect(mesh.triangleCount).toBeGreaterThan(4000);
+    // Bounded, so a retune of the spacing cannot quietly cost ten times this.
+    expect(mesh.triangleCount).toBeLessThan(40000);
+  });
+
+  it('never rises above the ground it meets at the wall', () => {
+    /*
+     * The seam, checked the way it is actually drawn.
+     *
+     * Inside the walls the surface is flat-topped cells; outside it is an
+     * interpolated mesh. Between two sample lines the mesh rises above the cell
+     * top it is meant to meet, so the outer edge is bedded down by more than
+     * that gap can ever be — which is why this samples BETWEEN the lines rather
+     * than on them. On the lines it would agree by construction and prove
+     * nothing.
+     */
+    const lines = skirtLines(128);
+    let worst = -Infinity;
+    for (const edge of ['x0', 'x1', 'z0', 'z1'] as const) {
+      for (let t = 0; t < 1280; t++) {
+        const along = t / 10;
+        let i = 0;
+        while (lines[i + 1]! <= along) i++;
+        const a = lines[i]!;
+        const b = lines[i + 1]!;
+        const f = (along - a) / (b - a);
+        const at = (v: number) => (
+          edge === 'x0' ? skirtHeight(0, v, OPTS)
+            : edge === 'x1' ? skirtHeight(128, v, OPTS)
+              : edge === 'z0' ? skirtHeight(v, 0, OPTS)
+                : skirtHeight(v, 128, OPTS)
+        );
+        const drawn = at(a) + (at(b) - at(a)) * f;
+        const column = Math.floor(along);
+        const slab = edge === 'x0' ? groundHeight(0, column, OPTS)
+          : edge === 'x1' ? groundHeight(127, column, OPTS)
+            : edge === 'z0' ? groundHeight(column, 0, OPTS)
+              : groundHeight(column, 127, OPTS);
+        worst = Math.max(worst, drawn - slab);
+      }
+    }
+    // Strictly below, everywhere, with room to spare. Measured at -0.375.
+    expect(worst).toBeLessThan(0);
+  });
+
+  it('is the same field on both sides of the glass', () => {
+    /*
+     * One height function, so the join cannot be tuned wrong — but it CAN be
+     * broken, by anything that makes the distant relief leak inward. A step at
+     * the wall is the thing you would see: a cliff or a ditch running the whole
+     * length of the tank, right where the eye already is.
+     */
+    for (let z = 0; z <= 128; z += 4) {
+      for (const [a, b] of [[0, -0.5], [128, 128.5]] as const) {
+        expect(Math.abs(groundHeight(a, z, OPTS) - groundHeight(b, z, OPTS)))
+          .toBeLessThan(0.5);
+      }
+    }
   });
 });
 

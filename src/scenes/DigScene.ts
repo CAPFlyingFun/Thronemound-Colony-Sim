@@ -16,7 +16,8 @@ import {
 } from '../voxel/VoxelWorld';
 import { clodMassGrams, haulFactor } from '../voxel/mass';
 import {
-  HILL_VOXELS, VALLEY_VOXELS, groundHeight, surfaceFill, terrainGenerator,
+  HILL_VOXELS, VALLEY_VOXELS, groundHeight, isSurfaceCell, surfaceFill, surfaceSlope,
+  surfaceVoxel, terrainGenerator,
   type TerrainOptions,
 } from '../voxel/terrain';
 import { ceilingFor, glassPass, isGlassCell, type BoxOptions } from '../voxel/formicarium';
@@ -38,6 +39,7 @@ import { DAY_HOURS, SKY_PHASES, packColor, skyAt } from '../voxel/daylight';
 import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
 import { DigSession } from '../voxel/DigSession';
 import { createVoxelMaterial, type VoxelMaterialBundle } from '../voxel/voxelMaterial';
+import { buildSkirt } from '../voxel/skirt';
 import { DEN_MIN_CHAMBER, DEN_MIN_DEPTH, QueenFounding } from '../voxel/QueenFounding';
 import {
   DEFAULT_BANDS, DEFAULT_GAIT, approach, clampStickOrigin, speedForStick, stickVector,
@@ -759,8 +761,45 @@ export class DigScene {
 
   private buildInitialMeshes(): void {
     for (const index of this.world.allMeshableChunks()) this.rebuildChunk(index);
+    this.buildSkirt();
     this.buildGlass();
     this.buildFrame();
+  }
+
+  /**
+   * The ground carrying on past the glass.
+   *
+   * Built once and never touched again: nothing out there can be dug, so it has
+   * no chunks, no dirty set and no rebuild. It shares the SOIL material, which
+   * is the whole reason it reads as the same world — same dirt textures, same
+   * tile size, and the uvs the skirt lays down use the same world-space
+   * convention as the mesher's upward faces, so the pattern runs straight out
+   * from under the wall instead of restarting at it.
+   */
+  private buildSkirt(): void {
+    const data = buildSkirt(TERRAIN);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(data.normals, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(data.colors, 3));
+    geometry.setAttribute('aTileUv', new THREE.BufferAttribute(data.uvs, 2));
+    geometry.setAttribute('aLayer', new THREE.BufferAttribute(data.layers, 1));
+    geometry.setAttribute('aTangent', new THREE.BufferAttribute(data.tangents, 3));
+    geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
+    geometry.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geometry, this.material);
+    /*
+     * Never culled. It is one mesh a metre across with the camera standing in
+     * the hole in its middle, so its bounding sphere is always on screen and
+     * testing it every frame is pure cost — and a stale bound on a mesh this
+     * size would blink the entire horizon out rather than a corner of it.
+     */
+    mesh.frustumCulled = false;
+    this.scene.add(mesh);
+    this.cleanups.push(() => {
+      this.scene.remove(mesh);
+      geometry.dispose();
+    });
   }
 
   /**
@@ -941,18 +980,39 @@ export class DigScene {
     surfaceFill(x, y, z, TERRAIN)
   );
 
+  /**
+   * Which way the ground faces at this cell, or null if it is not ground.
+   *
+   * Shading only — see terrain.surfaceSlope. The two halves come from the
+   * terrain: whether the cell is its surface, and which way that surface
+   * faces. Neither is something the mesher could work out for itself, and
+   * both have to agree with the fill above or the lighting would follow a
+   * different surface from the geometry.
+   */
+  private readonly soilSlope = (
+    x: number, y: number, z: number,
+  ): readonly [number, number, number] | null => (
+    isSurfaceCell(x, y, z, TERRAIN) ? surfaceSlope(x, z, TERRAIN) : null
+  );
+
   private meshSampler(): {
     get(x: number, y: number, z: number): number;
     fill(x: number, y: number, z: number): number;
+    slope(x: number, y: number, z: number): readonly [number, number, number] | null;
   } {
     if (this.chips.size === 0) {
-      return { get: (x, y, z) => this.world.get(x, y, z), fill: this.soilFill };
+      return {
+        get: (x, y, z) => this.world.get(x, y, z),
+        fill: this.soilFill,
+        slope: this.soilSlope,
+      };
     }
     // EVERY part-dug voxel is masked, not just the active one, or a cube she
     // walked away from half finished would render whole again.
     return {
       get: (x, y, z) => (this.chips.has(DigScene.chipKey(x, y, z)) ? AIR : this.world.get(x, y, z)),
       fill: this.soilFill,
+      slope: this.soilSlope,
     };
   }
 
@@ -3120,7 +3180,19 @@ export class DigScene {
   private carveDebugDen(): void {
     const cx = Math.floor(WORLD_SIZE / 2);
     const cz = Math.floor(WORLD_SIZE / 2);
-    const top = groundHeight(cx, cz, TERRAIN);
+    /*
+     * The CELL the ground ends in, not the HEIGHT it ends at.
+     *
+     * Those were one number until the surface was allowed to stop between
+     * voxels, and this is the only caller that wanted the cell — spawning,
+     * depth and the underground test all want the height and are right to read
+     * it. Handed a fractional y, `dig` addresses a cell that does not exist and
+     * quietly removes nothing, so neither the shaft nor the chamber was cut and
+     * she started the game inside solid ground. The mobility smoke reported it
+     * as "walking into the chamber wall did not mount it", which was true:
+     * there was no chamber.
+     */
+    const top = surfaceVoxel(cx, cz, TERRAIN);
     const floorY = top - DEN_MIN_DEPTH - 2;
     for (let y = top; y >= floorY; y--) this.world.dig(cx, y, cz);
     for (let dy = 0; dy < 3; dy++) {

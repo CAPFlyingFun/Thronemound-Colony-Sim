@@ -42,6 +42,18 @@ interface Sampler {
    * with a terrain module it has never heard of.
    */
   fill?(x: number, y: number, z: number): number;
+  /**
+   * Which way the ground faces at this cell, or null if it is not ground —
+   * SHADING only.
+   *
+   * Optional, and it is the SAMPLER that decides which cells qualify rather
+   * than the mesher inferring it from the fill. Those look like the same test
+   * and are not: a column landing exactly on a voxel line has a full top cell
+   * that is still surface, and dug soil can be part full without being surface
+   * at all. Getting that boundary from the thing that owns the height field is
+   * what keeps a cut face looking cut and a slope looking smooth.
+   */
+  slope?(x: number, y: number, z: number): readonly [number, number, number] | null;
 }
 
 type Vec3 = readonly [number, number, number];
@@ -231,6 +243,15 @@ export function meshChunk(
          */
         const fy = fillOf(x, y, z);
         const liftY = (localY: number) => y + localY * fy;
+        /*
+         * The slope this cell sits on, or null if it is not surface.
+         *
+         * Computed once per voxel and used for the shading normal of every
+         * outward face it has: the tread on top and the slivers of side wall
+         * around it are all facets of one continuous surface, and giving them
+         * one normal is what stops them reading as separate objects.
+         */
+        const slope = world.slope ? world.slope(x, y, z) : null;
 
         /*
          * Which of the six neighbours are air, computed once per voxel.
@@ -321,22 +342,87 @@ export function meshChunk(
              * one. It can only overlap, and overlap here is hidden inside the
              * neighbour or a fraction of a millimetre of extra soil.
              */
-            const [uAxis, vAxis] = tangentAxes(face.normal);
-            const bandTangent: [number, number, number] = [0, 0, 0];
-            bandTangent[uAxis] = 1;
+            /*
+             * Shaded as the SLOPE it stands for, not as the wall it is drawn
+             * as — and that is not a nicety, it is the difference between smooth
+             * ground and a black staircase.
+             *
+             * The band is how far the ground drops over one cell, so it is a
+             * sub-millimetre sliver: 0.6 mm at the median. Give it the sideways
+             * face normal and it lights like a wall, catching almost nothing
+             * from a sun overhead. Harmless seen from above and ruinous from
+             * where the ant actually stands — at 3.5 mm off the ground the
+             * surface is so near edge-on that these slivers cover more screen
+             * than the ground between them, and the first build of this drew
+             * the plain as sand ruled with black gashes.
+             *
+             * Its normal is therefore the normal of the slope: down by `gap`
+             * over one cell, in the face's own direction. On gentle ground that
+             * is a couple of degrees off straight up, the band lights exactly
+             * as the cells either side of it do, and the join disappears.
+             */
+            const gap = fy - under;
+            const slen = Math.hypot(gap, 1);
+            // The field's own gradient where it is on offer, since then the
+            // band and the treads either side share one normal exactly. The
+            // fallback is this band's own drop over one cell, which is the same
+            // quantity measured locally and keeps the mesher correct on its own.
+            const bn = slope ?? [nx * gap / slen, 1 / slen, nz * gap / slen] as const;
+            /*
+             * Ground UVs too — world x and z, the convention the upward faces
+             * use. Laying them the way a wall does would run one axis along the
+             * band's own height, which is a fraction of a millimetre, and smear
+             * a whole tile across it.
+             */
+            const raw: [number, number, number] = [1 - Math.abs(nx), 0, Math.abs(nx)];
+            const btd = raw[0] * bn[0] + raw[2] * bn[2];
+            const bt: [number, number, number] = [
+              raw[0] - bn[0] * btd, -bn[1] * btd, raw[2] - bn[2] * btd,
+            ];
+            const btl = Math.hypot(bt[0], bt[1], bt[2]) || 1;
             const bandFirst = positions.length / 3;
-            // A crease between two cells of ground: shaded as one.
-            const bandShade = AO_LEVELS[2]! * tint;
+            // Open ground, not a crease: bright, so it reads as the surface
+            // carrying on rather than as a line drawn across it.
+            const bandShade = AO_LEVELS[3]! * tint;
+            /*
+             * Down to the FLOOR of the cell, not down to the neighbour's fill
+             * line — and this is the sky you could see through the hill.
+             *
+             * Starting the band where the neighbour stops sounds exact and is
+             * wrong, because the neighbour's top is not flat: the chamfer cuts
+             * it back along every convex edge it has, so near those edges its
+             * real surface sits BELOW its fill line, by up to a chamfer of its
+             * own height. The band began above that notch and the notch was
+             * open to the sky — a slot on the low side of every step-up on the
+             * hillside, which is exactly where they were reported.
+             *
+             * Following that notch exactly would mean this face asking about
+             * another cell's convex edges — the coupling the chamfer design
+             * exists to avoid, and the source of the corner holes before it.
+             * But the notch has a floor: every chamfer cut is EDGE_CHAMFER of
+             * the cell it belongs to, so the neighbour's surface can never fall
+             * below that fraction of its own fill. Dropping the band to exactly
+             * there covers the deepest notch the neighbour can have and asks
+             * nothing about which edges it actually chamfered.
+             *
+             * The strip between there and the neighbour's fill line is buried
+             * where the neighbour is whole and is the visible wall of the notch
+             * where it is not, so it is right either way. Running the band all
+             * the way to the cell floor would also close the hole, and was
+             * tried: it puts a surface deep inside solid soil, which is
+             * invisible but destroys the watertightness the tests rely on —
+             * every parity probe through the hill flipped.
+             */
+            const notch = under * (1 - EDGE_CHAMFER);
             for (const corner of face.corners) {
               const wx = x + corner[0];
-              const wy = y + (corner[1] === 1 ? fy : under);
+              const wy = y + (corner[1] === 1 ? fy : notch);
               const wz = z + corner[2];
               positions.push(wx, wy, wz);
-              normals.push(nx, ny, nz);
+              normals.push(bn[0], bn[1], bn[2]);
               layers.push(voxel);
-              tangents.push(bandTangent[0], bandTangent[1], bandTangent[2]);
-              const w = [wx, wy, wz] as const;
-              uvs.push(w[uAxis]! / TILE_VOXELS, w[vAxis]! / TILE_VOXELS);
+              tangents.push(bt[0] / btl, bt[1] / btl, bt[2] / btl);
+              uvs.push(wx / TILE_VOXELS, wz / TILE_VOXELS);
               colors.push(bandShade, bandShade, bandShade);
             }
             indices.push(
@@ -357,6 +443,33 @@ export function meshChunk(
           tangent[axisA] = 1;
 
           /*
+           * A face of a part-full surface cell is a facet of the SLOPE.
+           *
+           * Which changes three things about it and none of them is geometry.
+           * Its shading normal is the ground's, so the tread on top and the
+           * sliver of side wall around it stop being lit as a terrace and a
+           * retaining wall. Its uvs become the ground's — world x and z — since
+           * a riser here is a fraction of a millimetre tall and laying a tile
+           * along its height would smear one across it. And a sideways face
+           * needs a HORIZONTAL tangent to go with a near-upright normal: the
+           * usual one for a ±X face runs along Y, which is very nearly parallel
+           * to it, and the shader's Gram-Schmidt step would be left normalising
+           * something a hair away from a zero vector.
+           */
+          const facet = slope && ny >= 0 ? slope : null;
+          if (facet && ny === 0) {
+            tangent[0] = nx !== 0 ? 0 : 1;
+            tangent[1] = 0;
+            tangent[2] = nx !== 0 ? 1 : 0;
+            const d = tangent[0] * facet[0] + tangent[2] * facet[2];
+            tangent[0] -= facet[0] * d;
+            tangent[1] = -facet[1] * d;
+            tangent[2] -= facet[2] * d;
+            const tl = Math.hypot(tangent[0], tangent[1], tangent[2]) || 1;
+            tangent[0] /= tl; tangent[1] /= tl; tangent[2] /= tl;
+          }
+
+          /*
            * Is the air on the other side a CAVITY, or open sky?
            *
            * Counted on the AIR voxel, not this one: a tunnel's air is walled on
@@ -371,7 +484,26 @@ export function meshChunk(
               z + nz + probe.normal[2],
             )) enclosure++;
           }
-          const dish = enclosure >= CAVITY_ENCLOSURE ? CAVITY_DISH : 0;
+          /*
+           * Open ground is never a cavity, however walled in the count says.
+           *
+           * The enclosure count is a good proxy for "am I inside a tunnel"
+           * on a FLAT world and a bad one on a hillside: the air over a slope
+           * has soil beneath it and soil on the two uphill sides, which is
+           * three, which is a cavity as far as the count can tell. So the open
+           * hill quietly started dishing its own surface — subdividing it and
+           * bowing every face inward, with the analytic normals that go with a
+           * curve, on faces that are not curved and are not in a tunnel.
+           *
+           * That is what the black slots across the hillside were. A dished
+           * SIDE face has its normal free to swing in Y, and measured on the
+           * flank it reached -0.52: pointing into the ground, lit by nothing,
+           * so the step-ups read as gaps you could see through.
+           *
+           * The sampler already knows the answer — if it calls this cell part
+           * of the terrain surface, the air on the other side is the sky.
+           */
+          const dish = enclosure >= CAVITY_ENCLOSURE && !slope ? CAVITY_DISH : 0;
 
           /*
            * A corner moves only if its cube VERTEX is cut, and then it moves in
@@ -440,13 +572,17 @@ export function meshChunk(
               const wy = liftY(drawn[1]);
               const wz = z + drawn[2];
               positions.push(wx, wy, wz);
-              normals.push(nx, ny, nz);
+              if (facet) normals.push(facet[0], facet[1], facet[2]);
+              else normals.push(nx, ny, nz);
               layers.push(voxel);
               tangents.push(tangent[0], tangent[1], tangent[2]);
               // World-space UVs: neighbouring voxels of one material read as a
               // single continuous surface, and one tile spans TILE_VOXELS.
+              // Slope facets take the GROUND pair whichever way they face, so
+              // the pattern runs across a riser instead of restarting on it.
               const w = [wx, wy, wz] as const;
-              uvs.push(w[axisA]! / TILE_VOXELS, w[axisB]! / TILE_VOXELS);
+              if (facet && ny === 0) uvs.push(wx / TILE_VOXELS, wz / TILE_VOXELS);
+              else uvs.push(w[axisA]! / TILE_VOXELS, w[axisB]! / TILE_VOXELS);
               const shade = AO_LEVELS[ao[ci]!]! * tint;
               colors.push(shade, shade, shade);
             }
@@ -510,8 +646,23 @@ export function meshChunk(
                  * the flat quad minus n * dish * sin(pi u) * sin(pi v), so each
                  * tangent picks up a term along the normal.
                  */
-                const du = -dish * Math.PI * Math.cos(Math.PI * u) * Math.sin(Math.PI * v);
-                const dv = -dish * Math.PI * Math.sin(Math.PI * u) * Math.cos(Math.PI * v);
+                /*
+                 * The rate the dish pulls back, in WORLD units.
+                 *
+                 * `liftY` scales this cell's Y by `fy`, so a dish of a given
+                 * depth moves the surface by `dish * fy` along a Y-facing
+                 * normal while these derivatives were written as though it
+                 * moved by `dish`. Get that wrong and the shading follows a
+                 * curve the geometry does not have — steeper than the truth by
+                 * whatever the cell was squashed by. Cells that dish are whole
+                 * today, so this is normally a multiply by one; it is here
+                 * because "normally" is what stops being true later.
+                 */
+                const yScale = Math.abs(ny) > 0 ? fy : 1;
+                const du = -dish * yScale * Math.PI
+                  * Math.cos(Math.PI * u) * Math.sin(Math.PI * v);
+                const dv = -dish * yScale * Math.PI
+                  * Math.sin(Math.PI * u) * Math.cos(Math.PI * v);
                 const tu = [dU[0]! - nx * du, dU[1]! - ny * du, dU[2]! - nz * du];
                 const tv = [dV[0]! - nx * dv, dV[1]! - ny * dv, dV[2]! - nz * dv];
                 let cx2 = tu[1]! * tv[2]! - tu[2]! * tv[1]!;
@@ -624,11 +775,26 @@ export function meshChunk(
              * on the axis that moved. Miss this and a shallow slab is lit as
              * though it were still a full cube.
              */
+            /*
+             * On the open surface, a bevel is ground too.
+             *
+             * Left to its own geometry a bevel on a VERTICAL convex edge comes
+             * out horizontal — (-0.71, 0, -0.71) and the like — and the squash
+             * above cannot help it, because scaling zero is zero. Point one of
+             * those away from the sun and it is unlit: measured at -0.5 lambert
+             * on the hill, which is black. Two hundred and twenty-seven of them
+             * were scattered over the slope as little dark triangles.
+             *
+             * They are a millimetre and a half across and they are part of the
+             * ground, so they light as the ground. Same rule as the faces they
+             * sit between, which is what makes the whole cell read as one
+             * surface rather than as a cube with its corners lit separately.
+             */
             const sy = un[1] / fy;
             const slen = Math.hypot(un[0], sy, un[2]) || 1;
-            const snx = un[0] / slen;
-            const sny = sy / slen;
-            const snz = un[2] / slen;
+            const snx = slope ? slope[0] : un[0] / slen;
+            const sny = slope ? slope[1] : sy / slen;
+            const snz = slope ? slope[2] : un[2] / slen;
             const tan: [number, number, number] = [0, 0, 0];
             tan[uAxis] = 1;
             const tdot = tan[0] * snx + tan[1] * sny + tan[2] * snz;
