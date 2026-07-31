@@ -93,8 +93,8 @@ export class QueenModel {
   private bones = new Map<string, THREE.Bone>();
   /** Rest rotation per bone, so every frame is an offset and never accumulates. */
   private rest = new Map<string, THREE.Quaternion>();
-  /** How fat each leg is around its bones, in world units. See `measureSoles`. */
-  private readonly soleRadius = new Map<string, number>();
+  /** How fat each limb is around its own bones, in world units. See `measureLimbs`. */
+  private readonly limbRadius = new Map<string, number>();
   private clock = 0;
   private loaded = false;
   private bodyRoot: THREE.Object3D | null = null;
@@ -157,7 +157,7 @@ export class QueenModel {
       }
       this.bodyRoot = this.bones.get(this.rig.body[0]!) ?? null;
       this.baseY = this.bodyRoot?.position.y ?? 0;
-      this.measureSoles();
+      this.measureLimbs();
       this.loaded = true;
       return true;
     } catch {
@@ -216,9 +216,9 @@ export class QueenModel {
     this.root.updateMatrixWorld(true);
     let worstPenetration = 0;
 
-    for (const leg of this.rig.legs) {
+    for (const limb of this.limbs()) {
       const chain: THREE.Bone[] = [];
-      for (const name of leg.bones) {
+      for (const name of limb.bones) {
         const bone = this.bones.get(name);
         if (bone) chain.push(bone);
       }
@@ -226,17 +226,25 @@ export class QueenModel {
       const foot = chain[chain.length - 1]!;
 
       /*
-       * The clearance a LEG needs, not the clearance a bone needs. The mesh is
+       * The clearance a LIMB needs, not the clearance a bone needs. The mesh is
        * a tube around the skeleton, so its underside hangs the tube's radius
-       * below the bone line — measured at load, per leg, rather than guessed.
+       * below the bone line — measured at load, per limb, rather than guessed.
        */
-      const sole = clearance + (this.soleRadius.get(leg.slot) ?? 0);
+      const sole = clearance + (this.limbRadius.get(limb.id) ?? 0);
       const lowest = Math.max(0, chain.length - 1 - IK_JOINTS);
 
       foot.getWorldPosition(FOOT);
       const ground = groundAt(FOOT.x, FOOT.z);
       worstPenetration = Math.max(worstPenetration, ground + sole - FOOT.y);
-      let wanted = footTarget(FOOT.y, ground, sole, band);
+      /*
+       * A leg is trying to STAND on the ground and an antenna is not — she
+       * sweeps them ahead of her and they should stay where the gait waves
+       * them, only never through the soil. A zero band gives exactly that:
+       * `footTarget` lifts anything below the surface and leaves everything
+       * else alone. Without it the antennae were the last thing still clipping,
+       * because nothing here was looking at them at all.
+       */
+      let wanted = footTarget(FOOT.y, ground, sole, limb.plant ? band : 0);
       if (Math.abs(wanted - FOOT.y) < 1e-7) continue;
 
       for (let attempt = 0; attempt < IK_ATTEMPTS; attempt += 1) {
@@ -292,7 +300,69 @@ export class QueenModel {
   }
 
   /**
-   * How far each leg's mesh reaches beyond its own bones, measured once.
+   * Every chain of bones that can end up in the dirt, and whether it is trying
+   * to stand on it.
+   *
+   * The legs plant; the antennae only have to stay out of the soil. Listing
+   * them together is what stops the next limb from being forgotten the way the
+   * antennae were — they were never legs, so a solver written for feet had
+   * nothing to say about them.
+   */
+  private limbs(): Array<{ id: string; bones: string[]; plant: boolean }> {
+    return [
+      ...this.rig.legs.map((leg) => ({ id: leg.slot, bones: leg.bones, plant: true })),
+      { id: 'antennaLeft', bones: this.rig.antennaLeft, plant: false },
+      { id: 'antennaRight', bones: this.rig.antennaRight, plant: false },
+    ];
+  }
+
+  /**
+   * The lowest any bone sits below the ground it should be clearing.
+   *
+   * The fail-safe, and deliberately the crudest thing here: whatever the
+   * solvers did or failed to do, nothing she is made of should be underground.
+   * It covers the parts no solver owns — mandibles, the tip of a gaster on a
+   * steep bank — and it costs one pass over the skeleton.
+   *
+   * Returns a LIFT for the whole model rather than bending anything, because a
+   * fail-safe that tries to be clever is a fail-safe with its own bugs. If it
+   * is doing visible work, the answer is a solver for whatever it is catching,
+   * not a bigger lift.
+   */
+  groundGuard(groundAt: (x: number, z: number) => number, clearance: number): number {
+    if (!this.loaded) return 0;
+    this.root.updateMatrixWorld(true);
+    let lift = 0;
+    for (const [group, names] of this.limbGroups()) {
+      const radius = this.limbRadius.get(group) ?? 0;
+      for (const name of names) {
+        const bone = this.bones.get(name);
+        if (!bone) continue;
+        bone.getWorldPosition(JOINT);
+        lift = Math.max(lift, groundAt(JOINT.x, JOINT.z) + clearance + radius - JOINT.y);
+      }
+    }
+    return lift;
+  }
+
+  /** Every named group of bones, for measuring thickness and for the guard. */
+  private limbGroups(): Array<[string, string[]]> {
+    const groups: Array<[string, string[]]> = [
+      ['body', this.rig.body],
+      ['thorax', this.rig.thorax],
+      ['mouth', this.rig.mouth],
+      ['gaster', this.rig.gaster],
+      ['antennaLeft', this.rig.antennaLeft],
+      ['antennaRight', this.rig.antennaRight],
+    ];
+    if (this.rig.mandibleLeft) groups.push(['mandibleLeft', this.rig.mandibleLeft]);
+    if (this.rig.mandibleRight) groups.push(['mandibleRight', this.rig.mandibleRight]);
+    for (const leg of this.rig.legs) groups.push([leg.slot, leg.bones]);
+    return groups;
+  }
+
+  /**
+   * How far each limb's mesh reaches beyond its own bones, measured once.
    *
    * Derived from the model rather than tuned, so a re-export with chunkier
    * legs does not silently start clipping again. Vertices are attributed to
@@ -301,23 +371,21 @@ export class QueenModel {
    * radius; measuring to the nearest joint instead would read a vertex halfway
    * along a bone as a bone-length away and stand her in the air.
    */
-  private measureSoles(): void {
+  private measureLimbs(): void {
     const ownerOf = new Map<string, string>();
-    for (const leg of this.rig.legs) {
-      for (const name of leg.bones.slice(-IK_JOINTS - 1)) ownerOf.set(name, leg.slot);
-    }
     const spineOf = new Map<string, Vec3[]>();
     this.root.updateMatrixWorld(true);
-    for (const leg of this.rig.legs) {
+    for (const [group, names] of this.limbGroups()) {
       const spine: Vec3[] = [];
-      for (const name of leg.bones.slice(-IK_JOINTS - 1)) {
+      for (const name of names) {
+        ownerOf.set(name, group);
         const bone = this.bones.get(name);
         if (!bone) continue;
         bone.getWorldPosition(JOINT);
         spine.push([JOINT.x, JOINT.y, JOINT.z]);
       }
-      spineOf.set(leg.slot, spine);
-      this.soleRadius.set(leg.slot, 0);
+      spineOf.set(group, spine);
+      this.limbRadius.set(group, 0);
     }
 
     const vertex = new THREE.Vector3();
@@ -337,15 +405,15 @@ export class QueenModel {
           if (weight > bestWeight) { bestWeight = weight; best = skinIndex.getComponent(i, k); }
         }
         const bone = mesh.skeleton.bones[best];
-        const slot = bone ? ownerOf.get(bone.name) : undefined;
-        if (!slot) continue;
-        const spine = spineOf.get(slot);
+        const group = bone ? ownerOf.get(bone.name) : undefined;
+        if (!group) continue;
+        const spine = spineOf.get(group);
         if (!spine || spine.length === 0) continue;
 
         mesh.getVertexPosition(i, vertex);
         mesh.localToWorld(vertex);
         const reach = distanceToPolyline([vertex.x, vertex.y, vertex.z], spine);
-        if (reach > (this.soleRadius.get(slot) ?? 0)) this.soleRadius.set(slot, reach);
+        if (reach > (this.limbRadius.get(group) ?? 0)) this.limbRadius.set(group, reach);
       }
     });
   }

@@ -218,11 +218,16 @@ for (const view of CASES) {
     if (!lab?.queenReady) return null;
     lab.queen.root.updateMatrixWorld(true);
     const legBones = new Set(lab.queen.rig.legs.flatMap((l) => l.bones));
+    const antennaBones = new Set([
+      ...lab.queen.rig.antennaLeft, ...lab.queen.rig.antennaRight,
+    ]);
+    let antennaChecked = 0, antennaBuried = 0, antennaDeepest = 0;
+    let anyChecked = 0, anyBuried = 0, anyDeepest = 0;
     let checked = 0;
     let buried = 0;
     let deepest = 0;
     let touching = 0;
-    const scratch = { x: 0, y: 0, z: 0 };
+    let closest = Infinity;
     lab.queen.root.traverse((n) => {
       if (!n.isSkinnedMesh) return;
       const position = n.geometry.attributes.position;
@@ -235,26 +240,69 @@ for (const view of CASES) {
           if (w > bestWeight) { bestWeight = w; best = skinIndex.getComponent(i, k); }
         }
         const bone = n.skeleton.bones[best];
-        if (!bone || !legBones.has(bone.name)) continue;
+        if (!bone) continue;
         const v = n.getVertexPosition(i, n.position.clone());
         n.localToWorld(v);
         const gap = v.y - lab.groundAt(v.x, v.z);
+
+        // Everything she is made of, then the two parts with their own solver.
+        anyChecked++;
+        if (gap < 0) { anyBuried++; anyDeepest = Math.min(anyDeepest, gap); }
+        if (antennaBones.has(bone.name)) {
+          antennaChecked++;
+          if (gap < 0) { antennaBuried++; antennaDeepest = Math.min(antennaDeepest, gap); }
+        }
+        if (!legBones.has(bone.name)) continue;
         checked++;
         if (gap < 0) { buried++; deepest = Math.min(deepest, gap); }
-        if (gap >= 0 && gap * 5 < 0.25) touching++;
+        if (gap >= 0) { closest = Math.min(closest, gap); if (gap * 5 < 0.25) touching++; }
       }
     });
-    return { checked, buried, deepestMm: deepest * 5, touching };
+    return {
+      checked, buried, deepestMm: deepest * 5, touching, closestMm: closest * 5,
+      antennaChecked, antennaBuried, antennaDeepestMm: antennaDeepest * 5,
+      anyChecked, anyBuried, anyDeepestMm: anyDeepest * 5,
+    };
   });
   if (!legs || legs.checked < 1000) fail(`could not measure the drawn legs (${legs?.checked})`);
   else if (legs.buried > 0) {
     fail(`${legs.buried} of ${legs.checked} leg vertices are under the soil, worst ${legs.deepestMm.toFixed(3)} mm`);
   } else {
     ok(`no part of a drawn leg is under the soil (${legs.checked} vertices)`);
-    // And they must REACH it — six legs held clear of the ground would pass
-    // the check above while looking like she is hovering.
-    if (legs.touching < 20) fail(`her legs are not touching the ground (${legs.touching} vertices within 0.25 mm)`);
-    else ok(`${legs.touching} leg vertices are resting on the surface`);
+    /*
+     * And she must not HOVER. Six legs held clear of the ground pass the check
+     * above while looking like she is floating, so this bounds the gap from
+     * the other side.
+     *
+     * It is a hover budget, not a contact test, and the difference matters:
+     * her legs are tubes about half a millimetre thick and the solver aims the
+     * bone at the ground plus that radius, so the drawn surface only touches
+     * where the tube happens to be tangent. Measured at 0.38 mm at the
+     * closest, of which 0.16 is the fail-safe lift. Six tenths of a millimetre
+     * is under a fifteenth of her body length — closer than you can see, and
+     * far enough from the 0.4 mm she used to be BURIED to be a real bound.
+     */
+    if (legs.closestMm > 0.6) fail(`she is hovering: closest leg vertex ${legs.closestMm.toFixed(3)} mm above the soil`);
+    else ok(`her legs rest on the surface (closest ${legs.closestMm.toFixed(3)} mm, ${legs.touching} within 0.25 mm)`);
+  }
+
+  /*
+   * The antennae, and then EVERYTHING.
+   *
+   * The legs were checked and fixed and the antennae went on clipping, because
+   * a check written for legs is a check about legs — nothing was looking at
+   * the rest of her at all. The whole-body count is the one that cannot be
+   * outflanked by the next part nobody thought of.
+   */
+  if (legs) {
+    if (legs.antennaChecked < 100) fail(`could not find her antennae (${legs.antennaChecked} vertices)`);
+    else if (legs.antennaBuried > 0) {
+      fail(`${legs.antennaBuried} antenna vertices are under the soil, worst ${legs.antennaDeepestMm.toFixed(3)} mm`);
+    } else ok(`her antennae are clear of the soil (${legs.antennaChecked} vertices)`);
+
+    if (legs.anyBuried > 0) {
+      fail(`${legs.anyBuried} of ${legs.anyChecked} vertices anywhere on her are under the soil, worst ${legs.anyDeepestMm.toFixed(3)} mm`);
+    } else ok(`no part of her is under the soil at all (${legs.anyChecked} vertices)`);
   }
 
   /*

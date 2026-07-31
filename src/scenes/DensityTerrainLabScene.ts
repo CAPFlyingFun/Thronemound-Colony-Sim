@@ -203,6 +203,8 @@ export class DensityTerrainLabScene {
   private footPenetration = 0;
   /** Where the last bite was centred, so the smoke can check it was her jaws. */
   private readonly lastBite = new THREE.Vector3();
+  /** How far the fail-safe had to lift her on the last frame. */
+  private guardLift = 0;
   private sun: any = null;
   private readonly move = { forward: 0, strafe: 0 };
   private readonly heldKeys = new Set<string>();
@@ -1043,7 +1045,8 @@ export class DensityTerrainLabScene {
       World: ${WORLD_TILES}×${WORLD_TILES} tiles of ${TILE_MM} mm = ${WORLD_SPAN * WORLD_UNIT_MM} mm<br>
       Tile ${tileX},${tileZ} · window ${WINDOW_CELLS}×${CELLS_Y}×${WINDOW_CELLS} = ${megabytes} MB<br>
       Queen: ${this.queenReady
-        ? `${CASTE_LENGTH_MM.queen} mm · feet ${(this.footPenetration * WORLD_UNIT_MM).toFixed(2)} mm corrected`
+        ? `${CASTE_LENGTH_MM.queen} mm · feet ${(this.footPenetration * WORLD_UNIT_MM).toFixed(2)} mm`
+          + ` · guard ${(this.guardLift * WORLD_UNIT_MM).toFixed(3)} mm`
         : 'loading…'}<br>
       Mesh: ${this.lastMeshMs.toFixed(1)} ms · scroll ${this.lastScrollMs.toFixed(1)} ms${queued}<br>
       Dug: ${this.stream.editedSamples} samples kept
@@ -1102,6 +1105,19 @@ export class DensityTerrainLabScene {
       this.footPenetration = this.queen.solveFeet(
         (x, z) => this.groundAt(x, z), FOOT_CLEARANCE, FOOT_PLANT_BAND,
       );
+      /*
+       * The fail-safe, after everything else has had its go: whatever the
+       * solvers did, nothing she is made of may be under the ground. It lifts
+       * the whole model rather than bending anything, which is blunt on
+       * purpose — a fail-safe with opinions is a fail-safe with its own bugs.
+       *
+       * A lift that is doing steady visible work means something is missing a
+       * solver, so it is reported next to the foot correction rather than
+       * quietly applied. That is how the antennae were found: nothing owned
+       * them, because they are not legs.
+       */
+      this.guardLift = this.queen.groundGuard((x, z) => this.groundAt(x, z), FOOT_CLEARANCE);
+      this.queen.root.position.y = this.antPosition.y + this.guardLift;
     }
     this.controls.update();
     this.drainPending(now - this.previousFrameStart);
