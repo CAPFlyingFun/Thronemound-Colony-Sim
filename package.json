@@ -13,7 +13,8 @@
     "smoke:dig": "node scripts/smoke-dig.mjs",
     "smoke:queen": "node scripts/smoke-queen.mjs",
     "smoke:mobility": "node scripts/smoke-mobility.mjs",
-    "smoke:model": "node scripts/smoke-model.mjs"
+    "smoke:model": "node scripts/smoke-model.mjs",
+    "smoke:density": "node scripts/smoke-density.mjs"
   },
   "dependencies": {
     "three": "^0.180.0"

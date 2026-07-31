@@ -336,7 +336,24 @@ export class DensityTerrainLabScene {
     const height = Math.max(1, this.host.clientHeight);
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
-    this.renderer.setSize(width, height, false);
+    /*
+     * Let three.js set the canvas CSS size as well as its buffer.
+     *
+     * The third argument is `updateStyle`, and passing false was why digging
+     * landed at the bottom right instead of under the crosshair. With no CSS
+     * size a canvas displays at its ATTRIBUTE size in CSS pixels, and the
+     * attributes are the buffer — width x devicePixelRatio. On a phone at
+     * ratio 2 that is a canvas twice the viewport, pinned to the host's top
+     * left and clipped by its `overflow: hidden`, so only the top-left quarter
+     * of the render is on screen. The dig ray is NDC (0,0), dead centre of the
+     * frustum and correct throughout; it was the picture that was off, by
+     * exactly half a viewport down and right.
+     *
+     * Measured before the fix, on a 430x932 host: offset (-1,-1) at ratio 1,
+     * (+214,+465) at ratio 2. Which is also the reason it survived a headless
+     * check — a phone-sized viewport at ratio 1 is not a phone.
+     */
+    this.renderer.setSize(width, height);
   }
 
   private animate = (): void => {
