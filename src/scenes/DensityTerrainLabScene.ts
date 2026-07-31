@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { QueenModel } from '../anim/QueenModel';
 import { BoreRig, DIG_YAW_RATE, YAW_RATE } from './BoreControl';
+import { clampStickOrigin, stickVector } from '../voxel/locomotion';
 import { FollowCamera } from './FollowCamera';
 import { CASTE_LENGTH_MM } from '../anim/hexapod';
 import { buildSurfaceNets } from '../density/SurfaceNets';
@@ -25,6 +26,29 @@ const CRAWL_FRACTION = 0.34;
 
 /** Radians per second she can turn. A little over half a turn a second. */
 const TURN_RATE = 3.6;
+
+/**
+ * Seconds for the head to swing the full ninety degrees, and how far behind it
+ * the thorax and the gaster follow.
+ *
+ * The pitch used to be applied to the aim the instant a button was pressed,
+ * which is why it "didn't exactly work": the number on the gauge jumped and
+ * the animal did not move at all. A body takes time to point somewhere, and
+ * the segments do not arrive together — head, then thorax, then gaster, like a
+ * train. The lags are fractions of the swing rather than seconds, so retuning
+ * the swing keeps the shape of the motion.
+ */
+const PITCH_SWING_SECONDS = 3;
+/*
+ * Each segment's own rate, as a fraction of the head's — so a SMALLER number
+ * trails further. They were 0.45 and 0.75, which made the gaster faster than
+ * the thorax it was supposed to be following, and since it is stepped toward
+ * the thorax in the same frame it caught up completely every time: the trace
+ * showed thorax and gaster identical to the tenth of a degree, which is a
+ * train with one carriage.
+ */
+const THORAX_RATE = 0.45;
+const GASTER_RATE = 0.22;
 
 /**
  * How quickly the dig animation fades after a bite, in units per second.
@@ -134,11 +158,26 @@ const BORE_CREEP = 0.28;
  */
 const BORE_SWEEP = [0, -0.3, -0.6, -0.9, -1.2];
 
+/**
+ * How far ahead of her jaws the bore is aimed — one centimetre.
+ *
+ * A virtual point she drives AT, rather than a direction she happens to be
+ * facing. The difference shows the moment the pitch changes: aiming down ten
+ * degrees moves a target a centimetre away by nearly two millimetres, so the
+ * cut swings and she follows it. Without a target the bite direction and the
+ * travel direction are two numbers that agree only as long as nobody touches
+ * the dial, and the tunnel wanders between them.
+ */
+const DIG_POINT_AHEAD = 10 / WORLD_UNIT_MM;
+
 /** How far her mandibles reach past the mouth bone — 1 mm. */
 const MANDIBLE_REACH = 1 / WORLD_UNIT_MM;
 
 /** How high up her body the camera aims — mid-thorax, about 2.5 mm. */
 const CAMERA_LOOK_AT = 2.5 / WORLD_UNIT_MM;
+
+/** Throw of the floating stick, in CSS pixels. Matches the main room's. */
+const STICK_RADIUS = 70;
 
 /** How far the camera swings per pixel dragged. */
 const LOOK_PER_PIXEL = 0.006;
@@ -273,10 +312,23 @@ export class DensityTerrainLabScene {
   private readonly velocity = new THREE.Vector3();
   /** 0..1, decaying. Drives the gait's dig animation after a bite. */
   private digPulse = 0;
+  /**
+   * The pitch her BODY is actually at, chasing the pitch the rig is set to.
+   *
+   * Two numbers, deliberately: `bore.pitch` is what the player dialled in and
+   * this is where the animal has got to. Conflating them is what made pressing
+   * the aim button feel like nothing happened.
+   */
+  private headPitch = 0;
+  private thoraxPitch = 0;
+  private gasterPitch = 0;
+
   /** Her current up axis, eased toward the slope so she does not shiver. */
   private readonly up = new THREE.Vector3(0, 1, 0);
   /** How far the worst foot was under the soil before the last solve. */
   private footPenetration = 0;
+  /** The point a centimetre ahead that the bore is driving at. */
+  private readonly digPoint = new THREE.Vector3();
   /** Where the last bite was centred, and where it sat relative to her then. */
   private readonly lastBite = new THREE.Vector3();
   private lastBiteAhead = 0;
@@ -286,6 +338,13 @@ export class DensityTerrainLabScene {
   /** Live pointers on the canvas, for look-around and pinch. */
   private readonly pointers = new Map<number, { x: number; y: number }>();
   private lastPinch = 0;
+  /** The floating stick: its element, the thumb driving it, and its throw. */
+  private readonly stick = document.createElement('div');
+  private readonly stickKnob = document.createElement('div');
+  private stickPointer: number | null = null;
+  private stickOrigin = { x: 0, y: 0 };
+  private stickX = 0;
+  private stickY = 0;
   private sun: any = null;
   /** What the controls are asking for: steering, throttle and the dig. */
   private readonly input = { yaw: 0, walk: 0 };
@@ -397,21 +456,19 @@ export class DensityTerrainLabScene {
       <div class="density-lab-title">DENSITY TERRAIN LAB <span>${BITE_WIDTH_MM} mm bite · ${BITE_DEPTH_MM} mm deep</span></div>
       <div class="density-lab-status"></div>
       <div class="density-lab-hint">Set pitch with △▽ · press BORE once to arm it · W/S then moves you along that pitch (A/D steers) · RUN toggles pace</div>
-      <div class="density-lab-gauge">
-        <div class="density-lab-gauge-dial"><span class="density-lab-gauge-ant">\u2b9d</span></div>
+      <div class="density-lab-gauge" aria-live="off">
+        <div class="density-lab-gauge-dial"><span class="density-lab-gauge-ant">\u2b9e</span></div>
         <div class="density-lab-gauge-read">0\u00b0</div>
       </div>
-      <div class="density-lab-pad"></div>
       <div class="density-lab-actions"></div>
     `;
     host.appendChild(hud);
 
     const status = hud.querySelector<HTMLDivElement>('.density-lab-status');
     const actions = hud.querySelector<HTMLDivElement>('.density-lab-actions');
-    const pad = hud.querySelector<HTMLDivElement>('.density-lab-pad');
     const dial = hud.querySelector<HTMLSpanElement>('.density-lab-gauge-ant');
     const read = hud.querySelector<HTMLDivElement>('.density-lab-gauge-read');
-    if (!status || !actions || !pad || !dial || !read) {
+    if (!status || !actions || !dial || !read) {
       throw new Error('Density terrain lab HUD failed to initialize');
     }
     this.gaugeAnt = dial;
@@ -461,7 +518,7 @@ export class DensityTerrainLabScene {
     this.resetButton.textContent = 'RESET';
     actions.appendChild(this.resetButton);
 
-    this.buildPad(pad);
+    this.buildStick(hud);
     this.digButton.addEventListener('pointerdown', this.onDigPointerDown);
     this.resetButton.addEventListener('click', this.resetTerrain);
     window.addEventListener('keydown', this.onKeyDown);
@@ -508,44 +565,32 @@ export class DensityTerrainLabScene {
   }
 
   /**
-   * The joystick: W/A/S/D as four held buttons.
+   * The real floating stick, the same one the main room uses.
    *
-   * Movement only — pitch is set on its own control, in steps, because it is a
-   * setting you dial in and read off a gauge rather than something you sweep
-   * while driving. The pad had pitch on its up and down keys and heading on
-   * its left and right, which meant the stick did two unrelated jobs and
-   * neither forward nor backward existed at all while burrowing.
+   * Four buttons in a cross is not a joystick: it has no magnitude, no
+   * diagonals, and your thumb has to find a specific 46-pixel square while
+   * watching something else. This spawns under the thumb wherever the left of
+   * the screen is touched, clamped into the lower-left so it cannot appear
+   * beside the HUD or halfway up the display, and reports a vector.
    *
-   * `pointerdown` sets the direction and `pointerup`/`pointercancel`/
-   * `pointerleave` all clear it. Leaving out any one of the three is how a
-   * touch pad ends up walking forever after a finger slides off it.
+   * Shared with the main room down to `stickVector` and `clampStickOrigin`, so
+   * the feel of driving an ant is one implementation rather than two that
+   * drift apart.
    */
-  private buildPad(pad: HTMLDivElement): void {
-    const keys: Array<[string, string, 'walk' | 'yaw', number]> = [
-      ['W', 'forward', 'walk', 1],
-      ['A', 'steer left', 'yaw', -1],
-      ['D', 'steer right', 'yaw', 1],
-      ['S', 'back', 'walk', -1],
-    ];
-    for (const [glyph, label, axis, sign] of keys) {
-      const button = document.createElement('button');
-      button.className = 'density-lab-padkey';
-      button.textContent = glyph;
-      button.setAttribute('aria-label', label);
-      const press = (event: PointerEvent): void => {
-        event.preventDefault();
-        this.input[axis] = sign;
-      };
-      const release = (): void => {
-        if (this.input[axis] === sign) this.input[axis] = 0;
-      };
-      button.addEventListener('pointerdown', press);
-      button.addEventListener('pointerup', release);
-      button.addEventListener('pointercancel', release);
-      button.addEventListener('pointerleave', release);
-      pad.appendChild(button);
-      this.padButtons.push(button);
-    }
+  private buildStick(hud: HTMLElement): void {
+    this.stick.className = 'density-lab-stick';
+    this.stickKnob.className = 'density-lab-stick-knob';
+    this.stick.appendChild(this.stickKnob);
+    hud.appendChild(this.stick);
+  }
+
+  private showStick(live: boolean): void {
+    this.stick.classList.toggle('is-live', live);
+    if (!live) return;
+    this.stick.style.left = `${this.stickOrigin.x}px`;
+    this.stick.style.top = `${this.stickOrigin.y}px`;
+    this.stickKnob.style.transform =
+      `translate(-50%, -50%) translate(${this.stickX * STICK_RADIUS}px, ${this.stickY * STICK_RADIUS}px)`;
   }
 
   /**
@@ -870,27 +915,23 @@ export class DensityTerrainLabScene {
       .addScaledVector(up, Math.sin(pitch)).normalize();
 
     /*
-     * The aimed angle first, then steeper, and steeper again — never straight
+     * The bore aims at a POINT a centimetre ahead, and the bite is taken along
+     * the line to it. Same direction as her travel, by construction, because
+     * both are derived from the one target — which is the whole reason for
+     * having a target rather than two angles that are supposed to match.
+     */
+    this.digPoint.copy(jaws).addScaledVector(direction, DIG_POINT_AHEAD);
+
+    /*
+     * The aimed line first, then steeper, and steeper again — never straight
      * down.
      *
      * Her mouthparts sit above her feet, so a LEVEL ray from them never meets
      * level ground and a stroke on the flat found nothing to bite. Dropping
      * back to straight down fixed that and broke something better: the crater
-     * opened underneath her instead of in front, which is the plank-over-a-
-     * hole all over again — measured at 3.11 mm from her jaws and 2.83 from her
-     * belly, on the wrong side of the line.
-     *
-     * Sweeping the PITCH keeps every attempt pointing where she is facing, so
-     * the hole stays ahead of her however far down she has to reach for it.
+     * opened underneath her instead of in front. Sweeping the PITCH keeps every
+     * attempt pointing where she is going.
      */
-    /*
-     * The probe starts at her MANDIBLES, a millimetre ahead of the mouth bone
-     * the rig gives us. The queen's auto-rig has no mandible bones — they were
-     * left out — so without this the bite is anchored a body-part short of
-     * where her jaws actually are, and the crater creeps back under her head.
-     */
-    jaws.addScaledVector(forward, MANDIBLE_REACH);
-
     let surface = null;
     for (const extra of BORE_SWEEP) {
       const tilted = forward.clone().multiplyScalar(Math.cos(pitch + extra))
@@ -1122,12 +1163,27 @@ export class DensityTerrainLabScene {
      * and reports it as the ground, which drops her through the world.
      */
     if (neighbour > 0) {
-      for (let y = start + 1; y <= top; y += 1) {
+      /*
+       * Climbing out is a STEP, not a swim to the surface.
+       *
+       * Unbounded, this scanned until the soil ran out — and in the wall of a
+       * shaft that is the open sky above the mound, so a foot a fraction of a
+       * millimetre into the wall was told its ground was ten millimetres over
+       * its head. That is the whole of the 15 mm foot reading, and the solver
+       * believed it and dragged her legs up after it.
+       *
+       * If the soil does not end within a step, nothing here is standable, and
+       * the honest answer is the height that was asked about: no lift, leave
+       * the limb where the gait put it. The blunt fail-safe still owns the case
+       * where she is genuinely buried — that is what it is for.
+       */
+      const reach = Math.min(top, start + Math.ceil(STEP_UP / CELL_SIZE));
+      for (let y = start + 1; y <= reach; y += 1) {
         const here = this.stream.field.sample(x, y * CELL_SIZE, z);
         if (here <= 0) return (y - 1 + neighbour / (neighbour - here)) * CELL_SIZE;
         neighbour = here;
       }
-      return top * CELL_SIZE;
+      return fromY === Infinity ? top * CELL_SIZE : fromY;
     }
 
     /*
@@ -1252,7 +1308,9 @@ export class DensityTerrainLabScene {
     const floor = this.groundAt(
       this.antPosition.x, this.antPosition.z, this.antPosition.y + FOOT_CLEARANCE,
     );
-    if (this.antPosition.y < floor) {
+    // Only ever lifted OUT of the floor, never dropped onto it: she is holding
+    // whatever height the bore gave her, and the floor is a lower bound.
+    if (this.antPosition.y < floor - FOOT_CLEARANCE) {
       const ease = 1 - Math.exp(-HEIGHT_EASE * dt);
       this.antPosition.y += (floor - this.antPosition.y) * ease;
     }
@@ -1297,6 +1355,17 @@ export class DensityTerrainLabScene {
     forward.addScaledVector(this.up, -forward.dot(this.up));
     if (forward.lengthSq() < 1e-8) forward.set(0, 0, 1);
     forward.normalize();
+    /*
+     * She points down the BORE, not along the ground, whenever her body has
+     * pitched. This is what makes an aimed dive look like a dive rather than a
+     * walk with a number attached — and it is applied to the whole animal
+     * because her legs hang off the same hub as her body, so anything else
+     * either leaves them behind or swings them into the air.
+     */
+    if (Math.abs(this.headPitch) > 1e-6) {
+      forward.multiplyScalar(Math.cos(this.headPitch))
+        .addScaledVector(this.up, Math.sin(this.headPitch)).normalize();
+    }
     const right = new THREE.Vector3().crossVectors(this.up, forward).normalize();
     this.queen.root.quaternion.setFromRotationMatrix(
       new THREE.Matrix4().makeBasis(right, this.up, forward),
@@ -1364,7 +1433,17 @@ export class DensityTerrainLabScene {
      * blocked by the floor she is standing on.
      */
     if (digging) {
-      PROBE.copy(next).addScaledVector(this.up, CAMERA_LOOK_AT * 0.5);
+      /*
+       * Probed AT the position she would occupy, with no upward offset.
+       *
+       * The offset was half a body height, which on a descent is a point above
+       * her that is still in open air while her feet are already in the soil —
+       * so she sank in, and `holdTunnel` climbed her straight back out. Six
+       * seconds of driving at ninety degrees down measured as two millimetres
+       * UP. Asking about the place she is actually going is both the simpler
+       * question and the one that paces her to the digging.
+       */
+      PROBE.copy(next);
       if (this.solidAt(PROBE)) return;
       this.antPosition.y = next.y;
     }
@@ -1388,6 +1467,14 @@ export class DensityTerrainLabScene {
   private updateGauge(): void {
     const degrees = Math.round(this.bore.pitch * 180 / Math.PI);
     this.gaugeRead.textContent = `${degrees}\u00b0`;
+    /*
+     * The needle points the way she will go, so level reads LEVEL.
+     *
+     * The glyph has to be a rightwards arrowhead for that. It was an upwards
+     * one, which put an unrotated needle straight up at 0 degrees \u2014 a dial
+     * reading "level" while pointing at the sky \u2014 and swung it to horizontal at
+     * minus ninety, exactly a quarter turn wrong the whole way round.
+     */
     this.gaugeAnt.style.transform = `rotate(${-degrees}deg)`;
     this.gaugeRead.dataset.digging = this.bore.digging ? 'on' : 'off';
   }
@@ -1419,7 +1506,7 @@ export class DensityTerrainLabScene {
     `;
   }
 
-  /** Drag to look around her; wheel or pinch to change the arm's length. */
+  /** Left of the screen drives her; the right of it looks around her. */
   private bindCamera(): void {
     const canvas = this.renderer.domElement;
     canvas.addEventListener('pointerdown', this.onCameraDown);
@@ -1429,11 +1516,50 @@ export class DensityTerrainLabScene {
     canvas.addEventListener('wheel', this.onCameraWheel, { passive: false });
   }
 
+  /** The left of the screen is the stick's zone; the rest looks. */
+  private get stickZone(): number {
+    return this.renderer.domElement.clientWidth * 0.42;
+  }
+
   private readonly onCameraDown = (event: PointerEvent): void => {
+    const canvas = this.renderer.domElement;
+    if (event.pointerType !== 'mouse' && event.clientX < this.stickZone && this.stickPointer === null) {
+      this.stickPointer = event.pointerId;
+      this.stickOrigin = clampStickOrigin(event.clientX, event.clientY, {
+        minX: STICK_RADIUS + 8,
+        maxX: Math.max(STICK_RADIUS + 8, this.stickZone - STICK_RADIUS - 8),
+        minY: canvas.clientHeight * 0.38,
+        maxY: canvas.clientHeight - STICK_RADIUS - 12,
+      });
+      this.stickX = 0;
+      this.stickY = 0;
+      this.showStick(true);
+      return;
+    }
     this.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
   };
 
   private readonly onCameraMove = (event: PointerEvent): void => {
+    if (event.pointerId === this.stickPointer) {
+      const v = stickVector(
+        event.clientX - this.stickOrigin.x, event.clientY - this.stickOrigin.y, STICK_RADIUS,
+      );
+      this.stickX = v.x;
+      this.stickY = v.y;
+      /*
+       * Up the screen is forward, and pushing RIGHT turns her nose right.
+       *
+       * That sign is measured, not reasoned: projecting a point ahead of her
+       * into the camera showed `yaw = +1` swinging her nose LEFT across the
+       * screen. The keyboard had it right and the button pad had it backwards,
+       * which is why left and right were inverted for anyone on a phone and
+       * fine for anyone on a keyboard.
+       */
+      this.input.walk = -v.y;
+      this.input.yaw = -v.x;
+      this.showStick(true);
+      return;
+    }
     const last = this.pointers.get(event.pointerId);
     if (!last) return;
     const dx = event.clientX - last.x;
@@ -1458,6 +1584,15 @@ export class DensityTerrainLabScene {
   };
 
   private readonly onCameraUp = (event: PointerEvent): void => {
+    if (event.pointerId === this.stickPointer) {
+      this.stickPointer = null;
+      this.stickX = 0;
+      this.stickY = 0;
+      this.input.walk = 0;
+      this.input.yaw = 0;
+      this.showStick(false);
+      return;
+    }
     this.pointers.delete(event.pointerId);
     if (this.pointers.size < 2) this.lastPinch = 0;
   };
@@ -1510,11 +1645,36 @@ export class DensityTerrainLabScene {
      */
     const bore = this.bore.step(delta, { yaw: this.input.yaw, forward: this.input.walk });
     this.facing = bore.heading;
+
+    /*
+     * The head leads and the body follows it. Rate-limited rather than eased,
+     * so ninety degrees always takes the same three seconds however far she has
+     * to go — an exponential ease would make a ten-degree change nearly
+     * instant and a ninety-degree one never quite finish.
+     */
+    const swing = (Math.PI / 2) / PITCH_SWING_SECONDS * delta;
+    this.headPitch += THREE.MathUtils.clamp(bore.pitch - this.headPitch, -swing, swing);
+    this.thoraxPitch += THREE.MathUtils.clamp(
+      this.headPitch - this.thoraxPitch, -swing * THORAX_RATE, swing * THORAX_RATE,
+    );
+    this.gasterPitch += THREE.MathUtils.clamp(
+      this.thoraxPitch - this.gasterPitch, -swing * GASTER_RATE, swing * GASTER_RATE,
+    );
     this.turnRate = this.input.yaw * (bore.digging ? DIG_YAW_RATE : YAW_RATE);
-    this.travel(delta, bore.pitch, bore.digging);
-    if (this.underground) this.holdTunnel(delta);
+    // She travels along the pitch her BODY has reached, not the one the dial
+    // is set to — otherwise she would dive before she had finished turning to
+    // face the dive.
+    this.travel(delta, this.headPitch, bore.digging);
+    /*
+     * With the dig armed she is committed to the hole, whether or not there is
+     * yet soil over her head. `stand` puts her on the surface, and while she is
+     * cutting the first few millimetres of a shaft that is a tug of war she
+     * always wins and the shaft never starts — measured as her rising two
+     * millimetres over six seconds of driving straight down.
+     */
+    if (bore.digging || this.underground) this.holdTunnel(delta);
     else this.stand(delta);
-    if (bore.bite) this.carveAlongBore(bore.pitch);
+    if (bore.bite) this.carveAlongBore(this.headPitch);
     // The gait's dig level IS the head's dip, so the animation and the moment
     // soil leaves are the same event rather than two things kept in step.
     this.digPulse = bore.dip;
@@ -1536,13 +1696,22 @@ export class DensityTerrainLabScene {
        * the one place the lab guarantees the ground is not flat.
        */
       /*
-       * Both solvers get the floor below HER, not the top of the world. In a
-       * burrow those are different by the whole depth of it, and taking the
-       * second is what used to convince the guard she was buried and heave her
-       * out through the ceiling.
+       * The floor below the POINT ASKING, not the top of the world and not the
+       * floor below her body. In a burrow the first two differ by the whole
+       * depth of it, which is what used to convince the guard she was buried
+       * and heave her out through the ceiling; the second two differ by
+       * whatever a foot has strayed from her centre, which in a shaft narrower
+       * than her stance means a foot in the wall asking about open air.
+       *
+       * A step of headroom, so ground she could climb onto is still findable.
        */
-      const under = (x: number, z: number): number =>
-        this.groundAt(x, z, this.antPosition.y + STEP_UP);
+      const under = (x: number, z: number, y: number): number =>
+        this.groundAt(x, z, y + STEP_UP);
+      // Only the LAG goes on the segments; the whole body is already pointed
+      // down the bore by `orientQueen`.
+      this.queen.leanSegments(
+        this.thoraxPitch - this.headPitch, this.gasterPitch - this.thoraxPitch,
+      );
       this.footPenetration = this.queen.solveFeet(
         under, FOOT_CLEARANCE, FOOT_PLANT_BAND,
       );

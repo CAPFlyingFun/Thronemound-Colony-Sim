@@ -577,6 +577,114 @@ for (const view of CASES) {
   const after = (await page.locator('.density-lab-status').innerText()).replace(/\s+/g, ' ');
   if (!/mm³ freed/.test(after)) fail(`dig after walking did not reach soil: "${after}"`);
   else ok('dig still reaches soil after the window has scrolled');
+
+  /*
+   * Does she HOLD her shape when nothing is asking her to change it?
+   *
+   * Three passes write her bones each frame — the gait, the segment lean and
+   * the foot IK — and only the gait was resetting from a base. The other two
+   * multiplied onto whatever they found, which is correct only for a bone
+   * something else rewrites first, and the gait does not write every bone. So
+   * they integrated: standing perfectly still, the thorax gained nine degrees a
+   * FRAME and the antennae wandered off by 14.9 mm in six seconds. On screen
+   * that was a mast growing out of her back, and it survived four rounds of
+   * looking at screenshots because nothing measured it.
+   *
+   * Standing still is the trick. Six seconds of WALKING moves every leg
+   * legitimately, so drift would read the walk cycle; at rest the pose is a
+   * constant and any movement at all is something accumulating.
+   */
+  const held = await page.evaluate(() => {
+    const lab = window.labScene;
+    const q = lab.queen;
+    const names = [...q.bones.keys()];
+    const sample = () => {
+      q.root.updateMatrixWorld(true);
+      const v = new (lab.antPosition.constructor)();
+      return names.map((n) => {
+        q.bones.get(n).getWorldPosition(v);
+        return [v.x, v.y, v.z];
+      });
+    };
+    lab.input.walk = 0;
+    lab.input.yaw = 0;
+    if (lab.bore.digging) lab.bore.toggleDig();
+    // Long enough for the pitch train to arrive as well — her gaster closes its
+    // lag slowly, and catching it still catching up reads as drift.
+    lab.stepForTest(1 / 60, 900);
+    const before = sample();
+    lab.stepForTest(1 / 60, 360);
+    const at = sample();
+
+    let worst = 0;
+    let worstBone = '';
+    for (let i = 0; i < names.length; i += 1) {
+      const d = Math.hypot(
+        at[i][0] - before[i][0], at[i][1] - before[i][1], at[i][2] - before[i][2],
+      );
+      if (d > worst) { worst = d; worstBone = names[i]; }
+    }
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
+    for (const p of at) for (let k = 0; k < 3; k += 1) {
+      lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], p[k]);
+    }
+
+    /*
+     * And is she STANDING ON the ground — every foot, measured at the last bone
+     * of each leg that geometry is actually drawn on.
+     *
+     * Not the last bone in the chain: these legs end in two bones carrying no
+     * vertices, and on the queen those markers fold back UP above the foot. The
+     * solver planted one of them and left the claw hanging, which is what the
+     * close-up of her feet showed.
+     */
+    const feet = q.rig.legs.map((leg) => {
+      const tipName = q.limbTip.get(leg.slot);
+      const tip = q.bones.get(tipName);
+      const v = new (lab.antPosition.constructor)();
+      tip.getWorldPosition(v);
+      const sole = 0.01 / 5 + (q.limbRadius.get(tipName) ?? 0);
+      const ground = lab.groundAt(v.x, v.z, v.y + 0.4);
+      return { slot: leg.slot, aboveRestingMm: (v.y - (ground + sole)) * 5 };
+    });
+    return {
+      driftMm: worst * 5,
+      worstBone,
+      spanMm: Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 5,
+      guardLiftMm: lab.guardLift * 5,
+      worstFoot: feet.reduce((a, f) => (Math.abs(f.aboveRestingMm) > Math.abs(a.aboveRestingMm) ? f : a)),
+    };
+  });
+  /*
+   * On flat untouched ground the residue is about a tenth of a millimetre — the
+   * IK settling. This runs after the walk-and-dig scenario, so she is standing
+   * on ground she has been chewing and the solver hunts a little more than
+   * that. Two millimetres still catches the fault by a factor of seven; what is
+   * being guarded here is unbounded integration, not jitter.
+   */
+  if (!(held.driftMm < 2)) {
+    fail(`standing still, ${held.worstBone} drifted ${held.driftMm.toFixed(2)} mm in six seconds`);
+  } else ok(`she holds her pose at rest (worst bone ${held.driftMm.toFixed(3)} mm in six seconds)`);
+  // Her bones span about her own length. A mast is several times that.
+  if (!(held.spanMm > 3 && held.spanMm < 14)) {
+    fail(`her skeleton spans ${held.spanMm.toFixed(1)} mm, and she is a 9 mm ant`);
+  } else ok(`skeleton spans ${held.spanMm.toFixed(1)} mm`);
+  // Reported for the log rather than asserted: on dug ground a foot can be
+  // legitimately mid-swing, and the guard check below is the sharper test of
+  // the fault this pair was added for.
+  ok(`worst foot ${held.worstFoot.aboveRestingMm.toFixed(3)} mm off resting (${held.worstFoot.slot})`);
+  /*
+   * The fail-safe should be IDLE. It is a blunt lift of the whole model, so any
+   * steady work it does moves six correctly planted feet at once — which is
+   * exactly how it hid this bug: it was rescuing the undrawn marker bones and
+   * hoisting her 0.448 mm, and six legs floating by the same amount looked like
+   * six solver failures rather than one rigid translation.
+   */
+  if (!(held.guardLiftMm < 0.05)) {
+    fail(`the ground guard is lifting her ${held.guardLiftMm.toFixed(3)} mm on flat ground`);
+  } else ok('the ground guard is idle, as it should be when the solvers are right');
+
   if (errors.length) fail(`walk run: ${errors.slice(0, 2).join(' | ')}`);
   await page.close();
 }

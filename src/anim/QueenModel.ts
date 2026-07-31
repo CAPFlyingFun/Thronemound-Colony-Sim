@@ -62,6 +62,9 @@ const AXIS = new THREE.Vector3();
 const WORLD_SPIN = new THREE.Quaternion();
 const LOCAL_SPIN = new THREE.Quaternion();
 const PARENT = new THREE.Quaternion();
+const TILT = new THREE.Quaternion();
+/** Her pitch axis in her own frame: she faces +Z, so pitching is about X. */
+const RIGHT = new THREE.Vector3(1, 0, 0);
 
 /**
  * Meshopt, not Draco.
@@ -93,8 +96,56 @@ export class QueenModel {
   private bones = new Map<string, THREE.Bone>();
   /** Rest rotation per bone, so every frame is an offset and never accumulates. */
   private rest = new Map<string, THREE.Quaternion>();
-  /** How fat each limb is around its own bones, in world units. See `measureLimbs`. */
+  /**
+   * What every bone looks like BEFORE the correction passes touch it, refreshed
+   * once per `update`.
+   *
+   * `update` keeps the rule that each frame is an offset from rest rather than
+   * a rotation of last frame — and then two passes that run after it broke the
+   * rule, both by multiplying onto the live quaternion. That is correct only
+   * for a bone something else has already rewritten from rest, and the gait
+   * does not write every bone:
+   *
+   *   - the lean writes `thorax[0]`, the gait writes `thorax[LAST]`
+   *   - the IK rotates three joints up each limb, the gait writes `antenna[0]`
+   *
+   * So both integrated. Measured standing perfectly still: the thorax lean
+   * added nine degrees a FRAME, and the antennae wandered 14.9 mm and 10.5 mm
+   * in six seconds — which is the mast growing out of her back in the landscape
+   * shot, and why the foot readout came back as 1.45e15 mm.
+   *
+   * A bone the gait wrote is at its gait pose and that is its base; a bone the
+   * gait skipped is still carrying the last correction, so its base is rest.
+   * Deciding that here, once, is what lets both passes stay idempotent — run
+   * either of them twice with the same numbers and she is in the same shape.
+   */
+  private poseBase = new Map<string, THREE.Quaternion>();
+  /**
+   * How fat the mesh is around each BONE, in world units. See `measureLimbs`.
+   *
+   * Per bone, not per limb. One number for a whole leg is the fattest part of
+   * it — the femur — and using that as the sole thickness at the claw props
+   * every foot up on the thickness of the thigh: measured at 0.86 to 1.29 mm of
+   * air under six feet that the solver believed it had planted to within a
+   * hundredth. An ant's leg tapers by more than an order of magnitude from hip
+   * to tarsus, so this has to taper with it.
+   */
   private readonly limbRadius = new Map<string, number>();
+  /**
+   * The last bone of each limb that any geometry is actually skinned to.
+   *
+   * Not the last bone in the chain. Every leg on this rig ends in two bones
+   * carrying no vertices at all — auto-rig terminals — and on the queen they do
+   * not even continue the leg's direction: on her rear left the chain's joints
+   * sit at 1.76, 1.62, 2.80, 1.09, 0.41, 1.29, 1.30 mm above the soil, so the
+   * last two markers point back UP, a millimetre above the foot they trail.
+   *
+   * The solver planted one of those markers, which is the whole of the "feet
+   * tips are up in the air" report: the thing being placed on the ground was
+   * not the thing being drawn, and no amount of solving the ankle could fix
+   * where the claw ended up while the target was a marker above it.
+   */
+  private readonly limbTip = new Map<string, string>();
   private clock = 0;
   private loaded = false;
   private bodyRoot: THREE.Object3D | null = null;
@@ -130,6 +181,7 @@ export class QueenModel {
           const bone = node as THREE.Bone;
           this.bones.set(bone.name, bone);
           this.rest.set(bone.name, bone.quaternion.clone());
+          this.poseBase.set(bone.name, bone.quaternion.clone());
         }
         const mesh = node as THREE.SkinnedMesh;
         if (mesh.isSkinnedMesh) {
@@ -193,6 +245,19 @@ export class QueenModel {
       );
     }
 
+    /*
+     * Snapshot what the correction passes are allowed to build on, while the
+     * answer is still knowable — here, before anything has run, is the only
+     * point in the frame where a bone the gait skipped is distinguishable from
+     * one it wrote. Read a moment later and yesterday's correction is folded
+     * into today's base and we are integrating again.
+     */
+    for (const [name, base] of this.poseBase) {
+      const bone = this.bones.get(name);
+      if (!bone) continue;
+      base.copy(pose.rotations.has(name) ? bone.quaternion : this.rest.get(name) ?? bone.quaternion);
+    }
+
     // Body bob rides on the bone, so it stays in her own frame — she bobs along
     // her own up axis whether she is on the floor, a wall or a ceiling.
     if (this.bodyRoot) this.bodyRoot.position.y = this.baseY + pose.lift;
@@ -208,33 +273,80 @@ export class QueenModel {
    * and a caller can assert it against what the feet end up at afterwards.
    */
   solveFeet(
-    groundAt: (x: number, z: number) => number,
+    /**
+     * Ground height under a point, asked from that point's OWN height.
+     *
+     * The third argument is not decoration. A burrow makes "the ground here"
+     * depend on where you are standing, and passing the BODY's height for all
+     * six feet asks about her, not about them: a foot pressed into the wall of
+     * a shaft is inside soil, so the query climbs out of it — and climbing out
+     * from her body's height, in a column that is solid all the way up, lands
+     * on the rim overhead. Measured mid-dive, the six feet were reported 15 mm
+     * under a ground that was really the summit ten millimetres above her, and
+     * the solver duly hauled her legs up toward it.
+     */
+    groundAt: (x: number, z: number, y: number) => number,
     clearance: number,
     band: number,
   ): number {
     if (!this.loaded) return 0;
+    /*
+     * Every joint this solver may rotate goes back to its base first.
+     *
+     * CCD premultiplies onto whatever it finds, and it climbs three joints up
+     * each limb while the gait writes only the first — so joints two and three
+     * were never cleared and each frame's correction landed on top of the last
+     * one's. Standing still, the antennae wandered off by 14.9 mm and 10.5 mm
+     * in six seconds. The legs hid it better because the gait happens to write
+     * their knee and ankle, so only their remaining joint crept.
+     *
+     * Undoing the pass before redoing it also makes it idempotent, which is
+     * what the caller actually wants from a corrective solver: solving twice
+     * against the same ground is the same as solving once.
+     */
+    for (const limb of this.limbs()) {
+      for (const name of limb.bones) {
+        const bone = this.bones.get(name);
+        const base = this.poseBase.get(name);
+        if (bone && base) bone.quaternion.copy(base);
+      }
+    }
     this.root.updateMatrixWorld(true);
     let worstPenetration = 0;
 
     for (const limb of this.limbs()) {
+      /*
+       * The chain STOPS at the last bone anything is drawn on.
+       *
+       * Past that point a leg is markers, and on this rig those markers do not
+       * even continue its line — they fold back up above the foot. Solving to
+       * one of them put a point that renders as nothing onto the soil and left
+       * the claw a millimetre in the air, which is what the close-up showed.
+       */
+      const tipName = this.limbTip.get(limb.id);
       const chain: THREE.Bone[] = [];
       for (const name of limb.bones) {
         const bone = this.bones.get(name);
         if (bone) chain.push(bone);
+        if (name === tipName) break;
       }
       if (chain.length < 3) continue;
       const foot = chain[chain.length - 1]!;
 
       /*
-       * The clearance a LIMB needs, not the clearance a bone needs. The mesh is
-       * a tube around the skeleton, so its underside hangs the tube's radius
-       * below the bone line — measured at load, per limb, rather than guessed.
+       * The clearance THIS BONE needs. The mesh is a tube around the skeleton,
+       * so its underside hangs the tube's radius below the bone line — and that
+       * radius is a different number at the tarsus than at the femur. Sharing
+       * one per limb meant the claw was held up on the thigh's half-millimetre,
+       * so every foot hovered however well the solver hit its target.
        */
-      const sole = clearance + (this.limbRadius.get(limb.id) ?? 0);
+      const soleOf = (bone: THREE.Bone): number =>
+        clearance + (this.limbRadius.get(bone.name) ?? 0);
+      const sole = soleOf(foot);
       const lowest = Math.max(0, chain.length - 1 - IK_JOINTS);
 
       foot.getWorldPosition(FOOT);
-      const ground = groundAt(FOOT.x, FOOT.z);
+      const ground = groundAt(FOOT.x, FOOT.z, FOOT.y);
       worstPenetration = Math.max(worstPenetration, ground + sole - FOOT.y);
       /*
        * A leg is trying to STAND on the ground and an antenna is not — she
@@ -289,8 +401,12 @@ export class QueenModel {
         // unfold, so this converges rather than chasing itself.
         let deepest = 0;
         for (let j = chain.length - 1; j >= lowest; j -= 1) {
-          chain[j]!.getWorldPosition(JOINT);
-          deepest = Math.max(deepest, groundAt(JOINT.x, JOINT.z) + sole - JOINT.y);
+          const joint = chain[j]!;
+          joint.getWorldPosition(JOINT);
+          // Each joint against its OWN thickness. The femur is the fat one and
+          // has to clear the soil by more than the tarsus does; one shared
+          // number either buries the thigh or floats the foot, and it floated.
+          deepest = Math.max(deepest, groundAt(JOINT.x, JOINT.z, JOINT.y) + soleOf(joint) - JOINT.y);
         }
         if (deepest <= 1e-6) break;
         wanted += deepest;
@@ -341,11 +457,48 @@ export class QueenModel {
     if (!this.loaded) return 0;
     this.root.updateMatrixWorld(true);
     let lift = 0;
-    for (const [, names] of this.limbGroups()) {
+    /*
+     * The parts NO SOLVER OWNS, which is what this was always for: mandibles,
+     * the tip of a gaster on a steep bank. The legs and antennae have their own
+     * solver with its own per-joint clearance, and second-guessing it here is
+     * actively harmful — the guard is a rigid lift of the whole model, so one
+     * leg it dislikes raises all six feet off ground they were correctly
+     * planted on. Measured: 0.29 mm of float on every foot, to rescue a single
+     * limb the IK had already placed.
+     */
+    const solved = new Set(this.limbs().map((limb) => limb.id));
+    for (const [group, names] of this.limbGroups()) {
+      if (solved.has(group)) continue;
       for (const name of names) {
+        /*
+         * Only bones that any geometry is DRAWN on. "Nothing she is made of may
+         * be in the soil" is the rule, and a marker with no vertices skinned to
+         * it is not something she is made of.
+         *
+         * This is the same category error as the solver's, one level down, and
+         * it was hiding the fix for it. Once the IK stopped planting the
+         * undrawn terminals, those markers hung below the surface — so the
+         * guard saw six buried bones and lifted the WHOLE ant 0.448 mm to
+         * rescue them, carrying all six correctly planted feet up with it. Six
+         * legs floating by exactly the same amount was the clue: a rigid
+         * translation, not six independent solver failures.
+         */
+        if ((this.limbRadius.get(name) ?? 0) <= 0) continue;
         const bone = this.bones.get(name);
         if (!bone) continue;
         bone.getWorldPosition(JOINT);
+        /*
+         * The BONE, not the underside of the mesh around it.
+         *
+         * Dropping the probe by the limb's radius was tried and is worse: a
+         * radius is the widest the mesh gets anywhere around that bone, and
+         * pushing it straight DOWN assumes the widest part hangs directly
+         * below. On her gaster that radius is 1.53 mm — most of her abdomen —
+         * so the probe sat well under her belly and the guard lifted her
+         * 0.27 mm off ground she was standing on perfectly well, taking all six
+         * planted feet with it. Same over-estimate as using the thigh's
+         * thickness at the claw, one body part over.
+         */
         lift = Math.max(lift, escapeAt(JOINT.x, JOINT.y, JOINT.z));
       }
     }
@@ -392,7 +545,7 @@ export class QueenModel {
         spine.push([JOINT.x, JOINT.y, JOINT.z]);
       }
       spineOf.set(group, spine);
-      this.limbRadius.set(group, 0);
+      for (const name of names) this.limbRadius.set(name, 0);
     }
 
     const vertex = new THREE.Vector3();
@@ -419,10 +572,35 @@ export class QueenModel {
 
         mesh.getVertexPosition(i, vertex);
         mesh.localToWorld(vertex);
+        /*
+         * Still measured to the whole limb's POLYLINE — that part was right,
+         * and measuring to the nearest joint would read a vertex halfway along
+         * a bone as a bone-length away. What changed is where the answer is
+         * filed: under the bone this vertex is skinned to, rather than under
+         * the limb, so a leg gets a thickness profile instead of one number
+         * taken from its fattest part.
+         */
         const reach = distanceToPolyline([vertex.x, vertex.y, vertex.z], spine);
-        if (reach > (this.limbRadius.get(group) ?? 0)) this.limbRadius.set(group, reach);
+        if (reach > (this.limbRadius.get(bone!.name) ?? 0)) {
+          this.limbRadius.set(bone!.name, reach);
+        }
       }
     });
+
+    /*
+     * Now the tips: the last bone of each limb that anything is drawn on.
+     *
+     * A bone still sitting at exactly zero after that sweep had no vertex claim
+     * it, so it is a marker rather than a part of her. Walking back from the
+     * end of each chain until something has width is what finds the real foot.
+     */
+    this.limbTip.clear();
+    for (const [group, names] of this.limbGroups()) {
+      for (let i = names.length - 1; i >= 0; i -= 1) {
+        const name = names[i]!;
+        if ((this.limbRadius.get(name) ?? 0) > 0) { this.limbTip.set(group, name); break; }
+      }
+    }
   }
 
   /** World position of a named bone, for callers that need to aim at one. */
@@ -432,6 +610,44 @@ export class QueenModel {
     this.root.updateMatrixWorld(true);
     bone.getWorldPosition(into);
     return true;
+  }
+
+  /**
+   * The LAG between her segments, not their absolute pitch.
+   *
+   * Her whole body points down the bore — that is done by the scene, in the
+   * basis it builds — and this only adds the difference between where each
+   * segment has got to and where the one in front of it is. Head, then thorax,
+   * then gaster: a train.
+   *
+   * It has to be the residual rather than the angle, because of how she is
+   * rigged. Every one of the six legs hangs off the same hub as the body root,
+   * so putting ninety degrees on the root swings her legs up into the air with
+   * her. The residuals are a few degrees and touch only the segments behind
+   * the head.
+   *
+   * Applied on top of the base `update` recorded, which is the gait's pose for
+   * a bone the gait writes and the rest pose for one it does not. Set rather
+   * than accumulated, so holding a steady lag holds a steady angle — call this
+   * a thousand times with the same numbers and she is in the same shape.
+   */
+  leanSegments(thoraxLag: number, gasterLag: number): void {
+    if (!this.loaded) return;
+    const groups: Array<[string[], number]> = [
+      [this.rig.thorax, thoraxLag],
+      [this.rig.gaster, gasterLag],
+    ];
+    for (const [names, angle] of groups) {
+      const first = names[0];
+      if (first === undefined) continue;
+      const bone = this.bones.get(first);
+      const base = this.poseBase.get(first);
+      if (!bone || !base) continue;
+      bone.quaternion.copy(base);
+      if (Math.abs(angle) < 1e-6) continue;
+      TILT.setFromAxisAngle(RIGHT, angle);
+      bone.quaternion.multiply(TILT);
+    }
   }
 
   /** Her mouthparts, in world space. False when the rig has not loaded. */
@@ -450,5 +666,8 @@ export class QueenModel {
     });
     this.bones.clear();
     this.rest.clear();
+    this.poseBase.clear();
+    this.limbRadius.clear();
+    this.limbTip.clear();
   }
 }

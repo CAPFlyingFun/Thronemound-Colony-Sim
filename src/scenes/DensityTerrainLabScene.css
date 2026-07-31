@@ -17,6 +17,7 @@
 .density-lab-title,
 .density-lab-status {
   position: absolute;
+  z-index: 1;
   left: max(12px, env(safe-area-inset-left));
   padding: 8px 11px;
   border-radius: 9px;
@@ -82,6 +83,7 @@
 
 .density-lab-actions {
   position: absolute;
+  z-index: 2;
   right: max(16px, env(safe-area-inset-right));
   bottom: max(22px, env(safe-area-inset-bottom));
   display: flex;
@@ -126,6 +128,14 @@
 
 @media (max-height: 480px) {
   /* Landscape on a phone: everything shrinks so the stat block stays legible. */
+  /*
+   * The hint goes entirely. It is anchored 176px off the bottom to clear the
+   * pad, and a phone on its side is 430px tall — that puts it straight through
+   * the stat block, which is what the landscape shot showed. The width query
+   * below hides it too, but a landscape phone is 932px WIDE and never reaches
+   * that one; height is the dimension the hint actually runs out of.
+   */
+  .density-lab-hint { display: none; }
   .density-lab-dig { width: 78px; height: 78px; }
   .density-lab-walk { width: 62px; height: 62px; font-size: 11px; }
   .density-lab-gauge-dial { width: 44px; height: 44px; }
@@ -181,10 +191,20 @@
  * at, which is a setting you commit to before you move — worth a face of its
  * own rather than a line in the stat block.
  */
+/*
+ * The gauge sits at the TOP MIDDLE, not the top right.
+ *
+ * On the right it was underneath the action stack in landscape — a phone held
+ * sideways is 430 tall, the buttons reach most of the way up it, and the dial
+ * was behind them. The middle of the top edge is the one strip nothing else
+ * claims in either orientation.
+ */
 .density-lab-gauge {
   position: absolute;
-  right: max(16px, env(safe-area-inset-right));
-  top: max(12px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  top: max(10px, env(safe-area-inset-top));
+  z-index: 3;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -252,8 +272,10 @@
  * it. In landscape the two overlapped and the readout was unreadable through
  * the instructions printed over it.
  */
+/* Narrow enough to clear the centred pitch gauge in landscape, where the
+   viewport is wide and short and the two were colliding. */
 .density-lab-status {
-  max-width: min(62vw, 420px);
+  max-width: min(38vw, 380px);
 }
 
 .density-lab-hint {
@@ -267,91 +289,51 @@
 }
 
 @media (max-width: 560px) {
-  /*
- * The pitch gauge, above the action stack. The dial is the angle she will bore
- * at, which is a setting you commit to before you move — worth a face of its
- * own rather than a line in the stat block.
- */
-.density-lab-gauge {
-  position: absolute;
-  right: max(16px, env(safe-area-inset-right));
-  top: max(12px, env(safe-area-inset-top));
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  pointer-events: none;
-}
-
-.density-lab-gauge-dial {
-  width: 54px;
-  height: 54px;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  background: rgba(92, 58, 34, 0.85);
-  box-shadow: inset 0 0 0 2px rgba(232, 197, 138, 0.5);
-}
-
-.density-lab-gauge-ant {
-  font-size: 26px;
-  line-height: 1;
-  color: #9ede63;
-  transition: transform 120ms ease-out;
-}
-
-.density-lab-gauge-read {
-  padding: 2px 8px;
-  border-radius: 7px;
-  background: rgba(20, 16, 11, 0.72);
-  color: #f0d88e;
-  font-variant-numeric: tabular-nums;
-}
-
-.density-lab-gauge-read[data-digging='on'] {
-  background: #2f6b32;
-  color: #eaffe1;
-}
-
-.density-lab-aim {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  align-items: center;
-  pointer-events: auto;
-}
-
-.density-lab-aimkey {
-  width: 56px;
-  height: 38px;
-  border: 0;
-  border-radius: 10px;
-  font: 700 17px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: #5c1f52;
-  background: rgba(240, 208, 236, 0.9);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.26);
-  touch-action: none;
-}
-
-.density-lab-aimkey:active {
-  transform: scale(0.95);
-  background: #f7d9f2;
-}
-
-/*
- * The stat block gets a width, and the hint sits under it rather than across
- * it. In landscape the two overlapped and the readout was unreadable through
- * the instructions printed over it.
- */
-.density-lab-status {
-  max-width: min(62vw, 420px);
-}
-
-.density-lab-hint { display: none; }
+  .density-lab-hint { display: none; }
   .density-lab-status { font-size: 10.5px; }
   .density-lab-title { font-size: 11px; }
   .density-lab-pad {
     grid-template-columns: repeat(3, 46px);
     grid-template-rows: repeat(3, 46px);
   }
+}
+
+/* ---------------------------------------- the floating stick (main-room feel) */
+
+.density-lab-stick {
+  position: absolute;
+  width: 140px;
+  height: 140px;
+  margin: -70px 0 0 -70px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(243, 236, 216, 0.28);
+  background: rgba(20, 26, 18, 0.24);
+  opacity: 0;
+  transition: opacity 0.16s ease;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.density-lab-stick.is-live { opacity: 1; }
+
+.density-lab-stick-knob {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  background: rgba(243, 236, 216, 0.55);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  transform: translate(-50%, -50%);
+}
+
+/* The inner ring marks the crawl/walk boundary, so the thumb has a landmark
+   for careful positioning while driving a tunnel. */
+.density-lab-stick::before {
+  content: '';
+  position: absolute;
+  inset: 32%;
+  border-radius: 50%;
+  border: 1px dashed rgba(243, 236, 216, 0.22);
 }
