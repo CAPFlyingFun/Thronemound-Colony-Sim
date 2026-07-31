@@ -300,6 +300,28 @@ export function surfaceSlope(
   return [-dx / len, 1 / len, -dz / len];
 }
 
+/**
+ * Height of the terrain surface at a lattice CORNER — the smoothing input for
+ * the render mesh.
+ *
+ * The lattice corner (cx, cz) IS the world position (cx, cz) — the shared
+ * edge between columns cx-1 and cx runs along x = cx — so the field is read
+ * exactly there, with no half-voxel shift. The height field is corner-
+ * aligned throughout this file: column x's own sample `groundHeight(x, z)`
+ * sits at its min corner (surfaceSlope differences symmetrically about the
+ * integer), so a cell's lower-left corner height equals its column fill and
+ * the smoothed sheet passes through every fill line it collides at. An
+ * earlier draft sampled half a voxel back, believing samples sat at cell
+ * centres; on the hill flank that displaced the whole sheet diagonally by
+ * half a cell of slope and every cell came out as a tilted diamond.
+ *
+ * Render-only. Collision, depth and digging keep reading `groundHeight` and
+ * `surfaceFill` per column; this cannot move a voxel or a fill line.
+ */
+export function surfaceCornerHeight(cx: number, cz: number, opts: TerrainOptions): number {
+  return groundHeight(cx, cz, opts);
+}
+
 export function surfaceFill(x: number, y: number, z: number, opts: TerrainOptions): number {
   const h = groundHeight(x, z, opts);
   const top = Math.ceil(h) - 1;

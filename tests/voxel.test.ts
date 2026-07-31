@@ -10,7 +10,8 @@ import { CLOD_RADIUS, MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES, type Clod } from
 import { HAUL_FLOOR, PELLET_FILL, QUEEN_MASS_G, clodMassGrams, haulFactor } from '../src/voxel/mass';
 import {
   FAR_RELIEF_VOXELS, HILL_VOXELS, SURFACE_STEP, VALLEY_VOXELS, features, groundHeight,
-  isSurfaceCell, outsideness, surfaceFill, surfaceSlope, surfaceVoxel, terrainGenerator,
+  isSurfaceCell, outsideness, surfaceCornerHeight, surfaceFill, surfaceSlope, surfaceVoxel,
+  terrainGenerator,
 } from '../src/voxel/terrain';
 import { SKIRT_REACH, buildSkirt, skirtHeight, skirtLines } from '../src/voxel/skirt';
 import { ceilingFor, glassPass, insideBox, isGlassCell, soilPass } from '../src/voxel/formicarium';
@@ -3045,7 +3046,11 @@ describe('terrain smoothing', () => {
     expect(worst % SURFACE_STEP).toBeCloseTo(0, 9);
   });
 
-  it('cannot be seen through, looking level at the hillside', () => {
+  // Run the probe twice: once against the flat-fill mesh exactly as before,
+  // and once with corner heights on offer — the smoothed surface has to be
+  // just as impossible to see through as the terraced one it replaces.
+  for (const withCorners of [false, true] as const) {
+  it(`cannot be seen through, looking level at the hillside${withCorners ? ' (conforming corners)' : ''}`, () => {
     /*
      * The reported fault — sky through the step-ups — and the third instrument
      * it took to catch it.
@@ -3069,6 +3074,9 @@ describe('terrain smoothing', () => {
       slope: (x: number, y: number, z: number) => (
         isSurfaceCell(x, y, z, OPTS) ? surfaceSlope(x, z, OPTS) : null
       ),
+      ...(withCorners ? {
+        cornerHeight: (cx: number, cz: number) => surfaceCornerHeight(cx, cz, OPTS),
+      } : {}),
     };
     const { hill } = features(OPTS);
     const tris: number[][] = [];
@@ -3172,11 +3180,48 @@ describe('terrain smoothing', () => {
           // about seeing through the surface.
           if (solid(from[0]!, from[1]!, from[2]!)) continue;
           if (!solid(to[0]!, to[1]!, to[2]!)) continue;
-          if (from[1]! > groundHeight(Math.floor(to[0]!), Math.floor(to[2]!), OPTS) - 0.6) continue;
+          /*
+           * The ray must genuinely end UNDER the surface, or "no hit" proves
+           * nothing. For flat cells the column sample is the surface, less a
+           * margin. With corners the drawn surface is the bilinear sheet,
+           * which on a steep cross-slope legitimately sags up to a voxel
+           * below the column sample — a ray in that band grazes over the
+           * smoothed crest without ever meeting soil, and the voxel-based
+           * guard waved exactly those through as "straight through" false
+           * alarms. So the corner run asks the sheet itself, with a small
+           * margin for the chamfer bevels' straight chords undercutting the
+           * bilinear surface by a hair on saddle corners.
+           */
+          const sheetAt = (px: number, pz: number) => {
+            const cx = Math.floor(px);
+            const cz = Math.floor(pz);
+            const fx = px - cx;
+            const fz = pz - cz;
+            return (
+              surfaceCornerHeight(cx, cz, OPTS) * (1 - fx)
+              + surfaceCornerHeight(cx + 1, cz, OPTS) * fx) * (1 - fz)
+              + (surfaceCornerHeight(cx, cz + 1, OPTS) * (1 - fx)
+              + surfaceCornerHeight(cx + 1, cz + 1, OPTS) * fx) * fz;
+          };
+          const ceiling = withCorners
+            ? sheetAt(to[0]!, to[2]!) - 0.1
+            : groundHeight(Math.floor(to[0]!), Math.floor(to[2]!), OPTS) - 0.6;
+          if (from[1]! > ceiling) continue;
           probes++;
           const key = `${Math.floor(from[1]!)},${Math.floor(from[other]!)}`;
           const hit = shoot(from, dir, buckets[axis]!.get(key) ?? []);
-          if (!(hit.t < 24)) seenThrough.push(`straight through from ${from.map((q) => q.toFixed(2))}`);
+          /*
+           * Flat cells hold their whole plan at the column sample, so the ray
+           * must meet soil by the hill's centre plane: 24 exactly. The
+           * smoothed sheet is the SAME field resampled bilinearly, and on the
+           * downhill half of a steep cell it legitimately sits below the
+           * column sample — up to a voxel of slope — which along a level ray
+           * reads as the surface arriving a couple of voxels DEEPER, still
+           * front-facing. Two voxels of slack covers the steepest flank this
+           * terrain can make (adjacent columns never differ by more than one).
+           */
+          const reach = withCorners ? 26 : 24;
+          if (!(hit.t < reach)) seenThrough.push(`straight through from ${from.map((q) => q.toFixed(2))}`);
           else if (hit.facing < 0) seenThrough.push(`inside-out at ${from.map((q) => q.toFixed(2))}`);
         }
       }
@@ -3185,6 +3230,7 @@ describe('terrain smoothing', () => {
     expect(probes).toBeGreaterThan(3000);
     expect(seenThrough.slice(0, 8)).toEqual([]);
   });
+  }
 
   it('lights every facet of the open surface', () => {
     /*
@@ -3288,6 +3334,72 @@ describe('terrain smoothing', () => {
     // Vacuous otherwise: a patch of flat ground would pass with nothing to say.
     expect(joins).toBeGreaterThan(200);
     expect(open).toEqual([]);
+  });
+
+  it('places every shared surface corner at the shared corner height', () => {
+    /*
+     * The smoothing contract, asked directly: when corner heights are on
+     * offer, every surface cell touching a lattice corner puts its top vertex
+     * AT that corner's height — unclamped, whatever cell it lands in. Four
+     * cells, one point — which is what makes neighbouring treads a single
+     * sheet instead of a terrace with its lighting painted over.
+     *
+     * Restricted to corners whose four columns all end in the SAME cell, since
+     * those are the ones with no open sides — no chamfer inset can move the
+     * vertex off the lattice, so the position is exactly predictable.
+     */
+    const world = new VoxelWorld(128, 128, 128, terrainGenerator(OPTS));
+    const view = {
+      get: (x: number, y: number, z: number) => world.get(x, y, z),
+      fill: (x: number, y: number, z: number) => surfaceFill(x, y, z, OPTS),
+      slope: (x: number, y: number, z: number) => (
+        isSurfaceCell(x, y, z, OPTS) ? surfaceSlope(x, z, OPTS) : null
+      ),
+      cornerHeight: (cx: number, cz: number) => surfaceCornerHeight(cx, cz, OPTS),
+    };
+    const { hill } = features(OPTS);
+    const cx = (hill.x + 12) >> 5;
+    const cz = hill.z >> 5;
+    const tris = trianglesOf(view, [[cx, 2, cz], [cx, 3, cz]]);
+    // Vertex heights seen at each lattice (x, z), for a tolerant lookup.
+    const seen = new Map<string, number[]>();
+    for (const t of tris) {
+      for (const o of [0, 3, 6]) {
+        const vx = t[o]!;
+        const vz = t[o + 2]!;
+        if (!Number.isInteger(vx) || !Number.isInteger(vz)) continue;
+        const key = `${vx},${vz}`;
+        const list = seen.get(key);
+        if (list) list.push(t[o + 1]!);
+        else seen.set(key, [t[o + 1]!]);
+      }
+    }
+    let corners = 0;
+    let smoothed = 0;
+    const missing: string[] = [];
+    for (let x = cx * 32 + 1; x < cx * 32 + 32; x++) {
+      for (let z = cz * 32 + 1; z < cz * 32 + 32; z++) {
+        const top = surfaceVoxel(x, z, OPTS);
+        if (
+          surfaceVoxel(x - 1, z, OPTS) !== top
+          || surfaceVoxel(x, z - 1, OPTS) !== top
+          || surfaceVoxel(x - 1, z - 1, OPTS) !== top
+        ) continue;
+        corners++;
+        const want = surfaceCornerHeight(x, z, OPTS);
+        if (Math.abs(want - Math.round(want)) > 1e-9) smoothed++;
+        const ys = seen.get(`${x},${z}`) ?? [];
+        if (!ys.some((yy) => Math.abs(yy - want) < 1e-6)) {
+          missing.push(`${x},${z} wanted ${want.toFixed(4)} saw ${ys.map((yy) => yy.toFixed(4)).join('/') || 'nothing'}`);
+        }
+      }
+    }
+    // Vacuous unless the flank really offers shared corners, and toothless
+    // unless most of them land OFF the lattice — on-lattice corners would pass
+    // under the old flat fills too.
+    expect(corners).toBeGreaterThan(300);
+    expect(smoothed).toBeGreaterThan(corners * 0.6);
+    expect(missing.slice(0, 8)).toEqual([]);
   });
 
   it('draws a part-full cell exactly as tall as it says, and no taller', () => {

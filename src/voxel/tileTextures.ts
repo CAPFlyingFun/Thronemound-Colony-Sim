@@ -70,8 +70,14 @@ function prng(seed: number): () => number {
   };
 }
 
-function mmToPx(mm: number): number {
-  return (mm / TILE_MM) * TILE_PX;
+/**
+ * Sized against the tile being generated, not against TILE_PX — a tile is
+ * always TILE_MM of ground whatever its resolution, so a 4 mm clod on a
+ * 512 px tile must cover four times the pixels it covers on a 128 px one.
+ * At the default size this divides out to exactly the old arithmetic.
+ */
+function mmToPx(mm: number, size: number): number {
+  return (mm / TILE_MM) * size;
 }
 
 /** Wrapped distance so clods straddling an edge tile seamlessly. */
@@ -121,7 +127,7 @@ export function generateTile(voxel: VoxelId, size = TILE_PX, seed = voxel * 9176
   // at 15-25% of tile width exactly as the texture spec requires.
   for (let c = 0; c < recipe.clodCount; c++) {
     const [minMm, maxMm] = recipe.clodMm;
-    const radius = mmToPx(minMm + rand() * (maxMm - minMm)) / 2;
+    const radius = mmToPx(minMm + rand() * (maxMm - minMm), size) / 2;
     const cx = rand() * size;
     const cy = rand() * size;
     const strength = 0.5 + rand() * 0.5;

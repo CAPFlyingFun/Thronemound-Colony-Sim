@@ -16,7 +16,8 @@ import {
 } from '../voxel/VoxelWorld';
 import { clodMassGrams, haulFactor } from '../voxel/mass';
 import {
-  HILL_VOXELS, VALLEY_VOXELS, groundHeight, isSurfaceCell, surfaceFill, surfaceSlope,
+  HILL_VOXELS, VALLEY_VOXELS, groundHeight, isSurfaceCell, surfaceCornerHeight, surfaceFill,
+  surfaceSlope,
   surfaceVoxel, terrainGenerator,
   type TerrainOptions,
 } from '../voxel/terrain';
@@ -995,16 +996,27 @@ export class DigScene {
     isSurfaceCell(x, y, z, TERRAIN) ? surfaceSlope(x, z, TERRAIN) : null
   );
 
+  /**
+   * Where the surface sits at a lattice corner — the render mesh's smoothing
+   * input. Same field as `soilFill`, evaluated at corners instead of columns,
+   * so the drawn ground and the fill line cannot tell different stories.
+   */
+  private readonly soilCorner = (cx: number, cz: number): number => (
+    surfaceCornerHeight(cx, cz, TERRAIN)
+  );
+
   private meshSampler(): {
     get(x: number, y: number, z: number): number;
     fill(x: number, y: number, z: number): number;
     slope(x: number, y: number, z: number): readonly [number, number, number] | null;
+    cornerHeight(cx: number, cz: number): number;
   } {
     if (this.chips.size === 0) {
       return {
         get: (x, y, z) => this.world.get(x, y, z),
         fill: this.soilFill,
         slope: this.soilSlope,
+        cornerHeight: this.soilCorner,
       };
     }
     // EVERY part-dug voxel is masked, not just the active one, or a cube she
@@ -1013,6 +1025,7 @@ export class DigScene {
       get: (x, y, z) => (this.chips.has(DigScene.chipKey(x, y, z)) ? AIR : this.world.get(x, y, z)),
       fill: this.soilFill,
       slope: this.soilSlope,
+      cornerHeight: this.soilCorner,
     };
   }
 
@@ -3164,6 +3177,20 @@ export class DigScene {
       y: shown.y + 0.5 + drift.y,
       z: shown.z + 0.5 + drift.z,
     };
+    /*
+     * The box never pokes above the soil. On a surface cell the ground stops
+     * at the fill line, not the cell ceiling, so a full-height outline drew a
+     * head of empty air above the dirt it claimed to enclose. Cap its top at
+     * the fill line and keep the floor where it was — same rule collision and
+     * the mesher follow, read from the same function.
+     */
+    const soilTop = shown.y + this.soilFill(shown.x, shown.y, shown.z);
+    const boxTop = Math.min(centre.y + scale.y / 2, soilTop);
+    const boxBottom = centre.y - scale.y / 2;
+    if (boxTop > boxBottom) {
+      scale.y = boxTop - boxBottom;
+      centre.y = (boxTop + boxBottom) / 2;
+    }
     this.highlight.scale.set(scale.x, scale.y, scale.z);
     this.highlight.position.set(centre.x, centre.y, centre.z);
     this.highlightDepth = Math.min(scale.x, scale.y, scale.z);

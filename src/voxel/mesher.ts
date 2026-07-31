@@ -54,6 +54,21 @@ interface Sampler {
    * what keeps a cut face looking cut and a slope looking smooth.
    */
   slope?(x: number, y: number, z: number): readonly [number, number, number] | null;
+  /**
+   * World-Y height of the terrain surface at a lattice corner (cx, cz).
+   * Optional; consulted ONLY for cells `slope` calls surface.
+   *
+   * This is what turns the staircase into ground. `fill` can only squash a
+   * cell flat, so a slope was still a run of level treads — smaller steps, but
+   * steps, and the silhouette showed it. Corners are SHARED: every surface
+   * cell touching a lattice corner places its top vertex at this same height,
+   * so neighbouring tops meet along their common edge exactly and the tread /
+   * riser pair disappears into one continuous sheet.
+   *
+   * Clamped by the mesher to the cell's own [0,1] band, so the drawn surface
+   * still cannot leave the cell that collision and the DDA raycast believe in.
+   */
+  cornerHeight?(cx: number, cz: number): number;
 }
 
 type Vec3 = readonly [number, number, number];
@@ -242,7 +257,26 @@ export function meshChunk(
          * the cell rather than by moving it.
          */
         const fy = fillOf(x, y, z);
-        const liftY = (localY: number) => y + localY * fy;
+        /*
+         * Where this cell's top ACTUALLY sits, per lattice corner.
+         *
+         * Present only on surface cells of a sampler that offers corner
+         * heights; everywhere else the cell keeps its flat fill line and the
+         * mesher behaves exactly as before — which is what keeps every
+         * existing caller and test byte-identical.
+         *
+         * Deliberately NOT clamped to the cell's own [0,1]. Every surface
+         * cell touching a lattice corner reads the same field value there, so
+         * unclamped tops tile into one continuous sheet even across columns
+         * whose top CELLS differ — which is the whole point. Clamping was
+         * tried first and it rebuilt the staircase exactly where it shows,
+         * on slopes steep enough for a corner to leave its cell (~2% of
+         * corners, all on the hill flank). Overshoot is safe: above the cell
+         * the sheet rises into open air no other face claims, below it the
+         * sheet sinks inside the solid cube underneath, and a cut face whose
+         * strip inverts (top below its floor) turns inside-out and is culled
+         * behind the sheet rather than drawn.
+         */
         /*
          * The slope this cell sits on, or null if it is not surface.
          *
@@ -252,6 +286,83 @@ export function meshChunk(
          * one normal is what stops them reading as separate objects.
          */
         const slope = world.slope ? world.slope(x, y, z) : null;
+        const ch = world.cornerHeight;
+        let cf: readonly [number, number, number, number] | null = null;
+        if (slope && ch) {
+          const cfOf = (cx: number, cz: number) => ch(cx, cz) - y;
+          cf = [cfOf(x, z), cfOf(x + 1, z), cfOf(x, z + 1), cfOf(x + 1, z + 1)];
+        }
+        /** Bilinear top height (as a fill) anywhere in the cell's plan. */
+        const fillAt = (lx: number, lz: number): number => (cf
+          ? (cf[0] * (1 - lx) + cf[1] * lx) * (1 - lz)
+            + (cf[2] * (1 - lx) + cf[3] * lx) * lz
+          : fy);
+        /*
+         * Per-vertex shading normal for the conforming sheet.
+         *
+         * The per-cell `slope` is one constant normal per cell, and the
+         * triplanar projection weights in the material are a function of the
+         * normal — so on the steep flank, where one cell's constant lands a
+         * hair the other side of a blend threshold from its neighbour's, the
+         * texture visibly changes projection at the cell border: crisp
+         * smeared rectangles on an otherwise smooth hillside.
+         *
+         * The gradient here is taken at each lattice CORNER from the same
+         * shared field the geometry uses — every cell touching a corner
+         * computes the identical samples — then blended bilinearly, so the
+         * shading normal is continuous across cell borders exactly like the
+         * sheet itself.
+         */
+        let sheetNormal: ((lx: number, lz: number) => readonly [number, number, number]) | null = null;
+        if (cf && ch) {
+          const g = (cx: number, cz: number): readonly [number, number] => [
+            (ch(cx + 1, cz) - ch(cx - 1, cz)) / 2,
+            (ch(cx, cz + 1) - ch(cx, cz - 1)) / 2,
+          ];
+          const cg = [g(x, z), g(x + 1, z), g(x, z + 1), g(x + 1, z + 1)] as const;
+          sheetNormal = (lx, lz) => {
+            const gx = (cg[0][0] * (1 - lx) + cg[1][0] * lx) * (1 - lz)
+              + (cg[2][0] * (1 - lx) + cg[3][0] * lx) * lz;
+            const gz = (cg[0][1] * (1 - lx) + cg[1][1] * lx) * (1 - lz)
+              + (cg[2][1] * (1 - lx) + cg[3][1] * lx) * lz;
+            const len = Math.hypot(gx, 1, gz);
+            return [-gx / len, 1 / len, -gz / len];
+          };
+        }
+        /**
+         * The one place vertical position is decided. `ly` scales between the
+         * cell floor and its (possibly per-corner) top, so every face, bevel,
+         * corner triangle and dish sample of this cell asks the same function
+         * and cannot disagree — the same watertightness argument the old
+         * uniform squash made, extended from an affine map to a bilinear one.
+         */
+        /*
+         * Lattice height -> world height, with one wrinkle where the sheet
+         * dips below the cell floor.
+         *
+         * With unclamped corners the sheet legitimately runs NEGATIVE near a
+         * corner (the true surface passes through the cell underneath). A
+         * plain `y + ly * fill` then DECREASES with ly, so any primitive
+         * spanning two lattice heights at that plan point — side faces,
+         * vertical-edge bevels — turns inside-out into a fin. Clamping just
+         * those primitives at the floor (the previous fix) un-inverted them
+         * but split them off the corner wedges and top bevels that still
+         * followed the sheet, and the seam was an open slit you could shoot a
+         * ray through.
+         *
+         * So the rule lives HERE, where every primitive gets the same answer
+         * for the same lattice point: where the sheet is below the floor,
+         * every lattice height collapses onto the sheet. Vertical primitives
+         * degenerate to zero height exactly there (nothing to draw — the
+         * surface is the sheet passing below), top primitives are unchanged
+         * (ly = 1 always lands on the sheet), and any two primitives sharing
+         * a lattice point still share a vertex, which is what watertight
+         * means.
+         */
+        const liftAt = (lx: number, ly: number, lz: number) => {
+          const f = fillAt(lx, lz);
+          return y + (f < 0 ? f : ly * f);
+        };
 
         /*
          * Which of the six neighbours are air, computed once per voxel.
@@ -329,7 +440,32 @@ export function meshChunk(
              * filled to, so neither can leave a band.
              */
             const under = fillOf(x + nx, y + ny, z + nz);
-            if (ny !== 0 || under >= fy) continue;
+            if (ny !== 0) continue;
+            /*
+             * When BOTH cells conform to shared corner heights, their tops
+             * meet along this edge exactly — same lattice corners, same
+             * heights, same clamp — so there is nothing for a band to cover,
+             * and emitting one anyway would push a quad down inside the
+             * neighbour's soil and flip every ray-parity probe through it.
+             */
+            const nbSlope = world.slope ? world.slope(x + nx, y, z + nz) : null;
+            let floorFill = under;
+            if (ch && nbSlope) {
+              if (cf) continue;
+              /*
+               * WE are a cut face against a conforming neighbour: its drawn
+               * top follows its corners, which can dip BELOW its column fill
+               * on the downhill side — below even this cell's floor, since
+               * corners are unclamped. The band has to reach the lowest
+               * shared corner or the wall of our cell shows through the
+               * wedge, so floorFill may legitimately go negative here.
+               */
+              for (const corner of face.corners) {
+                if (corner[1] !== 1) continue;
+                floorFill = Math.min(floorFill, ch(x + corner[0], z + corner[2]) - y);
+              }
+            }
+            if (floorFill >= fy) continue;
 
             /*
              * Emitted plain: no chamfer inset, no dish, flat shading.
@@ -361,7 +497,7 @@ export function meshChunk(
              * is a couple of degrees off straight up, the band lights exactly
              * as the cells either side of it do, and the join disappears.
              */
-            const gap = fy - under;
+            const gap = fy - floorFill;
             const slen = Math.hypot(gap, 1);
             // The field's own gradient where it is on offer, since then the
             // band and the treads either side share one normal exactly. The
@@ -413,10 +549,27 @@ export function meshChunk(
              * invisible but destroys the watertightness the tests rely on —
              * every parity probe through the hill flipped.
              */
-            const notch = under * (1 - EDGE_CHAMFER);
+            const notch = floorFill * (1 - EDGE_CHAMFER);
+            /*
+             * The band's top, per corner. `fillAt` (fy for a cell without
+             * corners of its own) — except against a CONFORMING neighbour,
+             * where the top is additionally capped at the shared corner
+             * heights. A full interior cell whose column's surface sits one
+             * cell up runs its flat top at fy while the neighbour's sheet
+             * edge dips below it — the sheet crossing from the neighbour's
+             * top into our surface cell above already seals that boundary,
+             * and the uncapped band top was poking through it as a bright
+             * smeared sliver on the flank. Capped, the band ends exactly on
+             * the sheet edge and covers only what the sheet does not.
+             */
+            const bandTop = (lx: number, lz: number) => (
+              ch && nbSlope
+                ? Math.min(fillAt(lx, lz), ch(x + lx, z + lz) - y)
+                : fillAt(lx, lz)
+            );
             for (const corner of face.corners) {
               const wx = x + corner[0];
-              const wy = y + (corner[1] === 1 ? fy : notch);
+              const wy = y + (corner[1] === 1 ? bandTop(corner[0], corner[2]) : notch);
               const wz = z + corner[2];
               positions.push(wx, wy, wz);
               normals.push(bn[0], bn[1], bn[2]);
@@ -562,17 +715,32 @@ export function meshChunk(
               return sample(p[0]!, p[1]!, p[2]!);
             })();
 
-            ao.push(aoLevel(sideA, sideB, diagonal));
+            /*
+             * A conforming cell's top is one continuous sheet with its
+             * neighbours — the uphill column being a cell "taller" is not a
+             * wall standing over this tread, it is the same surface carrying
+             * on. Occupancy-based AO cannot tell the difference and paints a
+             * dark crease along the uphill edge of every cell on the flank:
+             * the staircase again, this time in light. The sheet is open
+             * ground everywhere, so it takes the open-ground level.
+             */
+            ao.push(cf && ny === 1 ? 3 : aoLevel(sideA, sideB, diagonal));
           }
 
           if (dish === 0) {
             for (let ci = 0; ci < 4; ci++) {
               const drawn = inset[ci]!;
               const wx = x + drawn[0];
-              const wy = liftY(drawn[1]);
+              // Where the sheet dips below the floor, liftAt itself collapses
+              // every lattice height onto the sheet — side faces degenerate
+              // there instead of inverting, and no per-face clamp is needed.
+              const wy = liftAt(drawn[0], drawn[1], drawn[2]);
               const wz = z + drawn[2];
               positions.push(wx, wy, wz);
-              if (facet) normals.push(facet[0], facet[1], facet[2]);
+              if (sheetNormal && ny >= 0) {
+                const sn = sheetNormal(drawn[0], drawn[2]);
+                normals.push(sn[0], sn[1], sn[2]);
+              } else if (facet) normals.push(facet[0], facet[1], facet[2]);
               else normals.push(nx, ny, nz);
               layers.push(voxel);
               tangents.push(tangent[0], tangent[1], tangent[2]);
@@ -627,9 +795,15 @@ export function meshChunk(
                 // normal, so the wall recedes into the soil and never toward
                 // the player.
                 const back = dish * Math.sin(Math.PI * u) * Math.sin(Math.PI * v);
-                const wx = x + lerp3(u, v, 0) - nx * back;
-                const wy = liftY(lerp3(u, v, 1) - ny * back);
-                const wz = z + lerp3(u, v, 2) - nz * back;
+                const dlx = lerp3(u, v, 0) - nx * back;
+                const dly = lerp3(u, v, 1) - ny * back;
+                const dlz = lerp3(u, v, 2) - nz * back;
+                const wx = x + dlx;
+                // liftAt handles below-floor sheets by itself; dished cells
+                // are never conforming (dish requires !slope) so this is the
+                // plain y + ly * fy path regardless.
+                const wy = liftAt(dlx, dly, dlz);
+                const wz = z + dlz;
                 positions.push(wx, wy, wz);
 
                 /*
@@ -649,7 +823,7 @@ export function meshChunk(
                 /*
                  * The rate the dish pulls back, in WORLD units.
                  *
-                 * `liftY` scales this cell's Y by `fy`, so a dish of a given
+                 * `liftAt` scales this cell's Y by its fill, so a dish of a given
                  * depth moves the surface by `dish * fy` along a Y-facing
                  * normal while these derivatives were written as though it
                  * moved by `dish`. Get that wrong and the shading follows a
@@ -760,7 +934,9 @@ export function meshChunk(
               y + (un[1] > 0 ? 1 : un[1] < 0 ? -1 : 0),
               z + (un[2] > 0 ? 1 : un[2] < 0 ? -1 : 0),
             );
-            const shade = AO_LEVELS[diag ? 2 : 3]! * tint;
+            // Same rule as the top-face AO above: on a conforming cell the
+            // "solid" diagonally uphill is the sheet itself, not a crease.
+            const shade = AO_LEVELS[!cf && diag ? 2 : 3]! * tint;
             const [uAxis, vAxis] = tangentAxes(un[0] !== 0 && un[1] !== 0 && un[2] !== 0
               ? [1, 0, 0] : un);
             /*
@@ -802,12 +978,30 @@ export function meshChunk(
             const ty = tan[1] - sny * tdot;
             const tz = tan[2] - snz * tdot;
             const tlen = Math.hypot(tx, ty, tz) || 1;
+            /*
+             * Bevels on VERTICAL edges pinch at the floor exactly like the
+             * side faces they sit between (see the face loop); everything
+             * with any vertical reach — top-edge bevels, corner wedges —
+             * follows the sheet unclamped so it stays attached to the top
+             * face wherever that goes.
+             */
+            // No special case for vertical-edge bevels any more: liftAt
+            // collapses below-floor sheets for every primitive alike, which
+            // is exactly what keeps bevels, wedges and faces sharing vertices.
+            const bevelLift = (p: readonly [number, number, number]) => (
+              liftAt(p[0], p[1], p[2])
+            );
             for (const p of pts) {
-              positions.push(x + p[0], liftY(p[1]), z + p[2]);
-              normals.push(snx, sny, snz);
+              positions.push(x + p[0], bevelLift(p), z + p[2]);
+              // Bevels of a conforming cell are slivers of the sheet, so they
+              // shade with the same continuous normal its faces use.
+              if (sheetNormal) {
+                const sn = sheetNormal(p[0], p[2]);
+                normals.push(sn[0], sn[1], sn[2]);
+              } else normals.push(snx, sny, snz);
               layers.push(voxel);
               tangents.push(tx / tlen, ty / tlen, tz / tlen);
-              const w = [x + p[0], liftY(p[1]), z + p[2]] as const;
+              const w = [x + p[0], bevelLift(p), z + p[2]] as const;
               uvs.push(w[uAxis]! / TILE_VOXELS, w[vAxis]! / TILE_VOXELS);
               colors.push(shade, shade, shade);
             }
