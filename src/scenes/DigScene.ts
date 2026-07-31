@@ -11,9 +11,10 @@
 
 import * as THREE from 'three';
 import {
-  AIR, CHUNK, MATERIALS, TOPSOIL, VoxelWorld,
+  AIR, CHUNK, MATERIALS, TOPSOIL, VOXEL_MM, VoxelWorld,
   isSolid, layeredGenerator, materialOf, type VoxelId,
 } from '../voxel/VoxelWorld';
+import { clodMassGrams, haulFactor } from '../voxel/mass';
 import { FACES, burialShade, meshChunk } from '../voxel/mesher';
 import {
   buildFracture, cellCentre, chipHalfExtent, chipMeshData, chipOffset, eventsBetween, hashVoxel,
@@ -46,7 +47,6 @@ import {
 
 const WORLD_SIZE = 128;
 const SURFACE_Y = 96;
-const VOXEL_MM = 5;
 
 /*
  * Ant-sized, and that is a gameplay requirement rather than a detail.
@@ -96,6 +96,24 @@ const JUMP_HEIGHT = 1.45;
 const JUMP_SPEED = Math.sqrt(2 * GRAVITY * JUMP_HEIGHT);
 /** Rise the ant steps over without jumping — one voxel plus a hair. */
 const STEP_HEIGHT = 1.05;
+/**
+ * How finely she feels her way back down after a step.
+ *
+ * A twentieth of a voxel is a quarter of a millimetre at this scale, which is
+ * below anything the eye resolves, and it bounds the work at ~21 probes on the
+ * frames she actually climbs. Coarser and she would rest visibly proud of what
+ * she is standing on; finer buys nothing you can see.
+ */
+const STEP_SETTLE = 0.05;
+/**
+ * How fast the eye catches up to a step, per second of exponential decay.
+ *
+ * The body arrives instantly — it has to, or collision would be resolving
+ * against a position nothing else agrees with. The EYE is what sells the climb,
+ * and at this rate a full one-voxel step reads as about a tenth of a second of
+ * rise: quick enough to feel like a leg planting, slow enough not to snap.
+ */
+const STEP_LAG_RATE = 14;
 
 /** A corner of an axis-aligned box, in voxel units. */
 interface Box { x: number; y: number; z: number }
@@ -125,12 +143,13 @@ const SETTLE_SPEED = 2;
  * striding across open ground.
  */
 const UNDERGROUND_SPEED = 0.75;
-/**
- * Hauling. Honest caveat: a real ant carries many times its own body weight, so
- * one grain of soil would barely slow it — this is a feel number, there so the
- * trip out reads as work, not a biology number.
+/*
+ * Hauling used to be a flat 0.85 here, whatever was in her jaws.
+ *
+ * It is weight now — see mass.ts. Pellets vary by a fifth either way in size
+ * and by a quarter in density, so a big clay one is nearly four times the load
+ * of a small sandy one and every one of them used to read the same.
  */
-const CARRY_SPEED = 0.85;
 /** Shown in the HUD so it's obvious at a glance whether a build is current. */
 const BUILD_LABEL = `v${__APP_VERSION__} \u00b7 ${__BUILD_TIME__}`;
 /**
@@ -504,6 +523,14 @@ export class DigScene {
   private jumpQueued = false;
   /** Jumped and not yet landed — suspends weightlessness so the leap survives. */
   private airborne = false;
+  /**
+   * Height the eye still owes the body after a step, in voxels.
+   *
+   * Only steps feed this. Falling and jumping are already continuous, and
+   * smoothing those would take the weight out of the one movement that should
+   * have it.
+   */
+  private stepLag = 0;
 
   private readonly hud: HTMLDivElement;
   private readonly actionButton: HTMLButtonElement;
@@ -2216,6 +2243,29 @@ export class DigScene {
   }
 
   /**
+   * What she is carrying, in grams.
+   *
+   * Summed from the load's own source cells rather than from a count, because
+   * a pellet's size is a function of where it was dug and two pellets are
+   * rarely the same weight. A load entry without a source is soil that came
+   * from somewhere the size is not recorded for — it falls back to the nominal
+   * pellet rather than weighing nothing, since a load that reads as weightless
+   * would make her faster for having done the work.
+   */
+  private carriedMass(): number {
+    let grams = 0;
+    for (const entry of this.session.load) {
+      const radius = entry.source
+        ? CLOD_RADIUS * clodSizeScale(
+          entry.source.x, entry.source.y, entry.source.z, entry.material,
+        )
+        : CLOD_RADIUS;
+      grams += clodMassGrams(radius, entry.material) * entry.count;
+    }
+    return grams;
+  }
+
+  /**
    * Loose soil is something to climb over, not walk through.
    *
    * Spoil used to ignore the ant entirely, on the reasoning that a heap you can
@@ -2279,6 +2329,14 @@ export class DigScene {
    * Move along the surface plane with a step-up. Walking into a rise of one
    * voxel lifts the ant over it, which is what turns a dug staircase into a
    * usable ramp — no sloped geometry required.
+   *
+   * The lift is a PROBE, not the answer. It clears STEP_HEIGHT so the move can
+   * be tested, then settles back onto whatever is actually underfoot, so the
+   * net rise is the height of the obstacle rather than the height of the
+   * tallest obstacle she could have climbed. Keeping the whole 1.05 is what
+   * launched her over a pellet less than half that — reported as flying, and
+   * worse underground, where she is weightless and so nothing was ever going to
+   * bring her back down: every step out of a tunnel stacked another voxel on.
    */
   private moveOnSurface(axis: 'x' | 'y' | 'z', amount: number): boolean {
     if (this.tryAxis(axis, amount)) return true;
@@ -2287,13 +2345,41 @@ export class DigScene {
     const lifted = this.position.clone().addScaledVector(up, STEP_HEIGHT);
     if (!this.collides(lifted)) {
       this.position.copy(lifted);
-      if (this.tryAxis(axis, amount)) return true;
+      if (this.tryAxis(axis, amount)) {
+        this.settleOntoStep(up);
+        return true;
+      }
       this.position.copy(saved);
     }
     this.wallNormal.set(0, 0, 0);
     this.wallNormal[axis] = amount > 0 ? -1 : 1;
     this.hasWall = true;
     return false;
+  }
+
+  /**
+   * Lower back onto the thing she just stepped over, and tell the camera.
+   *
+   * Scanned rather than bisected. A bisection assumes that if she can drop a
+   * long way she can drop a short way, and that stops being true the moment
+   * there is a gap under her: she would drop straight through the lip of a hole
+   * she was stepping across. Twenty-odd probes at a twentieth of a voxel is
+   * cheap, and only runs on the frames she actually climbs something.
+   *
+   * The rise left over is handed to the camera as a LAG rather than applied to
+   * the eye at once. Collision stays discrete and only the camera interpolates,
+   * which is the rule the whole six-direction frame is built on.
+   */
+  private settleOntoStep(up: THREE.Vector3): void {
+    const probe = this.position.clone();
+    let dropped = 0;
+    while (dropped + STEP_SETTLE <= STEP_HEIGHT) {
+      probe.addScaledVector(up, -STEP_SETTLE);
+      if (this.collides(probe)) break;
+      this.position.copy(probe);
+      dropped += STEP_SETTLE;
+    }
+    this.stepLag = Math.min(STEP_HEIGHT, this.stepLag + (STEP_HEIGHT - dropped));
   }
 
   /**
@@ -2415,7 +2501,7 @@ export class DigScene {
     // depth rather than `weightless`, so speed depends on where she is and not
     // on what she happens to be brushing against.
     const load = this.position.y < UNDERGROUND_Y ? UNDERGROUND_SPEED : 1;
-    const haul = this.session.carried > 0 ? CARRY_SPEED : 1;
+    const haul = haulFactor(this.carriedMass());
     const gait = this.keyGait ?? this.gait;
     const targetSpeed = moving ? speedForStick(magnitude, gait, DEFAULT_BANDS) * load * haul : 0;
 
@@ -2583,6 +2669,19 @@ export class DigScene {
     this.cameraQuat.slerp(target, blend);
 
     const eye = this.position.clone().addScaledVector(up, EYE_HEIGHT);
+    /*
+     * Trail the body up a step instead of jumping with it.
+     *
+     * Reported as the ant flying when she walked out of a tunnel or over a
+     * pellet. Most of that was the step itself lifting a whole voxel for a
+     * half-voxel obstacle, which settleOntoStep now fixes; this is the other
+     * half, and it is what turns an honest small rise into a walked one.
+     */
+    if (this.stepLag > 1e-4) {
+      this.stepLag *= Math.exp(-STEP_LAG_RATE * dt);
+      if (this.stepLag <= 1e-4) this.stepLag = 0;
+      eye.addScaledVector(up, -this.stepLag);
+    }
     // A nudge when soil actually lets go, decaying fast. Only the bigger
     // moments set it, so this is a knock rather than a shake.
     if (this.cameraKick > 0) {
@@ -2949,12 +3048,22 @@ export class DigScene {
         + ` \u00B7 spill ${this.active.spilled}`
       : '';
     const chamber = status.depthMet ? ` \u00b7 Chamber ${status.chamber}/${DEN_MIN_CHAMBER}` : '';
+    /*
+     * The weight of the load, in milligrams, beside the count.
+     *
+     * Worth the characters: pellets differ by nearly four to one between a big
+     * clay one and a small sandy one, and the count alone says they are the
+     * same. This is the number that explains why one trip out is slower than
+     * the last.
+     */
+    const grams = this.carriedMass();
+    const carrying = grams > 0 ? ` \u00b7 ${(grams * 1000).toFixed(0)} mg` : '';
     readout.innerHTML = `
       <b>Depth</b> ${status.depth > 0 ? `${status.depthMm} mm` : 'surface'} &nbsp;
-      <b>Carrying</b> ${this.session.carried}/${this.session.capacity} pellets &nbsp;
+      <b>Carrying</b> ${this.session.carried}/${this.session.capacity} pellets${carrying} &nbsp;
       <b>Loose</b> ${this.soil.count} &nbsp;
       <b>Dug</b> ${this.world.excavated}<br>
-      <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 gait ${this.keyGait ?? this.gait} \u00b7 ` : ''}${this.weightless ? '\u{1FAB5} weightless \u00b7 ' : this.surface.mode === 'attached' ? '\u{1F9D7} gripping \u00b7 ' : ''}Target: ${targetName}${bar}${chamber}${skill}${held}${drawn}${chipping} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
+      <span class="dim">${BUILD_LABEL} \u00b7 ${this.debug ? `pos ${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)} \u00b7 up ${this.surface.up} \u00b7 spd ${this.planarSpeed.toFixed(2)} \u00b7 gait ${this.keyGait ?? this.gait} \u00b7 haul ${haulFactor(this.carriedMass()).toFixed(2)} \u00b7 eye ${this.camera.position.y.toFixed(3)} \u00b7 ` : ''}${this.weightless ? '\u{1FAB5} weightless \u00b7 ' : this.surface.mode === 'attached' ? '\u{1F9D7} gripping \u00b7 ' : ''}Target: ${targetName}${bar}${chamber}${skill}${held}${drawn}${chipping} \u00b7 ${(this.world.allocatedBytes() / 1024).toFixed(0)} KB voxels \u00b7 ${this.meshes.size} chunks</span>
     `;
   }
 
@@ -3003,5 +3112,5 @@ export class DigScene {
 
 /** Materials/constants re-exported so tests and future scenes agree on scale. */
 export const DIG_CONSTANTS = {
-  WORLD_SIZE, SURFACE_Y, VOXEL_MM, CHUNK, AIR, TOPSOIL, MATERIALS,
+  WORLD_SIZE, SURFACE_Y, CHUNK, AIR, TOPSOIL, MATERIALS,
 } as const;

@@ -7,6 +7,7 @@ import {
   CAVITY_DISH, DISH_CELLS, EDGE_CHAMFER, FACES, burialShade, meshChunk, tangentAxes,
 } from '../src/voxel/mesher';
 import { CLOD_RADIUS, MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES, type Clod } from '../src/voxel/LooseSoil';
+import { HAUL_FLOOR, PELLET_FILL, QUEEN_MASS_G, clodMassGrams, haulFactor } from '../src/voxel/mass';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
 import { SKY_PHASES, packColor, skyAt, wrapHours } from '../src/voxel/daylight';
@@ -1879,6 +1880,109 @@ describe('fracture', () => {
     expect(session.carried).toBe(PIECES_PER_VOXEL);
     session.place(20, SURFACE + 2, 20);
     expect(world.excavated).toBe(world.deposited);
+  });
+});
+
+describe('weight', () => {
+  it('fills the fraction of its bounding cube the mass model assumes', () => {
+    /*
+     * PELLET_FILL is the one number in mass.ts that is not measured — it is a
+     * property of the SHAPE, asserted in a file that never sees the geometry.
+     * So measure it: the divergence theorem over the real triangles, against
+     * the cube the shape spans. A pellet is a cube with its corners knocked
+     * off, so this sits below 1 and well above the 0.52 of a sphere.
+     *
+     * If the bevel is ever retuned, this is what notices — rather than every
+     * load in the game quietly weighing the wrong amount.
+     */
+    const fills: number[] = [];
+    for (let variant = 0; variant < SOIL_CLOD_VARIANT_COUNT; variant++) {
+      const shape = buildClodShape(variant);
+      let volume = 0;
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let i = 0; i < shape.positions.length; i += 9) {
+        const p = (k: number) => [
+          shape.positions[i + k * 3]!,
+          shape.positions[i + k * 3 + 1]!,
+          shape.positions[i + k * 3 + 2]!,
+        ];
+        const [a, b, c] = [p(0), p(1), p(2)];
+        volume += (
+          a[0]! * (b[1]! * c[2]! - b[2]! * c[1]!)
+          - a[1]! * (b[0]! * c[2]! - b[2]! * c[0]!)
+          + a[2]! * (b[0]! * c[1]! - b[1]! * c[0]!)
+        ) / 6;
+        for (let k = 0; k < 3; k++) {
+          lo = Math.min(lo, shape.positions[i + k * 3]!);
+          hi = Math.max(hi, shape.positions[i + k * 3]!);
+        }
+      }
+      const span = hi - lo;
+      fills.push(Math.abs(volume) / (span * span * span));
+    }
+    /*
+     * A BAND, not a point. The lumping moves each variant a few percent either
+     * side, so PELLET_FILL is a representative average and pretending it is
+     * exact would just mean a test that has to be edited every time the soil
+     * feel is touched. What matters is that the constant sits among the real
+     * shapes rather than drifting off on its own.
+     */
+    expect(Math.min(...fills)).toBeGreaterThan(0.76);
+    expect(Math.max(...fills)).toBeLessThan(0.9);
+    expect(PELLET_FILL).toBeGreaterThan(Math.min(...fills) - 0.05);
+    expect(PELLET_FILL).toBeLessThan(Math.max(...fills) + 0.05);
+  });
+
+  it('weighs a pellet at something a real ant could pick up', () => {
+    /*
+     * A nominal topsoil pellet is 2.5 mm across, and real fire-ant and
+     * leafcutter pellets run around 17 mg. Landing near there is the check that
+     * the g/cm^3 to g/mm^3 conversion went the right way: getting it backwards
+     * makes every load a thousand times too light, which is the one error that
+     * produces no symptom at all beyond the ant never slowing down.
+     */
+    const nominal = clodMassGrams(CLOD_RADIUS, TOPSOIL) * 1000;
+    expect(nominal).toBeGreaterThan(8);
+    expect(nominal).toBeLessThan(30);
+    // Denser soil weighs more at the same size, which is the whole reason for
+    // giving materials a density rather than soil one shared constant.
+    expect(clodMassGrams(CLOD_RADIUS, CLAY)).toBeGreaterThan(clodMassGrams(CLOD_RADIUS, TOPSOIL));
+    // Mass goes as the CUBE of size: twice the radius is eight times the load,
+    // not twice. Linear here would flatten most of the spread away.
+    expect(clodMassGrams(CLOD_RADIUS * 2, TOPSOIL))
+      .toBeCloseTo(clodMassGrams(CLOD_RADIUS, TOPSOIL) * 8, 6);
+  });
+
+  it('slows her in proportion to the load, and never to a stop', () => {
+    expect(haulFactor(0)).toBe(1);
+    const light = clodMassGrams(CLOD_RADIUS * CLOD_SIZE_MIN, SAND);
+    const heavy = clodMassGrams(CLOD_RADIUS * CLOD_SIZE_MAX, CLAY);
+    expect(haulFactor(heavy)).toBeLessThan(haulFactor(light));
+    /*
+     * The SPREAD is the point of the whole change. If the lightest and heaviest
+     * pellet moved her at the same speed then the flat multiplier this replaced
+     * was already right and nothing has been bought.
+     */
+    expect(haulFactor(light) - haulFactor(heavy)).toBeGreaterThan(0.05);
+    let last = 1.0001;
+    for (let g = 0; g < 5; g += 0.05) {
+      const f = haulFactor(g);
+      expect(f).toBeLessThanOrEqual(last + 1e-9);
+      expect(f).toBeGreaterThanOrEqual(HAUL_FLOOR - 1e-9);
+      last = f;
+    }
+    // Floored rather than able to pin her in place.
+    expect(haulFactor(1000)).toBe(HAUL_FLOOR);
+  });
+
+  it('is expressed against the ANT, so a heavier carrier struggles less', () => {
+    // Body mass is a parameter, not a constant baked into the curve: the same
+    // pellet has to cost a worker more than it costs the queen once workers
+    // exist, without this file learning anything new.
+    const pellet = clodMassGrams(CLOD_RADIUS, TOPSOIL);
+    expect(haulFactor(pellet, QUEEN_MASS_G / 3)).toBeLessThan(haulFactor(pellet, QUEEN_MASS_G));
+    expect(haulFactor(pellet, QUEEN_MASS_G * 3)).toBeGreaterThan(haulFactor(pellet, QUEEN_MASS_G));
   });
 });
 

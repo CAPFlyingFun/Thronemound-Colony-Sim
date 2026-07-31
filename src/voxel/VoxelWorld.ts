@@ -40,15 +40,24 @@ export interface Material {
    * describing waiting.
    */
   readonly hardness: number;
+  /**
+   * Bulk density in g/cm^3 — what a pellet of this stuff WEIGHS.
+   *
+   * Bulk rather than particle density, because a clod is soil with its pore
+   * space still in it, not a lump of mineral. That is the difference between
+   * about 1.3 and about 2.65 for the same material, so using the wrong one
+   * would double every load.
+   */
+  readonly density: number;
   readonly diggable: boolean;
 }
 
 export const MATERIALS: readonly Material[] = [
-  { id: AIR, name: 'Air', color: [0, 0, 0], hardness: 0, diggable: false },
-  { id: TOPSOIL, name: 'Topsoil', color: [0.28, 0.19, 0.11], hardness: 1, diggable: true },
-  { id: CLAY, name: 'Clay', color: [0.42, 0.21, 0.14], hardness: 1.5, diggable: true },
-  { id: SAND, name: 'Sand', color: [0.66, 0.56, 0.36], hardness: 1.25, diggable: true },
-  { id: STONE, name: 'Stone', color: [0.34, 0.34, 0.36], hardness: 0, diggable: false },
+  { id: AIR, name: 'Air', color: [0, 0, 0], hardness: 0, density: 0, diggable: false },
+  { id: TOPSOIL, name: 'Topsoil', color: [0.28, 0.19, 0.11], hardness: 1, density: 1.3, diggable: true },
+  { id: CLAY, name: 'Clay', color: [0.42, 0.21, 0.14], hardness: 1.5, density: 1.6, diggable: true },
+  { id: SAND, name: 'Sand', color: [0.66, 0.56, 0.36], hardness: 1.25, density: 1.5, diggable: true },
+  { id: STONE, name: 'Stone', color: [0.34, 0.34, 0.36], hardness: 0, density: 2.6, diggable: false },
 ];
 
 export function materialOf(id: VoxelId): Material {
@@ -58,6 +67,17 @@ export function materialOf(id: VoxelId): Material {
 export function isSolid(id: VoxelId): boolean {
   return id !== AIR;
 }
+
+/**
+ * How big a voxel is in the real world. One world unit is one cell is 5 mm, so
+ * the 128^3 volume is a 64 cm cube of earth.
+ *
+ * Lives here rather than in the scene because it is a property of the WORLD,
+ * and because weight is derived from it: a pellet's mass is its volume in
+ * millimetres times the density above, and neither half of that belongs to a
+ * renderer.
+ */
+export const VOXEL_MM = 5;
 
 export const CHUNK = 32;
 
