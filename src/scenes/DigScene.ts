@@ -774,13 +774,23 @@ export class DigScene {
    */
   private buildGlass(): void {
     const material = new THREE.MeshStandardMaterial({
-      color: 0xbfe6ea,
+      color: 0x86a1a4,
       transparent: true,
       opacity: 0.13,
       roughness: 0.04,
       metalness: 0,
       side: THREE.DoubleSide,
       depthWrite: false,
+      /*
+       * The panes stand ON the ground, so a pane's bottom face and the soil's
+       * top face are the same plane and the depth buffer cannot separate them —
+       * reported as z-fighting along the edges where the glass meets terrain.
+       * Nudging the glass in depth costs nothing visually on a surface this
+       * transparent and settles the tie in one direction, permanently.
+       */
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
     });
     this.cleanups.push(() => material.dispose());
     const span = Math.ceil(WORLD_SIZE / CHUNK);
@@ -804,6 +814,24 @@ export class DigScene {
         }
       }
     }
+  }
+
+  /**
+   * The world as anything deciding what she can STAND ON should see it.
+   *
+   * The panes are not voxels — they are geometry the box module describes — so
+   * `this.world` does not know they exist. Collision already special-cases them,
+   * but the surface frame reads the world directly to decide what to mount and
+   * what supports her, so walking into the glass did nothing: she was stopped
+   * by a wall that, as far as gripping was concerned, was not there.
+   *
+   * Wrapping the world once means the auto-mount, the edge crossing and the
+   * support check all get the glass for free, and none of them learns about it.
+   */
+  private climbable(): { get(x: number, y: number, z: number): VoxelId } {
+    return {
+      get: (x, y, z) => (isGlassCell(x, y, z, BOX) ? STONE : this.world.get(x, y, z)),
+    };
   }
 
   private static chipKey(x: number, y: number, z: number): string {
@@ -2629,7 +2657,7 @@ export class DigScene {
      * what makes gripping work, since attached `up` is the wall's normal and
      * gravity then presses the ant INTO the wall rather than down it.
      */
-    const touching = rankSurfaces(this.world, this.position, this.surface, wish).length > 0;
+    const touching = rankSurfaces(this.climbable(), this.position, this.surface, wish).length > 0;
     // `airborne` is what makes "jump releases you" true underground: without
     // it the leap would be cancelled by the weightlessness it is escaping.
     this.weightless = !this.airborne && this.underground() && touching;
@@ -2707,7 +2735,7 @@ export class DigScene {
       && magnitude >= INPUT_COMMIT_THRESHOLD && canChangeOrientation(this.surface)) {
       const mount = axisFromVector(this.wallNormal);
       if (mount !== this.surface.up) {
-        const mountSupport = supportBelow(this.world, this.position, mount);
+        const mountSupport = supportBelow(this.climbable(), this.position, mount);
         const contact = mountSupport ? this.surfaceContact(mount, mountSupport) : null;
         if (contact) {
           this.position.copy(contact);
@@ -2719,9 +2747,9 @@ export class DigScene {
 
     // Walking across an edge makes the new face your floor — the convex case.
     if (this.weightless || this.surface.mode === 'attached' || this.surface.up !== WORLD_UP) {
-      const decision = evaluateEdge(this.world, this.position, this.surface, wish, magnitude);
+      const decision = evaluateEdge(this.climbable(), this.position, this.surface, wish, magnitude);
       if (decision.commit && decision.up) {
-        const nextSupport = supportBelow(this.world, this.position, decision.up);
+        const nextSupport = supportBelow(this.climbable(), this.position, decision.up);
         const contact = nextSupport ? this.surfaceContact(decision.up, nextSupport) : null;
         if (contact) {
           this.position.copy(contact);
@@ -2730,7 +2758,7 @@ export class DigScene {
         }
       }
     }
-    this.surface.support = supportBelow(this.world, this.position, this.surface.up);
+    this.surface.support = supportBelow(this.climbable(), this.position, this.surface.up);
 
     this.position.y = THREE.MathUtils.clamp(this.position.y, 1, WORLD_SIZE - 2);
     this.position.x = THREE.MathUtils.clamp(this.position.x, 1, WORLD_SIZE - 1);
