@@ -25,6 +25,27 @@ const WALK_SPEED = 2.4;
 /** Crawl is a third of a walk — the pace for placing a tunnel precisely. */
 const CRAWL_FRACTION = 0.34;
 
+/**
+ * How fast she advances while BORING, in world units per second — 2.1 mm/s.
+ *
+ * Derived from the bite rather than chosen, because the complaint was that
+ * digging is nothing like the work it depicts. She used to bore at 8.2 mm/s,
+ * three quarters of her walking pace, while her jaws could clear 1.2 mm of face
+ * per second: she was not digging through the mound, she was swimming through
+ * it with the bite as decoration. Nothing stopped her, because the block test
+ * is a single point at her centre and the dig point runs a centimetre ahead —
+ * so her path is always already cleared by the time she reaches it.
+ *
+ * The honest rate is how fast the jaws can make room for her. One stroke takes
+ * a 4 mm x 0.5 mm scoop, about 6.3 mm³, every 0.42 s — call it 15 mm³/s. She is
+ * roughly 3 mm across, so pushing her body forward one millimetre needs about
+ * 7 mm³ cleared. 15 divided by 7 is close enough to two millimetres a second.
+ *
+ * Raise the bite and this should rise with it; they are the same number seen
+ * from two ends.
+ */
+const BORE_SPEED = 2.1 / WORLD_UNIT_MM;
+
 /** Radians per second she can turn. A little over half a turn a second. */
 const TURN_RATE = 3.6;
 
@@ -300,7 +321,20 @@ interface Pellet {
  */
 export class DensityTerrainLabScene {
   private readonly scene = new THREE.Scene();
-  private readonly camera = new THREE.PerspectiveCamera(62, 1, 0.05, 250);
+  /*
+   * The near plane is 0.1 mm, not 0.25 mm.
+   *
+   * Nothing closer than it is drawn, so a wall inside that distance is a hole
+   * you see the world through. At ant scale that is not a corner case: her bore
+   * is four millimetres wide, and measured from inside one the nearest soil was
+   * 0.20 mm against a 0.25 mm near plane. The terrain was being clipped away
+   * and rendering see-through, which is most of "a lot of camera clipping".
+   *
+   * The far plane comes in to match so the depth buffer keeps its precision —
+   * what matters there is the RATIO, and 1250 mm of range was always far more
+   * world than a 320 mm one needs.
+   */
+  private readonly camera = new THREE.PerspectiveCamera(62, 1, 0.02, 120);
   private readonly renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
   private readonly follow: FollowCamera;
   private readonly bore = new BoreRig();
@@ -1742,7 +1776,14 @@ export class DensityTerrainLabScene {
       ? forward.clone().multiplyScalar(Math.cos(pitch))
         .addScaledVector(WORLD_UP, Math.sin(pitch)).normalize()
       : forward;
-    const wanted = heading.multiplyScalar(this.speed * throttle);
+    /*
+     * Boring is paced by the JAWS, not by the legs — but only going FORWARD.
+     * Backing out removes nothing, so there is no work to pace against, and
+     * making her reverse at digging speed up a hole that is already there is
+     * just a slow walk home.
+     */
+    const pace = digging && throttle > 0 ? BORE_SPEED : this.speed;
+    const wanted = heading.multiplyScalar(pace * throttle);
 
     this.velocity.lerp(wanted, ease);
     this.walkSpeed = this.velocity.length();

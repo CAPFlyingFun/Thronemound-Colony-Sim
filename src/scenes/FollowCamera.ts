@@ -14,6 +14,15 @@ const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const FIRST_PERSON_SNAP = 12;
 
 /**
+ * How far the first-person eye stays clear of soil, in world units — 0.6 mm.
+ *
+ * Several times the near plane, because the near plane is the thing being
+ * avoided: a surface closer than it is simply not drawn, and an undrawn wall is
+ * a hole. Small enough that cutting a face barely shortens the offset.
+ */
+const EYE_CLEARANCE = 0.12;
+
+/**
  * A third-person camera that follows an ant into a hole.
  *
  * This replaces `OrbitControls`, and the reason is not preference. Orbit
@@ -184,7 +193,15 @@ export class FollowCamera {
     let usable = reach;
     for (let d = step; d <= reach; d += step) {
       at.copy(this.body).addScaledVector(direction, d);
-      if (solidAt(at)) { usable = Math.max(0, d - step); break; }
+      /*
+       * Stopped a CLEARANCE short of the soil, not at the last sample that
+       * happened to be clear. The third-person arm has always kept a margin and
+       * this kept none, so the eye came to rest a fifth of a millimetre from a
+       * wall — inside the near plane, which draws nothing and turns the wall
+       * into a window. A margin several times the near plane is the difference
+       * between being in a tunnel and seeing through one.
+       */
+      if (solidAt(at)) { usable = Math.max(0, d - step - EYE_CLEARANCE); break; }
     }
     return this.body.clone().addScaledVector(direction, usable);
   }
