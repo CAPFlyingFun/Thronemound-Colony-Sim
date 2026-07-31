@@ -66,6 +66,16 @@ export type CameraMode = 'first' | 'auto' | 'third';
 export class FollowCamera {
   /** Where the camera looks. The caller keeps this on the ant. */
   readonly target = new THREE.Vector3();
+  /**
+   * Where the first-person eye hangs from — her BODY, not the look target.
+   *
+   * The two are different points and it matters underground. `target` is lifted
+   * clear of her so a third-person shot frames the animal rather than her feet,
+   * and inside a four-millimetre bore that lift puts it in the ROOF. Hanging
+   * the eye off it therefore started every first-person frame inside the soil,
+   * with the collision walk-out having nowhere clear to walk from.
+   */
+  readonly body = new THREE.Vector3();
   /** Which way is up for the rig — the ant's own up, so it rolls with her. */
   readonly up = new THREE.Vector3(0, 1, 0);
   /**
@@ -140,6 +150,43 @@ export class FollowCamera {
   /** Is the rig riding her head because there was no room behind her? */
   get firstPerson(): boolean {
     return this.onboard;
+  }
+
+  /**
+   * The first-person eye, pulled back out of any soil it would be inside.
+   *
+   * The third-person arm has always marched out to the last clear point and the
+   * eye had no such check, which was fine while first person was a fallback for
+   * being in a tunnel — you are inside her head inside a hole, and that is the
+   * shot. It stops being fine the moment the eye is offset FORWARD onto her
+   * face: four millimetres ahead of her, while she is boring, is inside the
+   * working face she has not dug yet, and the view renders from within the
+   * terrain looking out through it.
+   *
+   * So the offset is walked from her body outward and stops short of solid.
+   * Losing a little of the forward offset while cutting is much better than
+   * losing the world.
+   */
+  private eyePoint(
+    solidAt: (point: THREE.Vector3) => boolean,
+    eyeRight: THREE.Vector3,
+    flat: THREE.Vector3,
+    step: number,
+  ): THREE.Vector3 {
+    const full = new THREE.Vector3()
+      .addScaledVector(eyeRight, this.eye.x)
+      .addScaledVector(WORLD_UP, this.eye.y)
+      .addScaledVector(flat, this.eye.z);
+    const reach = full.length();
+    const at = new THREE.Vector3();
+    if (reach < 1e-6) return this.body.clone();
+    const direction = full.clone().divideScalar(reach);
+    let usable = reach;
+    for (let d = step; d <= reach; d += step) {
+      at.copy(this.body).addScaledVector(direction, d);
+      if (solidAt(at)) { usable = Math.max(0, d - step); break; }
+    }
+    return this.body.clone().addScaledVector(direction, usable);
   }
 
   /**
@@ -233,10 +280,7 @@ export class FollowCamera {
     const eyeRight = new THREE.Vector3().crossVectors(WORLD_UP, flat).normalize();
     const right = new THREE.Vector3().crossVectors(up, forward).normalize();
     const wanted = this.onboard
-      ? this.target.clone()
-        .addScaledVector(eyeRight, this.eye.x)
-        .addScaledVector(WORLD_UP, this.eye.y)
-        .addScaledVector(flat, this.eye.z)
+      ? this.eyePoint(solidAt, eyeRight, flat, step)
       : this.target.clone().addScaledVector(back, Math.max(clear, this.options.minDistance));
 
     /*

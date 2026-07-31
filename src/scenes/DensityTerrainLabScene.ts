@@ -1554,6 +1554,15 @@ export class DensityTerrainLabScene {
   }
 
   private holdTunnel(dt: number): void {
+    /*
+     * A single column under her, NOT the stance median.
+     *
+     * The median was tried, to make this agree with `stand` and stop the step
+     * on arming, and it stops the dive dead: it samples five points across her
+     * stance, a bore is four millimetres wide and she is not, so four of the
+     * five land on the rim and the median holds her on top of her own shaft.
+     * Measured — she rose to 13.9 mm and stayed there instead of descending.
+     */
     const floor = this.groundAt(
       this.antPosition.x, this.antPosition.z, this.antPosition.y + FOOT_CLEARANCE,
     );
@@ -1563,7 +1572,7 @@ export class DensityTerrainLabScene {
       const ease = 1 - Math.exp(-HEIGHT_EASE * dt);
       this.antPosition.y += (floor - this.antPosition.y) * ease;
       this.fallSpeed = 0;
-    } else {
+    } else if (!this.bore.digging) {
       /*
        * And DROPPED onto it when the bore has left her over open space.
        *
@@ -1572,8 +1581,19 @@ export class DensityTerrainLabScene {
        * cut a minute ago, and there is no floor under you — so she held the
        * height the bore last gave her, indefinitely, in mid-air. A tunnel is
        * exactly the place a game makes holes for a body to fall down.
+       *
+       * Not while the bore is CUTTING, though. A body wedged in a hole it is
+       * chewing is held by the whole wall of it, not balanced on the floor —
+       * and the two height rules disagree by half a millimetre on sloped
+       * ground, because `stand` asks where her feet support her and this asks
+       * what is directly beneath her. Letting gravity act across that switch
+       * meant pressing BORE dropped her by exactly the difference: half a
+       * millimetre of movement from the one control whose entire specification
+       * is that it does not move you.
        */
       this.applyGravity(dt, floor);
+    } else {
+      this.fallSpeed = 0;
     }
     if (!this.queenReady) return;
     this.queen.root.position.copy(this.antPosition);
@@ -2126,6 +2146,8 @@ export class DensityTerrainLabScene {
      */
     this.follow.aimPitch = this.bore.pitch;
     this.follow.target.copy(this.antPosition).addScaledVector(this.up, CAMERA_LOOK_AT);
+    // The eye hangs off her BODY; only the third-person look target is lifted.
+    this.follow.body.copy(this.antPosition);
     this.follow.update(
       delta, this.facing, (point) => this.solidAt(point), CELL_SIZE * 2,
     );

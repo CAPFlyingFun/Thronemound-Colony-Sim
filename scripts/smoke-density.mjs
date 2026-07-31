@@ -27,6 +27,14 @@ const browser = await chromium.launch({
   args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'],
 });
 
+/**
+ * How far the DRAWN mesh may sit below the surface, in millimetres.
+ *
+ * See the leg check for why this is not zero: a leg is a tube around a bone and
+ * a tube around a curve dips below the line it is drawn about.
+ */
+const SINK_BUDGET_MM = 0.25;
+
 let failed = false;
 const fail = (msg) => { console.error(`FAIL: ${msg}`); failed = true; };
 const ok = (msg) => console.log(`  ok  ${msg}`);
@@ -146,6 +154,202 @@ for (const view of CASES) {
   await page.close();
 }
 
+{
+  /*
+   * Ground following gets its OWN page, and that is not tidiness.
+   *
+   * It carves at her feet and watches her drop, so it needs soil under her to
+   * remove. Run after the digging scenarios it used to share a page with, she
+   * is already standing at the bottom of a shaft they left — a hole dug under
+   * an ant who is on the floor removes nothing, and the check reported a two
+   * HUNDREDTHS of a millimetre non-fall as her failing to follow the ground.
+   * Measured alone on untouched soil she drops the full 2 mm and lands exactly
+   * on her stance height. The fault was the setup.
+   */
+  const page = await browser.newPage({
+    viewport: { width: 430, height: 932 }, deviceScaleFactor: 2,
+  });
+  await page.goto(URL, { waitUntil: 'networkidle' });
+  await page.waitForSelector('canvas', { timeout: 30000 });
+  await page.waitForTimeout(2500);
+
+  /*
+   * The DRAWN legs against the soil, not the skeleton.
+   *
+   * The first version of this check measured foot BONES, found all six sitting
+   * a hundredth of a millimetre above the ground exactly as designed, and
+   * passed — while 5,875 of her 80,754 rendered vertices were under the
+   * surface, the worst by 0.4 mm, which is what you actually see. A skeleton
+   * is a set of lines; a leg is a tube drawn around them, and the joint above
+   * the foot was a quarter-millimetre under with the tube's radius below that
+   * again. Measuring the thing that is displayed is the only version of this
+   * question that means anything.
+   */
+  const legs = await page.evaluate(() => {
+    const lab = window.labScene;
+    if (!lab?.queenReady) return null;
+    lab.queen.root.updateMatrixWorld(true);
+    const legBones = new Set(lab.queen.rig.legs.flatMap((l) => l.bones));
+    const antennaBones = new Set([
+      ...lab.queen.rig.antennaLeft, ...lab.queen.rig.antennaRight,
+    ]);
+    let antennaChecked = 0, antennaBuried = 0, antennaDeepest = 0;
+    let anyChecked = 0, anyBuried = 0, anyDeepest = 0;
+    let checked = 0;
+    let buried = 0;
+    let deepest = 0;
+    let touching = 0;
+    let closest = Infinity;
+    lab.queen.root.traverse((n) => {
+      if (!n.isSkinnedMesh) return;
+      const position = n.geometry.attributes.position;
+      const skinIndex = n.geometry.attributes.skinIndex;
+      const skinWeight = n.geometry.attributes.skinWeight;
+      for (let i = 0; i < position.count; i++) {
+        let best = 0, bestWeight = -1;
+        for (let k = 0; k < 4; k++) {
+          const w = skinWeight.getComponent(i, k);
+          if (w > bestWeight) { bestWeight = w; best = skinIndex.getComponent(i, k); }
+        }
+        const bone = n.skeleton.bones[best];
+        if (!bone) continue;
+        const v = n.getVertexPosition(i, n.position.clone());
+        n.localToWorld(v);
+        const gap = v.y - lab.groundAt(v.x, v.z, v.y + 0.4);
+
+        // Everything she is made of, then the two parts with their own solver.
+        anyChecked++;
+        if (gap < 0) { anyBuried++; anyDeepest = Math.min(anyDeepest, gap); }
+        if (antennaBones.has(bone.name)) {
+          antennaChecked++;
+          if (gap < 0) { antennaBuried++; antennaDeepest = Math.min(antennaDeepest, gap); }
+        }
+        if (!legBones.has(bone.name)) continue;
+        checked++;
+        if (gap < 0) { buried++; deepest = Math.min(deepest, gap); }
+        if (gap >= 0) { closest = Math.min(closest, gap); if (gap * 5 < 0.25) touching++; }
+      }
+    });
+    return {
+      checked, buried, deepestMm: deepest * 5, touching, closestMm: closest * 5,
+      antennaChecked, antennaBuried, antennaDeepestMm: antennaDeepest * 5,
+      anyChecked, anyBuried, anyDeepestMm: anyDeepest * 5,
+    };
+  });
+  if (!legs || legs.checked < 1000) fail(`could not measure the drawn legs (${legs?.checked})`);
+  /*
+   * A quarter of a millimetre of sink is ALLOWED, and that is a decision.
+   *
+   * Zero was the old rule and it was only ever met by holding every foot in the
+   * air: the solver used to prop the claw up on the thickness of the thigh, so
+   * nothing touched anything and the check passed while she hovered. Sizing the
+   * clearance per bone put her feet down, and a tube of mesh around a leg that
+   * is not parallel to the ground dips slightly below the bone line where it
+   * curves — measured at 0.17 mm, a third of a leg's own radius.
+   *
+   * A foot pressed a little into soil is what standing looks like. A foot held
+   * clear of it is what the fault looked like. The budget is bounded and stated
+   * rather than silently zero, and the hover check below bounds the other side.
+   */
+  else if (legs.deepestMm < -SINK_BUDGET_MM) {
+    fail(`${legs.buried} of ${legs.checked} leg vertices are under the soil, worst ${legs.deepestMm.toFixed(3)} mm`);
+  } else {
+    ok(`legs sink at most ${Math.max(0, -legs.deepestMm).toFixed(3)} mm into the soil (${legs.checked} vertices)`);
+    /*
+     * And she must not HOVER. Six legs held clear of the ground pass the check
+     * above while looking like she is floating, so this bounds the gap from
+     * the other side.
+     *
+     * It is a hover budget, not a contact test, and the difference matters:
+     * her legs are tubes about half a millimetre thick and the solver aims the
+     * bone at the ground plus that radius, so the drawn surface only touches
+     * where the tube happens to be tangent. Measured at 0.38 mm at the
+     * closest, of which 0.16 is the fail-safe lift. Six tenths of a millimetre
+     * is under a fifteenth of her body length — closer than you can see, and
+     * far enough from the 0.4 mm she used to be BURIED to be a real bound.
+     */
+    if (legs.closestMm > 0.6) fail(`she is hovering: closest leg vertex ${legs.closestMm.toFixed(3)} mm above the soil`);
+    else ok(`her legs rest on the surface (closest ${legs.closestMm.toFixed(3)} mm, ${legs.touching} within 0.25 mm)`);
+  }
+
+  /*
+   * The antennae, and then EVERYTHING.
+   *
+   * The legs were checked and fixed and the antennae went on clipping, because
+   * a check written for legs is a check about legs — nothing was looking at
+   * the rest of her at all. The whole-body count is the one that cannot be
+   * outflanked by the next part nobody thought of.
+   */
+  if (legs) {
+    if (legs.antennaChecked < 100) fail(`could not find her antennae (${legs.antennaChecked} vertices)`);
+    else if (legs.antennaBuried > 0) {
+      fail(`${legs.antennaBuried} antenna vertices are under the soil, worst ${legs.antennaDeepestMm.toFixed(3)} mm`);
+    } else ok(`her antennae are clear of the soil (${legs.antennaChecked} vertices)`);
+
+    if (legs.anyDeepestMm < -SINK_BUDGET_MM) {
+      fail(`${legs.anyBuried} of ${legs.anyChecked} vertices anywhere on her are under the soil, worst ${legs.anyDeepestMm.toFixed(3)} mm`);
+    } else ok(`nothing of her sinks past the budget (worst ${legs.anyDeepestMm.toFixed(3)} mm)`);
+  }
+
+  /*
+   * Does she follow the mesh after it changes UNDER her?
+   *
+   * Reported from play as "the ball doesn't automatically adjust to the new
+   * mesh", and the cause was that the ground height was only re-read inside
+   * the movement branch — so standing still over a hole you had just made left
+   * you at the height the soil used to be. Digging at the crosshair cannot
+   * test it, because the crosshair is not necessarily under her; this carves
+   * at her own feet and watches her drop, which is the actual claim.
+   */
+  const drop = await page.evaluate(async () => {
+    const lab = window.labScene;
+    if (!lab) return null;
+    /*
+     * Fresh soil first. This check runs after the digging scenarios above have
+     * already put her near the bottom of the world, and a hole dug under an ant
+     * who is standing on the floor removes nothing — she fell two hundredths of
+     * a millimetre and the check called it a failure to follow the ground.
+     * Measured in isolation on untouched ground she drops the full 2 mm and
+     * lands exactly on her stance height, so the fault was the setup, not her.
+     */
+    lab.stepForTest(1 / 60, 120);
+    const before = lab.antPosition.y;
+    /*
+     * Wider than she is. Her body rides on her stance, so a hole narrower than
+     * her footprint is one she straddles rather than falls into — which is
+     * correct, and which makes a narrow hole the wrong instrument for asking
+     * whether she follows the ground down.
+     */
+    const r = lab.stream.field.cellSize * 40;
+    for (let i = 0; i < 6; i += 1) {
+      lab.stream.subtractSphere(
+        { x: lab.antPosition.x, y: before + r - i * 0.1, z: lab.antPosition.z }, r,
+      );
+    }
+    /*
+     * A full simulated second, not two animation frames.
+     *
+     * Two frames was enough while her height SNAPPED to the ground through an
+     * exponential ease, which moved a third of the gap immediately. She falls
+     * under gravity now, and gravity starts at rest: at 25 mm/s² the first two
+     * frames are fourteen MICRONS, so the old window measured a real fall as no
+     * fall at all. Stepped deterministically so the answer does not depend on
+     * how fast the headless renderer happens to be.
+     */
+    lab.stepForTest(1 / 60, 60);
+    return { before, after: lab.antPosition.y };
+  });
+  if (!drop) fail('could not reach the scene to test ground following');
+  else if (!(drop.after < drop.before - 0.05)) {
+    fail(`she did not drop into a hole dug under her: ${drop.before} -> ${drop.after}`);
+  } else {
+    const mm = (drop.before - drop.after) * 5;
+    ok(`she drops ${mm.toFixed(2)} mm when the soil under her is removed`);
+  }
+
+  await page.close();
+}
+
 /* Digging actually works, and reports soil. Once is enough — the geometry
  * above is what varies by viewport, not the arithmetic. */
 {
@@ -221,17 +425,38 @@ for (const view of CASES) {
     const lab = window.labScene;
     if (!lab?.queenReady) return null;
     const bones = lab.queen.bones;
-    const feet = lab.queen.rig.legs.map((l) => {
-      const b = bones.get(l.bones[l.bones.length - 1]);
-      return b ? b.getWorldPosition(b.position.clone()).z : null;
-    }).filter((v) => v !== null);
+    /*
+     * Her SKELETON's longest axis, not her front-foot-to-rear-foot span.
+     *
+     * The span was a fair proxy while the legs were swung by a clock, and it
+     * stopped being one the moment the walk became a set of world anchors: feet
+     * now plant within a short stride of the shoulder rather than reaching fore
+     * and aft, so she measured 4.4 mm and the check reported a 9 mm ant as half
+     * size. That is a check failing for a reason that has nothing to do with
+     * what it is for.
+     *
+     * How long she is does not depend on what her legs are doing. Every bone,
+     * widest axis — the same measure the pose-drift check uses, and it agreed
+     * with the configured 9 mm throughout.
+     */
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
+    const probe = lab.antPosition.constructor;
+    for (const bone of bones.values()) {
+      const p = bone.getWorldPosition(new probe());
+      const at = [p.x, p.y, p.z];
+      for (let i = 0; i < 3; i += 1) {
+        lo[i] = Math.min(lo[i], at[i]);
+        hi[i] = Math.max(hi[i], at[i]);
+      }
+    }
+    // Kept for the facing check below, which asks which way round she is.
     const mouth = bones.get(lab.queen.rig.mouth.at(-1));
     const gaster = bones.get(lab.queen.rig.gaster.at(-1));
     return {
-      legSpan: Math.max(...feet) - Math.min(...feet),
+      legSpan: Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]),
       headToTail: mouth && gaster
-        ? mouth.getWorldPosition(mouth.position.clone()).z
-          - gaster.getWorldPosition(gaster.position.clone()).z
+        ? mouth.getWorldPosition(new probe()).z - gaster.getWorldPosition(new probe()).z
         : 0,
     };
   });
@@ -242,152 +467,13 @@ for (const view of CASES) {
     // Within a tenth of the 9 mm she is configured at. Her legs reach a little
     // past her body, so this is a fair proxy for overall length.
     if (Math.abs(spanMm - 9) > 0.9) fail(`queen measures ${spanMm.toFixed(2)} mm, not 9 mm`);
-    else ok(`queen measures ${spanMm.toFixed(2)} mm front foot to rear foot`);
+    else ok(`queen measures ${spanMm.toFixed(2)} mm along her longest axis`);
     // Head toward +Z, which is what `forward = (sin f, 0, cos f)` assumes.
     if (!(size.headToTail > 0)) fail('the queen model faces -Z; her heading is backwards');
     else ok('queen faces +Z, matching the heading maths');
   }
 
-  /*
-   * Does she follow the mesh after it changes UNDER her?
-   *
-   * Reported from play as "the ball doesn't automatically adjust to the new
-   * mesh", and the cause was that the ground height was only re-read inside
-   * the movement branch — so standing still over a hole you had just made left
-   * you at the height the soil used to be. Digging at the crosshair cannot
-   * test it, because the crosshair is not necessarily under her; this carves
-   * at her own feet and watches her drop, which is the actual claim.
-   */
-  const drop = await page.evaluate(async () => {
-    const lab = window.labScene;
-    if (!lab) return null;
-    const before = lab.antPosition.y;
-    /*
-     * Wider than she is. Her body rides on her stance, so a hole narrower than
-     * her footprint is one she straddles rather than falls into — which is
-     * correct, and which makes a narrow hole the wrong instrument for asking
-     * whether she follows the ground down.
-     */
-    const r = lab.stream.field.cellSize * 40;
-    for (let i = 0; i < 6; i += 1) {
-      lab.stream.subtractSphere(
-        { x: lab.antPosition.x, y: before + r - i * 0.1, z: lab.antPosition.z }, r,
-      );
-    }
-    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
-    return { before, after: lab.antPosition.y };
-  });
-  if (!drop) fail('could not reach the scene to test ground following');
-  else if (!(drop.after < drop.before - 0.05)) {
-    fail(`she did not drop into a hole dug under her: ${drop.before} -> ${drop.after}`);
-  } else {
-    const mm = (drop.before - drop.after) * 5;
-    ok(`she drops ${mm.toFixed(2)} mm when the soil under her is removed`);
-  }
 
-  /*
-   * The DRAWN legs against the soil, not the skeleton.
-   *
-   * The first version of this check measured foot BONES, found all six sitting
-   * a hundredth of a millimetre above the ground exactly as designed, and
-   * passed — while 5,875 of her 80,754 rendered vertices were under the
-   * surface, the worst by 0.4 mm, which is what you actually see. A skeleton
-   * is a set of lines; a leg is a tube drawn around them, and the joint above
-   * the foot was a quarter-millimetre under with the tube's radius below that
-   * again. Measuring the thing that is displayed is the only version of this
-   * question that means anything.
-   */
-  const legs = await page.evaluate(() => {
-    const lab = window.labScene;
-    if (!lab?.queenReady) return null;
-    lab.queen.root.updateMatrixWorld(true);
-    const legBones = new Set(lab.queen.rig.legs.flatMap((l) => l.bones));
-    const antennaBones = new Set([
-      ...lab.queen.rig.antennaLeft, ...lab.queen.rig.antennaRight,
-    ]);
-    let antennaChecked = 0, antennaBuried = 0, antennaDeepest = 0;
-    let anyChecked = 0, anyBuried = 0, anyDeepest = 0;
-    let checked = 0;
-    let buried = 0;
-    let deepest = 0;
-    let touching = 0;
-    let closest = Infinity;
-    lab.queen.root.traverse((n) => {
-      if (!n.isSkinnedMesh) return;
-      const position = n.geometry.attributes.position;
-      const skinIndex = n.geometry.attributes.skinIndex;
-      const skinWeight = n.geometry.attributes.skinWeight;
-      for (let i = 0; i < position.count; i++) {
-        let best = 0, bestWeight = -1;
-        for (let k = 0; k < 4; k++) {
-          const w = skinWeight.getComponent(i, k);
-          if (w > bestWeight) { bestWeight = w; best = skinIndex.getComponent(i, k); }
-        }
-        const bone = n.skeleton.bones[best];
-        if (!bone) continue;
-        const v = n.getVertexPosition(i, n.position.clone());
-        n.localToWorld(v);
-        const gap = v.y - lab.groundAt(v.x, v.z, v.y + 0.4);
-
-        // Everything she is made of, then the two parts with their own solver.
-        anyChecked++;
-        if (gap < 0) { anyBuried++; anyDeepest = Math.min(anyDeepest, gap); }
-        if (antennaBones.has(bone.name)) {
-          antennaChecked++;
-          if (gap < 0) { antennaBuried++; antennaDeepest = Math.min(antennaDeepest, gap); }
-        }
-        if (!legBones.has(bone.name)) continue;
-        checked++;
-        if (gap < 0) { buried++; deepest = Math.min(deepest, gap); }
-        if (gap >= 0) { closest = Math.min(closest, gap); if (gap * 5 < 0.25) touching++; }
-      }
-    });
-    return {
-      checked, buried, deepestMm: deepest * 5, touching, closestMm: closest * 5,
-      antennaChecked, antennaBuried, antennaDeepestMm: antennaDeepest * 5,
-      anyChecked, anyBuried, anyDeepestMm: anyDeepest * 5,
-    };
-  });
-  if (!legs || legs.checked < 1000) fail(`could not measure the drawn legs (${legs?.checked})`);
-  else if (legs.buried > 0) {
-    fail(`${legs.buried} of ${legs.checked} leg vertices are under the soil, worst ${legs.deepestMm.toFixed(3)} mm`);
-  } else {
-    ok(`no part of a drawn leg is under the soil (${legs.checked} vertices)`);
-    /*
-     * And she must not HOVER. Six legs held clear of the ground pass the check
-     * above while looking like she is floating, so this bounds the gap from
-     * the other side.
-     *
-     * It is a hover budget, not a contact test, and the difference matters:
-     * her legs are tubes about half a millimetre thick and the solver aims the
-     * bone at the ground plus that radius, so the drawn surface only touches
-     * where the tube happens to be tangent. Measured at 0.38 mm at the
-     * closest, of which 0.16 is the fail-safe lift. Six tenths of a millimetre
-     * is under a fifteenth of her body length — closer than you can see, and
-     * far enough from the 0.4 mm she used to be BURIED to be a real bound.
-     */
-    if (legs.closestMm > 0.6) fail(`she is hovering: closest leg vertex ${legs.closestMm.toFixed(3)} mm above the soil`);
-    else ok(`her legs rest on the surface (closest ${legs.closestMm.toFixed(3)} mm, ${legs.touching} within 0.25 mm)`);
-  }
-
-  /*
-   * The antennae, and then EVERYTHING.
-   *
-   * The legs were checked and fixed and the antennae went on clipping, because
-   * a check written for legs is a check about legs — nothing was looking at
-   * the rest of her at all. The whole-body count is the one that cannot be
-   * outflanked by the next part nobody thought of.
-   */
-  if (legs) {
-    if (legs.antennaChecked < 100) fail(`could not find her antennae (${legs.antennaChecked} vertices)`);
-    else if (legs.antennaBuried > 0) {
-      fail(`${legs.antennaBuried} antenna vertices are under the soil, worst ${legs.antennaDeepestMm.toFixed(3)} mm`);
-    } else ok(`her antennae are clear of the soil (${legs.antennaChecked} vertices)`);
-
-    if (legs.anyBuried > 0) {
-      fail(`${legs.anyBuried} of ${legs.anyChecked} vertices anywhere on her are under the soil, worst ${legs.anyDeepestMm.toFixed(3)} mm`);
-    } else ok(`no part of her is under the soil at all (${legs.anyChecked} vertices)`);
-  }
 
   /*
    * Does she dig AHEAD of herself?
@@ -561,9 +647,20 @@ for (const view of CASES) {
   if (/queued/.test(hud)) fail(`chunks still queued after settling: "${hud}"`);
   else ok('streamed chunks all built');
 
-  // And digging still lands somewhere real after the window has moved.
+  /*
+   * And digging still lands somewhere real after the window has moved — AIMED
+   * DOWN, which it now has to be.
+   *
+   * This bored at level pitch, and used to hit soil anyway because arming the
+   * dig tipped her nose into the ground whether or not that was asked for.
+   * That was the fault, and fixing it made this pass by accident stop passing:
+   * a level bore along the surface is a jaw waving through the air, so she
+   * freed 12 mm³ of nothing much and the HUD said, correctly, that there was
+   * nothing in reach. Aiming down is how you dig.
+   */
   await page.evaluate(() => {
     const lab = window.labScene;
+    for (let i = 0; i < 4; i += 1) lab.bore.aim(-1);
     if (!lab.bore.digging) lab.bore.toggleDig();
     lab.input.walk = 1;
     lab.stepForTest(1 / 60, 150);
@@ -606,9 +703,18 @@ for (const view of CASES) {
         return [v.x, v.y, v.z];
       });
     };
-    lab.input.walk = 0;
-    lab.input.yaw = 0;
+    /*
+     * On her feet on fresh ground first. These ask what she does STANDING, and
+     * the scenario above leaves her in the crater she has just been digging —
+     * where the fail-safe is legitimately at work holding her clear of a wall,
+     * so "the guard is idle" fails for a reason that is not the fault it hunts.
+     */
     if (lab.bore.digging) lab.bore.toggleDig();
+    while (lab.bore.pitch < 0) lab.bore.aim(1);
+    lab.input.yaw = 0;
+    lab.input.walk = 1;
+    lab.stepForTest(1 / 60, 240);
+    lab.input.walk = 0;
     // Long enough for the pitch train to arrive as well — her gaster closes its
     // lag slowly, and catching it still catching up reads as drift.
     lab.stepForTest(1 / 60, 900);
