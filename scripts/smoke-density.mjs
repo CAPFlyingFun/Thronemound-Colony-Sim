@@ -114,6 +114,87 @@ for (const view of CASES) {
     await page.waitForTimeout(400);
   }
   await page.screenshot({ path: `${OUT}-after.png` });
+  /*
+   * The queen has to have actually arrived. `QueenModel.load` resolves FALSE
+   * on failure rather than throwing, which is right — a missing model must not
+   * take the scene down — but it means a 404 on the 1.4 MB glb looks exactly
+   * like a working build with an invisible player, and nothing in the console
+   * says otherwise.
+   */
+  const banner = (await page.locator('.density-lab-status').innerText()).replace(/\s+/g, ' ');
+  if (/failed to load|loading/.test(banner)) fail(`queen model did not load: "${banner}"`);
+  else if (!/Queen: \d+ mm long/.test(banner)) fail(`HUD does not report the queen: "${banner}"`);
+  else ok(`queen loaded and scaled (${/Queen: [^·<]*/.exec(banner)?.[0].trim()})`);
+
+  /*
+   * How big she actually is, measured off the loaded model rather than off the
+   * constant that was meant to set it. `rigScale` divides a caste length in
+   * millimetres by the model's own measured length, so a re-export with
+   * different proportions changes her size while every number in the source
+   * stays exactly the same — and at ant scale nobody can eyeball 20% out.
+   */
+  const size = await page.evaluate(() => {
+    const lab = window.labScene;
+    if (!lab?.queenReady) return null;
+    const bones = lab.queen.bones;
+    const feet = lab.queen.rig.legs.map((l) => {
+      const b = bones.get(l.bones[l.bones.length - 1]);
+      return b ? b.getWorldPosition(b.position.clone()).z : null;
+    }).filter((v) => v !== null);
+    const mouth = bones.get(lab.queen.rig.mouth.at(-1));
+    const gaster = bones.get(lab.queen.rig.gaster.at(-1));
+    return {
+      legSpan: Math.max(...feet) - Math.min(...feet),
+      headToTail: mouth && gaster
+        ? mouth.getWorldPosition(mouth.position.clone()).z
+          - gaster.getWorldPosition(gaster.position.clone()).z
+        : 0,
+    };
+  });
+  if (!size) fail('could not measure the queen');
+  else {
+    const WORLD_UNIT_MM = 5;
+    const spanMm = size.legSpan * WORLD_UNIT_MM;
+    // Within a tenth of the 9 mm she is configured at. Her legs reach a little
+    // past her body, so this is a fair proxy for overall length.
+    if (Math.abs(spanMm - 9) > 0.9) fail(`queen measures ${spanMm.toFixed(2)} mm, not 9 mm`);
+    else ok(`queen measures ${spanMm.toFixed(2)} mm front foot to rear foot`);
+    // Head toward +Z, which is what `forward = (sin f, 0, cos f)` assumes.
+    if (!(size.headToTail > 0)) fail('the queen model faces -Z; her heading is backwards');
+    else ok('queen faces +Z, matching the heading maths');
+  }
+
+  /*
+   * Does she follow the mesh after it changes UNDER her?
+   *
+   * Reported from play as "the ball doesn't automatically adjust to the new
+   * mesh", and the cause was that the ground height was only re-read inside
+   * the movement branch — so standing still over a hole you had just made left
+   * you at the height the soil used to be. Digging at the crosshair cannot
+   * test it, because the crosshair is not necessarily under her; this carves
+   * at her own feet and watches her drop, which is the actual claim.
+   */
+  const drop = await page.evaluate(async () => {
+    const lab = window.labScene;
+    if (!lab) return null;
+    const before = lab.antPosition.y;
+    const r = lab.stream.field.cellSize * 8;
+    for (let i = 0; i < 6; i += 1) {
+      lab.stream.subtractSphere(
+        { x: lab.antPosition.x, y: before + r - i * 0.1, z: lab.antPosition.z }, r,
+      );
+    }
+    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    return { before, after: lab.antPosition.y };
+  });
+  if (!drop) fail('could not reach the scene to test ground following');
+  else if (!(drop.after < drop.before - 0.05)) {
+    fail(`she did not drop into a hole dug under her: ${drop.before} -> ${drop.after}`);
+  } else {
+    const mm = (drop.before - drop.after) * 5;
+    ok(`she drops ${mm.toFixed(2)} mm when the soil under her is removed`);
+  }
+
   const status = (await page.locator('.density-lab-status').innerText()).replace(/\s+/g, ' ');
   const removed = Number(/Removed: ([\d.]+)/.exec(status)?.[1] ?? 0);
   if (removed <= 0) fail(`digging removed nothing: "${status}"`);
@@ -189,10 +270,13 @@ for (const view of CASES) {
 
   // And digging still lands somewhere real after the window has moved.
   await page.locator('button', { hasText: 'DIG' }).first().click({ force: true });
-  await page.waitForTimeout(500);
+  // Long enough for the pellet to land, so the screenshot shows where a clod
+  // comes to REST rather than catching one mid-flight and looking like it is
+  // stuck in the air.
+  await page.waitForTimeout(1800);
   await page.screenshot({ path: `${OUT}-walked.png` });
   const after = (await page.locator('.density-lab-status').innerText()).replace(/\s+/g, ' ');
-  if (!/pellet freed/.test(after)) fail(`dig after walking did not reach soil: "${after}"`);
+  if (!/mm³ freed/.test(after)) fail(`dig after walking did not reach soil: "${after}"`);
   else ok('dig still reaches soil after the window has scrolled');
   if (errors.length) fail(`walk run: ${errors.slice(0, 2).join(' | ')}`);
   await page.close();

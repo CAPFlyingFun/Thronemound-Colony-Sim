@@ -80,40 +80,106 @@ export const BITE_DEPTH = BITE_DEPTH_MM / WORLD_UNIT_MM;
  */
 export const CLOD_ROUGHNESS = 0.17;
 
+/** How much a clod is flattened along its own Y, so it sits rather than rolls. */
+export const CLOD_SQUASH = 0.86;
+
 /**
  * Volume of the drawn pellet per unit of radius cubed.
  *
  * The pellet used to be `CylinderGeometry(r, 0.92r, 1.45r, 8)` — an octagonal
  * TUBE, which is what it looked like: a little drum of dirt. It is a knobbly
- * solid now (see `clodPositions`), and this is the number that keeps it
- * honest, because the pellet is sized so that it HOLDS the soil that was
- * removed and that sizing needs to know the shape's real volume.
+ * solid now (see `clodGeometry`), and this is the number that keeps it honest,
+ * because the pellet is sized so that it HOLDS the soil that was removed and
+ * that sizing needs to know the shape's real volume.
  *
  * A regular icosahedron of circumradius r encloses (5/12)(3 + sqrt5) * a^3
  * where a is its edge, and a = r * 4 / sqrt(10 + 2*sqrt5). Roughening moves
  * vertices both ways by the same amount, so to first order it cancels and the
- * base solid is the right measure. Derived rather than measured, so it follows
- * the geometry if that is ever retuned.
+ * base solid is the right measure. The squash is a linear scale on one axis and
+ * so scales the volume by exactly itself — it used to be applied to the drawn
+ * shape and left out of this, which quietly made every pellet hold 14% less
+ * than it claimed. Derived rather than measured, so it follows the geometry if
+ * that is ever retuned.
  */
 export const PELLET_SOLIDITY = (() => {
   const edge = 4 / Math.sqrt(10 + 2 * Math.sqrt(5));
-  return (5 / 12) * (3 + Math.sqrt(5)) * edge ** 3;
+  return (5 / 12) * (3 + Math.sqrt(5)) * edge ** 3 * CLOD_SQUASH;
 })();
 
 /**
- * A clod, as displaced points on an icosahedron.
- *
- * Deliberately its own function, free of three.js, so the shape can be checked
- * for volume without a renderer — the pellet has to hold what the bite removed
- * and that is arithmetic, not art.
- *
- * The displacement is keyed to a seed rather than to Math.random, so a clod
- * looks the same every time it is rebuilt and two clods look different from
- * each other.
+ * The displacement for one corner, keyed to a seed rather than to Math.random
+ * so a clod looks the same every time it is rebuilt and two clods look
+ * different from each other.
  */
 export function clodJitter(seed: number, index: number): number {
   const h = Math.sin(seed * 12.9898 + index * 78.233) * 43758.5453;
   return 1 + (h - Math.floor(h) - 0.5) * 2 * CLOD_ROUGHNESS;
+}
+
+/*
+ * The twelve corners of a regular icosahedron, and the twenty faces over them.
+ *
+ * Written out here rather than taken from `THREE.IcosahedronGeometry`, and that
+ * is the entire fix for clods that looked "not solid, fractured". Three.js
+ * builds its platonic solids NON-INDEXED: sixty vertices for twelve corners,
+ * each corner duplicated once per touching face. Roughening by vertex index
+ * therefore gave the five copies of every corner five DIFFERENT displacements,
+ * so the twenty triangles pulled away from each other and the pellet came apart
+ * into loose shards. Measured: 60 positions, 12 distinct directions, 5 copies
+ * of each.
+ *
+ * Indexed, a corner is one number and moving it moves every face that uses it,
+ * so the solid stays a solid by construction rather than by everyone
+ * remembering to weld. Flat shading still gives the facets — that was never
+ * what was broken.
+ */
+const PHI = (1 + Math.sqrt(5)) / 2;
+const ICOSA_CORNERS: ReadonlyArray<readonly [number, number, number]> = [
+  [-1, PHI, 0], [1, PHI, 0], [-1, -PHI, 0], [1, -PHI, 0],
+  [0, -1, PHI], [0, 1, PHI], [0, -1, -PHI], [0, 1, -PHI],
+  [PHI, 0, -1], [PHI, 0, 1], [-PHI, 0, -1], [-PHI, 0, 1],
+];
+const ICOSA_FACES: ReadonlyArray<readonly [number, number, number]> = [
+  [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+  [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+  [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+  [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+];
+
+export interface ClodGeometry {
+  positions: Float32Array;
+  indices: Uint16Array;
+}
+
+/**
+ * One clod, as an indexed solid of unit circumradius.
+ *
+ * Free of three.js on purpose, so the shape can be checked for closure,
+ * winding and volume without a renderer — a pellet has to hold what the bite
+ * removed, and that is arithmetic, not art.
+ *
+ * Each corner is pushed along its own direction, which keeps the solid
+ * star-shaped about its centre: no face can fold through another however the
+ * seed lands, so there is no roughness value that turns a clod inside out.
+ */
+export function clodGeometry(seed: number): ClodGeometry {
+  const positions = new Float32Array(ICOSA_CORNERS.length * 3);
+  for (let i = 0; i < ICOSA_CORNERS.length; i += 1) {
+    const corner = ICOSA_CORNERS[i]!;
+    const length = Math.hypot(corner[0], corner[1], corner[2]);
+    const scale = clodJitter(seed, i) / length;
+    positions[i * 3] = corner[0] * scale;
+    positions[i * 3 + 1] = corner[1] * scale * CLOD_SQUASH;
+    positions[i * 3 + 2] = corner[2] * scale;
+  }
+  const indices = new Uint16Array(ICOSA_FACES.length * 3);
+  for (let f = 0; f < ICOSA_FACES.length; f += 1) {
+    const face = ICOSA_FACES[f]!;
+    indices[f * 3] = face[0];
+    indices[f * 3 + 1] = face[1];
+    indices[f * 3 + 2] = face[2];
+  }
+  return { positions, indices };
 }
 
 export const WORLD_WIDTH = CELLS_X * CELL_SIZE;

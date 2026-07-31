@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { QueenModel } from '../anim/QueenModel';
+import { CASTE_LENGTH_MM } from '../anim/hexapod';
 import { buildSurfaceNets } from '../density/SurfaceNets';
 import { TerrainStream } from '../density/TerrainStream';
 import {
   BITE_DEPTH, BITE_DEPTH_MM, BITE_WIDTH_MM, BRUSH_RADIUS, CELLS_Y,
-  CELL_SIZE, CHUNK_CELLS, PELLET_SOLIDITY, WORLD_UNIT_MM, clodJitter,
+  CELL_SIZE, CHUNK_CELLS, PELLET_SOLIDITY, WORLD_UNIT_MM, clodGeometry,
 } from '../density/labMound';
 import {
   SOIL_DEPTH, TILE_CELLS, TILE_MM, WINDOW_BYTES, WINDOW_CELLS, WINDOW_SIZE,
@@ -14,8 +16,30 @@ import './DensityTerrainLabScene.css';
 
 const MAX_PELLETS = 36;
 
-/** World units per second the scout walks. About 12 mm/s — a tile every 1.3 s. */
-const SCOUT_SPEED = 2.4;
+/** World units per second she walks. About 12 mm/s — a tile every 1.3 s. */
+const WALK_SPEED = 2.4;
+
+/** Radians per second she can turn. A little over half a turn a second. */
+const TURN_RATE = 3.6;
+
+/**
+ * How quickly the dig animation fades after a bite, in units per second.
+ *
+ * The gait takes `digging` as a 0..1 level, not an event, so a bite raises it
+ * and this brings it back down. Roughly a third of a second of scraping per
+ * tap, which is about how long the crater takes to register anyway.
+ */
+const DIG_DECAY = 3;
+
+/**
+ * How far apart her feet are, as a fraction of her length, for reading slope.
+ *
+ * A little over a third either way, so the span is most of her body. Small
+ * enough that she follows a real rise; large enough that she ignores anything
+ * she could simply step over — including her own diggings, which is what she
+ * spends the whole lab doing.
+ */
+const STANCE = 0.35;
 
 /**
  * How much of a frame may go to building newly streamed chunks.
@@ -70,7 +94,7 @@ interface Pellet {
  * production voxel mesher, so failures here cannot disturb the main map.
  *
  * The soil is STREAMED: a three-by-three window of tiles is resident and it
- * slides to keep the scout in the middle one. See `TerrainStream` for why the
+ * slides to keep the queen in the middle one. See `TerrainStream` for why the
  * world can then be any size, and `labWorld` for why the tile is 16 mm.
  */
 export class DensityTerrainLabScene {
@@ -111,7 +135,28 @@ export class DensityTerrainLabScene {
   private readonly terrainMaterial = new THREE.MeshStandardMaterial({
     color: 0x6f4931, roughness: 0.96, metalness: 0, flatShading: false, side: THREE.FrontSide,
   });
-  private readonly scout: any;
+  /**
+   * Where the ant IS, as opposed to where she is drawn.
+   *
+   * Kept as a bare vector rather than read off the model, because the model
+   * arrives over the network and may not arrive at all. `QueenModel.load`
+   * resolves false on failure by design; if the scene's idea of position lived
+   * inside her, a slow connection would mean no walking, no streaming and no
+   * digging until she showed up.
+   */
+  private readonly antPosition: any;
+  private readonly queen = new QueenModel('queen');
+  private queenReady = false;
+  /** Radians. Her heading, eased toward the direction she is walking. */
+  private facing = 0;
+  /** Radians per second, for the gait's lean into a turn. */
+  private turnRate = 0;
+  /** World units per second, for the gait's cadence. Zero when standing. */
+  private walkSpeed = 0;
+  /** 0..1, decaying. Drives the gait's dig animation after a bite. */
+  private digPulse = 0;
+  /** Her current up axis, eased toward the slope so she does not shiver. */
+  private readonly up = new THREE.Vector3(0, 1, 0);
   private sun: any = null;
   private readonly move = { forward: 0, strafe: 0 };
   private readonly heldKeys = new Set<string>();
@@ -142,13 +187,27 @@ export class DensityTerrainLabScene {
     const start = WORLD_SPAN * 0.5;
     this.stream = new TerrainStream(start, start);
 
-    this.scout = new THREE.Mesh(
-      new THREE.SphereGeometry(0.16, 16, 12),
-      new THREE.MeshStandardMaterial({ color: 0xd8492f, roughness: 0.5, emissive: 0x3a0d05 }),
-    );
-    this.scout.castShadow = true;
-    this.scout.position.set(start, streamGroundHeight(start, start) + 0.16, start);
-    this.scene.add(this.scout);
+    this.antPosition = new THREE.Vector3(start, streamGroundHeight(start, start), start);
+    this.scene.add(this.queen.root);
+    void this.queen.load().then((ok) => {
+      /*
+       * A handle for the smoke test, and the reason it is worth having: "is
+       * she the right size" cannot be answered from a screenshot, and it
+       * cannot be answered from the constants either, because the scale is
+       * applied to a model whose own proportions live in the glb. Measured
+       * through here, her front foot to her rear foot spans 1.815 world units
+       * — 9.07 mm against the 9 mm `CASTE_LENGTH_MM` asks for.
+       *
+       * The same measurement settled which way she faces: her mouth bone sits
+       * at z = +0.82 and her gaster at z = -0.63, so her head is toward +Z and
+       * `forward = (sin f, 0, cos f)` points where she is actually going. From
+       * the side, at the lab's camera angle, +Z and -X look identical.
+       */
+      (window as unknown as { labScene?: unknown }).labScene = this;
+      this.queenReady = ok;
+      if (!ok) this.status.dataset.message = 'Queen model failed to load';
+      this.updateStatus();
+    });
 
     /*
      * Framing in fractions of the WINDOW, not of the world. The window is what
@@ -156,10 +215,10 @@ export class DensityTerrainLabScene {
      * a fraction of it away would look at soil that is not loaded.
      */
     this.camera.position.set(
-      start + WINDOW_SIZE * 0.16, this.scout.position.y + WINDOW_SIZE * 0.2, start + WINDOW_SIZE * 0.3,
+      start + WINDOW_SIZE * 0.16, this.antPosition.y + WINDOW_SIZE * 0.2, start + WINDOW_SIZE * 0.3,
     );
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.target.copy(this.scout.position);
+    this.controls.target.copy(this.antPosition);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.minDistance = WINDOW_SIZE * 0.05;
@@ -238,8 +297,7 @@ export class DensityTerrainLabScene {
     this.empties.clear();
     this.pending.length = 0;
     this.terrainMaterial.dispose();
-    this.scout.geometry.dispose();
-    if (this.scout.material instanceof THREE.Material) this.scout.material.dispose();
+    this.queen.dispose();
     for (const pellet of this.pellets) {
       pellet.mesh.geometry.dispose();
       if (pellet.mesh.material instanceof THREE.Material) pellet.mesh.material.dispose();
@@ -323,7 +381,7 @@ export class DensityTerrainLabScene {
     sun.castShadow = true;
     sun.shadow.mapSize.set(1024, 1024);
     /*
-     * The shadow camera follows the scout rather than sitting over a fixed
+     * The shadow camera follows the ant rather than sitting over a fixed
      * world box: at 320 mm the map is a hundred times the area a 1024 map can
      * cover usefully, and a world-sized frustum would put a shadow texel at
      * about a third of a millimetre — coarser than the bite it is meant to
@@ -385,12 +443,12 @@ export class DensityTerrainLabScene {
     /*
      * Nearest first. A diagonal scroll queues about eighty chunks and the
      * queue drains over a second or so, so the ORDER decides whether the soil
-     * that fills in last is under the scout's feet or out at the fog line.
+     * that fills in last is under her feet or out at the fog line.
      * Queued in raster order it was the former, which is the one place a gap
      * is unmissable.
      */
-    const sx = this.scout.position.x / (CHUNK_CELLS * CELL_SIZE);
-    const sz = this.scout.position.z / (CHUNK_CELLS * CELL_SIZE);
+    const sx = this.antPosition.x / (CHUNK_CELLS * CELL_SIZE);
+    const sz = this.antPosition.z / (CHUNK_CELLS * CELL_SIZE);
     this.pending.sort((a, b) =>
       ((a[0] - sx) ** 2 + (a[2] - sz) ** 2) - ((b[0] - sx) ** 2 + (b[2] - sz) ** 2));
     if (immediate) this.lastMeshMs = performance.now() - started;
@@ -539,9 +597,19 @@ export class DensityTerrainLabScene {
     }
 
     this.totalRemoved += result.removedVolume;
+    this.digPulse = 1;
     this.rebuildAround(result.bounds);
     this.spawnPellet(hit.point, hit.face?.normal ?? new THREE.Vector3(0, 1, 0), result.removedVolume);
-    this.status.dataset.message = `${result.removedVolume.toFixed(2)} voxel³ pellet freed`;
+    /*
+     * Reported in millimetres, because that is the unit the size argument is
+     * being had in. A conservation-true clod holding what a 4 mm x 0.5 mm
+     * scrape removes comes out around 2 mm across, against the 0.8 mm the brief
+     * asks for — and 0.8 mm only holds a tenth of a bite. Putting the number on
+     * screen is the cheapest way to settle which of the two gives.
+     */
+    const clodMm = Math.cbrt(result.removedVolume / PELLET_SOLIDITY) * 2 * WORLD_UNIT_MM;
+    this.status.dataset.message =
+      `${(result.removedVolume * WORLD_UNIT_MM ** 3).toFixed(2)} mm³ freed · ${clodMm.toFixed(2)} mm clod`;
     this.updateStatus();
   }
 
@@ -568,19 +636,22 @@ export class DensityTerrainLabScene {
      * A knobbly lump, not a drum.
      *
      * This was `CylinderGeometry(r, 0.92r, 1.45r, 8)` — an octagonal tube,
-     * and it read as exactly that. An icosahedron at detail 0 is twenty flat
-     * triangles, which under flat shading is already closer to a chip of
-     * earth than anything round; roughening each vertex breaks the symmetry
-     * so no two clods are the same lump.
+     * and it read as exactly that. Twenty flat triangles under flat shading is
+     * already closer to a chip of earth than anything round; roughening each
+     * corner breaks the symmetry so no two clods are the same lump.
+     *
+     * The shape comes from `clodGeometry` and is INDEXED, which was the fix for
+     * clods that looked fractured rather than solid. Three.js builds its
+     * platonic solids non-indexed — sixty vertices for twelve corners — so
+     * roughening by vertex index moved the five copies of every corner
+     * independently and the faces pulled away from each other.
      */
-    const geometry = new THREE.IcosahedronGeometry(radius, 0);
-    const pos = geometry.getAttribute('position');
-    const seed = this.pellets.length + volume * 1e4;
-    for (let i = 0; i < pos.count; i++) {
-      const k = clodJitter(seed, i);
-      pos.setXYZ(i, pos.getX(i) * k, pos.getY(i) * k * 0.86, pos.getZ(i) * k);
-    }
-    pos.needsUpdate = true;
+    const clod = clodGeometry(this.pellets.length + volume * 1e4);
+    const positions = new Float32Array(clod.positions.length);
+    for (let i = 0; i < clod.positions.length; i += 1) positions[i] = clod.positions[i]! * radius;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setIndex(new THREE.BufferAttribute(clod.indices, 1));
     geometry.computeVertexNormals();
     geometry.computeBoundingSphere();
     const material = new THREE.MeshStandardMaterial({
@@ -631,7 +702,7 @@ export class DensityTerrainLabScene {
 
   /**
    * Height of packed soil at a world position, read from the RESIDENT field
-   * rather than from the formula, so the scout and the pellets drop into holes
+   * rather than from the formula, so the queen and the pellets drop into holes
    * that have actually been dug. Falls back to the formula outside the window,
    * where by construction nothing has been dug anyway.
    */
@@ -640,27 +711,103 @@ export class DensityTerrainLabScene {
     const z = worldZ - this.stream.originWorldZ;
     const span = WINDOW_CELLS * CELL_SIZE;
     if (x < 0 || x > span || z < 0 || z > span) return streamGroundHeight(worldX, worldZ);
-    for (let y = CELLS_Y; y >= 0; y -= 1) {
-      if (this.stream.field.get(Math.round(x / CELL_SIZE), y, Math.round(z / CELL_SIZE)) > 0) {
-        return y * CELL_SIZE;
-      }
+
+    /*
+     * The crossing is INTERPOLATED, not the top of the last solid cell.
+     *
+     * Snapping to a cell quantises her feet to a quarter of a millimetre and a
+     * bite is half a millimetre deep, so standing in a fresh crater she would
+     * drop in two visible steps — or not at all, if the scrape happened to take
+     * less than one cell. The surface is DRAWN at the zero crossing, so that is
+     * the height to stand at, and `sample` gives it bilinearly across x and z
+     * as well rather than snapping her to the nearest column.
+     */
+    let above = this.stream.field.sample(x, CELLS_Y * CELL_SIZE, z);
+    for (let y = CELLS_Y - 1; y >= 0; y -= 1) {
+      const here = this.stream.field.sample(x, y * CELL_SIZE, z);
+      if (here > 0) return (y + here / (here - above)) * CELL_SIZE;
+      above = here;
     }
     return 0;
   }
 
   /**
-   * Walk the scout, then let the window catch up.
+   * Which way is up under an ant of HER size.
+   *
+   * Measured from ground heights a body-length apart, not from the density
+   * gradient at a point. The gradient is the surface normal of the soil at
+   * bite scale, which sounds like the same thing and is not: a fresh crater is
+   * four millimetres across and its wall points sideways, so standing in one
+   * she rolled onto her back. For a nine-millimetre animal that is aligning to
+   * a pebble.
+   *
+   * Sampling the HEIGHTFIELD also means the result can never point below the
+   * horizon however rough the ground gets, so there is no crater and no
+   * overhang that can turn her over — a bound the gradient version could not
+   * give at any sampling radius.
+   */
+  private groundNormal(worldX: number, worldZ: number): any {
+    const reach = (CASTE_LENGTH_MM.queen / WORLD_UNIT_MM) * STANCE;
+    const slopeX = this.groundAt(worldX + reach, worldZ) - this.groundAt(worldX - reach, worldZ);
+    const slopeZ = this.groundAt(worldX, worldZ + reach) - this.groundAt(worldX, worldZ - reach);
+    return new THREE.Vector3(-slopeX, 2 * reach, -slopeZ).normalize();
+  }
+
+  /**
+   * Put her on the ground, facing where she is going, leaning with the slope.
+   *
+   * Run every frame and NOT only while walking, which is the whole point. The
+   * marker this replaced re-read the ground inside the movement branch, so
+   * digging out from under yourself left you standing at the height the soil
+   * used to be — and standing still over a hole you just made is exactly when
+   * that is most obvious.
+   */
+  private stand(): void {
+    this.antPosition.y = this.groundAt(this.antPosition.x, this.antPosition.z);
+    if (!this.queenReady) return;
+    this.queen.root.position.copy(this.antPosition);
+
+    /*
+     * Built as a BASIS rather than as yaw plus a tilt. Her up is the terrain
+     * normal and her forward is the heading flattened against that up, so on a
+     * slope she pitches and rolls with the ground instead of standing plumb
+     * with her feet through it. Composing two rotations does not give this —
+     * the two orders disagree the moment both angles are non-zero.
+     */
+    /*
+     * Eased toward the new normal rather than snapped to it. Her feet cross a
+     * cell every twentieth of a second at walking pace, and the ground has
+     * quarter-millimetre grit on it, so taking each frame's slope literally
+     * makes her shiver.
+     */
+    const up = this.groundNormal(this.antPosition.x, this.antPosition.z);
+    this.up.lerp(up, 0.15).normalize();
+    const forward = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
+    forward.addScaledVector(this.up, -forward.dot(this.up));
+    if (forward.lengthSq() < 1e-8) forward.set(0, 0, 1);
+    forward.normalize();
+    const right = new THREE.Vector3().crossVectors(this.up, forward).normalize();
+    this.queen.root.quaternion.setFromRotationMatrix(
+      new THREE.Matrix4().makeBasis(right, this.up, forward),
+    );
+  }
+
+  /**
+   * Walk the queen, then let the window catch up.
    *
    * Movement is relative to where the camera is looking, because the pad has
    * no idea which way is north and neither does the player. The recentre is
    * checked every frame but only fires on a tile crossing, which is the whole
    * point of tiles being larger than a step.
    */
-  private updateScout(delta: number): void {
-    if (this.move.forward === 0 && this.move.strafe === 0) return;
+  private walk(dt: number): void {
+    if (this.move.forward === 0 && this.move.strafe === 0) {
+      this.walkSpeed = 0;
+      return;
+    }
 
     const forward = new THREE.Vector3()
-      .subVectors(this.scout.position, this.camera.position);
+      .subVectors(this.antPosition, this.camera.position);
     forward.y = 0;
     if (forward.lengthSq() < 1e-8) return;
     forward.normalize();
@@ -670,25 +817,39 @@ export class DensityTerrainLabScene {
       .addScaledVector(forward, this.move.forward)
       .addScaledVector(right, this.move.strafe);
     if (step.lengthSq() === 0) return;
-    step.normalize().multiplyScalar(SCOUT_SPEED * delta);
+    step.normalize().multiplyScalar(WALK_SPEED * dt);
+    this.walkSpeed = WALK_SPEED;
 
     const margin = CELL_SIZE * 3;
-    const previous = this.scout.position.clone();
-    this.scout.position.x = THREE.MathUtils.clamp(
-      this.scout.position.x + step.x, margin, WORLD_SPAN - margin,
+    const previous = this.antPosition.clone();
+    this.antPosition.x = THREE.MathUtils.clamp(
+      this.antPosition.x + step.x, margin, WORLD_SPAN - margin,
     );
-    this.scout.position.z = THREE.MathUtils.clamp(
-      this.scout.position.z + step.z, margin, WORLD_SPAN - margin,
+    this.antPosition.z = THREE.MathUtils.clamp(
+      this.antPosition.z + step.z, margin, WORLD_SPAN - margin,
     );
-    this.scout.position.y = this.groundAt(this.scout.position.x, this.scout.position.z) + 0.16;
+    /*
+     * She turns toward where she is going rather than snapping to it, so a tap
+     * on the pad reads as an animal deciding to go that way. The shortest way
+     * round is taken explicitly — the naive difference sends her the long way
+     * whenever the heading crosses the wrap at pi, which is a full spin in
+     * place for one step sideways.
+     */
+    const wanted = Math.atan2(step.x, step.z);
+    let turn = wanted - this.facing;
+    while (turn > Math.PI) turn -= Math.PI * 2;
+    while (turn < -Math.PI) turn += Math.PI * 2;
+    const step_ = THREE.MathUtils.clamp(turn, -TURN_RATE * dt, TURN_RATE * dt);
+    this.facing += step_;
+    this.turnRate = dt > 0 ? step_ / dt : 0;
 
-    // Carry the camera along by exactly the scout's step, so orbiting is
-    // untouched by walking: the arm the player set stays the arm they set.
-    const moved = this.scout.position.clone().sub(previous);
+    // Carry the camera along by exactly her step, so orbiting is untouched by
+    // walking: the arm the player set stays the arm they set.
+    const moved = this.antPosition.clone().sub(previous);
     this.camera.position.add(moved);
-    this.controls.target.copy(this.scout.position);
+    this.controls.target.copy(this.antPosition);
 
-    const scroll = this.stream.recentreOn(this.scout.position.x, this.scout.position.z);
+    const scroll = this.stream.recentreOn(this.antPosition.x, this.antPosition.z);
     if (scroll) {
       this.lastScrollMs = scroll.ms;
       this.refreshResidency(false, scroll.retained);
@@ -699,8 +860,8 @@ export class DensityTerrainLabScene {
   private updateStatus(): void {
     const message = this.status.dataset.message ?? 'Walk with the pad, aim, and press DIG';
     const physicalVolumeMm3 = this.totalRemoved * WORLD_UNIT_MM ** 3;
-    const tileX = Math.floor(this.scout.position.x / (TILE_CELLS * CELL_SIZE));
-    const tileZ = Math.floor(this.scout.position.z / (TILE_CELLS * CELL_SIZE));
+    const tileX = Math.floor(this.antPosition.x / (TILE_CELLS * CELL_SIZE));
+    const tileZ = Math.floor(this.antPosition.z / (TILE_CELLS * CELL_SIZE));
     const megabytes = (WINDOW_BYTES / 1048576).toFixed(1);
     const queued = this.pending.length > 0 ? ` · ${this.pending.length} queued` : '';
     this.status.innerHTML = `
@@ -708,6 +869,7 @@ export class DensityTerrainLabScene {
       Removed: ${this.totalRemoved.toFixed(1)} voxel³ · ${physicalVolumeMm3.toFixed(0)} mm³<br>
       World: ${WORLD_TILES}×${WORLD_TILES} tiles of ${TILE_MM} mm = ${WORLD_SPAN * WORLD_UNIT_MM} mm<br>
       Tile ${tileX},${tileZ} · window ${WINDOW_CELLS}×${CELLS_Y}×${WINDOW_CELLS} = ${megabytes} MB<br>
+      Queen: ${this.queenReady ? `${CASTE_LENGTH_MM.queen} mm long` : 'loading…'}<br>
       Mesh: ${this.lastMeshMs.toFixed(1)} ms · scroll ${this.lastScrollMs.toFixed(1)} ms${queued}<br>
       Dug: ${this.stream.editedSamples} samples kept
     `;
@@ -742,18 +904,31 @@ export class DensityTerrainLabScene {
     const now = performance.now();
     const delta = Math.min(0.05, (now - this.previousTime) / 1000);
     this.previousTime = now;
-    this.updateScout(delta);
+    this.walk(delta);
+    this.stand();
+    this.digPulse = Math.max(0, this.digPulse - DIG_DECAY * delta);
+    if (this.queenReady) {
+      this.queen.update(delta, {
+        // The gait wants voxels per second and a world unit IS a voxel here,
+        // both being five millimetres, so this needs no conversion — which is
+        // worth saying out loud, because it would need one if either changed.
+        speed: this.walkSpeed,
+        turn: this.turnRate,
+        digging: this.digPulse,
+        carrying: 0,
+      });
+    }
     this.controls.update();
     this.drainPending(now - this.previousFrameStart);
     this.previousFrameStart = now;
     this.updatePellets(delta);
     if (this.sun) {
       this.sun.position.set(
-        this.scout.position.x + WINDOW_SIZE * 0.5,
+        this.antPosition.x + WINDOW_SIZE * 0.5,
         SOIL_DEPTH + WINDOW_SIZE * 0.7,
-        this.scout.position.z + WINDOW_SIZE * 0.34,
+        this.antPosition.z + WINDOW_SIZE * 0.34,
       );
-      this.sun.target.position.copy(this.scout.position);
+      this.sun.target.position.copy(this.antPosition);
       this.sun.target.updateMatrixWorld();
     }
     this.renderer.render(this.scene, this.camera);
