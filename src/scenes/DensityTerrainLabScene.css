@@ -1,0 +1,132 @@
+.density-lab-host {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #8db4d6;
+}
+
+.density-lab-hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  color: #f8f0dc;
+  font: 600 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.density-lab-title,
+.density-lab-status {
+  position: absolute;
+  left: max(12px, env(safe-area-inset-left));
+  padding: 8px 11px;
+  border-radius: 9px;
+  background: rgba(20, 16, 11, 0.72);
+  backdrop-filter: blur(7px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.2);
+}
+
+.density-lab-title {
+  top: max(12px, env(safe-area-inset-top));
+  letter-spacing: 0.06em;
+}
+
+.density-lab-title span {
+  color: #d8b47b;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.density-lab-status {
+  top: calc(max(12px, env(safe-area-inset-top)) + 42px);
+  color: #d8cdb8;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.density-lab-status b {
+  color: #fff1c5;
+}
+
+.density-lab-crosshair {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 22px;
+  height: 22px;
+  margin: -12px 0 0 -12px;
+  border: 2px solid rgba(255, 244, 196, 0.95);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), inset 0 0 8px rgba(255, 231, 145, 0.25);
+}
+
+.density-lab-crosshair::before,
+.density-lab-crosshair::after {
+  content: '';
+  position: absolute;
+  background: rgba(255, 244, 196, 0.9);
+}
+
+.density-lab-crosshair::before {
+  width: 6px;
+  height: 2px;
+  left: 7px;
+  top: 9px;
+}
+
+.density-lab-crosshair::after {
+  width: 2px;
+  height: 6px;
+  left: 9px;
+  top: 7px;
+}
+
+.density-lab-actions {
+  position: absolute;
+  right: max(16px, env(safe-area-inset-right));
+  bottom: max(22px, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  align-items: flex-end;
+  pointer-events: auto;
+}
+
+.density-lab-button {
+  border: 0;
+  border-radius: 999px;
+  font: 800 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.06em;
+  color: #1d160e;
+  box-shadow: 0 7px 20px rgba(0, 0, 0, 0.32);
+  touch-action: none;
+}
+
+.density-lab-dig {
+  width: 94px;
+  height: 94px;
+  background: #e9c36f;
+}
+
+.density-lab-dig:active {
+  transform: scale(0.96);
+  background: #f0d88e;
+}
+
+.density-lab-reset {
+  padding: 12px 18px;
+  background: rgba(244, 236, 216, 0.88);
+}
+
+.density-lab-hint {
+  position: absolute;
+  left: max(12px, env(safe-area-inset-left));
+  bottom: max(12px, env(safe-area-inset-bottom));
+  color: rgba(255, 248, 228, 0.8);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
+}
+
+@media (max-width: 560px) {
+  .density-lab-hint { display: none; }
+  .density-lab-status { font-size: 10.5px; }
+  .density-lab-title { font-size: 11px; }
+}
