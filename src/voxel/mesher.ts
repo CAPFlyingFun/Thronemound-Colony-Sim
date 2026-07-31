@@ -30,6 +30,18 @@ export interface MeshData {
 
 interface Sampler {
   get(x: number, y: number, z: number): VoxelId;
+  /**
+   * How full this cell is drawn, from 0 (exclusive) to 1. Optional; absent
+   * means every cell is whole, which is what the world was before terrain
+   * smoothing and what dug soil, glass and every test that does not care about
+   * the surface still is.
+   *
+   * This is the ONLY thing the mesher knows about sub-voxel ground. It does not
+   * know there is a height field, which is deliberate — the same hook draws a
+   * half-height slab of anything, and the mesher cannot drift out of agreement
+   * with a terrain module it has never heard of.
+   */
+  fill?(x: number, y: number, z: number): number;
 }
 
 type Vec3 = readonly [number, number, number];
@@ -174,6 +186,20 @@ export function meshChunk(
 
   const offset = [0, 0, 0];
   const sample = (px: number, py: number, pz: number) => isSolid(world.get(px, py, pz));
+  /*
+   * Fill is asked ONLY about cells that are already solid, and never by the
+   * chamfer.
+   *
+   * That second half is the important one. Every convex-edge decision in this
+   * file rests on both voxels sharing a vertex asking the same question of the
+   * same pair of cells and therefore being unable to disagree — and "is my
+   * neighbour shorter than me" is a question two neighbours ALWAYS answer
+   * differently. Letting it near `openDir` would reopen the corner holes. So
+   * fill moves vertices and decides one extra face, and touches nothing else.
+   */
+  const fillOf = world.fill
+    ? (px: number, py: number, pz: number) => world.fill!(px, py, pz)
+    : () => 1;
 
   for (let ly = 0; ly < CHUNK; ly++) {
     for (let lz = 0; lz < CHUNK; lz++) {
@@ -188,6 +214,23 @@ export function meshChunk(
         // base colour now comes from the texture array, so vertex colour
         // carries only shading (AO x jitter) and multiplies over the albedo.
         const tint = voxelTint(x, y, z);
+
+        /**
+         * How tall this cell is drawn, and the one place it is applied.
+         *
+         * A pure scale in Y of everything this voxel emits — top face, the top
+         * edges of its sides, its bevels and its corner triangles alike. The
+         * shell stays the shell; it is just squashed. That is what lets the
+         * chamfer code below stay untouched and still be watertight: an affine
+         * map cannot open a hole in a surface that was already closed.
+         *
+         * Only ever a squash, never a stretch, so the drawn surface can only
+         * recede INTO the cell — the same safety rule the dish and the chamfer
+         * follow, and the reason collision can be brought along by shortening
+         * the cell rather than by moving it.
+         */
+        const fy = fillOf(x, y, z);
+        const liftY = (localY: number) => y + localY * fy;
 
         /*
          * Which of the six neighbours are air, computed once per voxel.
@@ -252,7 +295,57 @@ export function meshChunk(
 
         for (const face of FACES) {
           const [nx, ny, nz] = face.normal;
-          if (isSolid(world.get(x + nx, y + ny, z + nz))) continue;
+          if (isSolid(world.get(x + nx, y + ny, z + nz))) {
+            /*
+             * A solid neighbour normally hides this face completely. It does
+             * not when the neighbour is SHORTER: the band between its top and
+             * ours is open sky, and culling against it is what would show you
+             * the inside of this cell — a black wedge along every join where
+             * the ground drops.
+             *
+             * Only sideways. A solid cell above starts exactly at our top and
+             * a solid cell below ends exactly at our bottom, whatever either is
+             * filled to, so neither can leave a band.
+             */
+            const under = fillOf(x + nx, y + ny, z + nz);
+            if (ny !== 0 || under >= fy) continue;
+
+            /*
+             * Emitted plain: no chamfer inset, no dish, flat shading.
+             *
+             * Deliberately NOT run through the geometry below. Those insets are
+             * decided from grid neighbours, which say this face does not exist,
+             * so asking them where its corners go returns answers that do not
+             * line up with the top face — a slit, exactly the kind this project
+             * has already spent a session closing. A plain quad cannot leave
+             * one. It can only overlap, and overlap here is hidden inside the
+             * neighbour or a fraction of a millimetre of extra soil.
+             */
+            const [uAxis, vAxis] = tangentAxes(face.normal);
+            const bandTangent: [number, number, number] = [0, 0, 0];
+            bandTangent[uAxis] = 1;
+            const bandFirst = positions.length / 3;
+            // A crease between two cells of ground: shaded as one.
+            const bandShade = AO_LEVELS[2]! * tint;
+            for (const corner of face.corners) {
+              const wx = x + corner[0];
+              const wy = y + (corner[1] === 1 ? fy : under);
+              const wz = z + corner[2];
+              positions.push(wx, wy, wz);
+              normals.push(nx, ny, nz);
+              layers.push(voxel);
+              tangents.push(bandTangent[0], bandTangent[1], bandTangent[2]);
+              const w = [wx, wy, wz] as const;
+              uvs.push(w[uAxis]! / TILE_VOXELS, w[vAxis]! / TILE_VOXELS);
+              colors.push(bandShade, bandShade, bandShade);
+            }
+            indices.push(
+              bandFirst, bandFirst + 1, bandFirst + 2,
+              bandFirst, bandFirst + 2, bandFirst + 3,
+            );
+            quadCount++;
+            continue;
+          }
 
           const [axisA, axisB] = tangentAxes(face.normal);
           const first = positions.length / 3;
@@ -344,7 +437,7 @@ export function meshChunk(
             for (let ci = 0; ci < 4; ci++) {
               const drawn = inset[ci]!;
               const wx = x + drawn[0];
-              const wy = y + drawn[1];
+              const wy = liftY(drawn[1]);
               const wz = z + drawn[2];
               positions.push(wx, wy, wz);
               normals.push(nx, ny, nz);
@@ -399,7 +492,7 @@ export function meshChunk(
                 // the player.
                 const back = dish * Math.sin(Math.PI * u) * Math.sin(Math.PI * v);
                 const wx = x + lerp3(u, v, 0) - nx * back;
-                const wy = y + lerp3(u, v, 1) - ny * back;
+                const wy = liftY(lerp3(u, v, 1) - ny * back);
                 const wz = z + lerp3(u, v, 2) - nz * back;
                 positions.push(wx, wy, wz);
 
@@ -519,19 +612,36 @@ export function meshChunk(
             const shade = AO_LEVELS[diag ? 2 : 3]! * tint;
             const [uAxis, vAxis] = tangentAxes(un[0] !== 0 && un[1] !== 0 && un[2] !== 0
               ? [1, 0, 0] : un);
+            /*
+             * The SHADING normal follows the squash; the geometric one above
+             * does not.
+             *
+             * Everything `un` is used for otherwise — which diagonal to probe,
+             * which way the winding came out, which axes are in plane — depends
+             * only on the SIGNS of its components, and a positive scale in Y
+             * leaves those alone. The lit direction does not: squash a bevel
+             * and it turns to face further outward, by the inverse of the scale
+             * on the axis that moved. Miss this and a shallow slab is lit as
+             * though it were still a full cube.
+             */
+            const sy = un[1] / fy;
+            const slen = Math.hypot(un[0], sy, un[2]) || 1;
+            const snx = un[0] / slen;
+            const sny = sy / slen;
+            const snz = un[2] / slen;
             const tan: [number, number, number] = [0, 0, 0];
             tan[uAxis] = 1;
-            const tdot = tan[0] * un[0] + tan[1] * un[1] + tan[2] * un[2];
-            const tx = tan[0] - un[0] * tdot;
-            const ty = tan[1] - un[1] * tdot;
-            const tz = tan[2] - un[2] * tdot;
+            const tdot = tan[0] * snx + tan[1] * sny + tan[2] * snz;
+            const tx = tan[0] - snx * tdot;
+            const ty = tan[1] - sny * tdot;
+            const tz = tan[2] - snz * tdot;
             const tlen = Math.hypot(tx, ty, tz) || 1;
             for (const p of pts) {
-              positions.push(x + p[0], y + p[1], z + p[2]);
-              normals.push(un[0], un[1], un[2]);
+              positions.push(x + p[0], liftY(p[1]), z + p[2]);
+              normals.push(snx, sny, snz);
               layers.push(voxel);
               tangents.push(tx / tlen, ty / tlen, tz / tlen);
-              const w = [x + p[0], y + p[1], z + p[2]] as const;
+              const w = [x + p[0], liftY(p[1]), z + p[2]] as const;
               uvs.push(w[uAxis]! / TILE_VOXELS, w[vAxis]! / TILE_VOXELS);
               colors.push(shade, shade, shade);
             }

@@ -34,6 +34,41 @@ export const ROLL_VOXELS = 2;
 const HILL_SPREAD = 0.17;
 const VALLEY_SPREAD = 0.13;
 
+/**
+ * How finely the ground may sit BETWEEN voxels. The smoothing knob.
+ *
+ * The terrain used to round its height to a whole voxel, so a slope came out
+ * as contour terraces 5 mm tall — taller than the ant, and the one thing in
+ * the frame that read as a chart rather than as ground. The height field was
+ * always smooth; the rounding was the staircase.
+ *
+ * Now the field stays continuous and the topmost voxel of each column is drawn
+ * PART FULL, so the surface can stop anywhere within its own cell. This is the
+ * quantum it snaps to: an eighth of a voxel, 0.625 mm. Fine enough that the
+ * step is under the width of her foot, coarse enough that a column's fill is a
+ * stable number rather than one that flickers in the last bits of a float.
+ *
+ * ONE constant, and everything reads it — the generator that decides which
+ * voxels exist, the mesher that draws them, the collision that stands on them,
+ * and the skirt outside the glass. Set it to 1 and the world goes back to
+ * whole-voxel terraces exactly as it was, which is the test that it really is
+ * the only place the decision is made.
+ */
+export const SURFACE_STEP = 1 / 8;
+
+/**
+ * Relief beyond the walls, and how far out it takes hold.
+ *
+ * Inside the tank the brief is a 5 cm hill and a 3 cm hollow. Outside it, the
+ * ground is scenery seen through glass from an ant's eye, and holding it to
+ * the same 8 cm of range makes the world look like a table the tank is sitting
+ * on. So a second, much larger-amplitude layer fades in with distance from the
+ * walls — nothing inside the box moves, because the fade is exactly zero there.
+ */
+export const FAR_RELIEF_VOXELS = 46;
+const FAR_FADE = 220;
+const FAR_CELL = 150;
+
 export interface TerrainOptions {
   /** Height the flat world used to sit at — still the reference for depth. */
   surfaceY: number;
@@ -78,11 +113,26 @@ function bump(dx: number, dz: number, radius: number): number {
   return (Math.cos(d * Math.PI) + 1) / 2;
 }
 
+/**
+ * Placements, worked out once per world.
+ *
+ * `groundHeight` is now called per VERTEX by the skirt as well as per voxel by
+ * the generator — a few million times on a load — and it opened by hashing the
+ * same six numbers to rediscover where the hill is every time. The answer
+ * depends only on the options object, so it is cached against it.
+ */
+const featureCache = new WeakMap<TerrainOptions, {
+  hill: { x: number; z: number };
+  valley: { x: number; z: number };
+}>();
+
 /** Where this world puts its hill and its hollow. */
 export function features(opts: TerrainOptions): {
   hill: { x: number; z: number };
   valley: { x: number; z: number };
 } {
+  const cached = featureCache.get(opts);
+  if (cached) return cached;
   const seed = opts.seed ?? 1;
   const { size } = opts;
   /*
@@ -119,15 +169,37 @@ export function features(opts: TerrainOptions): {
     const away = (v: number) => (v > size / 2 ? v - wanted : v + wanted);
     valley = { x: inside(away(hill.x)), z: inside(away(hill.z)) };
   }
-  return { hill, valley };
+  const placed = { hill, valley };
+  featureCache.set(opts, placed);
+  return placed;
 }
 
 /**
- * Height of the topmost solid voxel in a column.
+ * How far outside the tank a point is, from 0 at the wall to 1 well beyond it.
+ *
+ * Exactly zero everywhere inside the world, which is the property that matters:
+ * the distant relief is multiplied by this, so it cannot move a single voxel of
+ * the ground the player can actually dig, and the two meet at the wall with no
+ * step to give the join away.
+ */
+export function outsideness(x: number, z: number, size: number): number {
+  const beyond = Math.max(0, -x, x - size, -z, z - size);
+  return ease(Math.min(1, beyond / FAR_FADE));
+}
+
+/**
+ * Height of the ground surface in a column — CONTINUOUS, not a whole voxel.
  *
  * The single source of truth for "where is the ground here". Depth, spawning,
- * and whether she counts as underground all read it, because the moment two of
- * them disagree about the surface one of them is putting her inside it.
+ * whether she counts as underground, how full the topmost voxel is drawn, what
+ * her feet stand on, and the ground outside the glass all read it, because the
+ * moment two of them disagree about the surface one of them is putting her
+ * inside it.
+ *
+ * This used to round to a whole voxel and that rounding WAS the staircase: a
+ * slope of half a voxel per voxel came out as a 5 mm terrace every second
+ * cell. Now it snaps to SURFACE_STEP instead — an eighth of a voxel — and the
+ * mesher draws the topmost cell part full to match.
  */
 export function groundHeight(x: number, z: number, opts: TerrainOptions): number {
   const { hill, valley } = features(opts);
@@ -150,10 +222,52 @@ export function groundHeight(x: number, z: number, opts: TerrainOptions): number
   const h = opts.surfaceY + roll + up * HILL_VOXELS - down * VALLEY_VOXELS;
   // Clamped to the brief: the hill tops out at 5 cm and the hollow bottoms at
   // 3 cm, so the roughness cannot quietly add to either.
-  return Math.round(Math.max(
+  const inside = Math.max(
     opts.surfaceY - VALLEY_VOXELS,
     Math.min(opts.surfaceY + HILL_VOXELS, h),
-  ));
+  );
+  /*
+   * Distant country, and it is added AFTER the clamp on purpose.
+   *
+   * Clamping it too would hold the horizon to the same 8 cm band as the tank
+   * and the world would end in a plain. The fade is zero inside the walls, so
+   * this term cannot reach anything that is dug, spawned on, or collided with.
+   */
+  const far = outsideness(x, z, opts.size) * FAR_RELIEF_VOXELS * (
+    noise(x, z, FAR_CELL, (opts.seed ?? 1) + 3) * 0.7
+    + noise(x, z, FAR_CELL / 3, (opts.seed ?? 1) + 4) * 0.3
+  );
+  return Math.round((inside + far) / SURFACE_STEP) * SURFACE_STEP;
+}
+
+/**
+ * The topmost voxel that actually EXISTS in a column.
+ *
+ * `ceil - 1` rather than `floor`, so a column whose surface lands exactly on a
+ * voxel boundary owns the cell BELOW the boundary at full height, instead of
+ * owning the cell above it at zero height. That keeps `surfaceFill` in (0, 1]
+ * and means there is never a cell in the world drawn with no thickness.
+ */
+export function surfaceVoxel(x: number, z: number, opts: TerrainOptions): number {
+  return Math.ceil(groundHeight(x, z, opts)) - 1;
+}
+
+/**
+ * How full a cell is drawn, from 0 (exclusive) to 1.
+ *
+ * 1 for every cell in the world except the topmost of each terrain column,
+ * which is the whole trick: the voxel grid is untouched — cells are still
+ * whole, still dug whole, still stored a byte each — and only the LAST one in
+ * a column is drawn and collided with as a slab. Dig it away and the cell
+ * beneath answers 1, because this is a question about the height field rather
+ * than about the cell, and the height field does not know she has been
+ * digging.
+ */
+export function surfaceFill(x: number, y: number, z: number, opts: TerrainOptions): number {
+  const h = groundHeight(x, z, opts);
+  const top = Math.ceil(h) - 1;
+  if (y !== top) return 1;
+  return h - top;
 }
 
 /**
@@ -164,8 +278,23 @@ export function groundHeight(x: number, z: number, opts: TerrainOptions): number
  * if you keep the old fixed bands and just move the ground through them.
  */
 export function terrainGenerator(opts: TerrainOptions): Generator {
+  /*
+   * One column, remembered.
+   *
+   * The generator is called once per CELL and the answer depends only on the
+   * column, so without this every world load evaluates the height field a
+   * hundred and twenty-eight times more often than it needs to. A single slot
+   * is enough because the world is filled a column at a time.
+   */
+  let lastKey = NaN;
+  let lastTop = 0;
   return (x: number, y: number, z: number): VoxelId => {
-    const top = groundHeight(x, z, opts);
+    const key = x * 65536 + z;
+    if (key !== lastKey) {
+      lastKey = key;
+      lastTop = surfaceVoxel(x, z, opts);
+    }
+    const top = lastTop;
     if (y > top) return AIR;
     const depth = top - y;
     if (depth < 6) return TOPSOIL;

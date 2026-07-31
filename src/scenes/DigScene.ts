@@ -15,7 +15,10 @@ import {
   isSolid, layeredGenerator, materialOf, type VoxelId,
 } from '../voxel/VoxelWorld';
 import { clodMassGrams, haulFactor } from '../voxel/mass';
-import { HILL_VOXELS, VALLEY_VOXELS, groundHeight, terrainGenerator, type TerrainOptions } from '../voxel/terrain';
+import {
+  HILL_VOXELS, VALLEY_VOXELS, groundHeight, surfaceFill, terrainGenerator,
+  type TerrainOptions,
+} from '../voxel/terrain';
 import { ceilingFor, glassPass, isGlassCell, type BoxOptions } from '../voxel/formicarium';
 import { FACES, burialShade, meshChunk } from '../voxel/mesher';
 import {
@@ -920,12 +923,36 @@ export class DigScene {
     return `${x},${y},${z}`;
   }
 
-  private meshSampler(): { get(x: number, y: number, z: number): number } {
-    if (this.chips.size === 0) return this.world;
+  /**
+   * How full a cell is — the whole of the terrain smoothing, in one function.
+   *
+   * The height field is continuous, the voxel grid is not, and this is the
+   * only place the two are reconciled. Everything that needs to know where the
+   * ground actually stops reads it: the mesher draws the cell this tall,
+   * collision lets her stand on top of it at this height, and the pellets rest
+   * on it here too. One number, three consumers, no way for them to drift —
+   * which on this project is not a stylistic preference so much as the lesson
+   * of every bug so far.
+   *
+   * A bound field rather than a method so it can be handed straight to the
+   * mesher's `fill` hook without a closure allocated per chunk per frame.
+   */
+  private readonly soilFill = (x: number, y: number, z: number): number => (
+    surfaceFill(x, y, z, TERRAIN)
+  );
+
+  private meshSampler(): {
+    get(x: number, y: number, z: number): number;
+    fill(x: number, y: number, z: number): number;
+  } {
+    if (this.chips.size === 0) {
+      return { get: (x, y, z) => this.world.get(x, y, z), fill: this.soilFill };
+    }
     // EVERY part-dug voxel is masked, not just the active one, or a cube she
     // walked away from half finished would render whole again.
     return {
       get: (x, y, z) => (this.chips.has(DigScene.chipKey(x, y, z)) ? AIR : this.world.get(x, y, z)),
+      fill: this.soilFill,
     };
   }
 
@@ -1599,7 +1626,9 @@ export class DigScene {
    * are at most a couple of hundred of them and no allocation happens here.
    */
   private updateLooseSoil(dt: number): void {
-    this.soil.step(this.world, dt, GRAVITY);
+    // Through the fill-aware view, so pellets settle onto the drawn ground
+    // rather than onto the ceiling of the cell it happens to live in.
+    this.soil.step(this.meshSampler(), dt, GRAVITY);
 
     /*
      * Clods deliberately ignore the ant, and she walks straight through them.
@@ -2287,8 +2316,13 @@ export class DigScene {
 
   // -------------------------------------------------------------- simulation
 
+  /** Is this POINT inside solid ground — part-full surface cells included. */
   private solidAt(x: number, y: number, z: number): boolean {
-    return isSolid(this.world.get(Math.floor(x), Math.floor(y), Math.floor(z)));
+    const cx = Math.floor(x);
+    const cy = Math.floor(y);
+    const cz = Math.floor(z);
+    if (!isSolid(this.world.get(cx, cy, cz))) return false;
+    return y < cy + this.soilFill(cx, cy, cz);
   }
 
   // ------------------------------------------------------- surface frame
@@ -2399,6 +2433,17 @@ export class DigScene {
         for (let z = Math.floor(lo.z); z <= Math.floor(hi.z); z++) {
           if (isGlassCell(x, y, z, BOX)) return true;
           if (!isSolid(this.world.get(x, y, z))) continue;
+          /*
+           * A part-full surface cell is only as solid as it is drawn.
+           *
+           * Same shape as the chipped-cell case below, and for the same
+           * reason: the cell is solid, but not all the way to its ceiling, and
+           * standing on a ceiling that isn't there is how she ends up hovering
+           * over a slope. Her box clears it entirely when its underside is at
+           * or above the cell's fill line.
+           */
+          const fill = this.soilFill(x, y, z);
+          if (fill < 1 && lo.y >= y + fill) continue;
           /*
            * A cell part-way through being dug is only as big as it LOOKS.
            *

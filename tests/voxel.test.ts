@@ -8,7 +8,10 @@ import {
 } from '../src/voxel/mesher';
 import { CLOD_RADIUS, MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES, type Clod } from '../src/voxel/LooseSoil';
 import { HAUL_FLOOR, PELLET_FILL, QUEEN_MASS_G, clodMassGrams, haulFactor } from '../src/voxel/mass';
-import { HILL_VOXELS, VALLEY_VOXELS, features, groundHeight, terrainGenerator } from '../src/voxel/terrain';
+import {
+  FAR_RELIEF_VOXELS, HILL_VOXELS, SURFACE_STEP, VALLEY_VOXELS, features, groundHeight,
+  outsideness, surfaceFill, surfaceVoxel, terrainGenerator,
+} from '../src/voxel/terrain';
 import { ceilingFor, glassPass, insideBox, isGlassCell, soilPass } from '../src/voxel/formicarium';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
@@ -2686,6 +2689,65 @@ describe('burial shading', () => {
   });
 });
 
+/**
+ * Sample points whose downward ray crosses the surface an EVEN number of times.
+ *
+ * At module scope because the terrain smoothing needs exactly this check too:
+ * drawing the topmost cell of a column part full is a change to the same
+ * surface the chamfer tests guard, and "is it still closed" is one question
+ * however many features are asking it.
+ */
+const leaks = (
+  tris: number[][],
+  lo: number,
+  hi: number,
+  loZ = lo,
+  hiZ = hi,
+) => {
+  const bad: string[] = [];
+  const N = 12;
+  for (let iu = 0; iu < (hi - lo) * N; iu++) {
+    for (let iv = 0; iv < (hiZ - loZ) * N; iv++) {
+      // Offset by irrationals: a sample landing exactly on a quad's shared
+      // diagonal hits both of its triangles and reads as even for no reason.
+      const x = lo + (iu + 0.5) / N + 0.00317;
+      const z = loZ + (iv + 0.5) / N + 0.00731;
+      let n = 0;
+      for (const t of tris) {
+        const [ax, az] = [t[0]!, t[2]!];
+        const [bx, bz] = [t[3]!, t[5]!];
+        const [cx, cz] = [t[6]!, t[8]!];
+        const dA = (x - bx) * (az - bz) - (ax - bx) * (z - bz);
+        const dB = (x - cx) * (bz - cz) - (bx - cx) * (z - cz);
+        const dC = (x - ax) * (cz - az) - (cx - ax) * (z - az);
+        if ((dA < 0 || dB < 0 || dC < 0) && (dA > 0 || dB > 0 || dC > 0)) continue;
+        n++;
+      }
+      if (n % 2 === 0) bad.push(`${x.toFixed(3)},${z.toFixed(3)} crossings=${n}`);
+    }
+  }
+  return bad;
+};
+
+/** Every triangle a set of chunks meshes to, as flat [ax,ay,az,bx,...] rows. */
+const trianglesOf = (
+  view: Parameters<typeof meshChunk>[0],
+  chunks: [number, number, number][],
+) => {
+  const tris: number[][] = [];
+  for (const [cx, cy, cz] of chunks) {
+    const d = meshChunk(view, cx, cy, cz);
+    if (!d) continue;
+    const p = (n: number) => [
+      d.positions[n * 3]!, d.positions[n * 3 + 1]!, d.positions[n * 3 + 2]!,
+    ];
+    for (let t = 0; t < d.indices.length; t += 3) {
+      tris.push([...p(d.indices[t]!), ...p(d.indices[t + 1]!), ...p(d.indices[t + 2]!)]);
+    }
+  }
+  return tris;
+};
+
 describe('chamfer holes at dug corners', () => {
   /*
    * Watertightness by ray parity, not by area and not by edge census.
@@ -2703,45 +2765,7 @@ describe('chamfer holes at dug corners', () => {
   const digAt = (cells: [number, number, number][]) => {
     const world = makeWorld();
     for (const [x, y, z] of cells) world.dig(x, y, z);
-    const tris: number[][] = [];
-    for (let cy = 1; cy <= 3; cy++) {
-      const d = meshChunk(world, 1, cy, 1);
-      if (!d) continue;
-      const p = (n: number) => [
-        d.positions[n * 3]!, d.positions[n * 3 + 1]!, d.positions[n * 3 + 2]!,
-      ];
-      for (let t = 0; t < d.indices.length; t += 3) {
-        tris.push([...p(d.indices[t]!), ...p(d.indices[t + 1]!), ...p(d.indices[t + 2]!)]);
-      }
-    }
-    return tris;
-  };
-
-  /** Sample points whose downward ray crosses the surface an EVEN number of times. */
-  const leaks = (tris: number[][], lo: number, hi: number) => {
-    const bad: string[] = [];
-    const N = 12;
-    for (let iu = 0; iu < (hi - lo) * N; iu++) {
-      for (let iv = 0; iv < (hi - lo) * N; iv++) {
-        // Offset by irrationals: a sample landing exactly on a quad's shared
-        // diagonal hits both of its triangles and reads as even for no reason.
-        const x = lo + (iu + 0.5) / N + 0.00317;
-        const z = lo + (iv + 0.5) / N + 0.00731;
-        let n = 0;
-        for (const t of tris) {
-          const [ax, az] = [t[0]!, t[2]!];
-          const [bx, bz] = [t[3]!, t[5]!];
-          const [cx, cz] = [t[6]!, t[8]!];
-          const dA = (x - bx) * (az - bz) - (ax - bx) * (z - bz);
-          const dB = (x - cx) * (bz - cz) - (bx - cx) * (z - cz);
-          const dC = (x - ax) * (cz - az) - (cx - ax) * (z - az);
-          if ((dA < 0 || dB < 0 || dC < 0) && (dA > 0 || dB > 0 || dC > 0)) continue;
-          n++;
-        }
-        if (n % 2 === 0) bad.push(`${x.toFixed(3)},${z.toFixed(3)} crossings=${n}`);
-      }
-    }
-    return bad;
+    return trianglesOf(world, [[1, 1, 1], [1, 2, 1], [1, 3, 1]]);
   };
 
   it('leaves no hole where two runs of rim meet at a corner', () => {
@@ -2858,8 +2882,19 @@ describe('terrain', () => {
      */
     let lowest = Infinity;
     let highest = -Infinity;
-    for (let x = 0; x < 128; x += 2) {
-      for (let z = 0; z < 128; z += 2) {
+    /*
+     * Every column, not every other one.
+     *
+     * This swept by twos while the height field rounded to whole voxels, and
+     * the rounding hid the stride: it dragged the columns either side of the
+     * hollow down onto its floor as well, so missing the centre cost nothing.
+     * Now the surface is continuous and only the centre itself is the extreme,
+     * so a stride of two walks straight past a hollow that lands on an odd
+     * column — which is exactly what it did. The test was passing on a
+     * coincidence, and the smoothing is what took the coincidence away.
+     */
+    for (let x = 0; x < 128; x += 1) {
+      for (let z = 0; z < 128; z += 1) {
         const h = groundHeight(x, z, OPTS);
         lowest = Math.min(lowest, h);
         highest = Math.max(highest, h);
@@ -2916,7 +2951,9 @@ describe('terrain', () => {
     const gen = terrainGenerator(OPTS);
     const { hill, valley } = features(OPTS);
     for (const at of [hill, valley, { x: 20, z: 100 }]) {
-      const top = groundHeight(at.x, at.z, OPTS);
+      // The topmost cell that EXISTS, which is no longer the same number as
+      // the height of the ground — the ground stops part way through it.
+      const top = surfaceVoxel(at.x, at.z, OPTS);
       // Air directly above, soil directly below: the surface is where the
       // height field says it is, in every column.
       expect(gen(at.x, top + 1, at.z)).toBe(AIR);
@@ -2926,6 +2963,243 @@ describe('terrain', () => {
       expect(gen(at.x, top - 5, at.z)).toBe(TOPSOIL);
       expect(gen(at.x, top - 6, at.z)).toBe(CLAY);
     }
+  });
+});
+
+describe('terrain smoothing', () => {
+  const OPTS = { surfaceY: SURFACE, size: 128, seed: 7 };
+
+  it('lets the ground stop between voxels, and agrees with itself about where', () => {
+    /*
+     * The one invariant the whole feature rests on: the topmost cell plus how
+     * full it is IS the height field. Three separate systems now read those
+     * two numbers — the mesher to draw the cell, collision to stand on it, the
+     * pellets to rest on it — and if they ever stopped adding up to the height
+     * everything else agrees on, she would hover or sink and it would look
+     * like a physics bug rather than an arithmetic one.
+     */
+    const wrong: string[] = [];
+    let offLattice = 0;
+    for (let x = 0; x < 128; x++) {
+      for (let z = 0; z < 128; z++) {
+        const h = groundHeight(x, z, OPTS);
+        const top = surfaceVoxel(x, z, OPTS);
+        const fill = surfaceFill(x, top, z, OPTS);
+        if (Math.abs(top + fill - h) > 1e-9) wrong.push(`${x},${z} ${top}+${fill} != ${h}`);
+        // Never zero — a cell drawn with no thickness — and never over one, or
+        // the drawn ground would stand proud of the cell collision uses.
+        if (fill <= 0 || fill > 1) wrong.push(`${x},${z} fill ${fill}`);
+        // Only the topmost cell is partial. Dig it away and the next one down
+        // is a whole cube again, which is what keeps digging feeling the same.
+        if (surfaceFill(x, top - 1, z, OPTS) !== 1) wrong.push(`${x},${z} below partial`);
+        if (surfaceFill(x, top + 1, z, OPTS) !== 1) wrong.push(`${x},${z} above partial`);
+        if (Math.abs(h - Math.round(h)) > 1e-9) offLattice++;
+      }
+    }
+    expect(wrong).toEqual([]);
+    // And it is actually being used: the great majority of the world's columns
+    // now stop somewhere a whole-voxel world could not have put them.
+    expect(offLattice).toBeGreaterThan(0.8 * 128 * 128);
+  });
+
+  it('replaces whole-voxel terraces with sub-voxel ones', () => {
+    /*
+     * The reported fault, measured.
+     *
+     * Rounding to a whole voxel made every join between columns either flat or
+     * a full 5 mm drop — taller than the ant, and on a slope of about half a
+     * voxel per voxel that is a terrace every second cell. It read as contour
+     * lines. There was never a middle value available.
+     *
+     * Now the join IS the local slope, so the numbers below are the shape of
+     * the ground rather than the shape of the rounding.
+     */
+    let steps = 0;
+    let wholeVoxel = 0;
+    let total = 0;
+    let worst = 0;
+    for (let x = 0; x < 127; x++) {
+      for (let z = 0; z < 127; z++) {
+        const h = groundHeight(x, z, OPTS);
+        for (const [dx, dz] of [[1, 0], [0, 1]] as const) {
+          const d = Math.abs(h - groundHeight(x + dx, z + dz, OPTS));
+          if (d < 1e-9) continue;
+          steps++;
+          total += d;
+          worst = Math.max(worst, d);
+          if (d >= 1 - 1e-9) wholeVoxel++;
+        }
+      }
+    }
+    // Not one full-voxel terrace left anywhere in the world. Before this every
+    // single one of these 15,000 joins was exactly that.
+    expect(wholeVoxel).toBe(0);
+    // Measured at 0.182 voxels — 0.91 mm, about a fifth of what it was.
+    expect(total / steps).toBeLessThan(0.25);
+    // Still climbable without jumping, at the steepest point of the hill —
+    // DigScene steps over 1.05 voxels, so anything under a voxel is walkable.
+    expect(worst).toBeLessThanOrEqual(1);
+    // A step can be as fine as one quantum and no finer, which is what makes
+    // SURFACE_STEP the knob rather than one setting among several.
+    expect(worst % SURFACE_STEP).toBeCloseTo(0, 9);
+  });
+
+  it('closes every join on a real hillside where the fills disagree', () => {
+    /*
+     * Deliberately NOT the ray-parity check the chamfer holes use.
+     *
+     * That was the first thing tried here and it is structurally blind to this
+     * bug: parity casts a ray straight DOWN, the band that goes missing is a
+     * VERTICAL face, and a vertical face contributes nothing to a vertical ray
+     * whatever state it is in. Removing the band entirely left the parity test
+     * green. It was measuring the top surface, which was never at risk.
+     *
+     * So this asks the question directly instead, on the real hill rather than
+     * on a rig: wherever two neighbouring columns end in the same cell but at
+     * different heights, is there geometry standing in the plane between them
+     * that spans the gap.
+     */
+    const world = new VoxelWorld(128, 128, 128, terrainGenerator(OPTS));
+    const view = {
+      get: (x: number, y: number, z: number) => world.get(x, y, z),
+      fill: (x: number, y: number, z: number) => surfaceFill(x, y, z, OPTS),
+    };
+    const { hill } = features(OPTS);
+    // The flank, where the slope is steepest and neighbouring columns disagree
+    // most. Flat ground has no differing fills and would test nothing.
+    const cx = (hill.x + 12) >> 5;
+    const cz = hill.z >> 5;
+    const tris = trianglesOf(view, [[cx, 2, cz], [cx, 3, cz]]);
+
+    const open: string[] = [];
+    let joins = 0;
+    for (let x = cx * 32; x < cx * 32 + 31; x++) {
+      for (let z = cz * 32; z < cz * 32 + 32; z++) {
+        const top = surfaceVoxel(x, z, OPTS);
+        if (surfaceVoxel(x + 1, z, OPTS) !== top) continue;
+        const a = surfaceFill(x, top, z, OPTS);
+        const b = surfaceFill(x + 1, top, z, OPTS);
+        if (a === b) continue;
+        joins++;
+        const low = top + Math.min(a, b);
+        const high = top + Math.max(a, b);
+        // A triangle standing in the plane between the two columns, inside this
+        // column's own strip, tall enough to span the gap on its own.
+        const spans = tris.some((t) => (
+          t[0] === x + 1 && t[3] === x + 1 && t[6] === x + 1
+          && Math.min(t[2]!, t[5]!, t[8]!) <= z && Math.max(t[2]!, t[5]!, t[8]!) >= z + 1
+          && Math.min(t[1]!, t[4]!, t[7]!) <= low + 1e-6
+          && Math.max(t[1]!, t[4]!, t[7]!) >= high - 1e-6
+        ));
+        if (!spans) open.push(`${x},${z} gap ${low.toFixed(3)}..${high.toFixed(3)}`);
+      }
+    }
+    // Vacuous otherwise: a patch of flat ground would pass with nothing to say.
+    expect(joins).toBeGreaterThan(200);
+    expect(open).toEqual([]);
+  });
+
+  it('draws a part-full cell exactly as tall as it says, and no taller', () => {
+    /*
+     * A world made for the question, rather than the real terrain.
+     *
+     * The first version of this asked the real hillside and tried to work out
+     * which column each vertex belonged to from its position — which is not
+     * answerable, because a vertex on a cell boundary belongs to both. It
+     * reported the taller neighbour as an overhang and was measuring nothing.
+     *
+     * Here the answer is known: one flat plateau, every top cell filled to the
+     * same fraction. So the top of the drawn geometry can be checked against
+     * that fraction exactly, and the safety rule the dish and the chamfer
+     * already follow — geometry may only ever recede INTO a cell, never stand
+     * proud of where the raycast and the AABBs think the solid is — becomes an
+     * equality rather than a bound.
+     */
+    const FILL = 0.375;
+    const TOP = 100;
+    const view = {
+      get: (_x: number, y: number, _z: number) => (y <= TOP ? TOPSOIL : AIR),
+      fill: (_x: number, y: number, _z: number) => (y === TOP ? FILL : 1),
+    };
+    const data = meshChunk(view, 1, 3, 1)!;
+    expect(data).toBeTruthy();
+    let highest = -Infinity;
+    for (let i = 1; i < data.positions.length; i += 3) {
+      highest = Math.max(highest, data.positions[i]!);
+    }
+    // Not TOP + 1: the cell is drawn to its fill line and stops.
+    expect(highest).toBeCloseTo(TOP + FILL, 9);
+
+    // And with no fill at all it is a whole cube again — the same mesher, the
+    // same world, one hook removed. If this ever drifts, `fill` has stopped
+    // being an optional refinement and become something the mesher depends on.
+    const plain = meshChunk({ get: view.get }, 1, 3, 1)!;
+    let plainHighest = -Infinity;
+    for (let i = 1; i < plain.positions.length; i += 3) {
+      plainHighest = Math.max(plainHighest, plain.positions[i]!);
+    }
+    expect(plainHighest).toBe(TOP + 1);
+  });
+
+  it('covers the band a shorter neighbour leaves exposed', () => {
+    /*
+     * Two columns, one filled higher than the other, and nothing else.
+     *
+     * The taller one's side face would normally be culled — its neighbour is
+     * solid — and culling it leaves the band between the two fill lines open
+     * onto the inside of the cell. On real ground that is a black slot along
+     * every join where the terrain steps down. Isolated here so the band is the
+     * only thing in the mesh that can account for the extra surface.
+     */
+    const TOP = 100;
+    const SHORT = 0.25;
+    const TALL = 0.875;
+    const at = (x: number) => (x === 40 ? SHORT : TALL);
+    const view = {
+      get: (_x: number, y: number, _z: number) => (y <= TOP ? TOPSOIL : AIR),
+      fill: (x: number, y: number, _z: number) => (y === TOP ? at(x) : 1),
+    };
+    const tris = trianglesOf(view, [[1, 3, 1]]);
+    // Every vertical face standing in the plane between the two columns.
+    const band = tris.filter((t) => t[0] === 41 && t[3] === 41 && t[6] === 41);
+    expect(band.length).toBeGreaterThan(0);
+    let low = Infinity;
+    let high = -Infinity;
+    for (const t of band) {
+      for (const i of [1, 4, 7]) {
+        low = Math.min(low, t[i]!);
+        high = Math.max(high, t[i]!);
+      }
+    }
+    // Exactly the gap: from the short column's top to the tall one's, with no
+    // overshoot past the cell's own ceiling.
+    expect(low).toBeCloseTo(TOP + SHORT, 9);
+    expect(high).toBeCloseTo(TOP + TALL, 9);
+  });
+
+  it('keeps the distant country outside, exactly', () => {
+    /*
+     * The horizon is a second, much larger relief that fades in past the walls.
+     * It has to be worth EXACTLY zero everywhere inside, not merely small: any
+     * leak at all and it moves ground she can dig, spawn on and collide with,
+     * and the tank stops matching the brief it was built to.
+     */
+    for (let v = 0; v <= 128; v += 8) {
+      expect(outsideness(v, 64, 128)).toBe(0);
+      expect(outsideness(64, v, 128)).toBe(0);
+    }
+    expect(outsideness(0, 0, 128)).toBe(0);
+    expect(outsideness(128, 128, 128)).toBe(0);
+    // And it does take hold once out there, or the world ends in a plain.
+    expect(outsideness(-400, 64, 128)).toBe(1);
+    let far = 0;
+    for (let d = 260; d < 900; d += 7) {
+      far = Math.max(far, Math.abs(groundHeight(-d, 64, OPTS) - SURFACE));
+    }
+    expect(far).toBeGreaterThan(FAR_RELIEF_VOXELS / 4);
+    // Continuous across the wall: the join is where a seam would show.
+    expect(Math.abs(groundHeight(0, 64, OPTS) - groundHeight(-0.5, 64, OPTS)))
+      .toBeLessThan(0.5);
   });
 });
 

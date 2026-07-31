@@ -97,12 +97,22 @@ export function insideBox(x: number, y: number, z: number, opts: BoxOptions): bo
 
 export interface Sampler {
   get(x: number, y: number, z: number): VoxelId;
+  /** How full a cell is drawn; see the mesher. Absent means whole. */
+  fill?(x: number, y: number, z: number): number;
 }
 
-/** The world as the SOIL pass sees it: glass is not there. */
+/**
+ * The world as the SOIL pass sees it: glass is not there.
+ *
+ * Sub-voxel fill is carried straight through, because it belongs to the soil
+ * and this pass IS the soil. Dropping it here would have been an invisible
+ * bug: the terrain would go back to whole-voxel terraces the moment the glass
+ * box existed, and nothing would say why.
+ */
 export function soilPass(world: Sampler, opts: BoxOptions): Sampler {
   return {
     get: (x, y, z) => (isGlassCell(x, y, z, opts) ? AIR : world.get(x, y, z)),
+    fill: world.fill ? (x, y, z) => world.fill!(x, y, z) : undefined,
   };
 }
 

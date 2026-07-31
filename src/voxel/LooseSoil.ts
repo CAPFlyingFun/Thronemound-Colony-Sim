@@ -89,10 +89,27 @@ export interface Clod {
 
 interface Sampler {
   get(x: number, y: number, z: number): VoxelId;
+  /** How full a cell is drawn, 0 to 1. Absent means whole. See the mesher. */
+  fill?(x: number, y: number, z: number): number;
 }
 
+/**
+ * Is this POINT inside solid ground?
+ *
+ * Asked of a point rather than of a cell — which used to be the same question
+ * and is not any more. The topmost cell of a terrain column is drawn only part
+ * full, so a point in its upper reaches is ABOVE the ground even though the
+ * cell it lands in is solid. Ignoring that would rest a pellet on the cell's
+ * ceiling, floating it up to a whole voxel clear of the dirt: the floating-clod
+ * fault a third time, and the most visible one yet, because this one happens in
+ * the open rather than down a tunnel.
+ */
 function solidAt(world: Sampler, x: number, y: number, z: number): boolean {
-  return isSolid(world.get(Math.floor(x), Math.floor(y), Math.floor(z)));
+  const cx = Math.floor(x);
+  const cy = Math.floor(y);
+  const cz = Math.floor(z);
+  if (!isSolid(world.get(cx, cy, cz))) return false;
+  return y < cy + (world.fill ? world.fill(cx, cy, cz) : 1);
 }
 
 /** How big one pellet is, so the caller can vary it per cell. */
