@@ -3252,7 +3252,13 @@ describe('terrain smoothing', () => {
     // Vacuous unless it really is shooting at the hill from all four sides.
     expect(probes).toBeGreaterThan(3000);
     expect(seenThrough.slice(0, 8)).toEqual([]);
-  });
+    /*
+     * Explicit, for the same reason as the flank test below: a full ray grid
+     * over the whole hillside lands close enough to vitest's five-second
+     * default that it passes or fails on how busy the machine is. Both of
+     * these were already flipping on an untouched checkout.
+     */
+  }, 60000);
   }
 
   it('lights every facet of the open surface', () => {

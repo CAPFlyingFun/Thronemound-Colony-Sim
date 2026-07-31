@@ -243,7 +243,7 @@ for (const view of CASES) {
         if (!bone) continue;
         const v = n.getVertexPosition(i, n.position.clone());
         n.localToWorld(v);
-        const gap = v.y - lab.groundAt(v.x, v.z);
+        const gap = v.y - lab.groundAt(v.x, v.z, v.y + 0.4);
 
         // Everything she is made of, then the two parts with their own solver.
         anyChecked++;
@@ -332,6 +332,64 @@ for (const view of CASES) {
     fail(`the bite landed under her body: ${mm(bite.toJaws)} mm from the jaws, ${mm(bite.toBelly)} mm from the centre`);
   } else {
     ok(`bite lands at her jaws (${(bite.toJaws * 5).toFixed(2)} mm) not her centre (${(bite.toBelly * 5).toFixed(2)} mm)`);
+  }
+
+  /*
+   * Can she get down a shaft and STAY down it, with the view still working?
+   *
+   * Reported as the ant digging down but snapping back to the top terrain, and
+   * it was one query answering the wrong question for three callers at once:
+   * ground height was "the topmost soil at this x and z", which inside a
+   * burrow is the RIM over her head. The stance thought she was buried, the
+   * fail-safe agreed with it, and it lifted her three millimetres out of her
+   * own hole — measured at `guard 2.954 mm` on the reported build.
+   *
+   * So this digs a shaft wider than she is, lets the easing settle, and checks
+   * both halves: that she went down, and that nothing hauled her back up.
+   */
+  const shaft = await page.evaluate(async () => {
+    const lab = window.labScene;
+    if (!lab) return null;
+    const before = lab.antPosition.y;
+    // Wider than her stance so she can get into it, but a burrow rather than
+    // a quarry — a crater big enough to swallow the camera tests something
+    // else, and did: the first version buried the view and rendered sky.
+    const r = lab.stream.field.cellSize * 18;
+    for (let i = 0; i < 10; i += 1) {
+      lab.stream.subtractSphere(
+        { x: lab.antPosition.x, y: before + r - i * 0.22, z: lab.antPosition.z }, r,
+      );
+    }
+    /*
+     * Called WITHOUT optional chaining, deliberately. It was written `?.()`
+     * and the method did not exist — a silent no-op that left every shaft
+     * check looking at a stale mesh while the numbers, which read the field
+     * rather than the geometry, went on passing. A defensive call that hides a
+     * missing function is not defensive.
+     */
+    lab.rebuildTerrainForTest();
+    // Long enough for an eased descent to finish; it is not instant by design.
+    await new Promise((done) => setTimeout(done, 1500));
+    const cam = lab.camera.position;
+    return {
+      before, after: lab.antPosition.y, guard: lab.guardLift,
+      cameraBuried: lab.solidAt(cam),
+    };
+  });
+  await page.screenshot({ path: `${OUT}-shaft.png` });
+  if (!shaft) fail('could not reach the scene to test the shaft');
+  else {
+    const dropMm = (shaft.before - shaft.after) * 5;
+    const guardMm = shaft.guard * 5;
+    if (dropMm < 2) fail(`she would not go down the shaft: dropped only ${dropMm.toFixed(2)} mm`);
+    else ok(`she descends into a shaft and stays (${dropMm.toFixed(2)} mm down)`);
+    // The fail-safe must be idle down there. If it is lifting, it is lifting
+    // her out, which is exactly the reported bug wearing a different hat.
+    if (guardMm > 0.5) fail(`the fail-safe is hauling her out of the shaft by ${guardMm.toFixed(3)} mm`);
+    else ok(`the fail-safe is quiet in the shaft (${guardMm.toFixed(3)} mm)`);
+    // And the camera must not have followed her into the dirt.
+    if (shaft.cameraBuried) fail('the camera ended up inside the soil, so the view renders as sky');
+    else ok('the camera stayed above the soil while she went down');
   }
 
   const status = (await page.locator('.density-lab-status').innerText()).replace(/\s+/g, ' ');

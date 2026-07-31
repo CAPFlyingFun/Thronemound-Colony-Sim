@@ -84,6 +84,46 @@ const FOOT_CLEARANCE = 0.01 / WORLD_UNIT_MM;
 const FOOT_PLANT_BAND = 0.6 / WORLD_UNIT_MM;
 
 /**
+ * How far above herself she looks for ground — her step height, 2 mm.
+ *
+ * Every ground query is now "the floor below this", so this is what decides
+ * what counts as a step up rather than a wall. Too small and she cannot climb
+ * the rim of her own diggings; too large and the query starts finding the top
+ * of a burrow's ceiling again, which is the bug it exists to avoid.
+ */
+const STEP_UP = 2 / WORLD_UNIT_MM;
+
+/**
+ * How quickly her height and her walking speed catch up, per second.
+ *
+ * Both were instant. Height snapped to whatever the ground said this frame,
+ * which over a dug surface is a different number every frame, and the pad
+ * moved her at full speed from a standing start. Smoothing both is most of
+ * what "make the movement lerp" means; the rest is that the terrain under her
+ * changes while she stands on it, and a step response of about a fifth of a
+ * second turns that from a snap into a settle.
+ */
+const HEIGHT_EASE = 14;
+
+/** How far the camera stays clear of the soil — 3 mm, about a third of her. */
+const CAMERA_CLEARANCE = 3 / WORLD_UNIT_MM;
+
+/**
+ * How close the camera may be dragged to her by an obstruction — 4 mm.
+ *
+ * Below about half a body length the view stops being a view of an ant and
+ * becomes a view of one leg: at 1.5 mm she filled the top of the frame and
+ * everything else was the sky above the shaft. When even 4 mm is still inside
+ * the soil the arm gives up and the camera escapes upward instead, which at
+ * least looks down the hole from the rim.
+ */
+const MIN_CAMERA_ARM = 4 / WORLD_UNIT_MM;
+
+/** Scratch for the camera sight-line march, so it allocates nothing. */
+const PROBE = new THREE.Vector3();
+const SPEED_EASE = 7;
+
+/**
  * How much of a frame may go to building newly streamed chunks.
  *
  * A scroll brings in a third of the window — around fifty chunks and a tenth
@@ -128,6 +168,8 @@ function stillValid(cellX: number, cellZ: number, retained?: Retained): boolean 
 interface Pellet {
   mesh: any;
   velocity: any;
+  /** Radians per second about each axis, damped with the clod's own speed. */
+  spin: any;
   age: number;
 }
 
@@ -195,6 +237,8 @@ export class DensityTerrainLabScene {
   private turnRate = 0;
   /** World units per second, for the gait's cadence. Zero when standing. */
   private walkSpeed = 0;
+  /** Her actual velocity, eased toward what the pad asks for. */
+  private readonly velocity = new THREE.Vector3();
   /** 0..1, decaying. Drives the gait's dig animation after a bite. */
   private digPulse = 0;
   /** Her current up axis, eased toward the slope so she does not shiver. */
@@ -205,6 +249,9 @@ export class DensityTerrainLabScene {
   private readonly lastBite = new THREE.Vector3();
   /** How far the fail-safe had to lift her on the last frame. */
   private guardLift = 0;
+  /** The zoom the player set, kept while the camera is pulled in past it. */
+  private orbitDistance = 0;
+  private cameraPulled = false;
   private sun: any = null;
   private readonly move = { forward: 0, strafe: 0 };
   private readonly heldKeys = new Set<string>();
@@ -281,7 +328,16 @@ export class DensityTerrainLabScene {
      * behind it to draw. Fading into it costs nothing and reads as distance
      * rather than as the map running out.
      */
-    this.scene.fog = new THREE.Fog(0x8db4d6, WINDOW_SIZE * 0.42, WINDOW_SIZE * 0.98);
+    /*
+     * Fog begins beyond anywhere the camera can get to, and that is the point
+     * of the numbers. It used to start at 0.42 of the window — 20 mm — while
+     * the orbit reaches out to 30, so soil a few millimetres past her was
+     * already a third faded and a shadowed pit floor came out as a pool of
+     * sky blue sitting in the crater. Starting past `maxDistance` leaves the
+     * fog doing the one job it is for: softening the cut face where the loaded
+     * window stops.
+     */
+    this.scene.fog = new THREE.Fog(0x8db4d6, WINDOW_SIZE * 0.75, WINDOW_SIZE * 1.5);
     this.addLighting();
 
     const hud = document.createElement('div');
@@ -579,6 +635,23 @@ export class DensityTerrainLabScene {
    * of the bite keeps its old surface, which reads as the dig only working on
    * one side of the crosshair.
    */
+  /**
+   * Rebuild every resident chunk from scratch.
+   *
+   * Only the smoke test uses it, to remesh after carving the field directly
+   * instead of through a bite. It is public for that reason and no other.
+   */
+  rebuildTerrainForTest(): void {
+    for (const [, mesh] of this.chunks) {
+      this.scene.remove(mesh);
+      mesh.geometry.dispose();
+    }
+    this.chunks.clear();
+    this.empties.clear();
+    this.pending.length = 0;
+    this.refreshResidency(true);
+  }
+
   private rebuildAround(bounds: {
     minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number;
   }): void {
@@ -670,13 +743,33 @@ export class DensityTerrainLabScene {
      * because the target is metres of ant-scale away and the ray comes out
      * nearly level.
      */
-    let surface = this.firstSoilFromJaws(jaws, direction);
-    if (!surface) {
-      surface = this.firstSoilFromJaws(jaws, scrape);
+    /*
+     * Three things to try, in the order an ant would: where you are looking,
+     * then forward and down, then straight down — putting her mouth to the
+     * floor, which is the one that cannot miss for want of a shallow angle.
+     *
+     * The last was added because the other two do miss. Her height is eased
+     * now rather than snapped, so while walking she rides a fraction of a
+     * millimetre above the true ground, and the fail-safe adds a little more;
+     * that was enough to lift her jaws past what a three-millimetre ray at
+     * forty degrees can reach, and every bite after a walk reported that she
+     * could not reach it. Straight down gets a longer reach because lowering
+     * the head is a bigger motion than leaning into a bank.
+     */
+    let surface: any = null;
+    const attempts: Array<[any, number]> = [
+      [direction, JAW_REACH],
+      [scrape, JAW_REACH],
+      [this.up.clone().negate(), JAW_REACH * 2],
+    ];
+    for (const [way, reach] of attempts) {
+      surface = this.firstSoilFromJaws(jaws, way, reach);
+      if (!surface) continue;
       // The bite direction has to be the one that actually found the soil, or
       // the brush is offset along a ray that missed and the crater opens
       // beside the hole rather than in it.
-      if (surface) direction.copy(scrape);
+      direction.copy(way);
+      break;
     }
     if (!surface) {
       this.status.dataset.message = 'Her jaws cannot reach that';
@@ -806,6 +899,11 @@ export class DensityTerrainLabScene {
         0.7 + Math.random() * 0.5,
         (Math.random() - 0.5) * 0.6,
       )),
+      spin: new THREE.Vector3(
+        (Math.random() - 0.5) * 9,
+        (Math.random() - 0.5) * 9,
+        (Math.random() - 0.5) * 9,
+      ),
       age: 0,
     });
   }
@@ -815,16 +913,43 @@ export class DensityTerrainLabScene {
       pellet.age += delta;
       pellet.velocity.y -= 9.5 * delta;
       pellet.mesh.position.addScaledVector(pellet.velocity, delta);
-      pellet.mesh.rotation.x += delta * 1.7;
-      pellet.mesh.rotation.z += delta * 1.2;
+
+      /*
+       * A clod tumbles because it is MOVING, and stops when it stops.
+       *
+       * The spin used to be a constant added every frame regardless, so a
+       * pellet that had come to rest on the ground went on rotating on the
+       * spot forever — a field of dirt spinning quietly in place. Tying the
+       * tumble to the velocity means it slows as the clod slows and ends when
+       * it lands, and it costs nothing: the number was always available.
+       */
+      pellet.mesh.rotation.x += pellet.spin.x * delta;
+      pellet.mesh.rotation.y += pellet.spin.y * delta;
+      pellet.mesh.rotation.z += pellet.spin.z * delta;
+
       const radius = (pellet.mesh.geometry.boundingSphere?.radius ?? 0.35) * 0.55;
-      const floorY = this.groundAt(pellet.mesh.position.x, pellet.mesh.position.z) + radius;
+      const floorY = this.groundAt(
+        pellet.mesh.position.x, pellet.mesh.position.z, pellet.mesh.position.y + radius,
+      ) + radius;
       if (pellet.mesh.position.y < floorY) {
         pellet.mesh.position.y = floorY;
         if (Math.abs(pellet.velocity.y) > 0.22) pellet.velocity.y *= -0.28;
         else pellet.velocity.y = 0;
         pellet.velocity.x *= 0.82;
         pellet.velocity.z *= 0.82;
+        // Landing scrubs the tumble off much faster than flight does; earth
+        // does not skate.
+        pellet.spin.multiplyScalar(0.55);
+      }
+
+      // Tumble tracks speed, and both are allowed to reach exactly zero rather
+      // than decaying toward it forever.
+      const speed = pellet.velocity.length();
+      if (speed < 0.02) {
+        pellet.velocity.set(0, 0, 0);
+        pellet.spin.set(0, 0, 0);
+      } else {
+        pellet.spin.multiplyScalar(Math.min(1, speed / (speed + delta * 6)));
       }
     }
   }
@@ -835,11 +960,47 @@ export class DensityTerrainLabScene {
    * that have actually been dug. Falls back to the formula outside the window,
    * where by construction nothing has been dug anyway.
    */
-  private groundAt(worldX: number, worldZ: number): number {
+  private groundAt(worldX: number, worldZ: number, fromY = Infinity): number {
     const x = worldX - this.stream.originWorldX;
     const z = worldZ - this.stream.originWorldZ;
     const span = WINDOW_CELLS * CELL_SIZE;
     if (x < 0 || x > span || z < 0 || z > span) return streamGroundHeight(worldX, worldZ);
+
+    /*
+     * The floor BELOW a height, not the top of the world.
+     *
+     * This used to scan from the sky down and return the first soil it met,
+     * which is the right answer exactly once: on open ground, before anybody
+     * has dug anything. Stand in a burrow and the topmost soil at your own x
+     * and z is the RIM, several millimetres over your head — so the stance
+     * thought she was buried, the fail-safe agreed, and it heaved her three
+     * millimetres straight up out of the hole she had just dug. Reported as
+     * not being able to keep her down in it, and it was the same query
+     * answering the same wrong question for the body, the feet and the guard
+     * all at once.
+     *
+     * `fromY` is a step height, not a technicality. Scanning from the ant's
+     * own head rather than from the sky is what lets a floor exist under a
+     * ceiling; scanning from a little ABOVE her is what still lets her walk up
+     * a rise, because ground she could step onto has to be findable.
+     */
+    const top = CELLS_Y;
+    const start = Math.max(0, Math.min(top, Math.ceil(fromY / CELL_SIZE)));
+    let neighbour = this.stream.field.sample(x, start * CELL_SIZE, z);
+
+    /*
+     * Starting inside solid soil means climbing out of it. Without this, a
+     * probe that begins buried finds the floor of whatever chamber lies below
+     * and reports it as the ground, which drops her through the world.
+     */
+    if (neighbour > 0) {
+      for (let y = start + 1; y <= top; y += 1) {
+        const here = this.stream.field.sample(x, y * CELL_SIZE, z);
+        if (here <= 0) return (y - 1 + neighbour / (neighbour - here)) * CELL_SIZE;
+        neighbour = here;
+      }
+      return top * CELL_SIZE;
+    }
 
     /*
      * The crossing is INTERPOLATED, not the top of the last solid cell.
@@ -851,11 +1012,10 @@ export class DensityTerrainLabScene {
      * the height to stand at, and `sample` gives it bilinearly across x and z
      * as well rather than snapping her to the nearest column.
      */
-    let above = this.stream.field.sample(x, CELLS_Y * CELL_SIZE, z);
-    for (let y = CELLS_Y - 1; y >= 0; y -= 1) {
+    for (let y = start - 1; y >= 0; y -= 1) {
       const here = this.stream.field.sample(x, y * CELL_SIZE, z);
-      if (here > 0) return (y + here / (here - above)) * CELL_SIZE;
-      above = here;
+      if (here > 0) return (y + here / (here - neighbour)) * CELL_SIZE;
+      neighbour = here;
     }
     return 0;
   }
@@ -865,18 +1025,18 @@ export class DensityTerrainLabScene {
    * within reach, or null. Half-cell steps, so nothing thinner than a bite can
    * be stepped over.
    */
-  private firstSoilFromJaws(jaws: any, direction: any): any {
+  private firstSoilFromJaws(jaws: any, direction: any, reach: number): any {
     const probe = new THREE.Vector3();
-    const steps = Math.ceil(JAW_REACH / (CELL_SIZE * 0.5));
+    const steps = Math.ceil(reach / (CELL_SIZE * 0.5));
     for (let i = 0; i <= steps; i += 1) {
-      probe.copy(jaws).addScaledVector(direction, (i / steps) * JAW_REACH);
+      probe.copy(jaws).addScaledVector(direction, (i / steps) * reach);
       if (this.solidAt(probe)) return probe.clone();
     }
     return null;
   }
 
   /** Is this world point inside packed soil? */
-  private solidAt(point: any): boolean {
+  solidAt(point: any): boolean {
     const x = point.x - this.stream.originWorldX;
     const z = point.z - this.stream.originWorldZ;
     const span = WINDOW_CELLS * CELL_SIZE;
@@ -902,28 +1062,29 @@ export class DensityTerrainLabScene {
    */
   private stance(worldX: number, worldZ: number): { height: number; up: any } {
     const reach = (CASTE_LENGTH_MM.queen / WORLD_UNIT_MM) * STANCE;
-    const west = this.groundAt(worldX - reach, worldZ);
-    const east = this.groundAt(worldX + reach, worldZ);
-    const south = this.groundAt(worldX, worldZ - reach);
-    const north = this.groundAt(worldX, worldZ + reach);
+    const from = this.antPosition.y + STEP_UP;
+    const west = this.groundAt(worldX - reach, worldZ, from);
+    const east = this.groundAt(worldX + reach, worldZ, from);
+    const south = this.groundAt(worldX, worldZ - reach, from);
+    const north = this.groundAt(worldX, worldZ + reach, from);
+    const centre = this.groundAt(worldX, worldZ, from);
 
     /*
-     * Her body rides on her FEET, not on the point under her belly.
+     * The MEDIAN of where her feet and her belly are, not the average and not
+     * the highest.
      *
-     * Reading the ground at her centre alone means a hole narrower than she is
-     * swallows her: dig a four-millimetre pit under her middle and the body
-     * drops two and a half into it while all six feet stay on the rim, which
-     * no amount of leg solving can undo because a leg cannot fold that far. An
-     * ant standing over a small hole is held up by the rim, so the support
-     * height is the average under her stance.
-     *
-     * The max against the centre is the other half of it: her root sits at
-     * foot level, so letting it fall below the ground directly beneath her
-     * would bury her belly in any ridge she straddles.
+     * Two failures pull in opposite directions here, and the median is what
+     * separates them without needing to know which is happening. A pothole
+     * narrower than she is touches one sample out of five, so the median
+     * ignores it and she strides over it — the thing the average was brought
+     * in to fix. A shaft she is walking down into is under most of the
+     * samples, so the median follows it down, which the average and the
+     * max-against-centre both refused to do: they held her on the rim of her
+     * own burrow and the fail-safe finished the job by hauling her out.
      */
-    const support = (west + east + south + north) / 4;
+    const ranked = [west, east, south, north, centre].sort((a, b) => a - b);
     return {
-      height: Math.max(support, this.groundAt(worldX, worldZ)),
+      height: ranked[2]!,
       up: new THREE.Vector3(-(east - west), 2 * reach, -(north - south)).normalize(),
     };
   }
@@ -937,9 +1098,17 @@ export class DensityTerrainLabScene {
    * used to be — and standing still over a hole you just made is exactly when
    * that is most obvious.
    */
-  private stand(): void {
+  private stand(dt: number): void {
     const ground = this.stance(this.antPosition.x, this.antPosition.z);
-    this.antPosition.y = ground.height;
+    // Eased, not assigned. The ground under her changes every time she bites,
+    // and following it exactly is a jolt on every frame that removes a cell.
+    const ease = 1 - Math.exp(-HEIGHT_EASE * dt);
+    const rise = (ground.height - this.antPosition.y) * ease;
+    this.antPosition.y += rise;
+    // The camera rides the rise as well, or descending a shaft leaves the view
+    // hanging at the surface looking at the back of her head.
+    this.camera.position.y += rise;
+    this.controls.target.copy(this.antPosition);
     if (!this.queenReady) return;
     this.queen.root.position.copy(this.antPosition);
 
@@ -976,8 +1145,13 @@ export class DensityTerrainLabScene {
    * point of tiles being larger than a step.
    */
   private walk(dt: number): void {
+    const ease = 1 - Math.exp(-SPEED_EASE * dt);
     if (this.move.forward === 0 && this.move.strafe === 0) {
-      this.walkSpeed = 0;
+      // Coast to a stop rather than halting on the frame the finger lifts.
+      this.velocity.multiplyScalar(1 - ease);
+      this.walkSpeed = this.velocity.length();
+      if (this.walkSpeed < 1e-3) { this.velocity.set(0, 0, 0); this.walkSpeed = 0; return; }
+      this.glide(dt);
       return;
     }
 
@@ -992,17 +1166,10 @@ export class DensityTerrainLabScene {
       .addScaledVector(forward, this.move.forward)
       .addScaledVector(right, this.move.strafe);
     if (step.lengthSq() === 0) return;
-    step.normalize().multiplyScalar(WALK_SPEED * dt);
-    this.walkSpeed = WALK_SPEED;
+    step.normalize().multiplyScalar(WALK_SPEED);
+    this.velocity.lerp(step, ease);
+    this.walkSpeed = this.velocity.length();
 
-    const margin = CELL_SIZE * 3;
-    const previous = this.antPosition.clone();
-    this.antPosition.x = THREE.MathUtils.clamp(
-      this.antPosition.x + step.x, margin, WORLD_SPAN - margin,
-    );
-    this.antPosition.z = THREE.MathUtils.clamp(
-      this.antPosition.z + step.z, margin, WORLD_SPAN - margin,
-    );
     /*
      * She turns toward where she is going rather than snapping to it, so a tap
      * on the pad reads as an animal deciding to go that way. The shortest way
@@ -1014,9 +1181,31 @@ export class DensityTerrainLabScene {
     let turn = wanted - this.facing;
     while (turn > Math.PI) turn -= Math.PI * 2;
     while (turn < -Math.PI) turn += Math.PI * 2;
-    const step_ = THREE.MathUtils.clamp(turn, -TURN_RATE * dt, TURN_RATE * dt);
-    this.facing += step_;
-    this.turnRate = dt > 0 ? step_ / dt : 0;
+    const turned = THREE.MathUtils.clamp(turn, -TURN_RATE * dt, TURN_RATE * dt);
+    this.facing += turned;
+    this.turnRate = dt > 0 ? turned / dt : 0;
+
+    this.glide(dt);
+  }
+
+  /**
+   * Carry her by the current velocity, and everything that has to follow her.
+   *
+   * Shared by the walking and the coasting branches, because the camera, the
+   * orbit target and the streaming window all have to keep up whether she is
+   * being driven or merely still slowing down — and a stop that leaves the
+   * window behind is a stop that streams a tile late.
+   */
+  private glide(dt: number): void {
+    if (this.velocity.lengthSq() < 1e-12) return;
+    const margin = CELL_SIZE * 3;
+    const previous = this.antPosition.clone();
+    this.antPosition.x = THREE.MathUtils.clamp(
+      this.antPosition.x + this.velocity.x * dt, margin, WORLD_SPAN - margin,
+    );
+    this.antPosition.z = THREE.MathUtils.clamp(
+      this.antPosition.z + this.velocity.z * dt, margin, WORLD_SPAN - margin,
+    );
 
     // Carry the camera along by exactly her step, so orbiting is untouched by
     // walking: the arm the player set stays the arm they set.
@@ -1053,6 +1242,93 @@ export class DensityTerrainLabScene {
     `;
   }
 
+  /**
+   * Keep the camera in open air, on the line to her.
+   *
+   * Following an ant down a shaft puts a camera two centimetres behind her
+   * inside the bank, where every surface it can see is a backface — so the
+   * terrain culls away and the screen goes sky blue. Reported as a blue pool
+   * sitting in the crater, which is what it looks like when only PART of the
+   * near wall is between you and the hole.
+   *
+   * Shortening the arm rather than lifting the camera, because lifting it out
+   * of the soil leaves it on the rim staring at the bank while she is out of
+   * frame below — the whole screen brown instead of the whole screen blue.
+   * Pulling in along the sight line keeps her framed and is what makes a
+   * burrow watchable at all.
+   *
+   * The zoom the player set is remembered separately and restored the moment
+   * the way is clear. Orbit controls derive their state from the camera's
+   * position, so writing a shortened arm back into it would be read as the
+   * player having zoomed in, and one trip down a hole would permanently
+   * shrink the view.
+   */
+  private keepCameraClear(): void {
+    const target = this.controls.target;
+    const arm = this.camera.position.clone().sub(target);
+    const distance = arm.length();
+    if (distance < 1e-6) return;
+    arm.divideScalar(distance);
+
+    const step = CELL_SIZE * 2;
+    let clear = distance;
+    for (let d = step; d <= distance; d += step) {
+      PROBE.copy(target).addScaledVector(arm, d);
+      if (this.solidAt(PROBE)) {
+        /*
+         * Closer than the zoom limit is allowed here, and has to be: a pull-in
+         * is a collision, not a zoom. Floored at the orbit's own minimum, the
+         * camera stopped two and a half millimetres out — still inside the
+         * shaft wall — and rendered the inside of the soil, which is to say
+         * nothing at all.
+         */
+        clear = Math.max(MIN_CAMERA_ARM, d - CELL_SIZE * 2);
+        break;
+      }
+    }
+    this.cameraPulled = clear < distance - 1e-6;
+    if (this.cameraPulled) this.camera.position.copy(target).addScaledVector(arm, clear);
+
+    /*
+     * Last resort. A shaft narrower than the shortest arm leaves the camera in
+     * the dirt however far in it is pulled, and a camera in the dirt renders
+     * the world as sky. Climbing to the surface above itself is worse framing
+     * and an honest picture.
+     */
+    if (this.solidAt(this.camera.position)) {
+      this.camera.position.y = this.groundAt(
+        this.camera.position.x, this.camera.position.z, this.camera.position.y,
+      ) + CAMERA_CLEARANCE;
+      this.cameraPulled = true;
+    }
+
+    /*
+     * And never below her. Shortening the arm preserves its direction, which
+     * near the horizontal leaves the camera level with her or under her —
+     * inside a shaft that means looking UP past her at a circle of sky, with
+     * the walls filling the rest of the frame. Diagnosed exactly that way: the
+     * terrain was intact and 270,000 triangles were being drawn, and what
+     * looked like a hole in the floor was the shaft's own mouth.
+     */
+    const floor = this.controls.target.y + MIN_CAMERA_ARM * 0.5;
+    if (this.camera.position.y < floor) {
+      this.camera.position.y = floor;
+      this.cameraPulled = true;
+    }
+  }
+
+  /** Give the arm back its full length before the controls read it. */
+  private restoreCameraArm(): void {
+    if (!this.cameraPulled) {
+      this.orbitDistance = this.camera.position.distanceTo(this.controls.target);
+      return;
+    }
+    const arm = this.camera.position.clone().sub(this.controls.target);
+    if (arm.lengthSq() < 1e-12) return;
+    this.camera.position.copy(this.controls.target)
+      .addScaledVector(arm.normalize(), this.orbitDistance);
+  }
+
   private resize(): void {
     const width = Math.max(1, this.host.clientWidth);
     const height = Math.max(1, this.host.clientHeight);
@@ -1083,7 +1359,7 @@ export class DensityTerrainLabScene {
     const delta = Math.min(0.05, (now - this.previousTime) / 1000);
     this.previousTime = now;
     this.walk(delta);
-    this.stand();
+    this.stand(delta);
     this.digPulse = Math.max(0, this.digPulse - DIG_DECAY * delta);
     if (this.queenReady) {
       this.queen.update(delta, {
@@ -1102,8 +1378,16 @@ export class DensityTerrainLabScene {
        * above every hollow — and into her own diggings most of all, which is
        * the one place the lab guarantees the ground is not flat.
        */
+      /*
+       * Both solvers get the floor below HER, not the top of the world. In a
+       * burrow those are different by the whole depth of it, and taking the
+       * second is what used to convince the guard she was buried and heave her
+       * out through the ceiling.
+       */
+      const under = (x: number, z: number): number =>
+        this.groundAt(x, z, this.antPosition.y + STEP_UP);
       this.footPenetration = this.queen.solveFeet(
-        (x, z) => this.groundAt(x, z), FOOT_CLEARANCE, FOOT_PLANT_BAND,
+        under, FOOT_CLEARANCE, FOOT_PLANT_BAND,
       );
       /*
        * The fail-safe, after everything else has had its go: whatever the
@@ -1116,10 +1400,21 @@ export class DensityTerrainLabScene {
        * quietly applied. That is how the antennae were found: nothing owned
        * them, because they are not legs.
        */
-      this.guardLift = this.queen.groundGuard((x, z) => this.groundAt(x, z), FOOT_CLEARANCE);
+      /*
+       * The guard asks whether a point is IN the soil, not whether it is under
+       * the surface. Near the wall of a shaft those are different questions
+       * and only the first one has a sensible answer.
+       */
+      this.guardLift = this.queen.groundGuard((x, y, z) => {
+        PROBE.set(x, y, z);
+        if (!this.solidAt(PROBE)) return 0;
+        return Math.max(0, this.groundAt(x, z, y) - y + FOOT_CLEARANCE);
+      });
       this.queen.root.position.y = this.antPosition.y + this.guardLift;
     }
+    this.restoreCameraArm();
     this.controls.update();
+    this.keepCameraClear();
     this.drainPending(now - this.previousFrameStart);
     this.previousFrameStart = now;
     this.updatePellets(delta);

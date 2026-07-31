@@ -317,29 +317,36 @@ export class QueenModel {
   }
 
   /**
-   * The lowest any bone sits below the ground it should be clearing.
+   * How far she must rise for no bone of hers to be INSIDE the soil.
    *
    * The fail-safe, and deliberately the crudest thing here: whatever the
-   * solvers did or failed to do, nothing she is made of should be underground.
-   * It covers the parts no solver owns — mandibles, the tip of a gaster on a
-   * steep bank — and it costs one pass over the skeleton.
+   * solvers did or failed to do, nothing she is made of should be embedded in
+   * the world. It covers the parts no solver owns — mandibles, the tip of a
+   * gaster on a steep bank — and it costs one pass over the skeleton.
+   *
+   * `escapeAt` asks whether a POINT is in solid soil, not whether it is below
+   * the surface, and the difference is the whole of why this used to fight
+   * her. A height query is a claim about a column, so standing in a shaft with
+   * a leg near the wall it answers "the rim, several millimetres over your
+   * head" — and the guard dutifully hauled her out of her own burrow by two
+   * and a half millimetres. Whether a point is inside soil is a question about
+   * that point, and a burrow is exactly the case where the two disagree.
    *
    * Returns a LIFT for the whole model rather than bending anything, because a
    * fail-safe that tries to be clever is a fail-safe with its own bugs. If it
    * is doing visible work, the answer is a solver for whatever it is catching,
    * not a bigger lift.
    */
-  groundGuard(groundAt: (x: number, z: number) => number, clearance: number): number {
+  groundGuard(escapeAt: (x: number, y: number, z: number) => number): number {
     if (!this.loaded) return 0;
     this.root.updateMatrixWorld(true);
     let lift = 0;
-    for (const [group, names] of this.limbGroups()) {
-      const radius = this.limbRadius.get(group) ?? 0;
+    for (const [, names] of this.limbGroups()) {
       for (const name of names) {
         const bone = this.bones.get(name);
         if (!bone) continue;
         bone.getWorldPosition(JOINT);
-        lift = Math.max(lift, groundAt(JOINT.x, JOINT.z) + clearance + radius - JOINT.y);
+        lift = Math.max(lift, escapeAt(JOINT.x, JOINT.y, JOINT.z));
       }
     }
     return lift;
