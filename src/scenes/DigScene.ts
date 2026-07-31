@@ -11,11 +11,12 @@
 
 import * as THREE from 'three';
 import {
-  AIR, CHUNK, MATERIALS, TOPSOIL, VOXEL_MM, VoxelWorld,
+  AIR, CHUNK, MATERIALS, STONE, TOPSOIL, VOXEL_MM, VoxelWorld,
   isSolid, layeredGenerator, materialOf, type VoxelId,
 } from '../voxel/VoxelWorld';
 import { clodMassGrams, haulFactor } from '../voxel/mass';
-import { groundHeight, terrainGenerator, type TerrainOptions } from '../voxel/terrain';
+import { HILL_VOXELS, groundHeight, terrainGenerator, type TerrainOptions } from '../voxel/terrain';
+import { ceilingFor, glassPass, isGlassCell, type BoxOptions } from '../voxel/formicarium';
 import { FACES, burialShade, meshChunk } from '../voxel/mesher';
 import {
   buildFracture, cellCentre, chipHalfExtent, chipMeshData, chipOffset, eventsBetween, hashVoxel,
@@ -139,6 +140,11 @@ const EDGE_ARC = 0.55;
 const UNDERGROUND_COVER = 0.9;
 /** The world's own relief, shared by the generator, spawning and depth. */
 const TERRAIN: TerrainOptions = { surfaceY: SURFACE_Y, size: WORLD_SIZE, seed: 7 };
+/** The formicarium she lives in: the world's own walls and lid. */
+const BOX: BoxOptions = {
+  size: WORLD_SIZE,
+  ceilingY: ceilingFor(SURFACE_Y + HILL_VOXELS),
+};
 /** Constant descent when nothing is underfoot below ground. 1 cm/s. */
 const SETTLE_SPEED = 2;
 /**
@@ -740,6 +746,7 @@ export class DigScene {
 
   private buildInitialMeshes(): void {
     for (const index of this.world.allMeshableChunks()) this.rebuildChunk(index);
+    this.buildGlass();
   }
 
   /**
@@ -752,6 +759,53 @@ export class DigScene {
    * mask exists purely so the procedural chipped mesh isn't drawn inside an
    * intact cube.
    */
+  /**
+   * Build the container once, because it never changes.
+   *
+   * The panes are not part of the voxel world and cannot be dug, so there is
+   * nothing to invalidate and no reason to rebuild them per chunk the way the
+   * soil is. One pass at startup, meshed through the SAME chunk mesher the soil
+   * uses — see formicarium.ts — so the glass inherits its face culling and
+   * chamfer rather than reimplementing them.
+   *
+   * Drawn with depthWrite off and a late renderOrder: it is a transparent
+   * surface wrapped around everything else, so writing depth would have it
+   * hiding the world it is supposed to be showing.
+   */
+  private buildGlass(): void {
+    const material = new THREE.MeshStandardMaterial({
+      color: 0xbfe6ea,
+      transparent: true,
+      opacity: 0.13,
+      roughness: 0.04,
+      metalness: 0,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    this.cleanups.push(() => material.dispose());
+    const span = Math.ceil(WORLD_SIZE / CHUNK);
+    const view = glassPass(this.world, BOX, STONE);
+    for (let cy = 0; cy < span; cy++) {
+      for (let cz = 0; cz < span; cz++) {
+        for (let cx = 0; cx < span; cx++) {
+          const data = meshChunk(view, cx, cy, cz);
+          if (!data) continue;
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+          geometry.setAttribute('normal', new THREE.BufferAttribute(data.normals, 3));
+          geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
+          const mesh = new THREE.Mesh(geometry, material);
+          mesh.renderOrder = 3;
+          this.scene.add(mesh);
+          this.cleanups.push(() => {
+            this.scene.remove(mesh);
+            geometry.dispose();
+          });
+        }
+      }
+    }
+  }
+
   private static chipKey(x: number, y: number, z: number): string {
     return `${x},${y},${z}`;
   }
@@ -2233,6 +2287,7 @@ export class DigScene {
     for (let x = Math.floor(lo.x); x <= Math.floor(hi.x); x++) {
       for (let y = Math.floor(lo.y); y <= Math.floor(hi.y); y++) {
         for (let z = Math.floor(lo.z); z <= Math.floor(hi.z); z++) {
+          if (isGlassCell(x, y, z, BOX)) return true;
           if (!isSolid(this.world.get(x, y, z))) continue;
           /*
            * A cell part-way through being dug is only as big as it LOOKS.
