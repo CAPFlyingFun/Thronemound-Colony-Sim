@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { QueenModel } from '../anim/QueenModel';
-import { BoreRig, PITCH_MAX, PITCH_MIN, YAW_RATE } from './BoreControl';
+import { BoreRig, DIG_YAW_RATE, YAW_RATE } from './BoreControl';
 import { FollowCamera } from './FollowCamera';
 import { CASTE_LENGTH_MM } from '../anim/hexapod';
 import { buildSurfaceNets } from '../density/SurfaceNets';
@@ -19,6 +19,9 @@ const MAX_PELLETS = 36;
 
 /** World units per second she walks. About 12 mm/s — a tile every 1.3 s. */
 const WALK_SPEED = 2.4;
+
+/** Crawl is a third of a walk — the pace for placing a tunnel precisely. */
+const CRAWL_FRACTION = 0.34;
 
 /** Radians per second she can turn. A little over half a turn a second. */
 const TURN_RATE = 3.6;
@@ -261,6 +264,11 @@ export class DensityTerrainLabScene {
   private turnRate = 0;
   /** World units per second, for the gait's cadence. Zero when standing. */
   private walkSpeed = 0;
+  /** Is she running? The HUD's Run/Crawl toggle. */
+  private running = true;
+  private get speed(): number {
+    return this.running ? WALK_SPEED : WALK_SPEED * CRAWL_FRACTION;
+  }
   /** Her actual velocity, eased toward what the pad asks for. */
   private readonly velocity = new THREE.Vector3();
   /** 0..1, decaying. Drives the gait's dig animation after a bite. */
@@ -280,7 +288,7 @@ export class DensityTerrainLabScene {
   private lastPinch = 0;
   private sun: any = null;
   /** What the controls are asking for: steering, throttle and the dig. */
-  private readonly input = { yaw: 0, pitch: 0, walk: 0, boring: false };
+  private readonly input = { yaw: 0, walk: 0 };
   private readonly heldKeys = new Set<string>();
   private animationFrame = 0;
   private previousTime = performance.now();
@@ -292,6 +300,8 @@ export class DensityTerrainLabScene {
   private readonly digButton: HTMLButtonElement;
   private readonly resetButton: HTMLButtonElement;
   private readonly walkButton: HTMLButtonElement;
+  private readonly gaugeAnt: HTMLSpanElement;
+  private readonly gaugeRead: HTMLDivElement;
   private readonly padButtons: HTMLButtonElement[] = [];
   private resizeObserver: ResizeObserver | null = null;
 
@@ -386,7 +396,11 @@ export class DensityTerrainLabScene {
     hud.innerHTML = `
       <div class="density-lab-title">DENSITY TERRAIN LAB <span>${BITE_WIDTH_MM} mm bite · ${BITE_DEPTH_MM} mm deep</span></div>
       <div class="density-lab-status"></div>
-      <div class="density-lab-hint">Drag to look · pinch to zoom · pad steers (◀▶ heading, ▲▼ pitch) · WALK to advance · hold BORE to tunnel</div>
+      <div class="density-lab-hint">Set pitch with △▽ · press BORE once to arm it · W/S then moves you along that pitch (A/D steers) · RUN toggles pace</div>
+      <div class="density-lab-gauge">
+        <div class="density-lab-gauge-dial"><span class="density-lab-gauge-ant">\u2b9d</span></div>
+        <div class="density-lab-gauge-read">0\u00b0</div>
+      </div>
       <div class="density-lab-pad"></div>
       <div class="density-lab-actions"></div>
     `;
@@ -395,7 +409,13 @@ export class DensityTerrainLabScene {
     const status = hud.querySelector<HTMLDivElement>('.density-lab-status');
     const actions = hud.querySelector<HTMLDivElement>('.density-lab-actions');
     const pad = hud.querySelector<HTMLDivElement>('.density-lab-pad');
-    if (!status || !actions || !pad) throw new Error('Density terrain lab HUD failed to initialize');
+    const dial = hud.querySelector<HTMLSpanElement>('.density-lab-gauge-ant');
+    const read = hud.querySelector<HTMLDivElement>('.density-lab-gauge-read');
+    if (!status || !actions || !pad || !dial || !read) {
+      throw new Error('Density terrain lab HUD failed to initialize');
+    }
+    this.gaugeAnt = dial;
+    this.gaugeRead = read;
     this.status = status;
 
     this.digButton = document.createElement('button');
@@ -404,16 +424,36 @@ export class DensityTerrainLabScene {
     this.digButton.setAttribute('aria-label', 'Hold to bore along the heading');
     actions.appendChild(this.digButton);
 
+    /*
+     * Pitch is set here and nowhere else, in ten-degree steps, so it can be
+     * dialled in and read off the gauge. It is a setting, not a stick.
+     */
+    const aim = document.createElement('div');
+    aim.className = 'density-lab-aim';
+    for (const [glyph, label, steps] of [['\u25b3', 'aim up', 1], ['\u25bd', 'aim down', -1]] as const) {
+      const button = document.createElement('button');
+      button.className = 'density-lab-aimkey';
+      button.textContent = glyph;
+      button.setAttribute('aria-label', label);
+      button.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        this.bore.aim(steps);
+        this.updateStatus();
+      });
+      aim.appendChild(button);
+    }
+    actions.insertBefore(aim, this.digButton);
+
     this.walkButton = document.createElement('button');
     this.walkButton.className = 'density-lab-button density-lab-walk';
-    this.walkButton.textContent = 'WALK';
-    this.walkButton.setAttribute('aria-label', 'Hold to walk along the heading');
-    const walkOn = (event: PointerEvent): void => { event.preventDefault(); this.input.walk = 1; };
-    const walkOff = (): void => { this.input.walk = 0; };
-    this.walkButton.addEventListener('pointerdown', walkOn);
-    this.walkButton.addEventListener('pointerup', walkOff);
-    this.walkButton.addEventListener('pointercancel', walkOff);
-    this.walkButton.addEventListener('pointerleave', walkOff);
+    this.walkButton.textContent = 'RUN';
+    this.walkButton.setAttribute('aria-label', 'Switch between running and crawling');
+    this.walkButton.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      this.running = !this.running;
+      this.walkButton.textContent = this.running ? 'RUN' : 'CRAWL';
+      this.updateStatus();
+    });
     actions.appendChild(this.walkButton);
 
     this.resetButton = document.createElement('button');
@@ -423,9 +463,6 @@ export class DensityTerrainLabScene {
 
     this.buildPad(pad);
     this.digButton.addEventListener('pointerdown', this.onDigPointerDown);
-    this.digButton.addEventListener('pointerup', this.onDigPointerUp);
-    this.digButton.addEventListener('pointercancel', this.onDigPointerUp);
-    this.digButton.addEventListener('pointerleave', this.onDigPointerUp);
     this.resetButton.addEventListener('click', this.resetTerrain);
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
@@ -449,9 +486,6 @@ export class DensityTerrainLabScene {
     this.renderer.domElement.removeEventListener('pointercancel', this.onCameraUp);
     this.renderer.domElement.removeEventListener('wheel', this.onCameraWheel);
     this.digButton.removeEventListener('pointerdown', this.onDigPointerDown);
-    this.digButton.removeEventListener('pointerup', this.onDigPointerUp);
-    this.digButton.removeEventListener('pointercancel', this.onDigPointerUp);
-    this.digButton.removeEventListener('pointerleave', this.onDigPointerUp);
     this.resetButton.removeEventListener('click', this.resetTerrain);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
@@ -474,18 +508,24 @@ export class DensityTerrainLabScene {
   }
 
   /**
-   * The walk pad: four buttons that behave like held keys.
+   * The joystick: W/A/S/D as four held buttons.
+   *
+   * Movement only — pitch is set on its own control, in steps, because it is a
+   * setting you dial in and read off a gauge rather than something you sweep
+   * while driving. The pad had pitch on its up and down keys and heading on
+   * its left and right, which meant the stick did two unrelated jobs and
+   * neither forward nor backward existed at all while burrowing.
    *
    * `pointerdown` sets the direction and `pointerup`/`pointercancel`/
    * `pointerleave` all clear it. Leaving out any one of the three is how a
    * touch pad ends up walking forever after a finger slides off it.
    */
   private buildPad(pad: HTMLDivElement): void {
-    const keys: Array<[string, string, 'yaw' | 'pitch', number]> = [
-      ['▲', 'aim up', 'pitch', 1],
-      ['◀', 'steer left', 'yaw', -1],
-      ['▶', 'steer right', 'yaw', 1],
-      ['▼', 'aim down', 'pitch', -1],
+    const keys: Array<[string, string, 'walk' | 'yaw', number]> = [
+      ['W', 'forward', 'walk', 1],
+      ['A', 'steer left', 'yaw', -1],
+      ['D', 'steer right', 'yaw', 1],
+      ['S', 'back', 'walk', -1],
     ];
     for (const [glyph, label, axis, sign] of keys) {
       const button = document.createElement('button');
@@ -508,19 +548,39 @@ export class DensityTerrainLabScene {
     }
   }
 
+  /**
+   * The dig control is a LATCH, not a trigger.
+   *
+   * Pressed once it arms the head; pressed again it stows it. Held-to-dig was
+   * the first spelling and it fought the joystick, because both hands were
+   * then doing continuous work for one action — and it made "pressing Dig will
+   * not automatically move you" impossible to express, since the only way to
+   * dig was to be holding something.
+   */
   private readonly onDigPointerDown = (event: PointerEvent): void => {
     event.preventDefault();
-    this.input.boring = true;
-  };
-
-  private readonly onDigPointerUp = (): void => {
-    this.input.boring = false;
+    this.bore.toggleDig();
+    this.updateStatus();
   };
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
-    if (event.code === 'Space') event.preventDefault();
+    if (event.repeat) return;
+    if (event.code === 'Space') {
+      event.preventDefault();
+      this.bore.toggleDig();
+      this.updateStatus();
+      return;
+    }
+    // Pitch steps on the press, not on the hold: ten degrees a tap.
+    if (event.code === 'ArrowUp' || event.code === 'KeyQ') { this.bore.aim(1); this.updateStatus(); return; }
+    if (event.code === 'ArrowDown' || event.code === 'KeyE') { this.bore.aim(-1); this.updateStatus(); return; }
     if (event.key.toLowerCase() === 'r') {
       this.resetTerrain();
+      return;
+    }
+    if (event.key.toLowerCase() === 'f') {
+      this.running = !this.running;
+      this.updateStatus();
       return;
     }
     this.heldKeys.add(event.code);
@@ -534,12 +594,18 @@ export class DensityTerrainLabScene {
 
   private applyHeldKeys(): void {
     const held = (...codes: string[]): boolean => codes.some((code) => this.heldKeys.has(code));
-    // Steering on A/D and the arrows, throttle on W/S, dig on space — the same
-    // three jobs the on-screen pad, the walk key and the dig button do.
-    this.input.yaw = (held('KeyD', 'ArrowRight') ? 1 : 0) - (held('KeyA', 'ArrowLeft') ? 1 : 0);
-    this.input.pitch = (held('ArrowUp', 'KeyQ') ? 1 : 0) - (held('ArrowDown', 'KeyE') ? 1 : 0);
+    /*
+     * Steering is inverted from the obvious spelling, and this is the sign that
+     * was wrong.
+     *
+     * Forward is (sin h, 0, cos h), so a rising heading swings her from +Z
+     * toward +X. With the camera behind her looking along +Z, +X is on the
+     * LEFT of the screen — so "steer right" turned her left, and it took
+     * driving her to notice, because the arithmetic is perfectly consistent
+     * and merely the mirror of what a player means.
+     */
+    this.input.yaw = (held('KeyA') ? 1 : 0) - (held('KeyD') ? 1 : 0);
     this.input.walk = (held('KeyW') ? 1 : 0) - (held('KeyS') ? 1 : 0);
-    this.input.boring = held('Space');
   }
 
   private addLighting(): void {
@@ -1160,6 +1226,41 @@ export class DensityTerrainLabScene {
    * used to be — and standing still over a hole you just made is exactly when
    * that is most obvious.
    */
+  /**
+   * Is she inside the hill rather than on it?
+   *
+   * Asked of the soil ABOVE her, because "below the surface" is a question
+   * about a column and she is often standing in a hole whose rim is over her
+   * head. A body length up is the difference between being in a shallow
+   * scrape, where she should still walk on the ground, and being in a tunnel,
+   * where the ground has a ceiling and the stance rules stop applying.
+   */
+  private get underground(): boolean {
+    PROBE.copy(this.antPosition).addScaledVector(this.up, CAMERA_LOOK_AT * 2);
+    return this.solidAt(PROBE);
+  }
+
+  /**
+   * Underground she keeps the height the bore gave her, only easing clear of
+   * the tunnel floor rather than being pulled back to the surface.
+   *
+   * `stand` reads the ground under her and puts her on it, which is right on a
+   * hillside and exactly wrong inside a burrow: the "ground" over her head is
+   * the roof, and following it hauls her back out of her own tunnel.
+   */
+  private holdTunnel(dt: number): void {
+    const floor = this.groundAt(
+      this.antPosition.x, this.antPosition.z, this.antPosition.y + FOOT_CLEARANCE,
+    );
+    if (this.antPosition.y < floor) {
+      const ease = 1 - Math.exp(-HEIGHT_EASE * dt);
+      this.antPosition.y += (floor - this.antPosition.y) * ease;
+    }
+    if (!this.queenReady) return;
+    this.queen.root.position.copy(this.antPosition);
+    this.orientQueen();
+  }
+
   private stand(dt: number): void {
     const ground = this.stance(this.antPosition.x, this.antPosition.z);
     // Eased, not assigned. The ground under her changes every time she bites,
@@ -1173,19 +1274,25 @@ export class DensityTerrainLabScene {
     this.queen.root.position.copy(this.antPosition);
 
     /*
-     * Built as a BASIS rather than as yaw plus a tilt. Her up is the terrain
-     * normal and her forward is the heading flattened against that up, so on a
-     * slope she pitches and rolls with the ground instead of standing plumb
-     * with her feet through it. Composing two rotations does not give this —
-     * the two orders disagree the moment both angles are non-zero.
-     */
-    /*
      * Eased toward the new normal rather than snapped to it. Her feet cross a
      * cell every twentieth of a second at walking pace, and the ground has
      * quarter-millimetre grit on it, so taking each frame's slope literally
      * makes her shiver.
      */
     this.up.lerp(ground.up, 0.15).normalize();
+    this.orientQueen();
+  }
+
+  /**
+   * Point her the way she is going, on whatever she is standing on.
+   *
+   * Built as a BASIS rather than as yaw plus a tilt. Her up is the terrain
+   * normal and her forward is the heading flattened against that up, so on a
+   * slope she pitches and rolls with the ground instead of standing plumb with
+   * her feet through it. Composing two rotations does not give this — the two
+   * orders disagree the moment both angles are non-zero.
+   */
+  private orientQueen(): void {
     const forward = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
     forward.addScaledVector(this.up, -forward.dot(this.up));
     if (forward.lengthSq() < 1e-8) forward.set(0, 0, 1);
@@ -1197,27 +1304,36 @@ export class DensityTerrainLabScene {
   }
 
   /**
-   * Drive her along the heading the rig is steering.
+   * Move her along the BORE, not along the ground.
    *
-   * Movement used to be relative to the CAMERA, which is right for a character
-   * you point at things and wrong for one you steer: dragging the view sideways
-   * changed which way "forward" was, so a tunnel wandered whenever you looked
-   * around. The heading is now the rig's, and the camera is free to look
-   * wherever it likes without touching where she is going.
+   * This is the fix for a gauge reading minus seventy-seven while she scraped
+   * a shallow trench across the surface: pitch steered the bite and nothing
+   * else, so however steeply she aimed, she still walked horizontally and the
+   * hole could never become a tunnel. Aim, then advance, and the aim is the
+   * direction you advance in — which is the whole of what "move forward or
+   * backwards along your pitch set" means.
+   *
+   * Above ground with the dig off, pitch is ignored and she simply walks.
    */
-  private walk(dt: number, throttle: number): void {
+  private travel(dt: number, pitch: number, digging: boolean): void {
     const ease = 1 - Math.exp(-SPEED_EASE * dt);
+    const throttle = this.input.walk;
     const forward = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
-    const step = forward.multiplyScalar(WALK_SPEED * throttle);
 
-    this.velocity.lerp(step, ease);
+    const heading = digging
+      ? forward.clone().multiplyScalar(Math.cos(pitch))
+        .addScaledVector(this.up, Math.sin(pitch)).normalize()
+      : forward;
+    const wanted = heading.multiplyScalar(this.speed * throttle);
+
+    this.velocity.lerp(wanted, ease);
     this.walkSpeed = this.velocity.length();
     if (throttle === 0 && this.walkSpeed < 1e-3) {
       this.velocity.set(0, 0, 0);
       this.walkSpeed = 0;
       return;
     }
-    this.glide(dt);
+    this.glide(dt, digging);
   }
 
   /**
@@ -1228,19 +1344,32 @@ export class DensityTerrainLabScene {
    * being driven or merely still slowing down — and a stop that leaves the
    * window behind is a stop that streams a tile late.
    */
-  private glide(dt: number): void {
+  private glide(dt: number, digging: boolean): void {
     if (this.velocity.lengthSq() < 1e-12) return;
     const margin = CELL_SIZE * 3;
-    this.antPosition.x = THREE.MathUtils.clamp(
-      this.antPosition.x + this.velocity.x * dt, margin, WORLD_SPAN - margin,
-    );
-    this.antPosition.z = THREE.MathUtils.clamp(
-      this.antPosition.z + this.velocity.z * dt, margin, WORLD_SPAN - margin,
-    );
+    const next = this.antPosition.clone().addScaledVector(this.velocity, dt);
+    next.x = THREE.MathUtils.clamp(next.x, margin, WORLD_SPAN - margin);
+    next.z = THREE.MathUtils.clamp(next.z, margin, WORLD_SPAN - margin);
 
-    // Carry the camera along by exactly her step, so orbiting is untouched by
-    // walking: the arm the player set stays the arm they set.
-    this.follow.target.copy(this.antPosition);
+    /*
+     * Underground she can only go where the soil has already been removed.
+     *
+     * Without this the joystick drives her straight through the working face
+     * and out the far side of the hill, and the digging becomes decoration.
+     * With it, advance is paced by the head: each stroke clears a little more
+     * and she moves into it, which is what makes the rate of tunnelling a
+     * property of the bore rather than of how long the stick is held.
+     *
+     * Vertical is checked with her BODY offset, not her feet, so she is not
+     * blocked by the floor she is standing on.
+     */
+    if (digging) {
+      PROBE.copy(next).addScaledVector(this.up, CAMERA_LOOK_AT * 0.5);
+      if (this.solidAt(PROBE)) return;
+      this.antPosition.y = next.y;
+    }
+    this.antPosition.x = next.x;
+    this.antPosition.z = next.z;
 
     const scroll = this.stream.recentreOn(this.antPosition.x, this.antPosition.z);
     if (scroll) {
@@ -1250,7 +1379,21 @@ export class DensityTerrainLabScene {
     }
   }
 
+  /**
+   * The pitch gauge: the number, and an ant tipped to the angle she will bore
+   * at. A dial is worth having because the pitch is a SETTING now — you dial
+   * it in before you commit, and reading it off the stat block is not the same
+   * as seeing which way she is pointed.
+   */
+  private updateGauge(): void {
+    const degrees = Math.round(this.bore.pitch * 180 / Math.PI);
+    this.gaugeRead.textContent = `${degrees}\u00b0`;
+    this.gaugeAnt.style.transform = `rotate(${-degrees}deg)`;
+    this.gaugeRead.dataset.digging = this.bore.digging ? 'on' : 'off';
+  }
+
   private updateStatus(): void {
+    this.updateGauge();
     const message = this.status.dataset.message ?? 'Walk with the pad, aim, and press DIG';
     const physicalVolumeMm3 = this.totalRemoved * WORLD_UNIT_MM ** 3;
     const tileX = Math.floor(this.antPosition.x / (TILE_CELLS * CELL_SIZE));
@@ -1265,7 +1408,7 @@ export class DensityTerrainLabScene {
       Bore: ${(((this.facing * 180 / Math.PI) + 360) % 360).toFixed(0).padStart(3, '0')}° ·`
       + ` pitch ${(this.bore.pitch * 180 / Math.PI >= 0 ? '+' : '')}`
       + `${(this.bore.pitch * 180 / Math.PI).toFixed(0)}°`
-      + `${this.input.boring ? ' · BORING' : ''}<br>
+      + `${this.bore.digging ? ' · DIG ON' : ''} · ${this.running ? 'run' : 'crawl'}<br>
       Queen: ${this.queenReady
         ? `${CASTE_LENGTH_MM.queen} mm · feet ${(this.footPenetration * WORLD_UNIT_MM).toFixed(2)} mm`
           + ` · guard ${(this.guardLift * WORLD_UNIT_MM).toFixed(3)} mm`
@@ -1361,21 +1504,16 @@ export class DensityTerrainLabScene {
    */
   private simulate(delta: number): void {
     /*
-     * Steer, then move, then dig — in that order, because the bore direction
-     * is what she walks along and what her jaws follow, and a bite taken
+     * Steer, then travel, then dig — in that order, because the bore direction
+     * is what she moves ALONG and what her jaws follow, and a bite taken
      * against last frame's heading is a tunnel with a kink in it.
      */
-    const bore = this.bore.step(delta, this.input);
+    const bore = this.bore.step(delta, { yaw: this.input.yaw, forward: this.input.walk });
     this.facing = bore.heading;
-    this.turnRate = this.input.yaw * YAW_RATE;
-    /*
-     * She creeps forward while boring even with no throttle. A tunnel is dug
-     * by advancing into it; standing still and biting makes a pocket and then
-     * nothing, because after the first stroke there is no soil left in reach.
-     */
-    const throttle = this.input.walk !== 0 ? this.input.walk : (bore.stroke > 0 ? BORE_CREEP : 0);
-    this.walk(delta, throttle);
-    this.stand(delta);
+    this.turnRate = this.input.yaw * (bore.digging ? DIG_YAW_RATE : YAW_RATE);
+    this.travel(delta, bore.pitch, bore.digging);
+    if (this.underground) this.holdTunnel(delta);
+    else this.stand(delta);
     if (bore.bite) this.carveAlongBore(bore.pitch);
     // The gait's dig level IS the head's dip, so the animation and the moment
     // soil leaves are the same event rather than two things kept in step.

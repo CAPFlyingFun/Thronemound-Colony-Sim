@@ -17,19 +17,15 @@ body,
  * exactly what you do to walk — popped the copy / look-up menu over the game.
  * `-webkit-touch-callout` is the property that suppresses that menu;
  * user-select stops the magnifier and the selection handles that come with it.
+ *
+ * The universal selector, not a list of elements. It was `html, body, #app,
+ * canvas, button`, which covers everything you can drive the game with and
+ * misses everything the game prints: the stat block is a stack of divs full of
+ * numbers, and iOS will happily offer to select and copy those the moment a
+ * thumb rests on them. In a game there is no element where a selection handle
+ * is the right answer, so the rule has no business being a list.
  */
-html,
-body,
-#app,
-canvas {
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  user-select: none;
-  -webkit-tap-highlight-color: transparent;
-}
-
-/* Buttons are the one place a stray highlight could still appear. */
-button {
+* {
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   user-select: none;
@@ -345,3 +341,71 @@ canvas {
 }
 
 .dig-hud.is-colony .dig-stick { display: none; }
+
+/* ------------------------------------------------------ landscape-only lock */
+
+/*
+ * The game is landscape-only, and this is a pure-CSS gate with no JS state to
+ * get stuck in. It covers every scene the moment a touch device turns portrait
+ * and vanishes the moment it turns back, because a media query cannot forget
+ * to fire the way an orientationchange listener can.
+ *
+ * Gated on `pointer: coarse` so a narrow desktop window — which nobody can
+ * rotate — is never blocked by it.
+ */
+.tm-orient-lock {
+  display: none;
+}
+
+@media (orientation: portrait) and (pointer: coarse) {
+  .tm-orient-lock {
+    display: flex;
+    position: fixed;
+    inset: 0;
+    /* Above every HUD layer the scenes create. */
+    z-index: 100000;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+    text-align: center;
+    background: #141a12;
+    pointer-events: auto;
+  }
+}
+
+.tm-orient-lock__inner {
+  max-width: 30ch;
+  color: #f3ecd8;
+  font: 500 15px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.tm-orient-lock__phone {
+  width: 46px;
+  height: 80px;
+  margin: 0 auto 1.8rem;
+  border: 3px solid #e9c36f;
+  border-radius: 11px;
+  transform-origin: 50% 50%;
+  animation: tm-rotate-phone 2.4s ease-in-out infinite;
+}
+
+@keyframes tm-rotate-phone {
+  0%, 28% { transform: rotate(0deg); }
+  62%, 100% { transform: rotate(-90deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tm-orient-lock__phone { animation: none; transform: rotate(-90deg); }
+}
+
+.tm-orient-lock__title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #fff1c5;
+  margin-bottom: 0.55rem;
+  letter-spacing: 0.04em;
+}
+
+.tm-orient-lock__hint {
+  color: #b9c8ae;
+}

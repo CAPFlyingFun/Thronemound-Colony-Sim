@@ -1,0 +1,10 @@
+{
+  "name": "Thronemound Colony Sim",
+  "short_name": "Thronemound",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#182016",
+  "theme_color": "#182016"
+}

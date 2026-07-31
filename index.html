@@ -7,9 +7,23 @@
     <meta name="description" content="Thronemound Colony Sim, a living 2.5D ant colony simulation." />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%90%9C%3C/text%3E%3C/svg%3E" />
     <title>Thronemound Colony Sim</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
   </head>
   <body>
     <div id="app"></div>
+    <!--
+      Landscape-only lock. Driven entirely by the `.tm-orient-lock` media query
+      in style.css, so it needs no JS and cannot be left showing by a scene
+      that forgot to hide it. It lives in the static markup rather than being
+      built by a scene so it is up before the first frame renders.
+    -->
+    <div class="tm-orient-lock" aria-hidden="true">
+      <div class="tm-orient-lock__inner">
+        <div class="tm-orient-lock__phone"></div>
+        <div class="tm-orient-lock__title">ROTATE YOUR DEVICE</div>
+        <p class="tm-orient-lock__hint">Thronemound plays in landscape.</p>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

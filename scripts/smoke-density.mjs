@@ -31,6 +31,51 @@ let failed = false;
 const fail = (msg) => { console.error(`FAIL: ${msg}`); failed = true; };
 const ok = (msg) => console.log(`  ok  ${msg}`);
 
+/*
+ * The landscape lock, and the fact that nothing in the game is selectable.
+ *
+ * Both are pure CSS, which is the point — a media query cannot be left in the
+ * wrong state by a scene the way a JS overlay can — but pure CSS is also
+ * exactly the sort of thing that silently stops applying when a selector is
+ * renamed, so it is measured rather than assumed.
+ */
+{
+  const page = await browser.newPage({
+    viewport: { width: 430, height: 932 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true,
+  });
+  await page.goto(URL, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(1500);
+
+  const portrait = await page.evaluate(() => {
+    const lock = document.querySelector('.tm-orient-lock');
+    const style = lock ? getComputedStyle(lock) : null;
+    return {
+      present: !!lock,
+      shown: style?.display !== 'none',
+      onTop: Number(style?.zIndex ?? 0) >= 10000,
+      // A sample of what the game prints, not just the container.
+      selectable: [...document.querySelectorAll('.density-lab-status, .density-lab-title, button')]
+        .filter((el) => getComputedStyle(el).webkitUserSelect !== 'none').length,
+    };
+  });
+  if (!portrait.present) fail('the landscape lock is not in the markup');
+  else if (!portrait.shown) fail('the landscape lock does not show in portrait on a touch device');
+  else if (!portrait.onTop) fail('the landscape lock sits below the HUD');
+  else ok('portrait on a phone is covered by the rotate gate');
+  if (portrait.selectable > 0) fail(`${portrait.selectable} elements still allow text selection`);
+  else ok('nothing in the game offers a selection handle');
+
+  await page.setViewportSize({ width: 932, height: 430 });
+  await page.waitForTimeout(400);
+  const landscape = await page.evaluate(() => {
+    const lock = document.querySelector('.tm-orient-lock');
+    return getComputedStyle(lock).display;
+  });
+  if (landscape !== 'none') fail(`the lock is still showing in landscape (${landscape})`);
+  else ok('rotating to landscape clears the gate');
+  await page.close();
+}
+
 /** Portrait and landscape, at the pixel ratios phones actually report. */
 const CASES = [
   { name: 'portrait  ratio 1', width: 430, height: 932, dpr: 1 },
@@ -118,10 +163,39 @@ for (const view of CASES) {
    * rather than on the press, so "click four times" no longer describes what
    * digging is — and holding is the only way to get more than one stroke.
    */
+  /*
+   * BORE is a LATCH now: pressed once it arms the head, and it never moves her.
+   * Arming it and waiting therefore does nothing ON PURPOSE — the joystick has
+   * to drive her into the face, which is the behaviour that was reported
+   * missing ("pressing Dig will NOT automatically move you").
+   */
   const bore = page.locator('button', { hasText: 'BORE' }).first();
   await bore.dispatchEvent('pointerdown');
-  await page.waitForTimeout(2200);
-  await bore.dispatchEvent('pointerup');
+  const idled = await page.evaluate(() => {
+    const lab = window.labScene;
+    const before = { x: lab.antPosition.x, y: lab.antPosition.y, z: lab.antPosition.z };
+    lab.stepForTest(1 / 60, 120);
+    return {
+      digging: lab.bore.digging,
+      movedMm: Math.hypot(
+        lab.antPosition.x - before.x, lab.antPosition.y - before.y, lab.antPosition.z - before.z,
+      ) * 5,
+      removed: lab.totalRemoved,
+    };
+  });
+  if (!idled.digging) fail('pressing BORE did not arm the dig');
+  else if (idled.movedMm > 0.2) fail(`arming the dig moved her ${idled.movedMm.toFixed(2)} mm on its own`);
+  else if (idled.removed > 0) fail('arming the dig removed soil without the joystick');
+  else ok('arming the dig moves nothing and digs nothing on its own');
+
+  // Now drive her into it, which is what actually cuts.
+  await page.evaluate(() => {
+    const lab = window.labScene;
+    for (let i = 0; i < 4; i += 1) lab.bore.aim(-1);
+    lab.input.walk = 1;
+    lab.stepForTest(1 / 60, 240);
+    lab.input.walk = 0;
+  });
   await page.waitForTimeout(600);
   await page.screenshot({ path: `${OUT}-after.png` });
   /*
@@ -333,9 +407,10 @@ for (const view of CASES) {
   const bite = await page.evaluate(() => {
     const lab = window.labScene;
     if (!lab?.queenReady) return null;
-    lab.input.boring = true;
+    if (!lab.bore.digging) lab.bore.toggleDig();
+    lab.input.walk = 1;
     lab.stepForTest(1 / 60, 180);
-    lab.input.boring = false;
+    lab.input.walk = 0;
     return {
       removed: lab.totalRemoved,
       aheadMm: lab.lastBiteAhead * 5,
@@ -384,16 +459,15 @@ for (const view of CASES) {
   const steered = await page.evaluate(() => {
     const lab = window.labScene;
     const start = lab.facing;
+    if (lab.bore.digging) lab.bore.toggleDig();
     lab.input.yaw = 1;
     lab.stepForTest(1 / 60, 60);
     lab.input.yaw = 0;
     const turned = lab.facing - start;
-    lab.input.pitch = -1;
-    lab.stepForTest(1 / 60, 60);
-    lab.input.pitch = 0;
+    for (let i = 0; i < 5; i += 1) lab.bore.aim(-1);
     return { turnedDeg: turned * 180 / Math.PI, pitchDeg: lab.bore.pitch * 180 / Math.PI };
   });
-  if (!(steered.turnedDeg > 30)) fail(`steering right turned her only ${steered.turnedDeg.toFixed(1)} degrees`);
+  if (!(steered.turnedDeg > 30)) fail(`steering turned her only ${steered.turnedDeg.toFixed(1)} degrees`);
   else ok(`steering turns her ${steered.turnedDeg.toFixed(0)} degrees a second`);
   if (!(steered.pitchDeg < -30)) fail(`aiming down reached only ${steered.pitchDeg.toFixed(1)} degrees`);
   else ok(`aiming down reaches ${steered.pitchDeg.toFixed(0)} degrees`);
@@ -401,7 +475,7 @@ for (const view of CASES) {
   const status = (await page.locator('.density-lab-status').innerText()).replace(/\s+/g, ' ');
   const removed = Number(/Removed: ([\d.]+)/.exec(status)?.[1] ?? 0);
   if (removed <= 0) fail(`boring removed nothing: "${status}"`);
-  else ok(`two seconds of boring removed ${removed} voxel³ — "${status}"`);
+  else ok(`driving the bore removed ${removed} voxel³ — "${status}"`);
   if (errors.length) fail(`dig run: ${errors.slice(0, 2).join(' | ')}`);
   await page.close();
 }
@@ -488,10 +562,13 @@ for (const view of CASES) {
   else ok('streamed chunks all built');
 
   // And digging still lands somewhere real after the window has moved.
-  const bore2 = page.locator('button', { hasText: 'BORE' }).first();
-  await bore2.dispatchEvent('pointerdown');
-  await page.waitForTimeout(1200);
-  await bore2.dispatchEvent('pointerup');
+  await page.evaluate(() => {
+    const lab = window.labScene;
+    if (!lab.bore.digging) lab.bore.toggleDig();
+    lab.input.walk = 1;
+    lab.stepForTest(1 / 60, 150);
+    lab.input.walk = 0;
+  });
   // Long enough for the pellet to land, so the screenshot shows where a clod
   // comes to REST rather than catching one mid-flight and looking like it is
   // stuck in the air.

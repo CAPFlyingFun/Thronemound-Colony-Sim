@@ -124,6 +124,14 @@
   background: rgba(206, 226, 208, 0.92);
 }
 
+@media (max-height: 480px) {
+  /* Landscape on a phone: everything shrinks so the stat block stays legible. */
+  .density-lab-dig { width: 78px; height: 78px; }
+  .density-lab-walk { width: 62px; height: 62px; font-size: 11px; }
+  .density-lab-gauge-dial { width: 44px; height: 44px; }
+  .density-lab-aimkey { width: 48px; height: 32px; }
+}
+
 .density-lab-walk:active {
   transform: scale(0.96);
   background: #d8eeda;
@@ -149,7 +157,7 @@
 .density-lab-padkey {
   border: 0;
   border-radius: 13px;
-  font: 700 18px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font: 800 16px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #1d160e;
   background: rgba(244, 236, 216, 0.84);
   box-shadow: 0 5px 14px rgba(0, 0, 0, 0.28);
@@ -168,17 +176,178 @@
 .density-lab-padkey:nth-child(3) { grid-area: 2 / 3; }
 .density-lab-padkey:nth-child(4) { grid-area: 3 / 2; }
 
+/*
+ * The pitch gauge, above the action stack. The dial is the angle she will bore
+ * at, which is a setting you commit to before you move — worth a face of its
+ * own rather than a line in the stat block.
+ */
+.density-lab-gauge {
+  position: absolute;
+  right: max(16px, env(safe-area-inset-right));
+  top: max(12px, env(safe-area-inset-top));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  pointer-events: none;
+}
+
+.density-lab-gauge-dial {
+  width: 54px;
+  height: 54px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(92, 58, 34, 0.85);
+  box-shadow: inset 0 0 0 2px rgba(232, 197, 138, 0.5);
+}
+
+.density-lab-gauge-ant {
+  font-size: 26px;
+  line-height: 1;
+  color: #9ede63;
+  transition: transform 120ms ease-out;
+}
+
+.density-lab-gauge-read {
+  padding: 2px 8px;
+  border-radius: 7px;
+  background: rgba(20, 16, 11, 0.72);
+  color: #f0d88e;
+  font-variant-numeric: tabular-nums;
+}
+
+.density-lab-gauge-read[data-digging='on'] {
+  background: #2f6b32;
+  color: #eaffe1;
+}
+
+.density-lab-aim {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+  pointer-events: auto;
+}
+
+.density-lab-aimkey {
+  width: 56px;
+  height: 38px;
+  border: 0;
+  border-radius: 10px;
+  font: 700 17px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #5c1f52;
+  background: rgba(240, 208, 236, 0.9);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.26);
+  touch-action: none;
+}
+
+.density-lab-aimkey:active {
+  transform: scale(0.95);
+  background: #f7d9f2;
+}
+
+/*
+ * The stat block gets a width, and the hint sits under it rather than across
+ * it. In landscape the two overlapped and the readout was unreadable through
+ * the instructions printed over it.
+ */
+.density-lab-status {
+  max-width: min(62vw, 420px);
+}
+
 .density-lab-hint {
   position: absolute;
   left: max(12px, env(safe-area-inset-left));
   /* Clear of the pad, which owns the bottom left corner. */
   bottom: calc(max(22px, env(safe-area-inset-bottom)) + 176px);
+  max-width: min(58vw, 460px);
   color: rgba(255, 248, 228, 0.8);
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
 }
 
 @media (max-width: 560px) {
-  .density-lab-hint { display: none; }
+  /*
+ * The pitch gauge, above the action stack. The dial is the angle she will bore
+ * at, which is a setting you commit to before you move — worth a face of its
+ * own rather than a line in the stat block.
+ */
+.density-lab-gauge {
+  position: absolute;
+  right: max(16px, env(safe-area-inset-right));
+  top: max(12px, env(safe-area-inset-top));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  pointer-events: none;
+}
+
+.density-lab-gauge-dial {
+  width: 54px;
+  height: 54px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(92, 58, 34, 0.85);
+  box-shadow: inset 0 0 0 2px rgba(232, 197, 138, 0.5);
+}
+
+.density-lab-gauge-ant {
+  font-size: 26px;
+  line-height: 1;
+  color: #9ede63;
+  transition: transform 120ms ease-out;
+}
+
+.density-lab-gauge-read {
+  padding: 2px 8px;
+  border-radius: 7px;
+  background: rgba(20, 16, 11, 0.72);
+  color: #f0d88e;
+  font-variant-numeric: tabular-nums;
+}
+
+.density-lab-gauge-read[data-digging='on'] {
+  background: #2f6b32;
+  color: #eaffe1;
+}
+
+.density-lab-aim {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+  pointer-events: auto;
+}
+
+.density-lab-aimkey {
+  width: 56px;
+  height: 38px;
+  border: 0;
+  border-radius: 10px;
+  font: 700 17px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #5c1f52;
+  background: rgba(240, 208, 236, 0.9);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.26);
+  touch-action: none;
+}
+
+.density-lab-aimkey:active {
+  transform: scale(0.95);
+  background: #f7d9f2;
+}
+
+/*
+ * The stat block gets a width, and the hint sits under it rather than across
+ * it. In landscape the two overlapped and the readout was unreadable through
+ * the instructions printed over it.
+ */
+.density-lab-status {
+  max-width: min(62vw, 420px);
+}
+
+.density-lab-hint { display: none; }
   .density-lab-status { font-size: 10.5px; }
   .density-lab-title { font-size: 11px; }
   .density-lab-pad {
