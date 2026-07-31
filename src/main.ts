@@ -11,12 +11,24 @@ import './style.css';
  *
  * Everything is imported lazily so a route only pays for its own scene.
  */
-const scene = new URLSearchParams(window.location.search).get('scene');
+const params = new URLSearchParams(window.location.search);
+const scene = params.get('scene');
+const map = params.get('map') ?? params.get('');
+const densityTerrainLab =
+  scene === 'density' ||
+  map === 'densityterrainlab' ||
+  params.has('densityterrainlab');
 
 const host = document.getElementById('app');
 if (host) {
   host.classList.add('dig-host');
-  if (scene === 'queen') {
+  if (densityTerrainLab) {
+    // Isolated signed-density terrain experiment. It intentionally shares no
+    // production voxel terrain code, so the main map remains untouched.
+    void import('./scenes/DensityTerrainLabScene').then(
+      ({ DensityTerrainLabScene }) => new DensityTerrainLabScene(host),
+    );
+  } else if (scene === 'queen') {
     // Model and gait preview. Nothing in the game imports it — see QueenScene.
     void import('./scenes/QueenScene').then(({ QueenScene }) => new QueenScene(host));
   } else if (scene === 'hex') {
