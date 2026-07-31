@@ -2751,22 +2751,37 @@ export class DigScene {
    * cubes immediately around the ant is workable.
    */
   private withinReach(x: number, y: number, z: number): boolean {
-    const ex = Math.floor(this.camera.position.x);
-    const ey = Math.floor(this.camera.position.y);
-    const ez = Math.floor(this.camera.position.z);
+    const eye = this.eyePoint();
+    const ex = Math.floor(eye.x);
+    const ey = Math.floor(eye.y);
+    const ez = Math.floor(eye.z);
     return Math.max(Math.abs(x - ex), Math.abs(y - ey), Math.abs(z - ez)) <= REACH_CUBES;
   }
 
   /** Cast into the world along an arbitrary direction and clamp to reach. */
   private targetAlong(dir: THREE.Vector3) {
-    const hit = raycastVoxel(
-      this.world,
-      this.camera.position.x, this.camera.position.y, this.camera.position.z,
-      dir.x, dir.y, dir.z,
-      REACH,
-    );
+    const from = this.eyePoint();
+    const hit = raycastVoxel(this.world, from.x, from.y, from.z, dir.x, dir.y, dir.z, REACH);
     if (!hit) return null;
     return this.withinReach(hit.x, hit.y, hit.z) ? hit : null;
+  }
+
+  /**
+   * Where her eye actually IS, with none of the camera's cosmetics.
+   *
+   * Reach and aiming used to measure from `camera.position`, which is not the
+   * ant: it carries the edge-arc bulge (up to 0.55 of a voxel while rounding a
+   * corner) and the step lag, both of which exist purely to make the picture
+   * move nicely. A visual wobble was therefore able to push the eye into the
+   * next cube up and put the soil under her feet out of reach — which is
+   * exactly what stopped digging working, and it took a terrain change to
+   * expose a fault that had been sitting there the whole time.
+   *
+   * Same rule as everywhere else in here: gameplay reads the body, only the
+   * camera interpolates.
+   */
+  private eyePoint(): THREE.Vector3 {
+    return this.position.clone().addScaledVector(this.upVec(), EYE_HEIGHT);
   }
 
   /** What the crosshair is on. */
