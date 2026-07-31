@@ -16,7 +16,8 @@ import {
 } from '../voxel/VoxelWorld';
 import { clodMassGrams, haulFactor } from '../voxel/mass';
 import {
-  HILL_VOXELS, VALLEY_VOXELS, groundHeight, isSurfaceCell, surfaceCornerHeight, surfaceFill,
+  HILL_VOXELS, VALLEY_VOXELS, digAwareCornerHeight, groundHeight, isSurfaceCell,
+  surfaceCornerHeight, surfaceFill,
   surfaceSlope,
   surfaceVoxel, terrainGenerator,
   type TerrainOptions,
@@ -383,6 +384,13 @@ interface ActiveDigVisual {
   spilled: number;
   /** The actual pieces handed over, so a cancelled dig can take them back. */
   dropped: Clod[];
+  /**
+   * Linear size multiplier for everything drawn for this dig — cbrt of the
+   * cell's soil fraction. A part-full surface cell shows a matching smaller
+   * block, so the chip starts at the size of the soil rather than a full cube
+   * shrinking down to it.
+   */
+  sizeScale: number;
 }
 
 /**
@@ -478,7 +486,9 @@ export class DigScene {
    */
   private readonly soil = new LooseSoil((clod) => CLOD_RADIUS * clodSizeScale(
     clod.source.x, clod.source.y, clod.source.z, clod.material,
-  ));
+    // A pellet from a part-full surface cell is smaller by cbrt(fraction),
+    // so its VOLUME matches the soil that was actually there.
+  ) * this.fractionScale(clod.source.x, clod.source.y, clod.source.z));
   /**
    * One InstancedMesh per clod variant, so a whole nest of spoil costs twelve
    * draw calls no matter how many clods there are. Per-instance colour carries
@@ -600,7 +610,11 @@ export class DigScene {
     this.world = new VoxelWorld(WORLD_SIZE, WORLD_SIZE, WORLD_SIZE, terrainGenerator(TERRAIN));
     // One cube at a time. An ant carries a grain, not a wheelbarrow — and it
     // makes the mound something you actually build rather than dump.
-    this.session = new DigSession(this.world, { capacityVoxels: 1 });
+    this.session = new DigSession(this.world, {
+      capacityVoxels: 1,
+      // Part-full surface cells cost part of the seconds — see cellSoilFraction.
+      fractionOf: (x, y, z) => this.cellSoilFraction(x, y, z),
+    });
 
     this.materialBundle = createVoxelMaterial();
     this.material = this.materialBundle.material;
@@ -654,15 +668,25 @@ export class DigScene {
     // White base, because instanceColor MULTIPLIES it.
     this.soilMaterial = new THREE.MeshStandardMaterial({ roughness: 0.98, metalness: 0 });
 
-    const box = new THREE.BoxGeometry(1.002, 1.002, 1.002);
+    /*
+     * Twelve edges in a dynamic buffer rather than EdgesGeometry(box): a box
+     * posed with position/scale can only cap flat, and the soil in a surface
+     * cell stops at the sloping smoothing sheet. The 24 endpoints are
+     * rewritten per frame from the cell's own corner heights instead — see
+     * setHighlightBox.
+     */
+    const highlightGeometry = new THREE.BufferGeometry();
+    highlightGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(72), 3));
     this.highlight = new THREE.LineSegments(
-      new THREE.EdgesGeometry(box),
+      highlightGeometry,
       new THREE.LineBasicMaterial({ color: 0xfff2a8, depthTest: false, transparent: true, opacity: 0.9 }),
     );
     this.highlight.renderOrder = 2;
     this.highlight.visible = false;
+    // Written in world space and reshaped per frame; recomputing a culling
+    // sphere that often for a dozen lines costs more than never culling them.
+    this.highlight.frustumCulled = false;
     this.scene.add(this.highlight);
-    box.dispose();
 
     /*
      * Stood on the ground rather than at a fixed height.
@@ -996,14 +1020,85 @@ export class DigScene {
     isSurfaceCell(x, y, z, TERRAIN) ? surfaceSlope(x, z, TERRAIN) : null
   );
 
+  /** World reader handed to the dig-aware corner drape, bound once. */
+  private readonly readVoxel = (x: number, y: number, z: number): number => (
+    this.world.get(x, y, z)
+  );
+
   /**
    * Where the surface sits at a lattice corner — the render mesh's smoothing
    * input. Same field as `soilFill`, evaluated at corners instead of columns,
    * so the drawn ground and the fill line cannot tell different stories.
+   *
+   * Dig-aware: once soil has been dug the pristine field would keep drawing a
+   * sheet over the hole — a crust whose unlit underside is an open window to
+   * the sky (see digAwareCornerHeight). Reads the world directly rather than
+   * the chip-masked sampler on purpose: a cell being chipped is still solid
+   * until the dig completes, so the sheet holds its shape through the whole
+   * chip animation and drapes only when the soil is actually gone.
    */
   private readonly soilCorner = (cx: number, cz: number): number => (
-    surfaceCornerHeight(cx, cz, TERRAIN)
+    // Pristine field until the first dig: the drape check costs four extra
+    // column reads per corner and cannot fire on an untouched world.
+    this.world.excavated === 0
+      ? surfaceCornerHeight(cx, cz, TERRAIN)
+      : digAwareCornerHeight(this.readVoxel, cx, cz, TERRAIN)
   );
+
+  /**
+   * Snapshot of a cell's soil fraction, taken the first time anyone asks.
+   *
+   * Deliberately never invalidated: a later dig next door drapes the sheet
+   * lower and would change the live answer, and a pellet that was dug at one
+   * size must not quietly become another. First read wins, and every consumer
+   * — dig seconds, pellet size, carried mass — sees the same number forever.
+   */
+  private readonly soilFractionCache = new Map<string, number>();
+
+  /**
+   * How much of this cell is actually soil, 0..1.
+   *
+   * Surface cells stop at the smoothing sheet, so the top of a slope can hold
+   * a fifth of a cube. Averaged from 3×3 CLAMPED bilinear samples rather than
+   * from the four corner fills directly, because a cell the sheet only clips
+   * one corner of is not the average of its corners — clamping to the cell
+   * has to happen before averaging or thin wedges read as negative soil.
+   */
+  private cellSoilFraction(x: number, y: number, z: number): number {
+    if (!isSurfaceCell(x, y, z, TERRAIN)) return 1;
+    const key = DigScene.chipKey(x, y, z);
+    const cached = this.soilFractionCache.get(key);
+    if (cached !== undefined) return cached;
+    const c00 = this.soilCorner(x, z) - y;
+    const c10 = this.soilCorner(x + 1, z) - y;
+    const c01 = this.soilCorner(x, z + 1) - y;
+    const c11 = this.soilCorner(x + 1, z + 1) - y;
+    let sum = 0;
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) {
+        const u = (i + 0.5) / 3;
+        const w = (j + 0.5) / 3;
+        const f = (c00 * (1 - u) + c10 * u) * (1 - w) + (c01 * (1 - u) + c11 * u) * w;
+        sum += Math.min(1, Math.max(0, f));
+      }
+    }
+    // Floored: a cell thin enough to round to nothing still takes a moment to
+    // dig and still yields a crumb, or the sliver would be free instant soil.
+    const fraction = Math.max(0.05, sum / 9);
+    this.soilFractionCache.set(key, fraction);
+    return fraction;
+  }
+
+  /**
+   * Linear size multiplier for pellets and chips from this cell.
+   *
+   * Cube root, not the fraction itself: a pellet is a lump, and a lump with a
+   * fifth of the SOIL should have a fifth of the volume — scaling every side
+   * by 0.2 would leave 0.8% of it. cbrt(0.2) ≈ 0.58 a side reads right.
+   */
+  private fractionScale(x: number, y: number, z: number): number {
+    return Math.cbrt(this.cellSoilFraction(x, y, z));
+  }
 
   private meshSampler(): {
     get(x: number, y: number, z: number): number;
@@ -1286,6 +1381,7 @@ export class DigScene {
       // Empty on purpose: pieces from FINISHED sheets are legitimately dug, and
       // cancelling this sheet must not claw them back.
       dropped: [],
+      sizeScale: this.fractionScale(x, y, z),
     };
     this.chips.set(DigScene.chipKey(x, y, z), chip);
     this.active = chip;
@@ -1412,6 +1508,19 @@ export class DigScene {
     // cost one extra draw call rather than a second shader.
     const mesh = new THREE.Mesh(geometry, this.material);
     mesh.frustumCulled = false;
+    /*
+     * The fracture pattern is a full cube's worth of lattice. A part-full
+     * surface cell shows the same lattice scaled about the cell's BOTTOM
+     * centre — scale s with position b·(1−s) is exactly p′ = b + s(p−b) — so
+     * the smaller block still sits on the floor instead of floating.
+     */
+    const s = chip.sizeScale;
+    mesh.scale.setScalar(s);
+    mesh.position.set(
+      (chip.voxel.x + 0.5) * (1 - s),
+      chip.voxel.y * (1 - s),
+      (chip.voxel.z + 0.5) * (1 - s),
+    );
     this.scene.add(mesh);
     chip.mesh = mesh;
   }
@@ -1534,17 +1643,19 @@ export class DigScene {
   }
 
   /** Point the shared clod mesh at one style. */
-  private applyClodStyle(style: SoilLoadStyle): void {
+  private applyClodStyle(style: SoilLoadStyle, sizeScale = 1): void {
     this.clodStyle = style;
     this.clodMesh.geometry = this.clodGeometry(style.material, style.variant);
     const base = materialOf(style.material).color;
     this.clodMaterial.color.setRGB(
       base[0] * style.tint, base[1] * style.tint, base[2] * style.tint,
     );
+    // sizeScale carries the source cell's soil fraction (cbrt), so the lump
+    // in her jaws is the same size as the pellet it was on the ground.
     this.clodMesh.scale.set(
-      CLOD_SIZE * style.axisScale[0],
-      CLOD_SIZE * style.axisScale[1],
-      CLOD_SIZE * style.axisScale[2],
+      CLOD_SIZE * style.axisScale[0] * sizeScale,
+      CLOD_SIZE * style.axisScale[1] * sizeScale,
+      CLOD_SIZE * style.axisScale[2] * sizeScale,
     );
     this.clodMesh.rotation.set(style.spin[0], style.spin[1], style.spin[2]);
   }
@@ -1625,7 +1736,11 @@ export class DigScene {
     }
 
     const style = styleForVoxel(load.source.x, load.source.y, load.source.z, load.material);
-    if (!this.clodStyle || this.clodStyle.seed !== style.seed) this.applyClodStyle(style);
+    if (!this.clodStyle || this.clodStyle.seed !== style.seed) {
+      this.applyClodStyle(
+        style, this.fractionScale(load.source.x, load.source.y, load.source.z),
+      );
+    }
     this.clodMesh.visible = true;
     this.clodMesh.position.copy(this.mandiblePoint());
   }
@@ -2528,9 +2643,12 @@ export class DigScene {
            */
           const chip = this.chips.get(DigScene.chipKey(x, y, z));
           if (!chip) return true;
-          const half = chipHalfExtent(chip.pattern, chip.progress);
+          // Same bottom-anchored scale the chip is DRAWN with, so what she
+          // stands on is what she sees.
+          const s = chip.sizeScale;
+          const half = chipHalfExtent(chip.pattern, chip.progress) * s;
           if (lo.x < x + 0.5 + half && hi.x > x + 0.5 - half
-            && lo.y < y + 0.5 + half && hi.y > y + 0.5 - half
+            && lo.y < y + s * 0.5 + half && hi.y > y + s * 0.5 - half
             && lo.z < z + 0.5 + half && hi.z > z + 0.5 - half) return true;
         }
       }
@@ -2574,7 +2692,8 @@ export class DigScene {
       const radius = entry.source
         ? CLOD_RADIUS * clodSizeScale(
           entry.source.x, entry.source.y, entry.source.z, entry.material,
-        )
+          // Same cbrt(fraction) the pellet was drawn with — mass follows size.
+        ) * this.fractionScale(entry.source.x, entry.source.y, entry.source.z)
         : CLOD_RADIUS;
       grams += clodMassGrams(radius, entry.material) * entry.count;
     }
@@ -3167,34 +3286,80 @@ export class DigScene {
      * biting.
      */
     const working = this.chips.get(DigScene.chipKey(shown.x, shown.y, shown.z));
-    const span = working ? chipHalfExtent(working.pattern, working.progress) * 2 : 1;
-    const drift = working
-      ? chipOffset(working.pattern, working.progress)
-      : { x: 0, y: 0, z: 0 };
-    const scale = { x: span, y: span, z: span };
-    const centre = {
-      x: shown.x + 0.5 + drift.x,
-      y: shown.y + 0.5 + drift.y,
-      z: shown.z + 0.5 + drift.z,
-    };
-    /*
-     * The box never pokes above the soil. On a surface cell the ground stops
-     * at the fill line, not the cell ceiling, so a full-height outline drew a
-     * head of empty air above the dirt it claimed to enclose. Cap its top at
-     * the fill line and keep the floor where it was — same rule collision and
-     * the mesher follow, read from the same function.
-     */
-    const soilTop = shown.y + this.soilFill(shown.x, shown.y, shown.z);
-    const boxTop = Math.min(centre.y + scale.y / 2, soilTop);
-    const boxBottom = centre.y - scale.y / 2;
-    if (boxTop > boxBottom) {
-      scale.y = boxTop - boxBottom;
-      centre.y = (boxTop + boxBottom) / 2;
+    if (working) {
+      /*
+       * The drawn chip is the fracture lattice scaled about the cell's bottom
+       * centre by the cell's soil fraction, so the outline runs through the
+       * same transform: extent, drift and the fill-line cap all shrink with
+       * it and the box keeps hugging the block she is actually biting.
+       */
+      const s = working.sizeScale;
+      const half = chipHalfExtent(working.pattern, working.progress) * s;
+      const drift = chipOffset(working.pattern, working.progress);
+      const cx = shown.x + 0.5 + drift.x * s;
+      const cy = shown.y + (0.5 + drift.y) * s;
+      const cz = shown.z + 0.5 + drift.z * s;
+      // Never poking above the soil: the lid caps at the fill line — same
+      // rule collision and the mesher follow, read from the same function.
+      const soilTop = shown.y + this.soilFill(shown.x, shown.y, shown.z);
+      const bottom = cy - half;
+      const top = Math.max(Math.min(cy + half, soilTop), bottom + 0.02);
+      this.setHighlightBox(cx - half, cx + half, cz - half, cz + half, bottom, () => top);
+      this.highlightDepth = Math.min(half * 2, top - bottom);
+    } else {
+      /*
+       * Idle: the outline is the CELL's soil, and on a surface cell the soil
+       * stops at the smoothing sheet — a slope, not a ceiling. Each lid
+       * corner reads the same corner height the ground is drawn from, so the
+       * box matches the wedge of dirt it encloses instead of capping flat
+       * with a head of air inside. Interior cells clamp to the full cube.
+       */
+      const topAt = (cornerX: number, cornerZ: number): number => Math.min(
+        shown.y + 1, Math.max(shown.y + 0.02, this.soilCorner(cornerX, cornerZ)),
+      );
+      this.setHighlightBox(shown.x, shown.x + 1, shown.z, shown.z + 1, shown.y, topAt);
+      this.highlightDepth = 1;
     }
-    this.highlight.scale.set(scale.x, scale.y, scale.z);
-    this.highlight.position.set(centre.x, centre.y, centre.z);
-    this.highlightDepth = Math.min(scale.x, scale.y, scale.z);
     this.highlight.visible = true;
+  }
+
+  /**
+   * Write the twelve highlight edges: a flat rectangular base, four uprights,
+   * and a lid whose corners take independent heights from `topAt`.
+   */
+  private setHighlightBox(
+    x0: number, x1: number, z0: number, z1: number, yBottom: number,
+    topAt: (cornerX: number, cornerZ: number) => number,
+  ): void {
+    const t00 = topAt(x0, z0);
+    const t10 = topAt(x1, z0);
+    const t11 = topAt(x1, z1);
+    const t01 = topAt(x0, z1);
+    const attr = this.highlight.geometry.getAttribute('position') as THREE.BufferAttribute;
+    const a = attr.array as Float32Array;
+    let i = 0;
+    const edge = (
+      ax: number, ay: number, az: number, bx: number, by: number, bz: number,
+    ): void => {
+      a[i++] = ax; a[i++] = ay; a[i++] = az;
+      a[i++] = bx; a[i++] = by; a[i++] = bz;
+    };
+    // Base rectangle…
+    edge(x0, yBottom, z0, x1, yBottom, z0);
+    edge(x1, yBottom, z0, x1, yBottom, z1);
+    edge(x1, yBottom, z1, x0, yBottom, z1);
+    edge(x0, yBottom, z1, x0, yBottom, z0);
+    // …lid following the four corner heights…
+    edge(x0, t00, z0, x1, t10, z0);
+    edge(x1, t10, z0, x1, t11, z1);
+    edge(x1, t11, z1, x0, t01, z1);
+    edge(x0, t01, z1, x0, t00, z0);
+    // …and the uprights joining them.
+    edge(x0, yBottom, z0, x0, t00, z0);
+    edge(x1, yBottom, z0, x1, t10, z0);
+    edge(x1, yBottom, z1, x1, t11, z1);
+    edge(x0, yBottom, z1, x0, t01, z1);
+    attr.needsUpdate = true;
   }
 
   /**

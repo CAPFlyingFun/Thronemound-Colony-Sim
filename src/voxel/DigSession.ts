@@ -44,6 +44,15 @@ export interface DigSessionOptions {
   digStep?: number;
   /** Fastest this ant will ever get. */
   digFloor?: number;
+  /**
+   * How much of a cell is ACTUALLY soil, 0..1. Surface cells stop between
+   * voxels now, so the top of a slope can be a fifth of a cube — and charging
+   * a whole cube's seconds for a fifth of a cube's soil read as the ant
+   * chewing on air. Optional and injected rather than computed here, because
+   * what fraction of a cell the terrain fills is a height-field question and
+   * this class deliberately knows nothing about terrain.
+   */
+  fractionOf?: (x: number, y: number, z: number) => number;
 }
 
 /** A cube being worked on, held across frames so the camera can look away. */
@@ -95,6 +104,7 @@ export class DigSession {
   readonly digStart: number;
   readonly digStep: number;
   readonly digFloor: number;
+  private readonly fractionOf: ((x: number, y: number, z: number) => number) | null;
 
   /** Spoil held, newest last. Mixed materials stack separately. */
   readonly load: CarryLoad[] = [];
@@ -111,6 +121,7 @@ export class DigSession {
     this.digStart = options.digStart ?? DIG_START;
     this.digStep = options.digStep ?? DIG_STEP;
     this.digFloor = options.digFloor ?? DIG_FLOOR;
+    this.fractionOf = options.fractionOf ?? null;
   }
 
   get practiced(): number {
@@ -236,7 +247,10 @@ export class DigSession {
      * The cell is the unit now, so `secondsFor()` is the whole press.
      */
     const material = this.world.get(x, y, z);
-    const seconds = Math.max(0.01, this.secondsFor(material));
+    // A part-full surface cell is proportionally quicker: 20% of the soil,
+    // 20% of the seconds. Interior cells report 1 and cost the whole press.
+    const fraction = this.fractionOf ? this.fractionOf(x, y, z) : 1;
+    const seconds = Math.max(0.01, this.secondsFor(material) * fraction);
     this.progress += deltaSeconds / seconds;
     if (this.progress < 1) return { kind: 'progress', ratio: this.progress };
 

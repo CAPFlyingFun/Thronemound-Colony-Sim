@@ -25,11 +25,15 @@ from PIL import Image
 
 SIZE = 512
 
-# Mirror of RECIPES in src/voxel/tileTextures.ts — sRGB base, base roughness.
+# The photo IS the colour now. The first bake normalised the photo's mean to
+# the procedural recipe bases, and those were authored as bright placeholder
+# dirt — the ground came out far lighter than the soil that was photographed.
+# So topsoil keeps the photo's own tone untouched, and clay/sand are small
+# multiplicative tints of it: what you dig looks like what you photographed.
 RECIPES = {
-    'topsoil': {'base': (144, 120, 92), 'rough': 0.95},
-    'clay': {'base': (172, 125, 103), 'rough': 0.72},
-    'sand': {'base': (211, 196, 161), 'rough': 0.99},
+    'topsoil': {'tint': (1.00, 1.00, 1.00), 'rough': 0.95},
+    'clay': {'tint': (1.12, 0.94, 0.90), 'rough': 0.72},
+    'sand': {'tint': (1.18, 1.10, 0.92), 'rough': 0.99},
 }
 
 
@@ -78,11 +82,10 @@ def main() -> None:
 
     mean = rgb.reshape(-1, 3).mean(axis=0)
     for name, recipe in RECIPES.items():
-        base = np.array(recipe['base'], dtype=np.float64)
-        # Per-channel mean normalisation: the photo's texture, the recipe's
-        # colour. Multiplicative, so shadows stay shadows and the tile means
-        # exactly what the procedural one meant to the lighting.
-        albedo = np.clip(rgb * (base / mean), 0, 255)
+        tint = np.array(recipe['tint'], dtype=np.float64)
+        # Multiplicative tint of the photo itself, so shadows stay shadows
+        # and the overall tone stays the photograph's, not a recipe's.
+        albedo = np.clip(rgb * tint, 0, 255)
         Image.fromarray(albedo.astype(np.uint8), 'RGB').save(outdir / f'{name}_albedo.png')
         Image.fromarray(normal.astype(np.uint8), 'RGB').save(outdir / f'{name}_normal.png')
         # Raised grains catch a little more light; recesses stay matte — the

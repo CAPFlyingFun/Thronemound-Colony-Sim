@@ -9,9 +9,9 @@ import {
 import { CLOD_RADIUS, MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES, type Clod } from '../src/voxel/LooseSoil';
 import { HAUL_FLOOR, PELLET_FILL, QUEEN_MASS_G, clodMassGrams, haulFactor } from '../src/voxel/mass';
 import {
-  FAR_RELIEF_VOXELS, HILL_VOXELS, SURFACE_STEP, VALLEY_VOXELS, features, groundHeight,
-  isSurfaceCell, outsideness, surfaceCornerHeight, surfaceFill, surfaceSlope, surfaceVoxel,
-  terrainGenerator,
+  DRAPE_LIMIT, FAR_RELIEF_VOXELS, HILL_VOXELS, SURFACE_STEP, VALLEY_VOXELS, digAwareCornerHeight,
+  features, groundHeight, isSurfaceCell, outsideness, surfaceCornerHeight, surfaceFill,
+  surfaceSlope, surfaceVoxel, terrainGenerator,
 } from '../src/voxel/terrain';
 import { SKIRT_REACH, buildSkirt, skirtHeight, skirtLines } from '../src/voxel/skirt';
 import { ceilingFor, glassPass, insideBox, isGlassCell, soilPass } from '../src/voxel/formicarium';
@@ -589,6 +589,29 @@ describe('DigSession', () => {
     expect(world.get(20, SURFACE, 20)).toBe(AIR);
     expect(session.digging).toBeNull();
     expect(session.carried).toBe(1);
+  });
+
+  it('charges a part-full cell a matching part of the seconds', () => {
+    /*
+     * 20% of the soil, 20% of the time. The fraction comes from an injected
+     * callback because how full a cell is belongs to the terrain, not here —
+     * and without one every cell must cost exactly what it always did.
+     */
+    const world = makeWorld();
+    const session = new DigSession(world, { fractionOf: () => 0.2 });
+    const full = session.secondsFor(TOPSOIL);
+
+    session.beginDig(20, SURFACE, 20);
+    expect(session.tickDig(full * 0.1).kind).toBe('progress');
+    expect(world.get(20, SURFACE, 20)).toBe(TOPSOIL);
+    expect(session.tickDig(full * 0.11).kind).toBe('dug');
+    expect(world.get(20, SURFACE, 20)).toBe(AIR);
+
+    // An interior cell (fraction 1) still costs the whole press.
+    const plain = new DigSession(makeWorld(), { fractionOf: () => 1 });
+    plain.beginDig(20, SURFACE, 20);
+    expect(plain.tickDig(full * 0.9).kind).toBe('progress');
+    expect(plain.tickDig(full * 0.2).kind).toBe('dug');
   });
 
   it('leaves nothing behind when a dig is cancelled part way', () => {
@@ -3516,6 +3539,213 @@ describe('terrain smoothing', () => {
     // Continuous across the wall: the join is where a seam would show.
     expect(Math.abs(groundHeight(0, 64, OPTS) - groundHeight(-0.5, 64, OPTS)))
       .toBeLessThan(0.5);
+  });
+});
+
+describe('digging keeps the smoothed surface sealed', () => {
+  const OPTS = { surfaceY: SURFACE, size: 128, seed: 7 };
+
+  /** A steep cell on the hill's east flank, found rather than hardcoded. */
+  const flankCell = () => {
+    const { hill } = features(OPTS);
+    const peak = groundHeight(hill.x, hill.z, OPTS);
+    for (let x = hill.x; x < hill.x + 24; x++) {
+      const h = groundHeight(x, hill.z, OPTS);
+      if (h < peak - 3 && h > SURFACE + 2) return { x, z: hill.z };
+    }
+    throw new Error('no flank cell found');
+  };
+
+  it('drapes corners into a dig instead of overhanging it', () => {
+    const world = new VoxelWorld(128, 128, 128, terrainGenerator(OPTS));
+    const read = (x: number, y: number, z: number) => world.get(x, y, z);
+    const { x, z } = flankCell();
+    const top = surfaceVoxel(x, z, OPTS);
+
+    // Untouched world: the dig-aware field IS the pristine field, everywhere.
+    for (let cx = x - 2; cx <= x + 3; cx++) {
+      for (let cz = z - 2; cz <= z + 3; cz++) {
+        expect(digAwareCornerHeight(read, cx, cz, OPTS))
+          .toBeCloseTo(surfaceCornerHeight(cx, cz, OPTS), 9);
+      }
+    }
+
+    expect(world.dig(x, top, z)).not.toBe(AIR);
+
+    for (let cx = x; cx <= x + 1; cx++) {
+      for (let cz = z; cz <= z + 1; cz++) {
+        const pristine = surfaceCornerHeight(cx, cz, OPTS);
+        const draped = digAwareCornerHeight(read, cx, cz, OPTS);
+        // Never raised — draping can only pull the sheet DOWN into the dig…
+        expect(draped).toBeLessThanOrEqual(pristine + 1e-9);
+        // …and for a one-deep pit it reaches the exposed floor exactly,
+        // unless the pristine corner already sat below it on the downhill
+        // side, in which case it stays put. Either way, no corner is left
+        // above the floor holding a crust over the hole.
+        expect(draped).toBeLessThanOrEqual(top + 1e-9);
+        expect(draped).toBeGreaterThanOrEqual(Math.min(pristine, top) - 1.5 - 1e-9);
+      }
+    }
+
+    // Two cells out, the dig is none of the corner's business.
+    expect(digAwareCornerHeight(read, x - 1, z - 1, OPTS))
+      .toBeCloseTo(surfaceCornerHeight(x - 1, z - 1, OPTS), 9);
+    expect(digAwareCornerHeight(read, x + 3, z + 2, OPTS))
+      .toBeCloseTo(surfaceCornerHeight(x + 3, z + 2, OPTS), 9);
+  });
+
+  it('caps the sag at one limit no matter how many shafts share the corner', () => {
+    /*
+     * The cap is "how far below PRISTINE the sheet may sag", and it must not
+     * compound: an earlier version clamped each dug column against the
+     * already-sagged running height, so four open shafts around one corner
+     * pulled it down four limits deep — in loop order. All four columns dug
+     * three cells deep is the worst case, and the answer is exactly one
+     * limit, regardless of how many columns contribute or their depths.
+     */
+    const world = new VoxelWorld(128, 128, 128, terrainGenerator(OPTS));
+    const read = (x: number, y: number, z: number) => world.get(x, y, z);
+    const { x, z } = flankCell();
+    const corner = { cx: x + 1, cz: z + 1 };
+    const pristine = surfaceCornerHeight(corner.cx, corner.cz, OPTS);
+
+    // Dig ever deeper shafts column by column; the corner must never sink
+    // past pristine minus the one limit, at any stage.
+    const columns = [[x, z], [x + 1, z], [x, z + 1], [x + 1, z + 1]] as const;
+    for (const [depth, [colX, colZ]] of columns.entries()) {
+      const top = surfaceVoxel(colX, colZ, OPTS);
+      for (let d = 0; d <= depth; d++) {
+        expect(world.dig(colX, top - d, colZ)).not.toBe(AIR);
+      }
+      const draped = digAwareCornerHeight(read, corner.cx, corner.cz, OPTS);
+      expect(draped).toBeGreaterThanOrEqual(pristine - DRAPE_LIMIT - 1e-9);
+      expect(draped).toBeLessThanOrEqual(pristine + 1e-9);
+    }
+    // With every shaft deeper than the limit, the sag IS the limit exactly.
+    expect(digAwareCornerHeight(read, corner.cx, corner.cz, OPTS))
+      .toBeCloseTo(pristine - DRAPE_LIMIT, 9);
+  });
+
+  it('cannot be seen through after a cell is dug out of the flank', () => {
+    /*
+     * The reported fault: dig a cell on the hillside and a window of sky
+     * opens in the slope below it. The pristine corner field kept drawing
+     * the smoothing sheet over ground that was no longer there, and a ray
+     * passing under that crust — through the freshly dug pit — met only the
+     * culled undersides of the hill: transparency, straight through to the
+     * sky. Same instrument as the pristine probe above: stand outside, look
+     * level at the hillside through the pit, and ask whether the first
+     * surface met faces the eye.
+     */
+    const world = new VoxelWorld(128, 128, 128, terrainGenerator(OPTS));
+    const read = (x: number, y: number, z: number) => world.get(x, y, z);
+    const { x, z } = flankCell();
+    const top = surfaceVoxel(x, z, OPTS);
+    expect(world.dig(x, top, z)).not.toBe(AIR);
+    // A second, adjacent dig — the report said digging NEXT to the hole
+    // partially closed it, so the seal must hold for pairs too.
+    const top2 = surfaceVoxel(x, z + 1, OPTS);
+    expect(world.dig(x, top2, z + 1)).not.toBe(AIR);
+
+    // Meshed exactly the way DigScene does after a dig: same view, but the
+    // corner heights come from the dig-aware drape.
+    const view = {
+      get: read,
+      fill: (vx: number, vy: number, vz: number) => surfaceFill(vx, vy, vz, OPTS),
+      slope: (vx: number, vy: number, vz: number) => (
+        isSurfaceCell(vx, vy, vz, OPTS) ? surfaceSlope(vx, vz, OPTS) : null
+      ),
+      cornerHeight: (cx: number, cz: number) => digAwareCornerHeight(read, cx, cz, OPTS),
+    };
+    const tris: number[][] = [];
+    for (const cx of [(x >> 5) - 1, x >> 5, (x >> 5) + 1]) {
+      for (const cz of [(z >> 5) - 1, z >> 5, (z >> 5) + 1]) {
+        for (const cy of [2, 3]) {
+          if (cx < 0 || cz < 0) continue;
+          const d = meshChunk(view, cx, cy, cz);
+          if (!d) continue;
+          const p = (n: number) => [
+            d.positions[n * 3]!, d.positions[n * 3 + 1]!, d.positions[n * 3 + 2]!,
+          ];
+          for (let t = 0; t < d.indices.length; t += 3) {
+            tris.push([...p(d.indices[t]!), ...p(d.indices[t + 1]!), ...p(d.indices[t + 2]!)]);
+          }
+        }
+      }
+    }
+
+    const shoot = (o: number[], d: number[]) => {
+      let best = Infinity;
+      let facing = 0;
+      for (const t of tris) {
+        const e1 = [t[3]! - t[0]!, t[4]! - t[1]!, t[5]! - t[2]!];
+        const e2 = [t[6]! - t[0]!, t[7]! - t[1]!, t[8]! - t[2]!];
+        const p = [
+          d[1]! * e2[2]! - d[2]! * e2[1]!,
+          d[2]! * e2[0]! - d[0]! * e2[2]!,
+          d[0]! * e2[1]! - d[1]! * e2[0]!,
+        ];
+        const det = e1[0]! * p[0]! + e1[1]! * p[1]! + e1[2]! * p[2]!;
+        if (Math.abs(det) < 1e-12) continue;
+        const inv = 1 / det;
+        const s = [o[0]! - t[0]!, o[1]! - t[1]!, o[2]! - t[2]!];
+        const u = (s[0]! * p[0]! + s[1]! * p[1]! + s[2]! * p[2]!) * inv;
+        if (u < 0 || u > 1) continue;
+        const q = [
+          s[1]! * e1[2]! - s[2]! * e1[1]!,
+          s[2]! * e1[0]! - s[0]! * e1[2]!,
+          s[0]! * e1[1]! - s[1]! * e1[0]!,
+        ];
+        const w = (d[0]! * q[0]! + d[1]! * q[1]! + d[2]! * q[2]!) * inv;
+        if (w < 0 || u + w > 1) continue;
+        const hit = (e2[0]! * q[0]! + e2[1]! * q[1]! + e2[2]! * q[2]!) * inv;
+        if (hit <= 1e-7 || hit >= best) continue;
+        best = hit;
+        facing = det;
+      }
+      return { t: best, facing };
+    };
+
+    const solid = (px: number, py: number, pz: number) => isSolid(
+      world.get(Math.floor(px), Math.floor(py), Math.floor(pz)),
+    );
+    // The draped sheet, sampled bilinearly — what is actually drawn now.
+    const sheetAt = (px: number, pz: number) => {
+      const cx = Math.floor(px);
+      const cz = Math.floor(pz);
+      const fx = px - cx;
+      const fz = pz - cz;
+      return (
+        digAwareCornerHeight(read, cx, cz, OPTS) * (1 - fx)
+        + digAwareCornerHeight(read, cx + 1, cz, OPTS) * fx) * (1 - fz)
+        + (digAwareCornerHeight(read, cx, cz + 1, OPTS) * (1 - fx)
+        + digAwareCornerHeight(read, cx + 1, cz + 1, OPTS) * fx) * fz;
+    };
+
+    let probes = 0;
+    const seenThrough: string[] = [];
+    // Level rays aimed westward through the pit's airspace into the hill,
+    // fanned across the pit and its rim in both height and z.
+    for (let a = 0; a < 40; a++) {
+      for (let b = 0; b < 40; b++) {
+        const from = [x + 8.0311, top + 0.05 + b * 0.05, z - 1 + a * 0.1 + 0.0173];
+        const dir = [-1, 0, 0];
+        const to = [x - 4, from[1]!, from[2]!];
+        if (solid(from[0]!, from[1]!, from[2]!)) continue;
+        if (!solid(to[0]!, to[1]!, to[2]!)) continue;
+        // Must genuinely end under the drawn surface, or "no hit" is the
+        // ray grazing over the crest and proves nothing.
+        if (from[1]! > sheetAt(to[0]!, to[2]!) - 0.1) continue;
+        probes++;
+        const hit = shoot(from, dir);
+        // 12 = well past the hill's local face from 8 out; the sheet on a
+        // steep flank can arrive a couple of voxels deep, never this deep.
+        if (!(hit.t < 12)) seenThrough.push(`straight through from ${from.map((q) => q.toFixed(2))}`);
+        else if (hit.facing < 0) seenThrough.push(`inside-out at ${from.map((q) => q.toFixed(2))}`);
+      }
+    }
+    expect(probes).toBeGreaterThan(200);
+    expect(seenThrough.slice(0, 8)).toEqual([]);
   });
 });
 

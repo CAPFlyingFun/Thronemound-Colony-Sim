@@ -15,7 +15,7 @@
  * No three.js and no VoxelWorld, so the height field can be checked on its own.
  */
 
-import { AIR, CLAY, SAND, STONE, TOPSOIL, type Generator, type VoxelId } from './VoxelWorld';
+import { AIR, CLAY, SAND, STONE, TOPSOIL, isSolid, type Generator, type VoxelId } from './VoxelWorld';
 
 /**
  * How high the hill stands and how deep the hollow cuts, in voxels.
@@ -320,6 +320,64 @@ export function surfaceSlope(
  */
 export function surfaceCornerHeight(cx: number, cz: number, opts: TerrainOptions): number {
   return groundHeight(cx, cz, opts);
+}
+
+/**
+ * How far a corner may sag below the pristine field when draping into a dig.
+ * One voxel and a half covers the deepest single-cell pit a corner can rim;
+ * anything deeper is a shaft, and a shaft mouth should stay a crisp rim with
+ * blocky walls below it rather than a sheet plunging to its floor.
+ */
+export const DRAPE_LIMIT = 1.5;
+
+/**
+ * Corner height that KNOWS about digging — the render sheet's real input.
+ *
+ * `surfaceCornerHeight` is the pristine height field, and the sheet drawn
+ * from it is a fiction reconciling that field with the voxel grid. The
+ * fiction is airtight only while the grid underneath matches the field: dig a
+ * cell out and the neighbouring sheets keep sloping toward ground that is no
+ * longer there — a crust hanging over the pit. Its underside is never drawn
+ * (backfaces are culled), so any line of sight that gets beneath it — and a
+ * pit is exactly such a doorway — sees straight through the hill to the sky.
+ * That was the transparent face on the flank: not a missing wall but a view
+ * up under the terrain's own skin.
+ *
+ * So the field learns about digging in the one place everything reads it:
+ * a lattice corner is shared by four columns, and if any of them has lost its
+ * surface voxel, the corner sags to that column's newly exposed floor. The
+ * sheet then DRAPES into the dig like disturbed soil instead of overhanging
+ * it — for a one-deep dig the corner lands exactly on the pit floor, sealing
+ * sheet to floor with nothing left to see under.
+ *
+ * Pure like everything else here: the world is handed in as a reader, never
+ * imported, so the drape can be tested against a plain function.
+ */
+export function digAwareCornerHeight(
+  get: (x: number, y: number, z: number) => number,
+  cx: number,
+  cz: number,
+  opts: TerrainOptions,
+): number {
+  const pristine = surfaceCornerHeight(cx, cz, opts);
+  let h = pristine;
+  for (let dx = -1; dx <= 0; dx++) {
+    for (let dz = -1; dz <= 0; dz++) {
+      const x = cx + dx;
+      const z = cz + dz;
+      const top = surfaceVoxel(x, z, opts);
+      if (isSolid(get(x, top, z))) continue; // column undug at the surface
+      let floor = top;
+      while (floor > 0 && !isSolid(get(x, floor - 1, z))) floor--;
+      // Clamped against the PRISTINE height, never the running minimum: the
+      // cap is "how far the sheet may sag below where it was", and taking it
+      // off an already-sagged h would compound per dug column — four open
+      // shafts around one corner pulling it down four limits deep, in
+      // whatever order the loop happened to visit them.
+      h = Math.min(h, Math.max(floor, pristine - DRAPE_LIMIT));
+    }
+  }
+  return h;
 }
 
 export function surfaceFill(x: number, y: number, z: number, opts: TerrainOptions): number {
