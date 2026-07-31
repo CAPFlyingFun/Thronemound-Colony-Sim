@@ -10,7 +10,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import {
-  QUEEN_RIG, RIGS, gaitPose, rigBones, rigLengthVoxels, rigScale,
+  QUEEN_RIG, RIGS, cadenceFor, gaitPose, rigBones, rigLengthVoxels, rigScale,
   type GaitInput, type RigMap,
 } from './hexapod';
 import { aimRotation, distanceToPolyline, footTarget, type Vec3 } from './legIk';
@@ -170,7 +170,11 @@ export class QueenModel {
    * expressed as the thing the solver actually needs. See `IK_MIN_MOBILITY`.
    */
   private readonly boneMobility = new Map<string, number>();
+  /** Neutral foot position and reach per leg. See `legPlan`. */
+  private readonly legHome: Array<{ slot: string; home: Vec3; reach: number }> = [];
   private clock = 0;
+  /** Gait revolutions, integrated. See `GaitInput.cycle`. */
+  private cycle = 0;
   private loaded = false;
   private bodyRoot: THREE.Object3D | null = null;
   private baseY = 0;
@@ -234,6 +238,7 @@ export class QueenModel {
       this.bodyRoot = this.bones.get(this.rig.body[0]!) ?? null;
       this.baseY = this.bodyRoot?.position.y ?? 0;
       this.measureLimbs();
+      this.measureLegPlan();
       this.loaded = true;
       return true;
     } catch {
@@ -252,7 +257,15 @@ export class QueenModel {
   update(dt: number, input: QueenPoseInput): void {
     if (!this.loaded) return;
     this.clock += dt;
-    const pose = gaitPose({ ...input, clock: this.clock }, this.rig);
+    /*
+     * The leg cycle is integrated at THIS frame's cadence, so the phase carries
+     * over continuously when the throttle changes. Cadence is proportional to
+     * speed, which makes the accumulated cycle proportional to DISTANCE
+     * TRAVELLED — a foot advances one stride per stride of ground covered, at
+     * any pace, through any acceleration. That is what stops the skating.
+     */
+    this.cycle += cadenceFor(input.speed) * dt;
+    const pose = gaitPose({ ...input, clock: this.clock, cycle: this.cycle }, this.rig);
 
     for (const [name, euler] of pose.rotations) {
       const bone = this.bones.get(name);
@@ -312,6 +325,19 @@ export class QueenModel {
     groundAt: (x: number, z: number, y: number) => number,
     clearance: number,
     band: number,
+    /**
+     * Where a planted leg's foot should BE, in world space, if something else
+     * is deciding that — the tripod stepper is.
+     *
+     * Without it this solver can only move a foot up and down, because the gait
+     * owns where the foot is fore and aft and this only corrects for terrain.
+     * That division is what made the feet skate: nothing in the whole pipeline
+     * ever knew where a foot was in the world from one frame to the next, so
+     * nothing could hold one still. Given an anchor, a stance foot is simply
+     * put back on the same world point every frame and its ground speed is
+     * exactly zero.
+     */
+    anchorFor?: (limbId: string) => readonly [number, number, number] | null,
   ): number {
     if (!this.loaded) return 0;
     /*
@@ -380,12 +406,23 @@ export class QueenModel {
        * else alone. Without it the antennae were the last thing still clipping,
        * because nothing here was looking at them at all.
        */
-      let wanted = footTarget(FOOT.y, ground, sole, limb.plant ? band : 0);
-      if (Math.abs(wanted - FOOT.y) < 1e-7) continue;
+      const anchor = limb.plant ? anchorFor?.(limb.id) ?? null : null;
+      let targetX = FOOT.x;
+      let targetZ = FOOT.z;
+      let wanted: number;
+      if (anchor) {
+        // The stepper's world point, raised by this bone's own thickness so the
+        // drawn claw rests ON the soil rather than inside it.
+        targetX = anchor[0];
+        targetZ = anchor[2];
+        wanted = anchor[1] + sole;
+      } else {
+        wanted = footTarget(FOOT.y, ground, sole, limb.plant ? band : 0);
+        if (Math.abs(wanted - FOOT.y) < 1e-7) continue;
+      }
 
       for (let attempt = 0; attempt < IK_ATTEMPTS; attempt += 1) {
-        foot.getWorldPosition(FOOT);
-        TARGET.set(FOOT.x, wanted, FOOT.z);
+        TARGET.set(targetX, wanted, targetZ);
 
         // Tip-first: cyclic coordinate descent converges from either end, and
         // starting at the joint nearest the foot spends the correction on the
@@ -530,6 +567,37 @@ export class QueenModel {
       }
     }
     return lift;
+  }
+
+  /**
+   * Each leg's neutral foot position in HER OWN frame, and its reach.
+   *
+   * Measured off the bind pose, so it is the rig's own idea of where a leg
+   * stands rather than a number somebody chose. The stepper needs both: the
+   * home to know when a foot has trailed too far behind its shoulder, and the
+   * reach to turn a sweep in degrees into a stride in millimetres — which is
+   * what lets one angle give the queen and a worker each their own stride.
+   */
+  legPlan(): Array<{ slot: string; home: Vec3; reach: number }> {
+    return this.legHome.slice();
+  }
+
+  private measureLegPlan(): void {
+    this.legHome.length = 0;
+    for (const leg of this.rig.legs) {
+      const tipName = this.limbTip.get(leg.slot);
+      const tip = tipName ? this.bones.get(tipName) : undefined;
+      const hip = this.bones.get(leg.bones[0]!);
+      if (!tip || !hip) continue;
+      tip.getWorldPosition(FOOT);
+      hip.getWorldPosition(JOINT);
+      // Bind pose, root untransformed, so world IS her frame here.
+      this.legHome.push({
+        slot: leg.slot,
+        home: [FOOT.x, FOOT.y, FOOT.z],
+        reach: JOINT.distanceTo(FOOT),
+      });
+    }
   }
 
   /** Every named group of bones, for measuring thickness and for the guard. */

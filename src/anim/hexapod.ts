@@ -221,6 +221,24 @@ export interface GaitPose {
 export interface GaitInput {
   /** Seconds of gait time accumulated. Advanced by the caller, not wall clock. */
   clock: number;
+  /**
+   * Gait revolutions accumulated — the leg cycle, INTEGRATED by the caller.
+   *
+   * This has to be integrated rather than derived, and that is the whole of the
+   * "feet going super fast, sliding on ice trying to accelerate" report. The
+   * cycle used to be computed as `clock * cadenceFor(speed)`: total elapsed
+   * time times the CURRENT speed. Stand still for ten seconds and then open the
+   * throttle and that expression multiplies the whole accumulated phase by
+   * sixteen in a single frame, so her legs rip through a dozen cycles at once
+   * while her body is still easing up to speed. Every acceleration did it, and
+   * only a constant speed hid it.
+   *
+   * Optional, with the old expression as the fallback, because at a CONSTANT
+   * speed the two agree exactly — `t * c` IS the integral of `c dt` when `c`
+   * does not vary. A caller that never accelerates loses nothing by omitting
+   * it; a caller with a throttle must supply it.
+   */
+  cycle?: number;
   /** Planar speed in voxels per second. */
   speed: number;
   /** Turn rate in radians per second; leans her into the turn. */
@@ -289,7 +307,9 @@ export function gaitPose(input: GaitInput, rig: RigMap = QUEEN_RIG): GaitPose {
   const { clock, speed, turn, digging, carrying } = input;
   const rotations = new Map<string, [number, number, number]>();
   const moving = Math.min(1, Math.abs(speed) / 0.6);
-  const cycle = clock * cadenceFor(speed);
+  // See `GaitInput.cycle`: the caller's integrated phase when it has one, and
+  // the constant-speed equivalent when it does not.
+  const cycle = input.cycle ?? clock * cadenceFor(speed);
 
   for (const leg of rig.legs) {
     const phase = legPhase(leg.slot, cycle);

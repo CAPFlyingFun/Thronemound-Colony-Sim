@@ -3,6 +3,7 @@ import { QueenModel } from '../anim/QueenModel';
 import { BoreRig, DIG_YAW_RATE, YAW_RATE } from './BoreControl';
 import { clampStickOrigin, stickVector } from '../voxel/locomotion';
 import { FollowCamera } from './FollowCamera';
+import { TripodGait } from '../anim/tripod';
 import { CASTE_LENGTH_MM } from '../anim/hexapod';
 import { buildSurfaceNets } from '../density/SurfaceNets';
 import { TerrainStream } from '../density/TerrainStream';
@@ -364,6 +365,8 @@ export class DensityTerrainLabScene {
   private footPenetration = 0;
   /** How fast she is currently falling, in world units per second. */
   private fallSpeed = 0;
+  /** The tripod walk. Rebuilt when she leaves the ground, null while boring. */
+  private gait: TripodGait | null = null;
   /** The point a centimetre ahead that the bore is driving at. */
   private readonly digPoint = new THREE.Vector3();
   /** Where the last bite was centred, and where it sat relative to her then. */
@@ -1433,6 +1436,38 @@ export class DensityTerrainLabScene {
    * her feet through it. Composing two rotations does not give this — the two
    * orders disagree the moment both angles are non-zero.
    */
+  /**
+   * Advance the tripod walk and hand back where each foot belongs.
+   *
+   * Null while she is boring or underground: down a shaft she is not walking,
+   * she is being pushed along a bore by the joystick, and anchoring her feet to
+   * world points would have her clawing at a tunnel wall that is moving past
+   * her. Above ground, walking, this is what makes a stance foot's ground speed
+   * zero — the thing the clock-driven gait could never do.
+   */
+  private stepFeet(dt: number): Map<string, readonly [number, number, number]> | null {
+    if (!this.queenReady) return null;
+    if (this.bore.digging || this.underground) {
+      this.gait = null;
+      return null;
+    }
+    if (!this.gait) {
+      const legs = this.queen.legPlan();
+      if (legs.length === 0) return null;
+      this.gait = new TripodGait(legs);
+    }
+    const ground = (x: number, z: number): number =>
+      this.groundAt(x, z, this.antPosition.y + STEP_UP);
+    const states = this.gait.step(dt, {
+      position: [this.antPosition.x, this.antPosition.y, this.antPosition.z],
+      heading: this.facing,
+      speed: this.walkSpeed,
+    }, ground);
+    const out = new Map<string, readonly [number, number, number]>();
+    for (const state of states) out.set(state.slot, state.target);
+    return out;
+  }
+
   private orientQueen(): void {
     /*
      * Pitch is measured from the WORLD horizon, never from the ground she
@@ -1817,8 +1852,17 @@ export class DensityTerrainLabScene {
       this.queen.leanSegments(
         this.thoraxPitch - this.headPitch, this.gasterPitch - this.thoraxPitch,
       );
+      /*
+       * The tripod stepper decides where her feet ARE; the solver only bends
+       * the legs to reach. Underground the gait is not walking her anywhere —
+       * she is being driven along a bore — so the anchors are dropped and the
+       * legs fall back to terrain-following, which is what they were doing
+       * before and is right for a body that is swimming through soil.
+       */
+      const anchors = this.stepFeet(delta);
       this.footPenetration = this.queen.solveFeet(
         under, FOOT_CLEARANCE, FOOT_PLANT_BAND,
+        anchors ? (slot) => anchors.get(slot) ?? null : undefined,
       );
       /*
        * The fail-safe, after everything else has had its go: whatever the
