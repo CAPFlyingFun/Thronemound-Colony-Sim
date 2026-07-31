@@ -25,6 +25,8 @@ import { isSolid, type VoxelWorld } from './VoxelWorld';
  * begun. Depth can grow later as the colony does.
  */
 export const DEN_MIN_DEPTH = 4;
+
+
 /**
  * Hollow space required around the den, counted as air voxels inside a radius-2
  * ball (33 cells, ignoring corners). A bare shaft yields about 5, so this can
@@ -78,12 +80,24 @@ export function countChamberAir(
 }
 
 export class QueenFounding {
-  readonly surfaceY: number;
+  /**
+   * Where the ground is, per column.
+   *
+   * A number while the world was a flat table top, and a function now that it
+   * has a hill and a hollow in it: depth is how far below the GROUND she is,
+   * and the ground is no longer one height.
+   *
+   * The obvious alternative — count the solid voxels above her head — is wrong
+   * in the case the den is actually dug in, and the tests said so immediately.
+   * At the bottom of a shaft there is nothing above her at all, because she
+   * removed it, and she is as deep as she has ever been.
+   */
+  readonly surfaceAt: (x: number, z: number) => number;
   readonly voxelMm: number;
   private site: DenSite | null = null;
 
-  constructor(surfaceY: number, voxelMm = 5) {
-    this.surfaceY = surfaceY;
+  constructor(surface: number | ((x: number, z: number) => number), voxelMm = 5) {
+    this.surfaceAt = typeof surface === 'number' ? () => surface : surface;
     this.voxelMm = voxelMm;
   }
 
@@ -96,7 +110,7 @@ export class QueenFounding {
   }
 
   evaluate(world: Pick<VoxelWorld, 'get'>, x: number, y: number, z: number): FoundingStatus {
-    const depth = this.surfaceY - Math.floor(y);
+    const depth = this.surfaceAt(Math.floor(x), Math.floor(z)) - Math.floor(y);
     const depthMm = depth * this.voxelMm;
 
     if (this.site) {

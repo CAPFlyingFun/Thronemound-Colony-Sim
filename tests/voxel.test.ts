@@ -8,6 +8,7 @@ import {
 } from '../src/voxel/mesher';
 import { CLOD_RADIUS, MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES, type Clod } from '../src/voxel/LooseSoil';
 import { HAUL_FLOOR, PELLET_FILL, QUEEN_MASS_G, clodMassGrams, haulFactor } from '../src/voxel/mass';
+import { HILL_VOXELS, VALLEY_VOXELS, features, groundHeight, terrainGenerator } from '../src/voxel/terrain';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
 import { SKY_PHASES, packColor, skyAt, wrapHours } from '../src/voxel/daylight';
@@ -2841,5 +2842,88 @@ describe('chunk invalidation', () => {
     expect(world.chunksNear(48, 48, 48)).toEqual([world.chunkIndex(1, 1, 1)]);
     // Clamped at the world edge rather than emitting out-of-range indices.
     expect(world.chunksNear(0, 0, 0)).toEqual([world.chunkIndex(0, 0, 0)]);
+  });
+});
+
+describe('terrain', () => {
+  const OPTS = { surfaceY: SURFACE, size: 128, seed: 7 };
+
+  it('puts a hill and a hollow in it, at the heights asked for', () => {
+    /*
+     * 5 cm up and 3 cm down at 5 mm a voxel. Sampled over the whole world
+     * rather than at the feature centres, because what matters is that those
+     * heights EXIST somewhere and that nothing exceeds them — the roughness
+     * between the features must not quietly add to either.
+     */
+    let lowest = Infinity;
+    let highest = -Infinity;
+    for (let x = 0; x < 128; x += 2) {
+      for (let z = 0; z < 128; z += 2) {
+        const h = groundHeight(x, z, OPTS);
+        lowest = Math.min(lowest, h);
+        highest = Math.max(highest, h);
+      }
+    }
+    expect(highest).toBe(SURFACE + HILL_VOXELS);
+    expect(lowest).toBe(SURFACE - VALLEY_VOXELS);
+    expect((highest - SURFACE) * 5).toBe(50);
+    expect((SURFACE - lowest) * 5).toBe(30);
+  });
+
+  it('keeps both features whole and apart', () => {
+    // A hollow sitting on top of the hill cancels it and the world is flat
+    // again with extra steps; one sliced off by the edge of the world reads as
+    // a cliff rather than as ground.
+    for (let seed = 1; seed <= 25; seed++) {
+      const opts = { ...OPTS, seed };
+      const { hill, valley } = features(opts);
+      for (const at of [hill, valley]) {
+        expect(at.x).toBeGreaterThan(8);
+        expect(at.x).toBeLessThan(120);
+        expect(at.z).toBeGreaterThan(8);
+        expect(at.z).toBeLessThan(120);
+      }
+      expect(Math.hypot(valley.x - hill.x, valley.z - hill.z)).toBeGreaterThan(20);
+      // And every seed really does produce both extremes, not just seed 7.
+      expect(groundHeight(hill.x, hill.z, opts)).toBe(SURFACE + HILL_VOXELS);
+      expect(groundHeight(valley.x, valley.z, opts)).toBe(SURFACE - VALLEY_VOXELS);
+    }
+  });
+
+  it('is continuous — no cliffs between neighbouring columns', () => {
+    /*
+     * Every step has to be something she can walk up, or the world contains
+     * walls she cannot climb and did not dig. STEP_HEIGHT is 1.05, so a rise of
+     * one voxel per column is the limit; this asserts it directly rather than
+     * trusting the falloff to be smooth.
+     */
+    let worst = 0;
+    for (let x = 1; x < 127; x++) {
+      for (let z = 1; z < 127; z++) {
+        const h = groundHeight(x, z, OPTS);
+        worst = Math.max(
+          worst,
+          Math.abs(h - groundHeight(x + 1, z, OPTS)),
+          Math.abs(h - groundHeight(x, z + 1, OPTS)),
+        );
+      }
+    }
+    expect(worst).toBeLessThanOrEqual(1);
+  });
+
+  it('lays the strata along the ground, not through it', () => {
+    const gen = terrainGenerator(OPTS);
+    const { hill, valley } = features(OPTS);
+    for (const at of [hill, valley, { x: 20, z: 100 }]) {
+      const top = groundHeight(at.x, at.z, OPTS);
+      // Air directly above, soil directly below: the surface is where the
+      // height field says it is, in every column.
+      expect(gen(at.x, top + 1, at.z)).toBe(AIR);
+      expect(gen(at.x, top, at.z)).toBe(TOPSOIL);
+      // Topsoil is a SKIN that follows the ground. Banding it at fixed heights
+      // instead would slice the hill's cap off and leave clay on the summit.
+      expect(gen(at.x, top - 5, at.z)).toBe(TOPSOIL);
+      expect(gen(at.x, top - 6, at.z)).toBe(CLAY);
+    }
   });
 });
