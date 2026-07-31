@@ -143,6 +143,13 @@ const TERRAIN: TerrainOptions = { surfaceY: SURFACE_Y, size: WORLD_SIZE, seed: 7
 /** The formicarium she lives in: the world's own walls and lid. */
 /** How thick the tank's timber is, in voxels. Chunky enough to read at a glance. */
 const FRAME_BEAM = 2.2;
+/**
+ * How far one repeat of the grain runs, in voxels.
+ *
+ * Roughly two beam-widths, so a post shows a few boards' worth of figure rather
+ * than one enormous smear of it.
+ */
+const GRAIN_VOXELS = 5;
 
 const BOX: BoxOptions = {
   size: WORLD_SIZE,
@@ -852,14 +859,26 @@ export class DigScene {
    * be legible is the EDGE, not the surface.
    */
   private buildFrame(): void {
-    const texture = new THREE.TextureLoader().load(`${import.meta.env.BASE_URL}frame/walnut.jpg`);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.wrapS = THREE.RepeatWrapping;
-    texture.wrapT = THREE.RepeatWrapping;
-    texture.repeat.set(6, 6);
-    const material = new THREE.MeshStandardMaterial({ map: texture, roughness: 0.72, metalness: 0 });
+    /*
+     * Grain scaled to each beam, not one repeat for all of them.
+     *
+     * Reported from play as looking like metal rather than wood, and it did:
+     * BoxGeometry lays its UVs 0..1 per face however long the box is, so a
+     * single repeat count stretched the grain over twenty voxels on a rail and
+     * squeezed it into two on a post. Smeared that far, timber has no grain
+     * left — just a smooth sheen, which is exactly what brushed metal looks
+     * like.
+     *
+     * So each beam gets its own texture clone repeating once every GRAIN_VOXELS
+     * of its ACTUAL length. Clones share the loaded image, so this is a handful
+     * of small objects rather than a handful of downloads.
+     */
+    const image = new THREE.TextureLoader().load(`${import.meta.env.BASE_URL}frame/walnut.jpg`);
+    image.colorSpace = THREE.SRGBColorSpace;
+    image.wrapS = THREE.RepeatWrapping;
+    image.wrapT = THREE.RepeatWrapping;
     const geometry = new THREE.BoxGeometry(1, 1, 1);
-    this.cleanups.push(() => { texture.dispose(); material.dispose(); geometry.dispose(); });
+    this.cleanups.push(() => { image.dispose(); geometry.dispose(); });
 
     const size = WORLD_SIZE;
     const top = BOX.ceilingY + 1;
@@ -869,6 +888,15 @@ export class DigScene {
     const beam = (
       cx: number, cy: number, cz: number, sx: number, sy: number, sz: number,
     ) => {
+      const texture = image.clone();
+      texture.needsUpdate = true;
+      // Along the beam's longest axis, and across its thickness.
+      const run = Math.max(sx, sy, sz);
+      texture.repeat.set(run / GRAIN_VOXELS, Math.min(sx, sy, sz) / GRAIN_VOXELS);
+      const material = new THREE.MeshStandardMaterial({
+        map: texture, roughness: 0.85, metalness: 0,
+      });
+      this.cleanups.push(() => { texture.dispose(); material.dispose(); });
       const mesh = new THREE.Mesh(geometry, material);
       mesh.position.set(cx, cy, cz);
       mesh.scale.set(sx, sy, sz);
