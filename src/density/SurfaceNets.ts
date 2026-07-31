@@ -80,6 +80,22 @@ export function buildSurfaceNets(field: DensityField, isoLevel = 0): SurfaceNetM
     return vertexByCell[cellIndex(x, y, z, cellsX, cellsY)] ?? -1;
   };
 
+  /*
+   * All three axes pass the SAME flip rule, and that is the whole of it.
+   *
+   * Each of the three quads below lists its four vertices in the identical
+   * cyclic pattern — (m, m-du, m-du-dv, m-dv) with (du, dv) cycling as
+   * (Y,Z), (Z,X), (X,Y) — so the winding they need is identical too. The
+   * first version gave the Y quad the opposite sign, which left the mesh
+   * perfectly CLOSED and not consistently ORIENTED: 2,040 of its 21,138
+   * edges had both their triangles running the same way round, and every
+   * one of those faces is backface-culled. You could see through a tenth of
+   * the hill while every boundary-edge count said the surface was sealed.
+   *
+   * Which is why the test beside this one checks ORIENTATION, not just
+   * closure. Counting edges cannot tell the two apart — an edge shared by
+   * two triangles is shared by two triangles whichever way they wind.
+   */
   const addQuad = (a: number, b: number, c: number, d: number, flip: boolean): void => {
     if (a < 0 || b < 0 || c < 0 || d < 0) return;
     if (flip) {
@@ -100,7 +116,7 @@ export function buildSurfaceNets(field: DensityField, isoLevel = 0): SurfaceNetM
             vertexAt(x, y - 1, z),
             vertexAt(x, y - 1, z - 1),
             vertexAt(x, y, z - 1),
-            start > 0,
+            start < 0,
           );
         }
 
@@ -120,7 +136,7 @@ export function buildSurfaceNets(field: DensityField, isoLevel = 0): SurfaceNetM
             vertexAt(x - 1, y, z),
             vertexAt(x - 1, y - 1, z),
             vertexAt(x, y - 1, z),
-            start > 0,
+            start < 0,
           );
         }
       }
