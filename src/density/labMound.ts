@@ -43,28 +43,78 @@ export const BITE_DEPTH_MM = 0.5;
  */
 export const CELL_MM = 0.25;
 export const CELL_SIZE = CELL_MM / WORLD_UNIT_MM;
-export const CELLS_X = 64;
-export const CELLS_Y = 32;
-export const CELLS_Z = 64;
+
+/*
+ * 64 x 32 x 64 mm of soil, sixteen times the footprint the lab started with.
+ *
+ * The cap here is MEMORY, not speed — remeshing is chunked now, so a tap costs
+ * the bite rather than the world. This field is 8.5 million samples at four
+ * bytes, which is 34 MB and comfortable on a phone. The same quarter-
+ * millimetre cells stretched over the real 640 mm tank would be 1.6 billion
+ * samples and 6.3 GB, so the finished game cannot hold ant-scale detail
+ * everywhere at once — it will want coarse soil away from the digging and fine
+ * soil only where she has actually been. That is the next thing this lab
+ * should answer, and it is a different question from the one it answers now.
+ */
+export const CELLS_X = 256;
+export const CELLS_Y = 128;
+export const CELLS_Z = 256;
+
+/**
+ * Cells per side of a remesh chunk — 8 mm at this cell size.
+ *
+ * Two competing costs. Smaller chunks remesh less per bite but cost a draw
+ * call each; larger ones do the reverse. A 4 mm bite spans sixteen cells, so
+ * at 32 it touches two chunks per axis at worst, and only the shell of chunks
+ * that actually contains surface ever gets a mesh at all.
+ */
+export const CHUNK_CELLS = 32;
 
 export const BRUSH_RADIUS = BITE_WIDTH_MM / 2 / WORLD_UNIT_MM;
 export const BITE_DEPTH = BITE_DEPTH_MM / WORLD_UNIT_MM;
 
 /**
+ * How rough a clod is: each vertex is pushed in or out by up to this fraction
+ * of the radius. Enough to read as broken earth, not so much that the pellet
+ * stops looking like one lump.
+ */
+export const CLOD_ROUGHNESS = 0.17;
+
+/**
  * Volume of the drawn pellet per unit of radius cubed.
  *
- * The pellet is `CylinderGeometry(r, 0.92r, 1.45r, 8)` — an octagonal frustum,
- * not a sphere — so sizing it by a sphere-equivalent radius makes it hold the
- * wrong amount of soil. A regular octagon of circumradius r has area
- * 2*sqrt(2)*r^2, and the frustum rule h/3 * (A1 + A2 + sqrt(A1*A2)) gives the
- * rest. Derived rather than measured, so it follows the geometry if that is
- * ever retuned.
+ * The pellet used to be `CylinderGeometry(r, 0.92r, 1.45r, 8)` — an octagonal
+ * TUBE, which is what it looked like: a little drum of dirt. It is a knobbly
+ * solid now (see `clodPositions`), and this is the number that keeps it
+ * honest, because the pellet is sized so that it HOLDS the soil that was
+ * removed and that sizing needs to know the shape's real volume.
+ *
+ * A regular icosahedron of circumradius r encloses (5/12)(3 + sqrt5) * a^3
+ * where a is its edge, and a = r * 4 / sqrt(10 + 2*sqrt5). Roughening moves
+ * vertices both ways by the same amount, so to first order it cancels and the
+ * base solid is the right measure. Derived rather than measured, so it follows
+ * the geometry if that is ever retuned.
  */
 export const PELLET_SOLIDITY = (() => {
-  const a1 = 2 * Math.SQRT2;
-  const a2 = 2 * Math.SQRT2 * 0.92 ** 2;
-  return (1.45 / 3) * (a1 + a2 + Math.sqrt(a1 * a2));
+  const edge = 4 / Math.sqrt(10 + 2 * Math.sqrt(5));
+  return (5 / 12) * (3 + Math.sqrt(5)) * edge ** 3;
 })();
+
+/**
+ * A clod, as displaced points on an icosahedron.
+ *
+ * Deliberately its own function, free of three.js, so the shape can be checked
+ * for volume without a renderer — the pellet has to hold what the bite removed
+ * and that is arithmetic, not art.
+ *
+ * The displacement is keyed to a seed rather than to Math.random, so a clod
+ * looks the same every time it is rebuilt and two clods look different from
+ * each other.
+ */
+export function clodJitter(seed: number, index: number): number {
+  const h = Math.sin(seed * 12.9898 + index * 78.233) * 43758.5453;
+  return 1 + (h - Math.floor(h) - 0.5) * 2 * CLOD_ROUGHNESS;
+}
 
 export const WORLD_WIDTH = CELLS_X * CELL_SIZE;
 export const WORLD_HEIGHT = CELLS_Y * CELL_SIZE;

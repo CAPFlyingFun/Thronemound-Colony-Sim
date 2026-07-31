@@ -5,6 +5,20 @@ export interface SurfaceNetMesh {
   indices: Uint32Array;
 }
 
+/**
+ * A box of cells to mesh, in cell indices, upper bounds exclusive.
+ *
+ * Without one, remeshing after a dig costs the whole WORLD, which is why the
+ * lab's mound had to be a 16 mm pea: a 64 mm map at the same cell size is
+ * 64 times the samples and half a second a tap. A bite only disturbs its own
+ * neighbourhood, so with a region the cost tracks the BITE instead and the map
+ * can be as large as memory allows.
+ */
+export interface CellRegion {
+  x0: number; y0: number; z0: number;
+  x1: number; y1: number; z1: number;
+}
+
 const CORNERS: ReadonlyArray<readonly [number, number, number]> = [
   [0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0],
   [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1],
@@ -23,18 +37,53 @@ const cellIndex = (x: number, y: number, z: number, cellsX: number, cellsY: numb
  * Builds a watertight surface-net mesh from a signed density field.
  * One representative vertex is placed in every mixed-sign cell, then quads
  * are emitted around each sign-changing grid edge.
+ *
+ * With a `region`, only quads OWNED by cells inside it are emitted — but
+ * vertices are still built for one cell beyond its low side, because a quad
+ * reaches back to (x-1, y-1, z-1) for three of its four corners. Pad the wrong
+ * side, or not at all, and every chunk comes out with a torn face against its
+ * neighbour. Regions tile exactly: each cell owns its quads and no other cell
+ * emits them, so meshing a region is the same surface as meshing the lot.
  */
-export function buildSurfaceNets(field: DensityField, isoLevel = 0): SurfaceNetMesh {
+export function buildSurfaceNets(
+  field: DensityField,
+  isoLevel = 0,
+  region?: CellRegion,
+): SurfaceNetMesh {
   const { cellsX, cellsY, cellsZ, cellSize } = field;
-  const vertexByCell = new Int32Array(cellsX * cellsY * cellsZ);
+  const clamp = (v: number, hi: number) => Math.max(0, Math.min(hi, v));
+  const qx0 = region ? clamp(region.x0, cellsX) : 0;
+  const qy0 = region ? clamp(region.y0, cellsY) : 0;
+  const qz0 = region ? clamp(region.z0, cellsZ) : 0;
+  const qx1 = region ? clamp(region.x1, cellsX) : cellsX;
+  const qy1 = region ? clamp(region.y1, cellsY) : cellsY;
+  const qz1 = region ? clamp(region.z1, cellsZ) : cellsZ;
+  // Vertices, padded one cell back so the quads above have corners to use.
+  const vx0 = Math.max(0, qx0 - 1);
+  const vy0 = Math.max(0, qy0 - 1);
+  const vz0 = Math.max(0, qz0 - 1);
+
+  /*
+   * The vertex lookup is sized to the REGION, not to the field.
+   *
+   * Sizing it to the field costs an allocate-and-fill of the whole world on
+   * every chunk — 33 MB a time at 256 cells a side — which made a chunked
+   * rebuild SLOWER than the whole-field one it replaced: 122 ms to redraw a
+   * four-millimetre bite. The saving from meshing less is entirely undone by
+   * clearing a map of everything.
+   */
+  const rx = qx1 - vx0;
+  const ry = qy1 - vy0;
+  const rz = qz1 - vz0;
+  const vertexByCell = new Int32Array(Math.max(0, rx * ry * rz));
   vertexByCell.fill(-1);
   const positions: number[] = [];
   const indices: number[] = [];
   const densities = new Float64Array(8);
 
-  for (let z = 0; z < cellsZ; z += 1) {
-    for (let y = 0; y < cellsY; y += 1) {
-      for (let x = 0; x < cellsX; x += 1) {
+  for (let z = vz0; z < qz1; z += 1) {
+    for (let y = vy0; y < qy1; y += 1) {
+      for (let x = vx0; x < qx1; x += 1) {
         let insideCount = 0;
         for (let corner = 0; corner < 8; corner += 1) {
           const offset = CORNERS[corner];
@@ -70,14 +119,14 @@ export function buildSurfaceNets(field: DensityField, isoLevel = 0): SurfaceNetM
           (y + sumY / crossings) * cellSize,
           (z + sumZ / crossings) * cellSize,
         );
-        vertexByCell[cellIndex(x, y, z, cellsX, cellsY)] = vertex;
+        vertexByCell[cellIndex(x - vx0, y - vy0, z - vz0, rx, ry)] = vertex;
       }
     }
   }
 
   const vertexAt = (x: number, y: number, z: number): number => {
-    if (x < 0 || x >= cellsX || y < 0 || y >= cellsY || z < 0 || z >= cellsZ) return -1;
-    return vertexByCell[cellIndex(x, y, z, cellsX, cellsY)] ?? -1;
+    if (x < vx0 || x >= qx1 || y < vy0 || y >= qy1 || z < vz0 || z >= qz1) return -1;
+    return vertexByCell[cellIndex(x - vx0, y - vy0, z - vz0, rx, ry)] ?? -1;
   };
 
   /*
@@ -105,9 +154,9 @@ export function buildSurfaceNets(field: DensityField, isoLevel = 0): SurfaceNetM
     }
   };
 
-  for (let z = 0; z < cellsZ; z += 1) {
-    for (let y = 0; y < cellsY; y += 1) {
-      for (let x = 0; x < cellsX; x += 1) {
+  for (let z = qz0; z < qz1; z += 1) {
+    for (let y = qy0; y < qy1; y += 1) {
+      for (let x = qx0; x < qx1; x += 1) {
         const start = field.get(x, y, z) - isoLevel;
 
         if ((start > 0) !== (field.get(x + 1, y, z) - isoLevel > 0)) {

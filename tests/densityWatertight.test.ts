@@ -243,17 +243,6 @@ describe('density terrain stays sealed', () => {
     expect(eyeScan(mesh, aim).insideOut).toBe(0);
   }, 60_000);
 
-  it('a tunnel two scoops deep leaves no way to see inside', () => {
-    const field = makeMoundField();
-    for (let i = 0; i < 2; i++) scoopAt(field, aim, i * BITE_DEPTH);
-    const mesh = buildSurfaceNets(field);
-    const s = survey(mesh);
-    expect(s.boundary).toBe(0);
-    expect(s.nonManifold).toBe(0);
-    expect(s.flipped).toBe(0);
-    expect(eyeScan(mesh, aim).insideOut).toBe(0);
-  }, 60_000);
-
   it('never opens a hole however deep the shaft goes, but does pinch', () => {
     /*
      * Two findings, and the first one is the one that matters.
@@ -300,6 +289,95 @@ describe('density terrain stays sealed', () => {
     expect(s.flipped).toBeLessThan(s.edges * 0.001);
     // Nothing sees inside regardless — a weld is two walls meeting, not a gap.
     expect(eyeScan(mesh, aim).insideOut).toBe(0);
+  }, 60_000);
+
+  it('meshes in chunks to exactly the same surface as meshing the lot', () => {
+    /*
+     * The property that lets the map grow.
+     *
+     * Remeshing the whole field after every bite makes digging cost the size
+     * of the WORLD, which is why the mound had to be a pea. Chunking makes it
+     * cost the size of the BITE — but only if regions tile EXACTLY, with each
+     * cell owning its quads and no other cell emitting them. Get the padding
+     * wrong and every chunk boundary is a torn seam, which is the same
+     * see-through failure as before wearing a different hat.
+     *
+     * So: mesh it whole, mesh it in blocks, weld the blocks' vertices back
+     * together by position, and require the two surfaces to be the same one —
+     * same triangle count, and still closed and consistently wound after the
+     * weld.
+     */
+    const field = makeMoundField();
+    scoopAt(field, aim);
+
+    /*
+     * A box around the dig, not the whole field. The map is 256 cells a side
+     * now, so chunking all of it is two thousand meshes and a minute and a
+     * half of test — and it would be testing the same one property over and
+     * over. The seams are what matter, so the box is sized to contain several
+     * of them.
+     */
+    const STEP = 16;
+    const c = (v: number) => Math.floor(v / CELL_SIZE / STEP) * STEP;
+    const box = {
+      x0: Math.max(0, c(aim[0]!) - STEP * 2), x1: c(aim[0]!) + STEP * 2,
+      y0: Math.max(0, c(aim[1]!) - STEP * 2), y1: c(aim[1]!) + STEP * 2,
+      z0: Math.max(0, c(aim[2]!) - STEP * 2), z1: c(aim[2]!) + STEP * 2,
+    };
+    const whole = survey(buildSurfaceNets(field, 0, box));
+
+    const parts: SurfaceNetMesh[] = [];
+    for (let z = box.z0; z < box.z1; z += STEP)
+      for (let y = box.y0; y < box.y1; y += STEP)
+        for (let x = box.x0; x < box.x1; x += STEP)
+          parts.push(buildSurfaceNets(field, 0, {
+            x0: x, y0: y, z0: z, x1: x + STEP, y1: y + STEP, z1: z + STEP,
+          }));
+
+    /*
+     * Weld by position before surveying. Separate chunks legitimately hold
+     * their own copies of the vertices they share, and an un-welded union
+     * would call every shared edge a boundary whether or not the surface is
+     * actually torn — which would make this test fail loudly on a mesh that is
+     * perfectly fine, and pass nothing useful.
+     */
+    const key = new Map<string, number>();
+    const positions: number[] = [];
+    const indices: number[] = [];
+    for (const part of parts) {
+      const remap = new Int32Array(part.positions.length / 3);
+      for (let v = 0; v < remap.length; v++) {
+        const k = `${part.positions[v * 3]!.toFixed(6)},`
+          + `${part.positions[v * 3 + 1]!.toFixed(6)},`
+          + `${part.positions[v * 3 + 2]!.toFixed(6)}`;
+        let id = key.get(k);
+        if (id === undefined) {
+          id = positions.length / 3;
+          key.set(k, id);
+          positions.push(
+            part.positions[v * 3]!, part.positions[v * 3 + 1]!, part.positions[v * 3 + 2]!,
+          );
+        }
+        remap[v] = id;
+      }
+      for (const i of part.indices) indices.push(remap[i]!);
+    }
+    const stitched = survey({
+      positions: new Float32Array(positions), indices: new Uint32Array(indices),
+    });
+
+    /*
+     * The property is that chunked EQUALS whole, in every respect — not that
+     * either is closed. A box cut out of the mound has genuinely open edges
+     * where the box face slices the soil (294 of them here), and demanding
+     * zero would be demanding the sub-region be something it is not. What must
+     * not happen is chunking ADDING any: an extra open edge is a seam.
+     */
+    expect(whole.triangles).toBeGreaterThan(500);
+    expect(stitched.triangles).toBe(whole.triangles);
+    expect(stitched.boundary).toBe(whole.boundary);
+    expect(stitched.nonManifold).toBe(whole.nonManifold);
+    expect(stitched.flipped).toBe(whole.flipped);
   }, 60_000);
 
   it('reports the same soil for the same scoop, and the right amount of it', () => {

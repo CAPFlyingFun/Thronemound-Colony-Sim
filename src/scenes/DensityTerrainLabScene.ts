@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { buildSurfaceNets } from '../density/SurfaceNets';
 import {
   BITE_DEPTH, BITE_DEPTH_MM, BITE_WIDTH_MM, BRUSH_RADIUS, CELLS_X, CELLS_Y, CELLS_Z,
-  CELL_SIZE, PELLET_SOLIDITY, WORLD_UNIT_MM, makeMoundField,
+  CELL_SIZE, CHUNK_CELLS, PELLET_SOLIDITY, WORLD_UNIT_MM, clodJitter, makeMoundField,
 } from '../density/labMound';
 import './DensityTerrainLabScene.css';
 
@@ -27,7 +27,20 @@ export class DensityTerrainLabScene {
   private readonly raycaster = new THREE.Raycaster();
   private readonly field = makeMoundField();
   private readonly pellets: Pellet[] = [];
-  private terrain: any = null;
+  /**
+   * One mesh per chunk of cells, keyed by chunk coordinate.
+   *
+   * There used to be a single mesh for the whole field, rebuilt from scratch
+   * on every bite — which made the cost of digging track the size of the map
+   * and is the reason the mound had to be a pea. Only chunks whose cells the
+   * brush actually touched are rebuilt now, so a tap costs the same whatever
+   * the world is. Chunks with no surface in them hold no mesh at all, so a
+   * solid interior and open sky are both free.
+   */
+  private readonly chunks = new Map<string, any>();
+  private readonly terrainMaterial = new THREE.MeshStandardMaterial({
+    color: 0x6f4931, roughness: 0.96, metalness: 0, flatShading: false, side: THREE.FrontSide,
+  });
   private animationFrame = 0;
   private previousTime = performance.now();
   private totalRemoved = 0;
@@ -116,8 +129,12 @@ export class DensityTerrainLabScene {
     this.digButton.removeEventListener('pointerdown', this.onDigPointerDown);
     this.resetButton.removeEventListener('click', this.resetTerrain);
     window.removeEventListener('keydown', this.onKeyDown);
-    this.terrain?.geometry.dispose();
-    if (this.terrain?.material instanceof THREE.Material) this.terrain.material.dispose();
+    for (const mesh of this.chunks.values()) {
+      this.scene.remove(mesh);
+      mesh.geometry.dispose();
+    }
+    this.chunks.clear();
+    this.terrainMaterial.dispose();
     for (const pellet of this.pellets) {
       pellet.mesh.geometry.dispose();
       if (pellet.mesh.material instanceof THREE.Material) pellet.mesh.material.dispose();
@@ -192,42 +209,77 @@ export class DensityTerrainLabScene {
     this.rebuildTerrain();
   };
 
+  /** Rebuild every chunk. Startup and RESET only — a bite uses the region. */
   private rebuildTerrain(): void {
     const started = performance.now();
-    const data = buildSurfaceNets(this.field);
+    for (let cz = 0; cz < CELLS_Z; cz += CHUNK_CELLS)
+      for (let cy = 0; cy < CELLS_Y; cy += CHUNK_CELLS)
+        for (let cx = 0; cx < CELLS_X; cx += CHUNK_CELLS) this.rebuildChunk(cx, cy, cz);
+    this.lastMeshMs = performance.now() - started;
+    this.updateStatus();
+  }
+
+  /**
+   * Rebuild only the chunks a brush actually touched.
+   *
+   * `bounds` arrives in SAMPLE indices and a sample is a cell corner, so a
+   * changed sample at index i is shared by cells i-1 and i — hence the extra
+   * cell of slack on the low side. Miss it and the chunk holding the far half
+   * of the bite keeps its old surface, which reads as the dig only working on
+   * one side of the crosshair.
+   */
+  private rebuildAround(bounds: {
+    minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number;
+  }): void {
+    const started = performance.now();
+    const lo = (v: number) => Math.floor(Math.max(0, v - 1) / CHUNK_CELLS) * CHUNK_CELLS;
+    const hi = (v: number, cells: number) => Math.min(cells - 1, v);
+    for (let cz = lo(bounds.minZ); cz <= hi(bounds.maxZ, CELLS_Z); cz += CHUNK_CELLS)
+      for (let cy = lo(bounds.minY); cy <= hi(bounds.maxY, CELLS_Y); cy += CHUNK_CELLS)
+        for (let cx = lo(bounds.minX); cx <= hi(bounds.maxX, CELLS_X); cx += CHUNK_CELLS)
+          this.rebuildChunk(cx, cy, cz);
+    this.lastMeshMs = performance.now() - started;
+    this.updateStatus();
+  }
+
+  private rebuildChunk(cx: number, cy: number, cz: number): void {
+    const key = `${cx},${cy},${cz}`;
+    const data = buildSurfaceNets(this.field, 0, {
+      x0: cx, y0: cy, z0: cz,
+      x1: cx + CHUNK_CELLS, y1: cy + CHUNK_CELLS, z1: cz + CHUNK_CELLS,
+    });
+    const existing = this.chunks.get(key);
+    // No surface in this chunk: solid soil or open sky, and neither is drawn.
+    if (data.indices.length === 0) {
+      if (existing) {
+        this.scene.remove(existing);
+        existing.geometry.dispose();
+        this.chunks.delete(key);
+      }
+      return;
+    }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
     geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
     geometry.computeVertexNormals();
     geometry.computeBoundingSphere();
-
-    const material = new THREE.MeshStandardMaterial({
-      color: 0x6f4931,
-      roughness: 0.96,
-      metalness: 0,
-      flatShading: false,
-      side: THREE.FrontSide,
-    });
-    const next = new THREE.Mesh(geometry, material);
-    next.castShadow = true;
-    next.receiveShadow = true;
-    next.name = 'density-terrain';
-
-    if (this.terrain) {
-      this.scene.remove(this.terrain);
-      this.terrain.geometry.dispose();
-      if (this.terrain.material instanceof THREE.Material) this.terrain.material.dispose();
+    if (existing) {
+      existing.geometry.dispose();
+      existing.geometry = geometry;
+      return;
     }
-    this.terrain = next;
-    this.scene.add(next);
-    this.lastMeshMs = performance.now() - started;
-    this.updateStatus();
+    const mesh = new THREE.Mesh(geometry, this.terrainMaterial);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.name = `density-chunk-${key}`;
+    this.scene.add(mesh);
+    this.chunks.set(key, mesh);
   }
 
   private carveAtCrosshair(): void {
-    if (!this.terrain) return;
+    if (this.chunks.size === 0) return;
     this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
-    const hit = this.raycaster.intersectObject(this.terrain, false)[0];
+    const hit = this.raycaster.intersectObjects([...this.chunks.values()], false)[0];
     if (!hit) {
       this.status.dataset.message = 'Aim the ring at soil';
       this.updateStatus();
@@ -256,7 +308,7 @@ export class DensityTerrainLabScene {
     }
 
     this.totalRemoved += result.removedVolume;
-    this.rebuildTerrain();
+    this.rebuildAround(result.bounds);
     this.spawnPellet(hit.point, hit.face?.normal ?? new THREE.Vector3(0, 1, 0), result.removedVolume);
     this.status.dataset.message = `${result.removedVolume.toFixed(2)} voxel³ pellet freed`;
     this.updateStatus();
@@ -287,7 +339,28 @@ export class DensityTerrainLabScene {
     const radius = THREE.MathUtils.clamp(
       Math.cbrt(volume / PELLET_SOLIDITY), 0.004, 0.4,
     );
-    const geometry = new THREE.CylinderGeometry(radius, radius * 0.92, radius * 1.45, 8, 1, false);
+    /*
+     * A knobbly lump, not a drum.
+     *
+     * This was `CylinderGeometry(r, 0.92r, 1.45r, 8)` — an octagonal tube,
+     * and it read as exactly that. An icosahedron at detail 0 is twenty flat
+     * triangles, which under flat shading is already closer to a chip of
+     * earth than anything round; roughening each vertex breaks the symmetry
+     * so no two clods are the same lump.
+     *
+     * Detail 0 on purpose. A pellet is about a millimetre across and will
+     * usually be a few pixels, so subdividing it buys nothing but triangles,
+     * and the facets are the whole point.
+     */
+    const geometry = new THREE.IcosahedronGeometry(radius, 0);
+    const pos = geometry.getAttribute('position');
+    const seed = this.pellets.length + volume * 1e4;
+    for (let i = 0; i < pos.count; i++) {
+      const k = clodJitter(seed, i);
+      pos.setXYZ(i, pos.getX(i) * k, pos.getY(i) * k * 0.86, pos.getZ(i) * k);
+    }
+    pos.needsUpdate = true;
+    geometry.computeVertexNormals();
     geometry.computeBoundingSphere();
     const material = new THREE.MeshStandardMaterial({
       color: 0x81583a,
@@ -295,7 +368,9 @@ export class DensityTerrainLabScene {
       flatShading: true,
     });
     const mesh = new THREE.Mesh(geometry, material);
-    const normal = localNormal.clone().transformDirection(this.terrain?.matrixWorld ?? new THREE.Matrix4());
+    // Chunk meshes sit at the origin unrotated, so the face normal is already
+    // in world space; the identity keeps the call honest if that ever changes.
+    const normal = localNormal.clone().transformDirection(new THREE.Matrix4());
     mesh.position.copy(point).addScaledVector(normal, radius * 1.8);
     mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
     mesh.castShadow = true;
