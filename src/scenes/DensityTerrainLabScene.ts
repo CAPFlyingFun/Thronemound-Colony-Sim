@@ -121,6 +121,41 @@ const FOOT_PLANT_BAND = 0.6 / WORLD_UNIT_MM;
  */
 const STEP_UP = 2 / WORLD_UNIT_MM;
 
+/** World up and world forward, for anything measured against the horizon. */
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
+const WORLD_FORWARD = new THREE.Vector3(0, 0, 1);
+
+/**
+ * Gravity, in world units per second squared. Five, as asked for.
+ *
+ * A tuned number, not physics: real gravity is 9,800 mm/s², which on a 9 mm
+ * animal in a 320 mm world is a fall over before you have seen it start. Five
+ * world units is 25 mm/s², about a body length in the first second — slow
+ * enough to read as weight rather than as a teleport.
+ *
+ * It applies whether she is walking, boring or underground. That is the point:
+ * every "floating in space" bug so far has been some code path deciding she
+ * did not need holding up this frame, and the honest answer to a missing
+ * support is to FALL, not to hang there. Gravity is the one rule that has no
+ * exceptions, so it is the only thing that can catch all of them at once.
+ */
+const GRAVITY = 5;
+
+/**
+ * How far above the ground she has to be before gravity takes over from the
+ * stance.
+ *
+ * Below this, `stand` eases her onto the surface — that easing is what stops
+ * her shivering as bites change the ground under her feet, and it has to keep
+ * doing that job. Above it she is not standing on anything and no amount of
+ * easing should pretend otherwise. Half a millimetre is under a tenth of her
+ * body height, so nothing that reads as contact ever reaches the falling path.
+ */
+const FALL_FROM = 0.5 / WORLD_UNIT_MM;
+
+/** Terminal speed, so a long drop cannot tunnel her through a thin floor. */
+const FALL_LIMIT = 30 / WORLD_UNIT_MM;
+
 /**
  * How quickly her height and her walking speed catch up, per second.
  *
@@ -327,6 +362,8 @@ export class DensityTerrainLabScene {
   private readonly up = new THREE.Vector3(0, 1, 0);
   /** How far the worst foot was under the soil before the last solve. */
   private footPenetration = 0;
+  /** How fast she is currently falling, in world units per second. */
+  private fallSpeed = 0;
   /** The point a centimetre ahead that the bore is driving at. */
   private readonly digPoint = new THREE.Vector3();
   /** Where the last bite was centred, and where it sat relative to her then. */
@@ -457,7 +494,7 @@ export class DensityTerrainLabScene {
       <div class="density-lab-status"></div>
       <div class="density-lab-hint">Set pitch with △▽ · press BORE once to arm it · W/S then moves you along that pitch (A/D steers) · RUN toggles pace</div>
       <div class="density-lab-gauge" aria-live="off">
-        <div class="density-lab-gauge-dial"><span class="density-lab-gauge-ant">\u2b9e</span></div>
+        <div class="density-lab-gauge-dial"><span class="density-lab-gauge-ant"></span></div>
         <div class="density-lab-gauge-read">0\u00b0</div>
       </div>
       <div class="density-lab-actions"></div>
@@ -1304,15 +1341,47 @@ export class DensityTerrainLabScene {
    * hillside and exactly wrong inside a burrow: the "ground" over her head is
    * the roof, and following it hauls her back out of her own tunnel.
    */
+  /**
+   * Fall, and land on `floor` rather than through it.
+   *
+   * Shared by the standing and the tunnelling paths on purpose. Every floating
+   * bug so far has come from one code path or another deciding it did not need
+   * to hold her up this frame, so the falling rule lives in one place and both
+   * of them call it — a third path added later that forgets to is a bug, but a
+   * third path that calls this and gets it subtly wrong is not possible.
+   */
+  private applyGravity(dt: number, floor: number): void {
+    this.fallSpeed = Math.min(FALL_LIMIT, this.fallSpeed + GRAVITY * dt);
+    const next = this.antPosition.y - this.fallSpeed * dt;
+    if (next <= floor) {
+      this.antPosition.y = floor;
+      this.fallSpeed = 0;
+    } else {
+      this.antPosition.y = next;
+    }
+  }
+
   private holdTunnel(dt: number): void {
     const floor = this.groundAt(
       this.antPosition.x, this.antPosition.z, this.antPosition.y + FOOT_CLEARANCE,
     );
-    // Only ever lifted OUT of the floor, never dropped onto it: she is holding
-    // whatever height the bore gave her, and the floor is a lower bound.
     if (this.antPosition.y < floor - FOOT_CLEARANCE) {
+      // Lifted OUT of the floor: she is holding whatever height the bore gave
+      // her, and the floor is a lower bound.
       const ease = 1 - Math.exp(-HEIGHT_EASE * dt);
       this.antPosition.y += (floor - this.antPosition.y) * ease;
+      this.fallSpeed = 0;
+    } else {
+      /*
+       * And DROPPED onto it when the bore has left her over open space.
+       *
+       * This branch used to do nothing at all, which is most of "the ant
+       * floating in space": drive a shaft, break through into the hollow you
+       * cut a minute ago, and there is no floor under you — so she held the
+       * height the bore last gave her, indefinitely, in mid-air. A tunnel is
+       * exactly the place a game makes holes for a body to fall down.
+       */
+      this.applyGravity(dt, floor);
     }
     if (!this.queenReady) return;
     this.queen.root.position.copy(this.antPosition);
@@ -1321,11 +1390,25 @@ export class DensityTerrainLabScene {
 
   private stand(dt: number): void {
     const ground = this.stance(this.antPosition.x, this.antPosition.z);
-    // Eased, not assigned. The ground under her changes every time she bites,
-    // and following it exactly is a jolt on every frame that removes a cell.
-    const ease = 1 - Math.exp(-HEIGHT_EASE * dt);
-    const rise = (ground.height - this.antPosition.y) * ease;
-    this.antPosition.y += rise;
+    if (this.antPosition.y - ground.height > FALL_FROM) {
+      /*
+       * Too far above the ground to be standing on it, so she falls.
+       *
+       * The easing below is a contact model — it exists so that biting the
+       * ground out from under her own feet is a settle rather than a jolt — and
+       * a contact model applied at any height is a levitation model. Walk off
+       * the rim of a crater and it lowered her gently through the air at a rate
+       * set by a smoothing constant, which is the "floating in space" in its
+       * above-ground spelling.
+       */
+      this.applyGravity(dt, ground.height);
+    } else {
+      // Eased, not assigned. The ground under her changes every time she bites,
+      // and following it exactly is a jolt on every frame that removes a cell.
+      const ease = 1 - Math.exp(-HEIGHT_EASE * dt);
+      this.antPosition.y += (ground.height - this.antPosition.y) * ease;
+      this.fallSpeed = 0;
+    }
     // The camera rides the rise as well, or descending a shaft leaves the view
     // hanging at the surface looking at the back of her head.
     if (!this.queenReady) return;
@@ -1351,24 +1434,43 @@ export class DensityTerrainLabScene {
    * orders disagree the moment both angles are non-zero.
    */
   private orientQueen(): void {
+    /*
+     * Pitch is measured from the WORLD horizon, never from the ground she
+     * happens to be on.
+     *
+     * `this.up` is the terrain normal, and building the bore on it made minus
+     * ninety mean "ninety degrees off whatever slope I am standing on". On the
+     * flank of the mound that is a diagonal; on the wall of her own shaft it is
+     * sideways, which is how she ended up clinging to a cliff face with the
+     * gauge insisting she was pointed straight down. Reported exactly that way:
+     * max at minus ninety was not straight down.
+     *
+     * A pitch dial is a promise about the world, the same one a submarine's
+     * is. So while she is aimed, her frame is world-referenced; only when she
+     * is level does she lie back down along the slope, which is what makes
+     * walking over a rise look right.
+     */
+    const aimed = Math.abs(this.headPitch) > 1e-6;
+    const up = aimed ? WORLD_UP : this.up;
     const forward = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
-    forward.addScaledVector(this.up, -forward.dot(this.up));
+    forward.addScaledVector(up, -forward.dot(up));
     if (forward.lengthSq() < 1e-8) forward.set(0, 0, 1);
     forward.normalize();
-    /*
-     * She points down the BORE, not along the ground, whenever her body has
-     * pitched. This is what makes an aimed dive look like a dive rather than a
-     * walk with a number attached — and it is applied to the whole animal
-     * because her legs hang off the same hub as her body, so anything else
-     * either leaves them behind or swings them into the air.
-     */
-    if (Math.abs(this.headPitch) > 1e-6) {
+    if (aimed) {
       forward.multiplyScalar(Math.cos(this.headPitch))
-        .addScaledVector(this.up, Math.sin(this.headPitch)).normalize();
+        .addScaledVector(WORLD_UP, Math.sin(this.headPitch)).normalize();
     }
-    const right = new THREE.Vector3().crossVectors(this.up, forward).normalize();
+    /*
+     * Her own up is rebuilt from the basis rather than taken from the terrain,
+     * so at ninety degrees down she is nose-first into the floor with her back
+     * squarely behind her instead of being twisted to match a wall.
+     */
+    let right = new THREE.Vector3().crossVectors(up, forward);
+    if (right.lengthSq() < 1e-8) right.crossVectors(WORLD_FORWARD, forward);
+    right.normalize();
+    const back = new THREE.Vector3().crossVectors(forward, right).normalize();
     this.queen.root.quaternion.setFromRotationMatrix(
-      new THREE.Matrix4().makeBasis(right, this.up, forward),
+      new THREE.Matrix4().makeBasis(right, back, forward),
     );
   }
 
@@ -1389,9 +1491,12 @@ export class DensityTerrainLabScene {
     const throttle = this.input.walk;
     const forward = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
 
+    // Down the WORLD's pitch, matching the gauge. Built on the terrain normal
+    // this drifted with the slope, so a dial reading minus ninety drove her
+    // along a hillside instead of into it.
     const heading = digging
       ? forward.clone().multiplyScalar(Math.cos(pitch))
-        .addScaledVector(this.up, Math.sin(pitch)).normalize()
+        .addScaledVector(WORLD_UP, Math.sin(pitch)).normalize()
       : forward;
     const wanted = heading.multiplyScalar(this.speed * throttle);
 

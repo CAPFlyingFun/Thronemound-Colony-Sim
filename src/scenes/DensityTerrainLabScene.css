@@ -222,10 +222,27 @@
   box-shadow: inset 0 0 0 2px rgba(232, 197, 138, 0.5);
 }
 
+/*
+ * The needle is DRAWN, not typed.
+ *
+ * It used to be an arrowhead character, and on iOS that dial was simply empty:
+ * U+2B9E has no glyph in the system fonts, so the one control that says which
+ * way she will dig showed nothing at all on the device the game is played on.
+ * A missing glyph is silent — no error, no fallback box, just a blank circle —
+ * which is why two rounds of screenshots went past with an empty dial in them.
+ *
+ * Borders cannot go missing. The triangle points RIGHT at rest so that a
+ * needle at zero rotation reads level; `rotate()` then takes it clockwise to
+ * point straight down at minus ninety.
+ */
 .density-lab-gauge-ant {
-  font-size: 26px;
-  line-height: 1;
-  color: #9ede63;
+  width: 0;
+  height: 0;
+  border-top: 11px solid transparent;
+  border-bottom: 11px solid transparent;
+  border-left: 19px solid #9ede63;
+  /* Nudged so it spins about its own middle rather than its base. */
+  margin-left: 6px;
   transition: transform 120ms ease-out;
 }
 

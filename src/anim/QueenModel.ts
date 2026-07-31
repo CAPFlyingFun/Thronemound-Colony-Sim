@@ -37,8 +37,27 @@ import { aimRotation, distanceToPolyline, footTarget, type Vec3 } from './legIk'
  * of it — so the cap only decides how far short the feet land.
  */
 const IK_JOINTS = 3;
-const IK_PASSES = 4;
+const IK_PASSES = 8;
 const IK_MAX_STEP = 0.9;
+
+/**
+ * How little the HEAVIEST joint of a limb may swing, against the lightest.
+ *
+ * Every joint used to take the same share of a correction, which is why her
+ * legs "went all over the place" once she had been walking a while: a hip and a
+ * claw are not equally free, so spreading the work evenly swung the massive
+ * upper leg as readily as the tarsus and the whole limb flailed for a
+ * correction the foot could have absorbed on its own.
+ *
+ * The weight is the mesh's own thickness — a joint's share is scaled by how
+ * thin it is relative to the tip of its limb — so the tarsus (0.13 mm) moves
+ * freely and the femur (0.5 mm) is four times more reluctant. Measured, not
+ * hand-assigned, so it stays honest if the model is ever re-exported.
+ *
+ * The floor stops a very fat joint from freezing solid, which would just move
+ * the flailing one bone further down.
+ */
+const IK_MIN_MOBILITY = 0.25;
 
 /**
  * How many times a leg may be lifted and re-solved.
@@ -146,6 +165,11 @@ export class QueenModel {
    * where the claw ended up while the target was a marker above it.
    */
   private readonly limbTip = new Map<string, string>();
+  /**
+   * How freely each bone may swing under a correction, 0..1 — its weight,
+   * expressed as the thing the solver actually needs. See `IK_MIN_MOBILITY`.
+   */
+  private readonly boneMobility = new Map<string, number>();
   private clock = 0;
   private loaded = false;
   private bodyRoot: THREE.Object3D | null = null;
@@ -387,7 +411,10 @@ export class QueenModel {
              * of these is in the bind pose and none of them is once she turns.
              */
             AXIS.set(swing.axis[0], swing.axis[1], swing.axis[2]);
-            WORLD_SPIN.setFromAxisAngle(AXIS, Math.min(swing.angle, IK_MAX_STEP));
+            // Scaled by this joint's own weight, so the correction is taken up
+            // by the light end of the limb rather than swung out of the hip.
+            const mobility = this.boneMobility.get(joint.name) ?? 1;
+            WORLD_SPIN.setFromAxisAngle(AXIS, Math.min(swing.angle, IK_MAX_STEP) * mobility);
             if (joint.parent) joint.parent.getWorldQuaternion(PARENT);
             else PARENT.identity();
             LOCAL_SPIN.copy(PARENT).invert().multiply(WORLD_SPIN).multiply(PARENT);
@@ -595,10 +622,26 @@ export class QueenModel {
      * end of each chain until something has width is what finds the real foot.
      */
     this.limbTip.clear();
+    this.boneMobility.clear();
     for (const [group, names] of this.limbGroups()) {
       for (let i = names.length - 1; i >= 0; i -= 1) {
         const name = names[i]!;
         if ((this.limbRadius.get(name) ?? 0) > 0) { this.limbTip.set(group, name); break; }
+      }
+      /*
+       * And the weights, relative to the tip of this limb. A joint as thin as
+       * the claw is free; anything fatter is proportionally more reluctant, so
+       * a correction is absorbed by the light end of the leg the way a real one
+       * absorbs it — which is the whole of "assign weights so it is more stable
+       * and heavier".
+       */
+      const tip = this.limbTip.get(group);
+      const tipRadius = tip ? this.limbRadius.get(tip) ?? 0 : 0;
+      if (tipRadius <= 0) continue;
+      for (const name of names) {
+        const radius = this.limbRadius.get(name) ?? 0;
+        const mobility = radius > 0 ? Math.min(1, tipRadius / radius) : 1;
+        this.boneMobility.set(name, Math.max(IK_MIN_MOBILITY, mobility));
       }
     }
   }
@@ -669,5 +712,6 @@ export class QueenModel {
     this.poseBase.clear();
     this.limbRadius.clear();
     this.limbTip.clear();
+    this.boneMobility.clear();
   }
 }
