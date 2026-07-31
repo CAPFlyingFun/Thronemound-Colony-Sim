@@ -2,8 +2,11 @@ import { DensityField, type BrushResult, type Vec3Like } from './DensityField';
 import { CELLS_Y, CELL_SIZE } from './labMound';
 import {
   CAP_PLANES, TILE_CELLS, WINDOW_CELLS, WINDOW_TILES, WORLD_TILES,
-  cappedDensity, streamDensityAt, streamHeightAt,
+  cappedDensity, densityUnder, streamHeightAt,
 } from './labWorld';
+
+/** Scratch for a row of column heights, sized to the widest a bite can be. */
+const HEIGHTS = new Float64Array(WINDOW_CELLS + 1);
 
 /** What a recentre cost, for the readout — and what it left alone. */
 export interface ScrollReport {
@@ -323,15 +326,28 @@ export class TerrainStream {
    */
   private remember(bounds: BrushResult['bounds']): void {
     const rim = CAP_PLANES;
+    const lastX = Math.min(WINDOW_CELLS - rim, bounds.maxX);
+    const firstX = Math.max(rim, bounds.minX);
     for (let z = Math.max(rim, bounds.minZ); z <= Math.min(WINDOW_CELLS - rim, bounds.maxZ); z += 1) {
       const gz = this.originCellZ + z;
       const tz = Math.min(WORLD_TILES - 1, Math.floor(gz / TILE_CELLS));
+      /*
+       * One ground height per column, reused down it — the same saving the
+       * generator takes, for the same reason. A bite's box is about twenty
+       * samples on a side, so asking for the height per SAMPLE did four
+       * sine-cosine pairs nine thousand times where four hundred would do, and
+       * that was most of the two and a half milliseconds a bite spent here.
+       */
+      for (let x = firstX; x <= lastX; x += 1) {
+        HEIGHTS[x - firstX] = streamHeightAt((this.originCellX + x) * CELL_SIZE, gz * CELL_SIZE);
+      }
       for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
-        const lastX = Math.min(WINDOW_CELLS - rim, bounds.maxX);
-        for (let x = Math.max(rim, bounds.minX); x <= lastX; x += 1) {
+        for (let x = firstX; x <= lastX; x += 1) {
           const gx = this.originCellX + x;
           const value = this.field.get(x, y, z);
-          const base = streamDensityAt(gx * CELL_SIZE, y * CELL_SIZE, gz * CELL_SIZE);
+          const base = densityUnder(
+            HEIGHTS[x - firstX]!, gx * CELL_SIZE, y * CELL_SIZE, gz * CELL_SIZE,
+          );
           const tx = Math.min(WORLD_TILES - 1, Math.floor(gx / TILE_CELLS));
           const key = tx + WORLD_TILES * tz;
           const local = (gx - tx * TILE_CELLS)

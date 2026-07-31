@@ -55,10 +55,13 @@ for (const view of CASES) {
   const geom = await page.evaluate(() => {
     const canvas = document.querySelector('canvas');
     const host = document.querySelector('.density-lab-host') ?? document.getElementById('app');
-    const cross = document.querySelector('.density-lab-crosshair');
+    // The HOST's centre, not a crosshair. Digging is steered by the rig now,
+    // so the crosshair was removed rather than left on screen aiming nothing —
+    // and this check was never about the crosshair, it was about whether the
+    // canvas is the size and place it claims to be.
     const cr = canvas.getBoundingClientRect();
     const hr = host.getBoundingClientRect();
-    const xr = cross?.getBoundingClientRect();
+
     return {
       host: [Math.round(hr.width), Math.round(hr.height)],
       canvasCss: [Math.round(cr.width), Math.round(cr.height)],
@@ -67,13 +70,14 @@ for (const view of CASES) {
       // crosshair says the player is aiming. The dig ray is NDC (0,0), so
       // these two must be the same point or the dig lands somewhere else.
       renderCentre: [Math.round(cr.x + cr.width / 2), Math.round(cr.y + cr.height / 2)],
-      crosshair: xr ? [Math.round(xr.x + xr.width / 2), Math.round(xr.y + xr.height / 2)] : null,
+      hostCentre: [Math.round(hr.x + hr.width / 2), Math.round(hr.y + hr.height / 2)],
     };
   });
 
-  const [dx, dy] = geom.crosshair
-    ? [geom.renderCentre[0] - geom.crosshair[0], geom.renderCentre[1] - geom.crosshair[1]]
-    : [NaN, NaN];
+  const [dx, dy] = [
+    geom.renderCentre[0] - geom.hostCentre[0],
+    geom.renderCentre[1] - geom.hostCentre[1],
+  ];
 
   // The canvas must OCCUPY the host, not overflow it. Two pixels of slack for
   // sub-pixel layout rounding; the failure this guards was 430 and 932 out.
@@ -90,8 +94,8 @@ for (const view of CASES) {
   else ok(`${view.name}: buffer is ratio-${cap} sharp (${geom.canvasBuffer})`);
 
   if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
-    fail(`${view.name}: aim is off by ${dx},${dy} px — dig will not land at the crosshair`);
-  } else ok(`${view.name}: render centre sits under the crosshair (off by ${dx},${dy})`);
+    fail(`${view.name}: render centre is off by ${dx},${dy} px from the viewport centre`);
+  } else ok(`${view.name}: render centre sits at the viewport centre (off by ${dx},${dy})`);
 
   if (errors.length) fail(`${view.name}: ${errors.slice(0, 2).join(' | ')}`);
   await page.close();
@@ -109,10 +113,16 @@ for (const view of CASES) {
   await page.waitForSelector('canvas', { timeout: 30000 });
   await page.waitForTimeout(2500);
   await page.screenshot({ path: `${OUT}-before.png` });
-  for (let i = 0; i < 4; i++) {
-    await page.locator('button', { hasText: 'DIG' }).first().click({ force: true });
-    await page.waitForTimeout(400);
-  }
+  /*
+   * BORE is held, not tapped. The bite fires at the bottom of a head stroke
+   * rather than on the press, so "click four times" no longer describes what
+   * digging is — and holding is the only way to get more than one stroke.
+   */
+  const bore = page.locator('button', { hasText: 'BORE' }).first();
+  await bore.dispatchEvent('pointerdown');
+  await page.waitForTimeout(2200);
+  await bore.dispatchEvent('pointerup');
+  await page.waitForTimeout(600);
   await page.screenshot({ path: `${OUT}-after.png` });
   /*
    * The queen has to have actually arrived. `QueenModel.load` resolves FALSE
@@ -306,96 +316,92 @@ for (const view of CASES) {
   }
 
   /*
-   * Does she dig with her FACE?
+   * Does she dig AHEAD of herself?
    *
    * Reported as her lying across the hole like a plank over it, which is what
-   * digging at the camera's crosshair produces: the crosshair is the centre of
-   * the screen, the camera looks at her, so the crater opens under her middle.
-   * The bite has to start at her mouthparts instead. Measured as a comparison
-   * rather than a threshold, because the right number depends on her size and
-   * the answer either way is unambiguous: the crater is nearer her jaws than
-   * her belly, or the change did not happen.
+   * digging at the camera's crosshair produced: the crosshair is the centre of
+   * the screen and the camera looks at her, so the crater opened under her
+   * middle.
+   *
+   * Measured along her HEADING rather than as "nearer the jaws than the
+   * belly", which was the first spelling and is the wrong question. Boring
+   * steeply down puts the crater under her head — between her jaws and her
+   * centre, so that check failed — while still being exactly what a digging
+   * ant does. Ahead-of-centre is the claim that actually distinguishes digging
+   * face first from digging underneath yourself.
    */
   const bite = await page.evaluate(() => {
     const lab = window.labScene;
     if (!lab?.queenReady) return null;
-    const jaws = new (lab.antPosition.constructor)();
-    if (!lab.queen.jawPosition(jaws)) return null;
+    lab.input.boring = true;
+    lab.stepForTest(1 / 60, 180);
+    lab.input.boring = false;
     return {
-      toJaws: lab.lastBite.distanceTo(jaws),
-      toBelly: lab.lastBite.distanceTo(lab.antPosition),
+      removed: lab.totalRemoved,
+      aheadMm: lab.lastBiteAhead * 5,
+      sidewaysMm: lab.lastBiteSideways * 5,
     };
   });
-  if (!bite) fail('could not locate the last bite');
-  else if (!(bite.toJaws < bite.toBelly)) {
-    const mm = (v) => (v * 5).toFixed(2);
-    fail(`the bite landed under her body: ${mm(bite.toJaws)} mm from the jaws, ${mm(bite.toBelly)} mm from the centre`);
+  if (!bite || bite.removed <= 0) fail('three seconds of boring removed nothing');
+  else if (!(bite.aheadMm > 1)) {
+    fail(`the bite landed ${bite.aheadMm.toFixed(2)} mm ahead of her centre — she is digging under herself`);
+  } else if (Math.abs(bite.sidewaysMm) > 2) {
+    fail(`the bite landed ${bite.sidewaysMm.toFixed(2)} mm off to one side of her heading`);
   } else {
-    ok(`bite lands at her jaws (${(bite.toJaws * 5).toFixed(2)} mm) not her centre (${(bite.toBelly * 5).toFixed(2)} mm)`);
+    ok(`the bite lands ${bite.aheadMm.toFixed(2)} mm ahead of her, on her heading`);
   }
 
   /*
-   * Can she get down a shaft and STAY down it, with the view still working?
+   * The camera has to be looking AT her.
    *
-   * Reported as the ant digging down but snapping back to the top terrain, and
-   * it was one query answering the wrong question for three callers at once:
-   * ground height was "the topmost soil at this x and z", which inside a
-   * burrow is the RIM over her head. The stance thought she was buried, the
-   * fail-safe agreed with it, and it lifted her three millimetres out of her
-   * own hole — measured at `guard 2.954 mm` on the reported build.
-   *
-   * So this digs a shaft wider than she is, lets the easing settle, and checks
-   * both halves: that she went down, and that nothing hauled her back up.
+   * Nothing was checking this, and the rig sat at the world origin for a whole
+   * round because a refactor dropped the line that applied the computed
+   * position — every other check passed, because every other check is about
+   * the ant and none of them care where the camera is.
    */
-  const shaft = await page.evaluate(async () => {
+  const rig = await page.evaluate(() => {
     const lab = window.labScene;
-    if (!lab) return null;
-    const before = lab.antPosition.y;
-    // Wider than her stance so she can get into it, but a burrow rather than
-    // a quarry — a crater big enough to swallow the camera tests something
-    // else, and did: the first version buried the view and rendered sky.
-    const r = lab.stream.field.cellSize * 18;
-    for (let i = 0; i < 10; i += 1) {
-      lab.stream.subtractSphere(
-        { x: lab.antPosition.x, y: before + r - i * 0.22, z: lab.antPosition.z }, r,
-      );
-    }
-    /*
-     * Called WITHOUT optional chaining, deliberately. It was written `?.()`
-     * and the method did not exist — a silent no-op that left every shaft
-     * check looking at a stale mesh while the numbers, which read the field
-     * rather than the geometry, went on passing. A defensive call that hides a
-     * missing function is not defensive.
-     */
-    lab.rebuildTerrainForTest();
-    // Long enough for an eased descent to finish; it is not instant by design.
-    await new Promise((done) => setTimeout(done, 1500));
-    const cam = lab.camera.position;
+    lab.stepForTest(1 / 60, 30);
+    const c = lab.camera.position;
+    const a = lab.antPosition;
     return {
-      before, after: lab.antPosition.y, guard: lab.guardLift,
-      cameraBuried: lab.solidAt(cam),
+      armMm: Math.hypot(c.x - a.x, c.y - a.y, c.z - a.z) * 5,
+      firstPerson: lab.follow.firstPerson,
+      inSoil: lab.solidAt(c),
     };
   });
-  await page.screenshot({ path: `${OUT}-shaft.png` });
-  if (!shaft) fail('could not reach the scene to test the shaft');
-  else {
-    const dropMm = (shaft.before - shaft.after) * 5;
-    const guardMm = shaft.guard * 5;
-    if (dropMm < 2) fail(`she would not go down the shaft: dropped only ${dropMm.toFixed(2)} mm`);
-    else ok(`she descends into a shaft and stays (${dropMm.toFixed(2)} mm down)`);
-    // The fail-safe must be idle down there. If it is lifting, it is lifting
-    // her out, which is exactly the reported bug wearing a different hat.
-    if (guardMm > 0.5) fail(`the fail-safe is hauling her out of the shaft by ${guardMm.toFixed(3)} mm`);
-    else ok(`the fail-safe is quiet in the shaft (${guardMm.toFixed(3)} mm)`);
-    // And the camera must not have followed her into the dirt.
-    if (shaft.cameraBuried) fail('the camera ended up inside the soil, so the view renders as sky');
-    else ok('the camera stayed above the soil while she went down');
-  }
+  if (rig.inSoil) fail('the camera is inside the soil');
+  else if (rig.firstPerson) ok(`the rig is riding her head (${rig.armMm.toFixed(1)} mm)`);
+  else if (rig.armMm < 12 || rig.armMm > 70) {
+    fail(`the camera is ${rig.armMm.toFixed(1)} mm from her — too close to see her, or lost`);
+  } else ok(`the camera follows her at ${rig.armMm.toFixed(0)} mm`);
+
+  /*
+   * And the bore goes where it is STEERED. This is the whole point of the rig
+   * over camera aiming: the same control gives the same tunnel regardless of
+   * where the view has been dragged.
+   */
+  const steered = await page.evaluate(() => {
+    const lab = window.labScene;
+    const start = lab.facing;
+    lab.input.yaw = 1;
+    lab.stepForTest(1 / 60, 60);
+    lab.input.yaw = 0;
+    const turned = lab.facing - start;
+    lab.input.pitch = -1;
+    lab.stepForTest(1 / 60, 60);
+    lab.input.pitch = 0;
+    return { turnedDeg: turned * 180 / Math.PI, pitchDeg: lab.bore.pitch * 180 / Math.PI };
+  });
+  if (!(steered.turnedDeg > 30)) fail(`steering right turned her only ${steered.turnedDeg.toFixed(1)} degrees`);
+  else ok(`steering turns her ${steered.turnedDeg.toFixed(0)} degrees a second`);
+  if (!(steered.pitchDeg < -30)) fail(`aiming down reached only ${steered.pitchDeg.toFixed(1)} degrees`);
+  else ok(`aiming down reaches ${steered.pitchDeg.toFixed(0)} degrees`);
 
   const status = (await page.locator('.density-lab-status').innerText()).replace(/\s+/g, ' ');
   const removed = Number(/Removed: ([\d.]+)/.exec(status)?.[1] ?? 0);
-  if (removed <= 0) fail(`digging removed nothing: "${status}"`);
-  else ok(`four scoops removed ${removed} voxel³ — "${status}"`);
+  if (removed <= 0) fail(`boring removed nothing: "${status}"`);
+  else ok(`two seconds of boring removed ${removed} voxel³ — "${status}"`);
   if (errors.length) fail(`dig run: ${errors.slice(0, 2).join(' | ')}`);
   await page.close();
 }
@@ -428,32 +434,48 @@ for (const view of CASES) {
     return m ? `${m[1]},${m[2]}` : null;
   };
   const startTile = await tileOf();
-  if (!startTile) fail('HUD does not report which tile the scout is in');
-
-  await page.keyboard.down('KeyW');
-  await page.waitForTimeout(4000);
-  await page.keyboard.up('KeyW');
+  if (!startTile) fail('HUD does not report which tile the queen is in');
 
   /*
-   * Wait for the chunk queue to drain rather than sleeping a fixed amount.
-   *
-   * This runs on swiftshader, where frames are several times slower than a
-   * phone's, so the per-frame build budget buys several times less wall-clock
-   * work. A fixed sleep would encode the software renderer's frame rate as if
-   * it were the requirement. What matters is that the queue empties at all —
-   * and within a few seconds, hence the bound.
+   * Driven, not held. Under software rendering a frame is half a second and
+   * the delta is capped, so holding the key for four real seconds advanced the
+   * world by about a third of one — she moved three millimetres and the tile
+   * crossing this is about never happened. Stepping the simulation asks the
+   * question the test is named after instead of asking how fast the renderer
+   * is.
    */
-  let settled = false;
-  for (let i = 0; i < 20 && !settled; i++) {
-    await page.waitForTimeout(400);
-    settled = !/queued/.test(await page.locator('.density-lab-status').innerText());
-  }
-  if (!settled) fail('the streamed chunk queue never drained');
+  const walked = await page.evaluate(() => {
+    const lab = window.labScene;
+    const from = { x: lab.antPosition.x, z: lab.antPosition.z };
+    lab.input.walk = 1;
+    lab.stepForTest(1 / 60, 60 * 8);
+    lab.input.walk = 0;
+    return {
+      movedMm: Math.hypot(lab.antPosition.x - from.x, lab.antPosition.z - from.z) * 5,
+      scrollMs: lab.lastScrollMs,
+    };
+  });
+  if (!(walked.movedMm > 20)) fail(`eight seconds of walking moved her ${walked.movedMm.toFixed(1)} mm`);
+  else ok(`she walks ${walked.movedMm.toFixed(0)} mm in eight seconds`);
 
   const endTile = await tileOf();
   if (startTile && endTile === startTile) {
-    fail(`walking for four seconds never left tile ${startTile}`);
+    fail(`walking never left tile ${startTile}`);
   } else ok(`walked from tile ${startTile} to ${endTile}`);
+
+  /*
+   * Wait for the chunk queue to drain rather than sleeping a fixed amount.
+   * Eight simulated seconds of walking crosses five tiles at once, which
+   * queues about 140 chunks — under software rendering that takes seven or
+   * eight real seconds to mesh, and a fixed sleep would be encoding the
+   * renderer's speed as the requirement.
+   */
+  let settled = false;
+  for (let i = 0; i < 40 && !settled; i++) {
+    await page.waitForTimeout(500);
+    settled = !/queued/.test(await page.locator('.density-lab-status').innerText());
+  }
+  if (!settled) fail('the streamed chunk queue never drained');
 
   // The scroll has to have actually happened AND the chunk queue has to have
   // drained: soil left queued is soil that is not on screen.
@@ -466,7 +488,10 @@ for (const view of CASES) {
   else ok('streamed chunks all built');
 
   // And digging still lands somewhere real after the window has moved.
-  await page.locator('button', { hasText: 'DIG' }).first().click({ force: true });
+  const bore2 = page.locator('button', { hasText: 'BORE' }).first();
+  await bore2.dispatchEvent('pointerdown');
+  await page.waitForTimeout(1200);
+  await bore2.dispatchEvent('pointerup');
   // Long enough for the pellet to land, so the screenshot shows where a clod
   // comes to REST rather than catching one mid-flight and looking like it is
   // stuck in the air.

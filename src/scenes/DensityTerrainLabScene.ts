@@ -1,6 +1,7 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { QueenModel } from '../anim/QueenModel';
+import { BoreRig, PITCH_MAX, PITCH_MIN, YAW_RATE } from './BoreControl';
+import { FollowCamera } from './FollowCamera';
 import { CASTE_LENGTH_MM } from '../anim/hexapod';
 import { buildSurfaceNets } from '../density/SurfaceNets';
 import { TerrainStream } from '../density/TerrainStream';
@@ -109,15 +110,35 @@ const HEIGHT_EASE = 14;
 const CAMERA_CLEARANCE = 3 / WORLD_UNIT_MM;
 
 /**
- * How close the camera may be dragged to her by an obstruction — 4 mm.
+ * Throttle applied automatically while boring, as a fraction of walking pace.
  *
- * Below about half a body length the view stops being a view of an ant and
- * becomes a view of one leg: at 1.5 mm she filled the top of the frame and
- * everything else was the sky above the shaft. When even 4 mm is still inside
- * the soil the arm gives up and the camera escapes upward instead, which at
- * least looks down the hole from the rim.
+ * A tunnel is dug by advancing into it. Standing still and biting makes one
+ * pocket and then nothing at all, because after the first stroke there is no
+ * soil left within reach of her jaws — so the second bite reports nothing to
+ * bite and the player concludes the dig has broken. A slow creep keeps her
+ * face against the working end.
  */
-const MIN_CAMERA_ARM = 4 / WORLD_UNIT_MM;
+const BORE_CREEP = 0.28;
+
+/**
+ * Extra downward pitch to try, in radians, when the aimed angle finds nothing.
+ *
+ * Her jaws are about 1.4 mm above her feet and reach 3 mm, so anything
+ * shallower than roughly twenty-five degrees below level misses flat ground
+ * entirely. Sweeping rather than giving up means "aim level and hold BORE" on
+ * open ground does the obvious thing — scrapes a trench in front of her —
+ * without the player having to discover that they must aim down first.
+ */
+const BORE_SWEEP = [0, -0.3, -0.6, -0.9, -1.2];
+
+/** How far her mandibles reach past the mouth bone — 1 mm. */
+const MANDIBLE_REACH = 1 / WORLD_UNIT_MM;
+
+/** How high up her body the camera aims — mid-thorax, about 2.5 mm. */
+const CAMERA_LOOK_AT = 2.5 / WORLD_UNIT_MM;
+
+/** How far the camera swings per pixel dragged. */
+const LOOK_PER_PIXEL = 0.006;
 
 /** Scratch for the camera sight-line march, so it allocates nothing. */
 const PROBE = new THREE.Vector3();
@@ -185,7 +206,8 @@ export class DensityTerrainLabScene {
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.PerspectiveCamera(62, 1, 0.05, 250);
   private readonly renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-  private readonly controls: any;
+  private readonly follow: FollowCamera;
+  private readonly bore = new BoreRig();
   private readonly raycaster = new THREE.Raycaster();
   private readonly stream: TerrainStream;
   private readonly pellets: Pellet[] = [];
@@ -216,6 +238,8 @@ export class DensityTerrainLabScene {
    */
   private readonly empties = new Set<string>();
   private readonly pending: Array<[number, number, number]> = [];
+  /** The same set as `pending`, for an O(1) "is it already queued". */
+  private readonly pendingKeys = new Set<string>();
   private readonly terrainMaterial = new THREE.MeshStandardMaterial({
     color: 0x6f4931, roughness: 0.96, metalness: 0, flatShading: false, side: THREE.FrontSide,
   });
@@ -245,15 +269,18 @@ export class DensityTerrainLabScene {
   private readonly up = new THREE.Vector3(0, 1, 0);
   /** How far the worst foot was under the soil before the last solve. */
   private footPenetration = 0;
-  /** Where the last bite was centred, so the smoke can check it was her jaws. */
+  /** Where the last bite was centred, and where it sat relative to her then. */
   private readonly lastBite = new THREE.Vector3();
+  private lastBiteAhead = 0;
+  private lastBiteSideways = 0;
   /** How far the fail-safe had to lift her on the last frame. */
   private guardLift = 0;
-  /** The zoom the player set, kept while the camera is pulled in past it. */
-  private orbitDistance = 0;
-  private cameraPulled = false;
+  /** Live pointers on the canvas, for look-around and pinch. */
+  private readonly pointers = new Map<number, { x: number; y: number }>();
+  private lastPinch = 0;
   private sun: any = null;
-  private readonly move = { forward: 0, strafe: 0 };
+  /** What the controls are asking for: steering, throttle and the dig. */
+  private readonly input = { yaw: 0, pitch: 0, walk: 0, boring: false };
   private readonly heldKeys = new Set<string>();
   private animationFrame = 0;
   private previousTime = performance.now();
@@ -264,6 +291,7 @@ export class DensityTerrainLabScene {
   private readonly status: HTMLDivElement;
   private readonly digButton: HTMLButtonElement;
   private readonly resetButton: HTMLButtonElement;
+  private readonly walkButton: HTMLButtonElement;
   private readonly padButtons: HTMLButtonElement[] = [];
   private resizeObserver: ResizeObserver | null = null;
 
@@ -312,14 +340,27 @@ export class DensityTerrainLabScene {
     this.camera.position.set(
       start + WINDOW_SIZE * 0.16, this.antPosition.y + WINDOW_SIZE * 0.2, start + WINDOW_SIZE * 0.3,
     );
-    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.target.copy(this.antPosition);
-    this.controls.enableDamping = true;
-    this.controls.dampingFactor = 0.08;
-    this.controls.minDistance = WINDOW_SIZE * 0.05;
-    this.controls.maxDistance = WINDOW_SIZE * 0.62;
-    this.controls.maxPolarAngle = Math.PI * 0.49;
-    this.controls.update();
+    this.follow = new FollowCamera(this.camera, {
+      /*
+       * Thirty millimetres back — about three body lengths, which frames her
+       * and a useful patch of what she is digging.
+       *
+       * It was a fraction of the WINDOW and came out at 10.6 mm, SHORTER than
+       * the 13 mm minimum below it, so the arm was always "too short for third
+       * person" and the rig sat in first person from the first frame on open
+       * ground. Two numbers describing the same thing in different units, and
+       * only one of them was ever looked at.
+       */
+      distance: 30 / WORLD_UNIT_MM,
+      // Beyond her own length, so third person is always a view OF her.
+      minDistance: 13 / WORLD_UNIT_MM,
+      eyeHeight: 2.4 / WORLD_UNIT_MM,
+      maxDistance: 60 / WORLD_UNIT_MM,
+      clearance: CAMERA_CLEARANCE,
+      ease: 6,
+    });
+    this.follow.target.copy(this.antPosition).addScaledVector(this.up, CAMERA_LOOK_AT);
+    this.bindCamera();
 
     this.scene.background = new THREE.Color(0x8db4d6);
     /*
@@ -345,8 +386,7 @@ export class DensityTerrainLabScene {
     hud.innerHTML = `
       <div class="density-lab-title">DENSITY TERRAIN LAB <span>${BITE_WIDTH_MM} mm bite · ${BITE_DEPTH_MM} mm deep</span></div>
       <div class="density-lab-status"></div>
-      <div class="density-lab-crosshair" aria-hidden="true"></div>
-      <div class="density-lab-hint">Drag to orbit · pinch to zoom · WASD or the pad to walk · space to bite (she digs with her jaws, so walk up to it)</div>
+      <div class="density-lab-hint">Drag to look · pinch to zoom · pad steers (◀▶ heading, ▲▼ pitch) · WALK to advance · hold BORE to tunnel</div>
       <div class="density-lab-pad"></div>
       <div class="density-lab-actions"></div>
     `;
@@ -360,9 +400,21 @@ export class DensityTerrainLabScene {
 
     this.digButton = document.createElement('button');
     this.digButton.className = 'density-lab-button density-lab-dig';
-    this.digButton.textContent = 'DIG';
-    this.digButton.setAttribute('aria-label', `Carve a ${BITE_WIDTH_MM} millimetre scoop`);
+    this.digButton.textContent = 'BORE';
+    this.digButton.setAttribute('aria-label', 'Hold to bore along the heading');
     actions.appendChild(this.digButton);
+
+    this.walkButton = document.createElement('button');
+    this.walkButton.className = 'density-lab-button density-lab-walk';
+    this.walkButton.textContent = 'WALK';
+    this.walkButton.setAttribute('aria-label', 'Hold to walk along the heading');
+    const walkOn = (event: PointerEvent): void => { event.preventDefault(); this.input.walk = 1; };
+    const walkOff = (): void => { this.input.walk = 0; };
+    this.walkButton.addEventListener('pointerdown', walkOn);
+    this.walkButton.addEventListener('pointerup', walkOff);
+    this.walkButton.addEventListener('pointercancel', walkOff);
+    this.walkButton.addEventListener('pointerleave', walkOff);
+    actions.appendChild(this.walkButton);
 
     this.resetButton = document.createElement('button');
     this.resetButton.className = 'density-lab-button density-lab-reset';
@@ -371,6 +423,9 @@ export class DensityTerrainLabScene {
 
     this.buildPad(pad);
     this.digButton.addEventListener('pointerdown', this.onDigPointerDown);
+    this.digButton.addEventListener('pointerup', this.onDigPointerUp);
+    this.digButton.addEventListener('pointercancel', this.onDigPointerUp);
+    this.digButton.addEventListener('pointerleave', this.onDigPointerUp);
     this.resetButton.addEventListener('click', this.resetTerrain);
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
@@ -388,8 +443,15 @@ export class DensityTerrainLabScene {
   dispose(): void {
     cancelAnimationFrame(this.animationFrame);
     this.resizeObserver?.disconnect();
-    this.controls.dispose();
+    this.renderer.domElement.removeEventListener('pointerdown', this.onCameraDown);
+    this.renderer.domElement.removeEventListener('pointermove', this.onCameraMove);
+    this.renderer.domElement.removeEventListener('pointerup', this.onCameraUp);
+    this.renderer.domElement.removeEventListener('pointercancel', this.onCameraUp);
+    this.renderer.domElement.removeEventListener('wheel', this.onCameraWheel);
     this.digButton.removeEventListener('pointerdown', this.onDigPointerDown);
+    this.digButton.removeEventListener('pointerup', this.onDigPointerUp);
+    this.digButton.removeEventListener('pointercancel', this.onDigPointerUp);
+    this.digButton.removeEventListener('pointerleave', this.onDigPointerUp);
     this.resetButton.removeEventListener('click', this.resetTerrain);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
@@ -400,6 +462,7 @@ export class DensityTerrainLabScene {
     this.chunks.clear();
     this.empties.clear();
     this.pending.length = 0;
+    this.pendingKeys.clear();
     this.terrainMaterial.dispose();
     this.queen.dispose();
     for (const pellet of this.pellets) {
@@ -418,25 +481,23 @@ export class DensityTerrainLabScene {
    * touch pad ends up walking forever after a finger slides off it.
    */
   private buildPad(pad: HTMLDivElement): void {
-    const keys: Array<[string, string, number, number]> = [
-      ['▲', 'walk forward', 1, 0],
-      ['◀', 'walk left', 0, -1],
-      ['▶', 'walk right', 0, 1],
-      ['▼', 'walk back', -1, 0],
+    const keys: Array<[string, string, 'yaw' | 'pitch', number]> = [
+      ['▲', 'aim up', 'pitch', 1],
+      ['◀', 'steer left', 'yaw', -1],
+      ['▶', 'steer right', 'yaw', 1],
+      ['▼', 'aim down', 'pitch', -1],
     ];
-    for (const [glyph, label, forward, strafe] of keys) {
+    for (const [glyph, label, axis, sign] of keys) {
       const button = document.createElement('button');
       button.className = 'density-lab-padkey';
       button.textContent = glyph;
       button.setAttribute('aria-label', label);
       const press = (event: PointerEvent): void => {
         event.preventDefault();
-        if (forward) this.move.forward = forward;
-        if (strafe) this.move.strafe = strafe;
+        this.input[axis] = sign;
       };
       const release = (): void => {
-        if (forward) this.move.forward = 0;
-        if (strafe) this.move.strafe = 0;
+        if (this.input[axis] === sign) this.input[axis] = 0;
       };
       button.addEventListener('pointerdown', press);
       button.addEventListener('pointerup', release);
@@ -449,15 +510,15 @@ export class DensityTerrainLabScene {
 
   private readonly onDigPointerDown = (event: PointerEvent): void => {
     event.preventDefault();
-    this.carveAtCrosshair();
+    this.input.boring = true;
+  };
+
+  private readonly onDigPointerUp = (): void => {
+    this.input.boring = false;
   };
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
-    if (event.code === 'Space') {
-      event.preventDefault();
-      this.carveAtCrosshair();
-      return;
-    }
+    if (event.code === 'Space') event.preventDefault();
     if (event.key.toLowerCase() === 'r') {
       this.resetTerrain();
       return;
@@ -473,8 +534,12 @@ export class DensityTerrainLabScene {
 
   private applyHeldKeys(): void {
     const held = (...codes: string[]): boolean => codes.some((code) => this.heldKeys.has(code));
-    this.move.forward = (held('KeyW', 'ArrowUp') ? 1 : 0) - (held('KeyS', 'ArrowDown') ? 1 : 0);
-    this.move.strafe = (held('KeyD', 'ArrowRight') ? 1 : 0) - (held('KeyA', 'ArrowLeft') ? 1 : 0);
+    // Steering on A/D and the arrows, throttle on W/S, dig on space — the same
+    // three jobs the on-screen pad, the walk key and the dig button do.
+    this.input.yaw = (held('KeyD', 'ArrowRight') ? 1 : 0) - (held('KeyA', 'ArrowLeft') ? 1 : 0);
+    this.input.pitch = (held('ArrowUp', 'KeyQ') ? 1 : 0) - (held('ArrowDown', 'KeyE') ? 1 : 0);
+    this.input.walk = (held('KeyW') ? 1 : 0) - (held('KeyS') ? 1 : 0);
+    this.input.boring = held('Space');
   }
 
   private addLighting(): void {
@@ -526,9 +591,8 @@ export class DensityTerrainLabScene {
           wanted.add(key);
           const known = this.chunks.has(key) || this.empties.has(key);
           if (known && stillValid(x, z, retained)) continue;
-          if (this.pending.some((p) => p[0] === gx && p[1] === gy && p[2] === gz)) continue;
           if (immediate) this.buildChunk(gx, gy, gz);
-          else this.pending.push([gx, gy, gz]);
+          else this.enqueue(gx, gy, gz);
         }
 
     for (const [key, mesh] of this.chunks) {
@@ -542,7 +606,11 @@ export class DensityTerrainLabScene {
     // A queued chunk that has already scrolled back out is work nobody wants.
     for (let i = this.pending.length - 1; i >= 0; i -= 1) {
       const entry = this.pending[i];
-      if (entry && !wanted.has(`${entry[0]},${entry[1]},${entry[2]}`)) this.pending.splice(i, 1);
+      if (!entry) continue;
+      const key = `${entry[0]},${entry[1]},${entry[2]}`;
+      if (wanted.has(key)) continue;
+      this.pending.splice(i, 1);
+      this.pendingKeys.delete(key);
     }
     /*
      * Nearest first. A diagonal scroll queues about eighty chunks and the
@@ -569,6 +637,7 @@ export class DensityTerrainLabScene {
     while (this.pending.length > 0 && performance.now() - started < budget) {
       const next = this.pending.shift();
       if (!next) break;
+      this.pendingKeys.delete(`${next[0]},${next[1]},${next[2]}`);
       this.buildChunk(next[0], next[1], next[2]);
       built += 1;
     }
@@ -649,13 +718,13 @@ export class DensityTerrainLabScene {
     this.chunks.clear();
     this.empties.clear();
     this.pending.length = 0;
+    this.pendingKeys.clear();
     this.refreshResidency(true);
   }
 
   private rebuildAround(bounds: {
     minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number;
   }): void {
-    const started = performance.now();
     const lo = (v: number) => Math.floor(Math.max(0, v - 1) / CHUNK_CELLS);
     const hi = (v: number, cells: number) => Math.floor(Math.min(cells - 1, v) / CHUNK_CELLS);
     const baseX = this.stream.originCellX / CHUNK_CELLS;
@@ -663,9 +732,29 @@ export class DensityTerrainLabScene {
     for (let cz = lo(bounds.minZ); cz <= hi(bounds.maxZ, WINDOW_CELLS); cz += 1)
       for (let cy = lo(bounds.minY); cy <= hi(bounds.maxY, CELLS_Y); cy += 1)
         for (let cx = lo(bounds.minX); cx <= hi(bounds.maxX, WINDOW_CELLS); cx += 1)
-          this.buildChunk(baseX + cx, cy, baseZ + cz);
-    this.lastMeshMs = performance.now() - started;
+          this.enqueue(baseX + cx, cy, baseZ + cz);
     this.updateStatus();
+  }
+
+  /**
+   * Queue a chunk for remeshing, at most once.
+   *
+   * Bites used to remesh on the spot, which is twenty milliseconds of meshing
+   * inside the tap handler — a whole frame, per bite, before anything else can
+   * happen. Sustained digging measured at 1.94 seconds of blocked main thread
+   * over 150 bites, felt as the controls locking up for a couple of seconds
+   * after a burst.
+   *
+   * Queued, the same eight chunks touched by ten rapid bites are meshed ONCE,
+   * inside the frame budget the streamer already respects. The crater lands a
+   * frame or two late, which nobody can see, instead of the input freezing,
+   * which everybody can.
+   */
+  private enqueue(gx: number, gy: number, gz: number): void {
+    const key = `${gx},${gy},${gz}`;
+    if (this.pendingKeys.has(key)) return;
+    this.pendingKeys.add(key);
+    this.pending.push([gx, gy, gz]);
   }
 
   private readonly resetTerrain = (): void => {
@@ -684,133 +773,106 @@ export class DensityTerrainLabScene {
     this.chunks.clear();
     this.empties.clear();
     this.pending.length = 0;
+    this.pendingKeys.clear();
     this.refreshResidency(true);
   };
 
   /**
-   * Bite with her JAWS, in front of her face.
+   * Bite along the bore, from her jaws.
    *
-   * It used to carve wherever the crosshair struck, which is the camera's
-   * centre and therefore roughly her middle — so the crater opened UNDER her
-   * and she lay across it like a plank over a hole, which is not what an ant
-   * does with a hole. She digs face first, so the bite starts at her
-   * mouthparts and goes where she is looking.
+   * No raycast and no crosshair. The direction is the one the rig is steering
+   * — her heading, pitched by however far the player has aimed up or down —
+   * expressed in HER frame, so on a slope or in a tunnel "down ten degrees"
+   * means ten degrees off the floor she is standing on rather than off the
+   * world's horizontal.
    *
-   * The crosshair still aims: the direction runs from her jaws toward whatever
-   * it is pointed at, so orbiting the camera decides whether she scrapes down
-   * at her feet or forward into a bank. What the crosshair no longer does is
-   * decide WHERE the soil is removed. If it is aimed at something she cannot
-   * reach, she cannot reach it, and that is the answer rather than a crater
-   * appearing at arm's length.
+   * Aiming with the camera was the old way and it is the wrong tool for a
+   * tunnel: the same tap gave a different hole depending on where the view had
+   * last been dragged, so a bore wandered with the player's attention. It also
+   * cost a raycast against a quarter of a million triangles on every bite.
    */
-  private carveAtCrosshair(): void {
-    if (this.chunks.size === 0) return;
+  private carveAlongBore(pitch: number): void {
     const jaws = new THREE.Vector3();
-    if (!this.queenReady || !this.queen.jawPosition(jaws)) {
-      this.status.dataset.message = 'Waiting for the queen';
-      this.updateStatus();
-      return;
-    }
+    if (!this.queenReady || !this.queen.jawPosition(jaws)) return;
+
+    const up = this.up.clone().normalize();
+    const forward = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
+    forward.addScaledVector(up, -forward.dot(up));
+    if (forward.lengthSq() < 1e-8) forward.set(0, 0, 1);
+    forward.normalize();
+    const direction = forward.clone().multiplyScalar(Math.cos(pitch))
+      .addScaledVector(up, Math.sin(pitch)).normalize();
 
     /*
-     * Aim from the jaws, not from the camera. The crosshair picks the target;
-     * the ray that does the digging starts at her face. Where the crosshair
-     * hits nothing — sky, or past the edge of the loaded window — she scrapes
-     * forward and down, which is what she would do anyway.
-     */
-    this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
-    const aimed = this.raycaster.intersectObjects([...this.chunks.values()], false)[0];
-    const heading = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
-    const direction = aimed
-      ? aimed.point.clone().sub(jaws)
-      : heading.clone().addScaledVector(this.up, -Math.tan(DIG_PITCH));
-    if (direction.lengthSq() < 1e-10) direction.copy(heading);
-    direction.normalize();
-
-    /*
-     * Walk out from the jaws until the soil starts, and no further than she
-     * can reach. Marching the FIELD rather than raycasting the mesh, because
-     * her mandibles are often already buried — inside the soil there is no
-     * surface ahead to hit, and a mesh raycast from in there either misses
-     * everything or finds the far wall of the chamber.
-     */
-    const scrape = heading.clone()
-      .addScaledVector(this.up, -Math.tan(DIG_PITCH)).normalize();
-    /*
-     * The aimed direction first, then the scrape. Aiming is what makes the
-     * crosshair mean anything; the scrape is what she does when it does not
-     * point at soil she can reach, which on open ground is most of the time
-     * because the target is metres of ant-scale away and the ray comes out
-     * nearly level.
-     */
-    /*
-     * Three things to try, in the order an ant would: where you are looking,
-     * then forward and down, then straight down — putting her mouth to the
-     * floor, which is the one that cannot miss for want of a shallow angle.
+     * The aimed angle first, then steeper, and steeper again — never straight
+     * down.
      *
-     * The last was added because the other two do miss. Her height is eased
-     * now rather than snapped, so while walking she rides a fraction of a
-     * millimetre above the true ground, and the fail-safe adds a little more;
-     * that was enough to lift her jaws past what a three-millimetre ray at
-     * forty degrees can reach, and every bite after a walk reported that she
-     * could not reach it. Straight down gets a longer reach because lowering
-     * the head is a bigger motion than leaning into a bank.
+     * Her mouthparts sit above her feet, so a LEVEL ray from them never meets
+     * level ground and a stroke on the flat found nothing to bite. Dropping
+     * back to straight down fixed that and broke something better: the crater
+     * opened underneath her instead of in front, which is the plank-over-a-
+     * hole all over again — measured at 3.11 mm from her jaws and 2.83 from her
+     * belly, on the wrong side of the line.
+     *
+     * Sweeping the PITCH keeps every attempt pointing where she is facing, so
+     * the hole stays ahead of her however far down she has to reach for it.
      */
-    let surface: any = null;
-    const attempts: Array<[any, number]> = [
-      [direction, JAW_REACH],
-      [scrape, JAW_REACH],
-      [this.up.clone().negate(), JAW_REACH * 2],
-    ];
-    for (const [way, reach] of attempts) {
-      surface = this.firstSoilFromJaws(jaws, way, reach);
+    /*
+     * The probe starts at her MANDIBLES, a millimetre ahead of the mouth bone
+     * the rig gives us. The queen's auto-rig has no mandible bones — they were
+     * left out — so without this the bite is anchored a body-part short of
+     * where her jaws actually are, and the crater creeps back under her head.
+     */
+    jaws.addScaledVector(forward, MANDIBLE_REACH);
+
+    let surface = null;
+    for (const extra of BORE_SWEEP) {
+      const tilted = forward.clone().multiplyScalar(Math.cos(pitch + extra))
+        .addScaledVector(up, Math.sin(pitch + extra)).normalize();
+      surface = this.firstSoilFromJaws(jaws, tilted, JAW_REACH);
       if (!surface) continue;
-      // The bite direction has to be the one that actually found the soil, or
-      // the brush is offset along a ray that missed and the crater opens
-      // beside the hole rather than in it.
-      direction.copy(way);
+      direction.copy(tilted);
       break;
     }
     if (!surface) {
-      this.status.dataset.message = 'Her jaws cannot reach that';
+      this.status.dataset.message = 'Nothing in reach of her jaws';
       this.updateStatus();
       return;
     }
 
     /*
-     * The brush RIDES the surface and only dips in by BITE_DEPTH.
-     *
-     * Sinking the centre below the hit buries most of the sphere and the
-     * crater ends up as deep as the centre plus the whole radius — 7.9 mm for
-     * what was advertised as a 5 mm scoop. A mandible does not do that; it
-     * scrapes. Putting the centre (radius - depth) BEHIND the surface along
-     * the bite direction leaves exactly a cap of height BITE_DEPTH in front of
-     * it, which is the bite.
+     * The brush RIDES the surface and only dips in by BITE_DEPTH. Sinking the
+     * centre below the hit buries most of the sphere and the crater ends up as
+     * deep as the centre plus the whole radius. A mandible does not do that;
+     * it scrapes.
      */
     const center = surface.clone().addScaledVector(direction, BITE_DEPTH - BRUSH_RADIUS);
     const result = this.stream.subtractSphere(center, BRUSH_RADIUS);
-    if (result.changedSamples === 0 || result.removedVolume <= 0.0001) {
-      this.status.dataset.message = 'No packed soil in that scoop';
-      this.updateStatus();
-      return;
-    }
+    if (result.changedSamples === 0 || result.removedVolume <= 0.0001) return;
 
     this.totalRemoved += result.removedVolume;
-    this.digPulse = 1;
     this.lastBite.copy(center);
+    /*
+     * Where the bite landed RELATIVE TO HER, recorded now rather than worked
+     * out later. She creeps forward while boring, so a few seconds after the
+     * fact the crater is behind her — measured at 2.27 mm behind her centre,
+     * which reads as digging underneath herself and is really just her having
+     * walked past her own work.
+     */
+    this.lastBiteAhead = (center.x - this.antPosition.x) * forward.x
+      + (center.z - this.antPosition.z) * forward.z;
+    this.lastBiteSideways = (center.x - this.antPosition.x) * forward.z
+      - (center.z - this.antPosition.z) * forward.x;
     this.rebuildAround(result.bounds);
     /*
-     * Spoil goes BACKWARD, over her shoulder, not straight back out of the
-     * hole. Out of the hole is toward her own face — the bite direction runs
-     * from her jaws into the soil, so its negation points at her head, and the
-     * clods spawned inside her thorax and flew through her.
-     *
-     * Which is also what an ant does with it: she passes the load back under
-     * the body and drops it behind, so the spoil ends up in a heap at the
-     * mouth of the burrow rather than back in the hole she just made.
+     * Spoil goes BACKWARD, over her shoulder. Straight back out of the hole is
+     * toward her own face — the bite direction runs from her jaws into the
+     * soil, so its negation points at her head and the clods spawned inside
+     * her thorax and flew through her. It is also what an ant does with it:
+     * the load goes back under the body and out behind.
      */
-    const toss = this.up.clone().multiplyScalar(1.1)
-      .addScaledVector(heading, -0.9).normalize();
+    const toss = up.clone().multiplyScalar(1.1)
+      .addScaledVector(forward, -0.9).normalize();
     this.spawnPellet(surface, toss, result.removedVolume);
     /*
      * Reported in millimetres, because that is the unit the size argument is
@@ -1107,8 +1169,6 @@ export class DensityTerrainLabScene {
     this.antPosition.y += rise;
     // The camera rides the rise as well, or descending a shaft leaves the view
     // hanging at the surface looking at the back of her head.
-    this.camera.position.y += rise;
-    this.controls.target.copy(this.antPosition);
     if (!this.queenReady) return;
     this.queen.root.position.copy(this.antPosition);
 
@@ -1137,54 +1197,26 @@ export class DensityTerrainLabScene {
   }
 
   /**
-   * Walk the queen, then let the window catch up.
+   * Drive her along the heading the rig is steering.
    *
-   * Movement is relative to where the camera is looking, because the pad has
-   * no idea which way is north and neither does the player. The recentre is
-   * checked every frame but only fires on a tile crossing, which is the whole
-   * point of tiles being larger than a step.
+   * Movement used to be relative to the CAMERA, which is right for a character
+   * you point at things and wrong for one you steer: dragging the view sideways
+   * changed which way "forward" was, so a tunnel wandered whenever you looked
+   * around. The heading is now the rig's, and the camera is free to look
+   * wherever it likes without touching where she is going.
    */
-  private walk(dt: number): void {
+  private walk(dt: number, throttle: number): void {
     const ease = 1 - Math.exp(-SPEED_EASE * dt);
-    if (this.move.forward === 0 && this.move.strafe === 0) {
-      // Coast to a stop rather than halting on the frame the finger lifts.
-      this.velocity.multiplyScalar(1 - ease);
-      this.walkSpeed = this.velocity.length();
-      if (this.walkSpeed < 1e-3) { this.velocity.set(0, 0, 0); this.walkSpeed = 0; return; }
-      this.glide(dt);
-      return;
-    }
+    const forward = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
+    const step = forward.multiplyScalar(WALK_SPEED * throttle);
 
-    const forward = new THREE.Vector3()
-      .subVectors(this.antPosition, this.camera.position);
-    forward.y = 0;
-    if (forward.lengthSq() < 1e-8) return;
-    forward.normalize();
-    const right = new THREE.Vector3(-forward.z, 0, forward.x);
-
-    const step = new THREE.Vector3()
-      .addScaledVector(forward, this.move.forward)
-      .addScaledVector(right, this.move.strafe);
-    if (step.lengthSq() === 0) return;
-    step.normalize().multiplyScalar(WALK_SPEED);
     this.velocity.lerp(step, ease);
     this.walkSpeed = this.velocity.length();
-
-    /*
-     * She turns toward where she is going rather than snapping to it, so a tap
-     * on the pad reads as an animal deciding to go that way. The shortest way
-     * round is taken explicitly — the naive difference sends her the long way
-     * whenever the heading crosses the wrap at pi, which is a full spin in
-     * place for one step sideways.
-     */
-    const wanted = Math.atan2(step.x, step.z);
-    let turn = wanted - this.facing;
-    while (turn > Math.PI) turn -= Math.PI * 2;
-    while (turn < -Math.PI) turn += Math.PI * 2;
-    const turned = THREE.MathUtils.clamp(turn, -TURN_RATE * dt, TURN_RATE * dt);
-    this.facing += turned;
-    this.turnRate = dt > 0 ? turned / dt : 0;
-
+    if (throttle === 0 && this.walkSpeed < 1e-3) {
+      this.velocity.set(0, 0, 0);
+      this.walkSpeed = 0;
+      return;
+    }
     this.glide(dt);
   }
 
@@ -1199,7 +1231,6 @@ export class DensityTerrainLabScene {
   private glide(dt: number): void {
     if (this.velocity.lengthSq() < 1e-12) return;
     const margin = CELL_SIZE * 3;
-    const previous = this.antPosition.clone();
     this.antPosition.x = THREE.MathUtils.clamp(
       this.antPosition.x + this.velocity.x * dt, margin, WORLD_SPAN - margin,
     );
@@ -1209,9 +1240,7 @@ export class DensityTerrainLabScene {
 
     // Carry the camera along by exactly her step, so orbiting is untouched by
     // walking: the arm the player set stays the arm they set.
-    const moved = this.antPosition.clone().sub(previous);
-    this.camera.position.add(moved);
-    this.controls.target.copy(this.antPosition);
+    this.follow.target.copy(this.antPosition);
 
     const scroll = this.stream.recentreOn(this.antPosition.x, this.antPosition.z);
     if (scroll) {
@@ -1233,101 +1262,67 @@ export class DensityTerrainLabScene {
       Removed: ${this.totalRemoved.toFixed(1)} voxel³ · ${physicalVolumeMm3.toFixed(0)} mm³<br>
       World: ${WORLD_TILES}×${WORLD_TILES} tiles of ${TILE_MM} mm = ${WORLD_SPAN * WORLD_UNIT_MM} mm<br>
       Tile ${tileX},${tileZ} · window ${WINDOW_CELLS}×${CELLS_Y}×${WINDOW_CELLS} = ${megabytes} MB<br>
+      Bore: ${(((this.facing * 180 / Math.PI) + 360) % 360).toFixed(0).padStart(3, '0')}° ·`
+      + ` pitch ${(this.bore.pitch * 180 / Math.PI >= 0 ? '+' : '')}`
+      + `${(this.bore.pitch * 180 / Math.PI).toFixed(0)}°`
+      + `${this.input.boring ? ' · BORING' : ''}<br>
       Queen: ${this.queenReady
         ? `${CASTE_LENGTH_MM.queen} mm · feet ${(this.footPenetration * WORLD_UNIT_MM).toFixed(2)} mm`
           + ` · guard ${(this.guardLift * WORLD_UNIT_MM).toFixed(3)} mm`
+          + `${this.follow.firstPerson ? ' · eye view' : ''}`
         : 'loading…'}<br>
       Mesh: ${this.lastMeshMs.toFixed(1)} ms · scroll ${this.lastScrollMs.toFixed(1)} ms${queued}<br>
       Dug: ${this.stream.editedSamples} samples kept
     `;
   }
 
-  /**
-   * Keep the camera in open air, on the line to her.
-   *
-   * Following an ant down a shaft puts a camera two centimetres behind her
-   * inside the bank, where every surface it can see is a backface — so the
-   * terrain culls away and the screen goes sky blue. Reported as a blue pool
-   * sitting in the crater, which is what it looks like when only PART of the
-   * near wall is between you and the hole.
-   *
-   * Shortening the arm rather than lifting the camera, because lifting it out
-   * of the soil leaves it on the rim staring at the bank while she is out of
-   * frame below — the whole screen brown instead of the whole screen blue.
-   * Pulling in along the sight line keeps her framed and is what makes a
-   * burrow watchable at all.
-   *
-   * The zoom the player set is remembered separately and restored the moment
-   * the way is clear. Orbit controls derive their state from the camera's
-   * position, so writing a shortened arm back into it would be read as the
-   * player having zoomed in, and one trip down a hole would permanently
-   * shrink the view.
-   */
-  private keepCameraClear(): void {
-    const target = this.controls.target;
-    const arm = this.camera.position.clone().sub(target);
-    const distance = arm.length();
-    if (distance < 1e-6) return;
-    arm.divideScalar(distance);
-
-    const step = CELL_SIZE * 2;
-    let clear = distance;
-    for (let d = step; d <= distance; d += step) {
-      PROBE.copy(target).addScaledVector(arm, d);
-      if (this.solidAt(PROBE)) {
-        /*
-         * Closer than the zoom limit is allowed here, and has to be: a pull-in
-         * is a collision, not a zoom. Floored at the orbit's own minimum, the
-         * camera stopped two and a half millimetres out — still inside the
-         * shaft wall — and rendered the inside of the soil, which is to say
-         * nothing at all.
-         */
-        clear = Math.max(MIN_CAMERA_ARM, d - CELL_SIZE * 2);
-        break;
-      }
-    }
-    this.cameraPulled = clear < distance - 1e-6;
-    if (this.cameraPulled) this.camera.position.copy(target).addScaledVector(arm, clear);
-
-    /*
-     * Last resort. A shaft narrower than the shortest arm leaves the camera in
-     * the dirt however far in it is pulled, and a camera in the dirt renders
-     * the world as sky. Climbing to the surface above itself is worse framing
-     * and an honest picture.
-     */
-    if (this.solidAt(this.camera.position)) {
-      this.camera.position.y = this.groundAt(
-        this.camera.position.x, this.camera.position.z, this.camera.position.y,
-      ) + CAMERA_CLEARANCE;
-      this.cameraPulled = true;
-    }
-
-    /*
-     * And never below her. Shortening the arm preserves its direction, which
-     * near the horizontal leaves the camera level with her or under her —
-     * inside a shaft that means looking UP past her at a circle of sky, with
-     * the walls filling the rest of the frame. Diagnosed exactly that way: the
-     * terrain was intact and 270,000 triangles were being drawn, and what
-     * looked like a hole in the floor was the shaft's own mouth.
-     */
-    const floor = this.controls.target.y + MIN_CAMERA_ARM * 0.5;
-    if (this.camera.position.y < floor) {
-      this.camera.position.y = floor;
-      this.cameraPulled = true;
-    }
+  /** Drag to look around her; wheel or pinch to change the arm's length. */
+  private bindCamera(): void {
+    const canvas = this.renderer.domElement;
+    canvas.addEventListener('pointerdown', this.onCameraDown);
+    canvas.addEventListener('pointermove', this.onCameraMove);
+    canvas.addEventListener('pointerup', this.onCameraUp);
+    canvas.addEventListener('pointercancel', this.onCameraUp);
+    canvas.addEventListener('wheel', this.onCameraWheel, { passive: false });
   }
 
-  /** Give the arm back its full length before the controls read it. */
-  private restoreCameraArm(): void {
-    if (!this.cameraPulled) {
-      this.orbitDistance = this.camera.position.distanceTo(this.controls.target);
+  private readonly onCameraDown = (event: PointerEvent): void => {
+    this.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  };
+
+  private readonly onCameraMove = (event: PointerEvent): void => {
+    const last = this.pointers.get(event.pointerId);
+    if (!last) return;
+    const dx = event.clientX - last.x;
+    const dy = event.clientY - last.y;
+    this.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+    if (this.pointers.size >= 2) {
+      /*
+       * Pinch, measured between the two live pointers. Tracked as a RATIO of
+       * the previous spread rather than as a delta, so the zoom feels the same
+       * whether the fingers start together or apart.
+       */
+      const [a, b] = [...this.pointers.values()];
+      if (!a || !b) return;
+      const spread = Math.hypot(a.x - b.x, a.y - b.y);
+      if (this.lastPinch > 0 && spread > 0) this.follow.zoom(this.lastPinch / spread);
+      this.lastPinch = spread;
       return;
     }
-    const arm = this.camera.position.clone().sub(this.controls.target);
-    if (arm.lengthSq() < 1e-12) return;
-    this.camera.position.copy(this.controls.target)
-      .addScaledVector(arm.normalize(), this.orbitDistance);
-  }
+    this.lastPinch = 0;
+    this.follow.orbit(-dx * LOOK_PER_PIXEL, -dy * LOOK_PER_PIXEL);
+  };
+
+  private readonly onCameraUp = (event: PointerEvent): void => {
+    this.pointers.delete(event.pointerId);
+    if (this.pointers.size < 2) this.lastPinch = 0;
+  };
+
+  private readonly onCameraWheel = (event: WheelEvent): void => {
+    event.preventDefault();
+    this.follow.zoom(event.deltaY > 0 ? 1.1 : 1 / 1.1);
+  };
 
   private resize(): void {
     const width = Math.max(1, this.host.clientWidth);
@@ -1354,13 +1349,37 @@ export class DensityTerrainLabScene {
     this.renderer.setSize(width, height);
   }
 
-  private animate = (): void => {
-    const now = performance.now();
-    const delta = Math.min(0.05, (now - this.previousTime) / 1000);
-    this.previousTime = now;
-    this.walk(delta);
+  /**
+   * One step of the world, with no rendering in it.
+   *
+   * Split out from the frame loop so a test can advance the simulation by a
+   * fixed amount instead of holding a key and hoping. Under software rendering
+   * a frame takes half a second and the per-frame delta is capped — so three
+   * real seconds of holding "walk" was about a third of a simulated one, and
+   * checks written against the wall clock were measuring the renderer rather
+   * than the thing they named. This runs exactly what the frame loop runs.
+   */
+  private simulate(delta: number): void {
+    /*
+     * Steer, then move, then dig — in that order, because the bore direction
+     * is what she walks along and what her jaws follow, and a bite taken
+     * against last frame's heading is a tunnel with a kink in it.
+     */
+    const bore = this.bore.step(delta, this.input);
+    this.facing = bore.heading;
+    this.turnRate = this.input.yaw * YAW_RATE;
+    /*
+     * She creeps forward while boring even with no throttle. A tunnel is dug
+     * by advancing into it; standing still and biting makes a pocket and then
+     * nothing, because after the first stroke there is no soil left in reach.
+     */
+    const throttle = this.input.walk !== 0 ? this.input.walk : (bore.stroke > 0 ? BORE_CREEP : 0);
+    this.walk(delta, throttle);
     this.stand(delta);
-    this.digPulse = Math.max(0, this.digPulse - DIG_DECAY * delta);
+    if (bore.bite) this.carveAlongBore(bore.pitch);
+    // The gait's dig level IS the head's dip, so the animation and the moment
+    // soil leaves are the same event rather than two things kept in step.
+    this.digPulse = bore.dip;
     if (this.queenReady) {
       this.queen.update(delta, {
         // The gait wants voxels per second and a world unit IS a voxel here,
@@ -1412,11 +1431,16 @@ export class DensityTerrainLabScene {
       });
       this.queen.root.position.y = this.antPosition.y + this.guardLift;
     }
-    this.restoreCameraArm();
-    this.controls.update();
-    this.keepCameraClear();
-    this.drainPending(now - this.previousFrameStart);
-    this.previousFrameStart = now;
+    /*
+     * The camera looks at her BODY, not at her feet. `antPosition` is her
+     * ground contact, so framing on it puts her in the top of the shot and
+     * points the collision probe straight into the floor.
+     */
+    this.follow.up.copy(this.up);
+    this.follow.target.copy(this.antPosition).addScaledVector(this.up, CAMERA_LOOK_AT);
+    this.follow.update(
+      delta, this.facing, (point) => this.solidAt(point), CELL_SIZE * 2,
+    );
     this.updatePellets(delta);
     if (this.sun) {
       this.sun.position.set(
@@ -1427,6 +1451,20 @@ export class DensityTerrainLabScene {
       this.sun.target.position.copy(this.antPosition);
       this.sun.target.updateMatrixWorld();
     }
+  }
+
+  /** Advance the simulation deterministically. For the smoke test only. */
+  stepForTest(delta: number, steps: number): void {
+    for (let i = 0; i < steps; i += 1) this.simulate(delta);
+  }
+
+  private animate = (): void => {
+    const now = performance.now();
+    const delta = Math.min(0.05, (now - this.previousTime) / 1000);
+    this.previousTime = now;
+    this.simulate(delta);
+    this.drainPending(now - this.previousFrameStart);
+    this.previousFrameStart = now;
     this.renderer.render(this.scene, this.camera);
     this.animationFrame = requestAnimationFrame(this.animate);
   };
