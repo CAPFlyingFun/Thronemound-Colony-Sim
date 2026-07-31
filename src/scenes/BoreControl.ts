@@ -28,10 +28,21 @@ export const YAW_RATE = 1.5;
  */
 export const DIG_YAW_RATE = 10 * Math.PI / 180;
 
-/** Pitch is set in whole steps, not swept — 0 to -90 in tens. */
+/**
+ * Pitch is set in whole steps, not swept — straight down to straight UP, in
+ * tens.
+ *
+ * The ceiling used to be level, on the reasoning that nothing wants to bore
+ * into its own roof. That reasoning is right about the roof and wrong about the
+ * game: dig a shaft, arrive at the bottom, and the only directions available
+ * are level and further down. There is no way back to the surface, and being
+ * unable to leave is a worse property than being able to make a silly tunnel.
+ *
+ * An ant that digs down can dig up. The dial is symmetric.
+ */
 export const PITCH_STEP = 10 * Math.PI / 180;
 export const PITCH_MIN = -Math.PI / 2;
-export const PITCH_MAX = 0;
+export const PITCH_MAX = Math.PI / 2;
 
 /**
  * Seconds for one stroke of the head.

@@ -79,7 +79,7 @@ describe('the dig toggle', () => {
 });
 
 describe('aiming', () => {
-  it('steps in ten-degree increments between level and straight down', () => {
+  it('steps in ten-degree increments between straight up and straight down', () => {
     const rig = new BoreRig();
     expect(rig.pitch).toBe(0);
 
@@ -90,10 +90,16 @@ describe('aiming', () => {
     rig.aim(2);
     expect(rig.pitch * 180 / Math.PI).toBeCloseTo(-20, 9);
 
-    // Level is the ceiling: there is no boring into your own roof.
-    for (let i = 0; i < 20; i += 1) rig.aim(1);
-    expect(rig.pitch).toBe(PITCH_MAX);
-    expect(PITCH_MAX).toBe(0);
+    /*
+     * Straight UP is the ceiling, not level. Level was the old limit and it
+     * trapped you: at the bottom of a shaft the only aims on offer were level
+     * and further down, so there was no way back to the surface. Anything that
+     * can dig itself in has to be able to dig itself out.
+     */
+    for (let i = 0; i < 30; i += 1) rig.aim(1);
+    expect(rig.pitch).toBeCloseTo(PITCH_MAX, 9);
+    expect(PITCH_MAX * 180 / Math.PI).toBeCloseTo(90, 9);
+    expect(Math.round(PITCH_MAX / PITCH_STEP)).toBe(9);
 
     // Straight down is the floor, and reachable — a shaft is a normal thing.
     for (let i = 0; i < 20; i += 1) rig.aim(-1);

@@ -1,5 +1,18 @@
 import * as THREE from 'three';
 
+/** The horizon. First person is stabilised against it, never against her. */
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
+
+/**
+ * How much snappier the first-person eye is than the follow rig.
+ *
+ * Easing is right for a camera trailing an animal and is lag on its head: you
+ * look, and the view arrives afterwards. Not zero, because the stance solver
+ * moves her a hundredth of a millimetre most frames and a rigid eye shows every
+ * one of them.
+ */
+const FIRST_PERSON_SNAP = 12;
+
 /**
  * A third-person camera that follows an ant into a hole.
  *
@@ -72,6 +85,14 @@ export class FollowCamera {
    */
   mode: CameraMode = 'auto';
   submerged = false;
+  /**
+   * Where the first-person view points, as a pitch from the world horizon.
+   *
+   * The caller sets it to the bore's angle, so looking and digging are the same
+   * direction — the whole reason to be in her head is to see where the tunnel
+   * is about to go.
+   */
+  aimPitch = 0;
 
   /**
    * The player's look, as an offset from her heading rather than as a world
@@ -194,14 +215,28 @@ export class FollowCamera {
     this.onboard = this.mode === 'first'
       || (this.mode === 'auto' && this.submerged)
       || noRoom;
+
+    /*
+     * First person gets a LEVEL frame, not her body's.
+     *
+     * Her frame is the honest place to hang a camera off a third-person rig and
+     * the wrong place to put an eye. It rolls with the terrain normal, tips
+     * with the dig train, and settles on a lerp — so riding it, every pebble
+     * she walked over banked the horizon and every stroke of the head nodded
+     * the whole view. Reported as her body moving too much to look at.
+     *
+     * A head-mounted camera in any game that ships is stabilised. This one
+     * keeps her heading and the angle she is AIMING at, and throws away the
+     * rest of her motion: level horizon, no roll, no bob.
+     */
+    const flat = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+    const eyeRight = new THREE.Vector3().crossVectors(WORLD_UP, flat).normalize();
     const right = new THREE.Vector3().crossVectors(up, forward).normalize();
     const wanted = this.onboard
-      // Her frame, so the offset means the same thing whichever way she faces
-      // and whatever she is standing on.
       ? this.target.clone()
-        .addScaledVector(right, this.eye.x)
-        .addScaledVector(up, this.eye.y)
-        .addScaledVector(forward, this.eye.z)
+        .addScaledVector(eyeRight, this.eye.x)
+        .addScaledVector(WORLD_UP, this.eye.y)
+        .addScaledVector(flat, this.eye.z)
       : this.target.clone().addScaledVector(back, Math.max(clear, this.options.minDistance));
 
     /*
@@ -210,11 +245,21 @@ export class FollowCamera {
      * map; easing between a shot from behind her and a shot from her own head
      * travels straight through her body.
      */
+    /*
+     * And first person is barely smoothed at all.
+     *
+     * Easing is right for a rig trailing an animal — it is what stops the
+     * camera snapping about as she turns. On her head it is lag: you look, and
+     * the view arrives afterwards, which reads as swimming. Twelve times the
+     * follow rate puts the eye within a frame of where it belongs while still
+     * absorbing the single-frame jitter of the stance solver.
+     */
+    const ease = this.onboard ? this.options.ease * FIRST_PERSON_SNAP : this.options.ease;
     if (!this.settled || this.onboard !== this.wasOnboard) {
       this.smoothed.copy(wanted);
       this.settled = true;
     } else {
-      this.smoothed.lerp(wanted, 1 - Math.exp(-this.options.ease * dt));
+      this.smoothed.lerp(wanted, 1 - Math.exp(-ease * dt));
     }
     this.wasOnboard = this.onboard;
 
@@ -227,18 +272,34 @@ export class FollowCamera {
     if (!this.onboard && solidAt(this.smoothed)) this.smoothed.copy(wanted);
 
     this.camera.position.copy(this.smoothed);
-    this.camera.up.copy(up);
     /*
-     * From her head, look along the BORE rather than at her own body — the
-     * target is inside the camera at that point, and looking at a point you
-     * are standing on produces a degenerate view matrix.
+     * From her head, look down the BORE — the direction she will actually dig,
+     * built on the WORLD horizon so the dial and the view agree. Looking at her
+     * own body instead is degenerate anyway: the target is inside the camera.
+     *
+     * The camera's up is world up here, not hers. Rolling the horizon with the
+     * ground she stands on is a nice touch over her shoulder and motion
+     * sickness from inside her head.
      */
     if (this.onboard) {
-      this.camera.lookAt(
-        this.smoothed.clone().addScaledVector(forward, 1)
-          .addScaledVector(up, -Math.sin(this.pitch)),
-      );
+      const look = flat.clone().multiplyScalar(Math.cos(this.aimPitch))
+        .addScaledVector(WORLD_UP, Math.sin(this.aimPitch));
+      /*
+       * Straight up and straight down are the two aims where world up cannot be
+       * the camera's up: the look direction is parallel to it, `lookAt` has no
+       * way to resolve the roll, and the view rolls to whatever the arithmetic
+       * happens to produce. Both are reachable now that she can dig herself out
+       * of a shaft, and a shaft is exactly where you are looking at one of them.
+       *
+       * Near vertical, the ground-plane heading takes over as up — so looking
+       * straight down a shaft puts the way she is facing at the top of the
+       * screen, which is the convention every map and every cockpit uses.
+       */
+      const vertical = Math.abs(look.dot(WORLD_UP));
+      this.camera.up.copy(vertical > 0.999 ? flat : WORLD_UP);
+      this.camera.lookAt(this.smoothed.clone().add(look));
     } else {
+      this.camera.up.copy(up);
       this.camera.lookAt(this.target);
     }
   }

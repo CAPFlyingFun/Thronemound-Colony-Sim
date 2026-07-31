@@ -2000,7 +2000,19 @@ export class DensityTerrainLabScene {
      * instant and a ninety-degree one never quite finish.
      */
     const swing = (Math.PI / 2) / PITCH_SWING_SECONDS * delta;
-    this.headPitch += THREE.MathUtils.clamp(bore.pitch - this.headPitch, -swing, swing);
+    /*
+     * She only tips when the dig is ARMED. The dial is an aim you set before
+     * you commit — pressing it should not put her nose in the dirt while she is
+     * walking about on the surface, which is what it did: leave the gauge at
+     * minus forty and she wandered the mound permanently face-down.
+     *
+     * The dial keeps its value the whole time, so the gauge still reads what
+     * she will dig at. What changes is only whether her BODY is holding that
+     * angle yet, and she levels out on the same rate limit she tips down on,
+     * so disarming is a controlled rise rather than a snap upright.
+     */
+    const aim = bore.digging ? bore.pitch : 0;
+    this.headPitch += THREE.MathUtils.clamp(aim - this.headPitch, -swing, swing);
     this.thoraxPitch += THREE.MathUtils.clamp(
       this.headPitch - this.thoraxPitch, -swing * THORAX_RATE, swing * THORAX_RATE,
     );
@@ -2106,6 +2118,13 @@ export class DensityTerrainLabScene {
      * for soil to close over her head flips the view halfway into the stroke.
      */
     this.follow.submerged = this.underground || this.bore.digging;
+    /*
+     * The first-person view looks where the DIAL is aimed, not where her body
+     * has got to — so the moment you nudge the pitch you are already looking at
+     * the soil you are about to take, rather than watching her three-second
+     * lean catch up with the decision.
+     */
+    this.follow.aimPitch = this.bore.pitch;
     this.follow.target.copy(this.antPosition).addScaledVector(this.up, CAMERA_LOOK_AT);
     this.follow.update(
       delta, this.facing, (point) => this.solidAt(point), CELL_SIZE * 2,
