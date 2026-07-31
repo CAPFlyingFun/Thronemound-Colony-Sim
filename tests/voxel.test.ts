@@ -9,6 +9,7 @@ import {
 import { CLOD_RADIUS, MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES, type Clod } from '../src/voxel/LooseSoil';
 import { HAUL_FLOOR, PELLET_FILL, QUEEN_MASS_G, clodMassGrams, haulFactor } from '../src/voxel/mass';
 import { HILL_VOXELS, VALLEY_VOXELS, features, groundHeight, terrainGenerator } from '../src/voxel/terrain';
+import { ceilingFor, insideBox, isGlassCell } from '../src/voxel/formicarium';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
 import { SKY_PHASES, packColor, skyAt, wrapHours } from '../src/voxel/daylight';
@@ -2924,6 +2925,55 @@ describe('terrain', () => {
       // instead would slice the hill's cap off and leave clay on the summit.
       expect(gen(at.x, top - 5, at.z)).toBe(TOPSOIL);
       expect(gen(at.x, top - 6, at.z)).toBe(CLAY);
+    }
+  });
+});
+
+describe('formicarium box', () => {
+  const OPTS = { size: 128, ceilingY: ceilingFor(SURFACE + HILL_VOXELS) };
+
+  it('encloses the world on four sides and the top, with no floor pane', () => {
+    expect(isGlassCell(0, 100, 64, OPTS)).toBe(true);
+    expect(isGlassCell(127, 100, 64, OPTS)).toBe(true);
+    expect(isGlassCell(64, 100, 0, OPTS)).toBe(true);
+    expect(isGlassCell(64, 100, 127, OPTS)).toBe(true);
+    expect(isGlassCell(64, OPTS.ceilingY, 64, OPTS)).toBe(true);
+    // No base: the world already bottoms out in undiggable stone, and a second
+    // thing saying the same thing is what eventually disagrees.
+    expect(isGlassCell(64, 0, 64, OPTS)).toBe(false);
+    // Open in the middle at every height she can occupy.
+    expect(isGlassCell(64, 100, 64, OPTS)).toBe(false);
+  });
+
+  it('leaves no seam where a wall meets the lid', () => {
+    /*
+     * That junction is the whole reason for climbing it. A wall that stopped
+     * one cell short of the lid would put a gap exactly where she transfers
+     * from vertical to upside down, which is the one place a hole is certain
+     * to be found.
+     */
+    for (let y = OPTS.ceilingY - 3; y <= OPTS.ceilingY; y++) {
+      expect(isGlassCell(0, y, 0, OPTS)).toBe(true);
+      expect(isGlassCell(127, y, 127, OPTS)).toBe(true);
+    }
+  });
+
+  it('gives the summit headroom rather than a lid resting on it', () => {
+    // Standing on the hill is the one place in the world with a view.
+    const summit = SURFACE + HILL_VOXELS;
+    expect(OPTS.ceilingY - summit).toBeGreaterThanOrEqual(10);
+    expect(insideBox(64, summit + 1, 64, OPTS)).toBe(true);
+  });
+
+  it('agrees with itself about what is glass and what is inside', () => {
+    // The two questions must never both say yes about one cell, or the ant is
+    // standing in the pane she is meant to be climbing.
+    for (let x = 0; x < 128; x += 7) {
+      for (let z = 0; z < 128; z += 7) {
+        for (let y = 0; y <= OPTS.ceilingY; y += 11) {
+          expect(isGlassCell(x, y, z, OPTS) && insideBox(x, y, z, OPTS)).toBe(false);
+        }
+      }
     }
   });
 });
