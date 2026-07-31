@@ -104,6 +104,7 @@ export class DensityTerrainLabScene {
     window.addEventListener('keydown', this.onKeyDown);
 
     this.resetField();
+    this.rebuildTerrain();
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(host);
     this.resize();
