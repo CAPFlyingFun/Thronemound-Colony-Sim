@@ -9,7 +9,7 @@ import {
 import { CLOD_RADIUS, MAX_LOOSE_CLODS, LooseSoil, SCOOP_PIECES, type Clod } from '../src/voxel/LooseSoil';
 import { HAUL_FLOOR, PELLET_FILL, QUEEN_MASS_G, clodMassGrams, haulFactor } from '../src/voxel/mass';
 import { HILL_VOXELS, VALLEY_VOXELS, features, groundHeight, terrainGenerator } from '../src/voxel/terrain';
-import { ceilingFor, insideBox, isGlassCell } from '../src/voxel/formicarium';
+import { ceilingFor, glassPass, insideBox, isGlassCell, soilPass } from '../src/voxel/formicarium';
 import { MAX_CLOD_AXIS_SCALE, MIN_CLOD_AXIS_SCALE, SOIL_CLOD_VARIANT_COUNT, buildClodShape, pieceSource, styleForVoxel } from '../src/voxel/clod';
 import { HEX_AIR, HEX_BULGE, HEX_HEIGHT, HEX_NEIGHBOURS, HEX_RADIUS, HexWorld, hexAt, hexCentre, hexCorners, meshHexWorld } from '../src/voxel/HexGrid';
 import { SKY_PHASES, packColor, skyAt, wrapHours } from '../src/voxel/daylight';
@@ -2972,6 +2972,66 @@ describe('formicarium box', () => {
       for (let z = 0; z < 128; z += 7) {
         for (let y = 0; y <= OPTS.ceilingY; y += 11) {
           expect(isGlassCell(x, y, z, OPTS) && insideBox(x, y, z, OPTS)).toBe(false);
+        }
+      }
+    }
+  });
+});
+
+describe('glass meshing passes', () => {
+  const OPTS = { size: 64, ceilingY: SURFACE + 14 };
+  const world = { get: (_x: number, y: number) => (y <= SURFACE ? TOPSOIL : AIR) };
+
+  it('hides the panes from the soil pass, so terrain is still meshed behind them', () => {
+    /*
+     * The trap this exists for: treat glass as solid in the soil pass and every
+     * outer wall of the world gets culled against it, so the terrain ends in a
+     * rim of nothing that you can see straight through — the same class of
+     * failure as the chunk-seam holes, arrived at from the other direction.
+     */
+    const soil = soilPass(world, OPTS);
+    expect(soil.get(0, SURFACE, 32)).toBe(AIR);
+    expect(soil.get(1, SURFACE, 32)).toBe(TOPSOIL);
+    expect(soil.get(32, OPTS.ceilingY, 32)).toBe(AIR);
+  });
+
+  it('shows the glass pass the panes and nothing else', () => {
+    const glass = glassPass(world, OPTS, STONE);
+    // A pane in open air is drawn...
+    expect(glass.get(0, SURFACE + 5, 32)).toBe(STONE);
+    // ...one buried in the ground is not: nobody can see it, and a transparent
+    // surface behind an opaque one is exactly what sorts badly.
+    expect(glass.get(0, SURFACE - 5, 32)).toBe(AIR);
+    // And ordinary soil is never glass.
+    expect(glass.get(32, SURFACE, 32)).toBe(AIR);
+  });
+
+  it('meshes both passes through the unchanged chunk mesher', () => {
+    /*
+     * The point of doing it with samplers: the container gets the same face
+     * culling, chamfer and AO as the soil, and every watertightness fix in this
+     * file's history applies to it without being reimplemented.
+     */
+    // Chunk 3 is the one holding the surface and the panes standing in open
+    // air; chunk 2 is entirely buried, where BOTH passes correctly mesh
+    // nothing at all — which is how the first version of this test failed.
+    const soil = meshChunk(soilPass(world, OPTS), 0, 3, 0);
+    const glass = meshChunk(glassPass(world, OPTS, STONE), 0, 3, 0);
+    expect(soil).not.toBeNull();
+    expect(glass).not.toBeNull();
+    expect(glass!.positions.length).toBeGreaterThan(0);
+  });
+
+  it('never lets both passes claim the same cell', () => {
+    // Two views of one world; a cell belonging to both would be drawn twice,
+    // opaque and transparent, in the same place.
+    const soil = soilPass(world, OPTS);
+    const glass = glassPass(world, OPTS, STONE);
+    for (let x = 0; x < 64; x += 3) {
+      for (let z = 0; z < 64; z += 3) {
+        for (let y = SURFACE - 6; y <= OPTS.ceilingY; y += 2) {
+          const both = soil.get(x, y, z) !== AIR && glass.get(x, y, z) !== AIR;
+          expect(both).toBe(false);
         }
       }
     }

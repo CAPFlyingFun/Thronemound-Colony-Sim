@@ -17,6 +17,8 @@
  * disagree.
  */
 
+import { AIR, isSolid, type VoxelId } from './VoxelWorld';
+
 export interface BoxOptions {
   /** Width and depth of the world in voxels. The box is the world. */
   size: number;
@@ -69,4 +71,53 @@ export function insideBox(x: number, y: number, z: number, opts: BoxOptions): bo
   return x >= PANE && z >= PANE
     && x < size - PANE && z < size - PANE
     && y >= 0 && y <= ceilingY - PANE;
+}
+
+/* --------------------------------------------------------------- meshing */
+
+/**
+ * Two passes over one mesher, rather than a mesher that knows about glass.
+ *
+ * The chunk mesher takes a Sampler and asks it what is solid. That is the whole
+ * interface, so the way to get a transparent box out of it is not to teach it
+ * transparency — it is to hand it two different views of the same world and
+ * draw the results with two different materials.
+ *
+ *  - `soilPass` shows it the world with the glass removed, so the panes cast no
+ *    faces and, more importantly, the soil behind them is still meshed. Treat
+ *    glass as solid here and every wall of the world would be culled against
+ *    it, and the terrain would end in a black rim you could see through.
+ *  - `glassPass` shows it the panes alone, so the same face-culling, chamfer
+ *    and AO that shape the soil shape the container too, for free.
+ *
+ * Neither pass is a special case inside the mesher, which is what keeps the
+ * watertightness work from this project's history applying to both.
+ */
+
+
+export interface Sampler {
+  get(x: number, y: number, z: number): VoxelId;
+}
+
+/** The world as the SOIL pass sees it: glass is not there. */
+export function soilPass(world: Sampler, opts: BoxOptions): Sampler {
+  return {
+    get: (x, y, z) => (isGlassCell(x, y, z, opts) ? AIR : world.get(x, y, z)),
+  };
+}
+
+/**
+ * The world as the GLASS pass sees it: the panes, and nothing else.
+ *
+ * A pane buried in soil is dropped. Nobody can see it, it is inside the ground,
+ * and leaving it in would mean drawing a transparent surface behind an opaque
+ * one on every column of the four walls — which is both wasted and exactly the
+ * sort of thing that sorts badly.
+ */
+export function glassPass(world: Sampler, opts: BoxOptions, glass: VoxelId): Sampler {
+  return {
+    get: (x, y, z) => (
+      isGlassCell(x, y, z, opts) && !isSolid(world.get(x, y, z)) ? glass : AIR
+    ),
+  };
 }
