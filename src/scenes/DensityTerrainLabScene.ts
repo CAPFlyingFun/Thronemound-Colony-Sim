@@ -6,7 +6,7 @@ import { buildSurfaceNets } from '../density/SurfaceNets';
 import { TerrainStream } from '../density/TerrainStream';
 import {
   BITE_DEPTH, BITE_DEPTH_MM, BITE_WIDTH_MM, BRUSH_RADIUS, CELLS_Y,
-  CELL_SIZE, CHUNK_CELLS, PELLET_SOLIDITY, WORLD_UNIT_MM, clodGeometry,
+  CELL_SIZE, CHUNK_CELLS, CLOD_DISPLAY_SCALE, PELLET_SOLIDITY, WORLD_UNIT_MM, clodGeometry,
 } from '../density/labMound';
 import {
   SOIL_DEPTH, TILE_CELLS, TILE_MM, WINDOW_BYTES, WINDOW_CELLS, WINDOW_SIZE,
@@ -40,6 +40,48 @@ const DIG_DECAY = 3;
  * spends the whole lab doing.
  */
 const STANCE = 0.35;
+
+/**
+ * How far past her mouthparts she can bite, in world units — about 2 mm.
+ *
+ * Her mandibles are not in the rig (the auto-rigger left the queen's out), so
+ * the mouth bone is the nearest honest anchor and this covers the jaws
+ * themselves plus a little of the lunge. It is also the reach limit: soil
+ * further away than this is soil she has to walk to.
+ */
+const JAW_REACH = 0.6;
+
+/**
+ * How far below level she scrapes when she is not aiming at anything reachable.
+ *
+ * Her mouthparts sit about 1.4 mm above her feet and 4 mm ahead of her centre,
+ * so a ray from them toward a target several millimetres away is very nearly
+ * level — and a level ray from a point above the ground never meets it. Aiming
+ * alone therefore found no soil at all and every bite reported that her jaws
+ * could not reach, on flat ground, with her face in the dirt.
+ */
+const DIG_PITCH = 0.7;
+
+/**
+ * The gap left under a planted foot, in world units — a hundredth of a
+ * millimetre, as asked for.
+ *
+ * Not zero, and the reason is floating point rather than taste: the foot's
+ * position comes back through a skinned mesh at float32, so a target of
+ * exactly the surface lands a hair under it about half the time, and a hair
+ * under is the clipping this exists to stop.
+ */
+const FOOT_CLEARANCE = 0.01 / WORLD_UNIT_MM;
+
+/**
+ * How close to the ground a foot must be before it is treated as standing on
+ * it — 0.6 mm, about a tenth of her body length.
+ *
+ * This is what tells a planted foot from a swinging one without the gait
+ * having to say. Too large and she drags her feet through the swing; too small
+ * and a downhill foot never finds the ground it is supposed to be pushing off.
+ */
+const FOOT_PLANT_BAND = 0.6 / WORLD_UNIT_MM;
 
 /**
  * How much of a frame may go to building newly streamed chunks.
@@ -157,6 +199,10 @@ export class DensityTerrainLabScene {
   private digPulse = 0;
   /** Her current up axis, eased toward the slope so she does not shiver. */
   private readonly up = new THREE.Vector3(0, 1, 0);
+  /** How far the worst foot was under the soil before the last solve. */
+  private footPenetration = 0;
+  /** Where the last bite was centred, so the smoke can check it was her jaws. */
+  private readonly lastBite = new THREE.Vector3();
   private sun: any = null;
   private readonly move = { forward: 0, strafe: 0 };
   private readonly heldKeys = new Set<string>();
@@ -242,7 +288,7 @@ export class DensityTerrainLabScene {
       <div class="density-lab-title">DENSITY TERRAIN LAB <span>${BITE_WIDTH_MM} mm bite · ${BITE_DEPTH_MM} mm deep</span></div>
       <div class="density-lab-status"></div>
       <div class="density-lab-crosshair" aria-hidden="true"></div>
-      <div class="density-lab-hint">Drag to orbit · pinch to zoom · WASD or the pad to walk · space to dig</div>
+      <div class="density-lab-hint">Drag to orbit · pinch to zoom · WASD or the pad to walk · space to bite (she digs with her jaws, so walk up to it)</div>
       <div class="density-lab-pad"></div>
       <div class="density-lab-actions"></div>
     `;
@@ -566,29 +612,87 @@ export class DensityTerrainLabScene {
     this.refreshResidency(true);
   };
 
+  /**
+   * Bite with her JAWS, in front of her face.
+   *
+   * It used to carve wherever the crosshair struck, which is the camera's
+   * centre and therefore roughly her middle — so the crater opened UNDER her
+   * and she lay across it like a plank over a hole, which is not what an ant
+   * does with a hole. She digs face first, so the bite starts at her
+   * mouthparts and goes where she is looking.
+   *
+   * The crosshair still aims: the direction runs from her jaws toward whatever
+   * it is pointed at, so orbiting the camera decides whether she scrapes down
+   * at her feet or forward into a bank. What the crosshair no longer does is
+   * decide WHERE the soil is removed. If it is aimed at something she cannot
+   * reach, she cannot reach it, and that is the answer rather than a crater
+   * appearing at arm's length.
+   */
   private carveAtCrosshair(): void {
     if (this.chunks.size === 0) return;
-    this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
-    const hit = this.raycaster.intersectObjects([...this.chunks.values()], false)[0];
-    if (!hit) {
-      this.status.dataset.message = 'Aim the ring at soil';
+    const jaws = new THREE.Vector3();
+    if (!this.queenReady || !this.queen.jawPosition(jaws)) {
+      this.status.dataset.message = 'Waiting for the queen';
       this.updateStatus();
       return;
     }
 
-    const inward = this.raycaster.ray.direction.clone().normalize();
+    /*
+     * Aim from the jaws, not from the camera. The crosshair picks the target;
+     * the ray that does the digging starts at her face. Where the crosshair
+     * hits nothing — sky, or past the edge of the loaded window — she scrapes
+     * forward and down, which is what she would do anyway.
+     */
+    this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
+    const aimed = this.raycaster.intersectObjects([...this.chunks.values()], false)[0];
+    const heading = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
+    const direction = aimed
+      ? aimed.point.clone().sub(jaws)
+      : heading.clone().addScaledVector(this.up, -Math.tan(DIG_PITCH));
+    if (direction.lengthSq() < 1e-10) direction.copy(heading);
+    direction.normalize();
+
+    /*
+     * Walk out from the jaws until the soil starts, and no further than she
+     * can reach. Marching the FIELD rather than raycasting the mesh, because
+     * her mandibles are often already buried — inside the soil there is no
+     * surface ahead to hit, and a mesh raycast from in there either misses
+     * everything or finds the far wall of the chamber.
+     */
+    const scrape = heading.clone()
+      .addScaledVector(this.up, -Math.tan(DIG_PITCH)).normalize();
+    /*
+     * The aimed direction first, then the scrape. Aiming is what makes the
+     * crosshair mean anything; the scrape is what she does when it does not
+     * point at soil she can reach, which on open ground is most of the time
+     * because the target is metres of ant-scale away and the ray comes out
+     * nearly level.
+     */
+    let surface = this.firstSoilFromJaws(jaws, direction);
+    if (!surface) {
+      surface = this.firstSoilFromJaws(jaws, scrape);
+      // The bite direction has to be the one that actually found the soil, or
+      // the brush is offset along a ray that missed and the crater opens
+      // beside the hole rather than in it.
+      if (surface) direction.copy(scrape);
+    }
+    if (!surface) {
+      this.status.dataset.message = 'Her jaws cannot reach that';
+      this.updateStatus();
+      return;
+    }
+
     /*
      * The brush RIDES the surface and only dips in by BITE_DEPTH.
      *
-     * Sinking the centre below the hit, as this did, buries most of the
-     * sphere and the crater ends up as deep as the centre plus the whole
-     * radius — 7.9 mm for what was advertised as a 5 mm scoop. A mandible
-     * does not do that; it scrapes. Putting the centre (radius - depth)
-     * ABOVE the surface leaves exactly a cap of height BITE_DEPTH below it,
-     * which is the bite, and the offset is negative because `inward` points
-     * into the soil.
+     * Sinking the centre below the hit buries most of the sphere and the
+     * crater ends up as deep as the centre plus the whole radius — 7.9 mm for
+     * what was advertised as a 5 mm scoop. A mandible does not do that; it
+     * scrapes. Putting the centre (radius - depth) BEHIND the surface along
+     * the bite direction leaves exactly a cap of height BITE_DEPTH in front of
+     * it, which is the bite.
      */
-    const center = hit.point.clone().addScaledVector(inward, BITE_DEPTH - BRUSH_RADIUS);
+    const center = surface.clone().addScaledVector(direction, BITE_DEPTH - BRUSH_RADIUS);
     const result = this.stream.subtractSphere(center, BRUSH_RADIUS);
     if (result.changedSamples === 0 || result.removedVolume <= 0.0001) {
       this.status.dataset.message = 'No packed soil in that scoop';
@@ -598,8 +702,21 @@ export class DensityTerrainLabScene {
 
     this.totalRemoved += result.removedVolume;
     this.digPulse = 1;
+    this.lastBite.copy(center);
     this.rebuildAround(result.bounds);
-    this.spawnPellet(hit.point, hit.face?.normal ?? new THREE.Vector3(0, 1, 0), result.removedVolume);
+    /*
+     * Spoil goes BACKWARD, over her shoulder, not straight back out of the
+     * hole. Out of the hole is toward her own face — the bite direction runs
+     * from her jaws into the soil, so its negation points at her head, and the
+     * clods spawned inside her thorax and flew through her.
+     *
+     * Which is also what an ant does with it: she passes the load back under
+     * the body and drops it behind, so the spoil ends up in a heap at the
+     * mouth of the burrow rather than back in the hole she just made.
+     */
+    const toss = this.up.clone().multiplyScalar(1.1)
+      .addScaledVector(heading, -0.9).normalize();
+    this.spawnPellet(surface, toss, result.removedVolume);
     /*
      * Reported in millimetres, because that is the unit the size argument is
      * being had in. A conservation-true clod holding what a 4 mm x 0.5 mm
@@ -607,7 +724,8 @@ export class DensityTerrainLabScene {
      * asks for — and 0.8 mm only holds a tenth of a bite. Putting the number on
      * screen is the cheapest way to settle which of the two gives.
      */
-    const clodMm = Math.cbrt(result.removedVolume / PELLET_SOLIDITY) * 2 * WORLD_UNIT_MM;
+    const clodMm = Math.cbrt(result.removedVolume / PELLET_SOLIDITY)
+      * 2 * WORLD_UNIT_MM * CLOD_DISPLAY_SCALE;
     this.status.dataset.message =
       `${(result.removedVolume * WORLD_UNIT_MM ** 3).toFixed(2)} mm³ freed · ${clodMm.toFixed(2)} mm clod`;
     this.updateStatus();
@@ -631,7 +749,7 @@ export class DensityTerrainLabScene {
      */
     const radius = THREE.MathUtils.clamp(
       Math.cbrt(volume / PELLET_SOLIDITY), 0.004, 0.4,
-    );
+    ) * CLOD_DISPLAY_SCALE;
     /*
      * A knobbly lump, not a drum.
      *
@@ -663,7 +781,9 @@ export class DensityTerrainLabScene {
     // Chunk meshes are translated but not rotated, so a face normal is already
     // in world space; the identity keeps the call honest if that ever changes.
     const normal = localNormal.clone().transformDirection(new THREE.Matrix4());
-    mesh.position.copy(point).addScaledVector(normal, radius * 1.8);
+    // Clear of her body to begin with. The bite happens at her mouthparts, so
+    // a pellet spawned at the surface starts inside her head.
+    mesh.position.copy(point).addScaledVector(normal, radius * 2.2);
     mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
@@ -672,10 +792,17 @@ export class DensityTerrainLabScene {
 
     this.pellets.push({
       mesh,
-      velocity: normal.multiplyScalar(1.4).add(new THREE.Vector3(
-        (Math.random() - 0.5) * 0.8,
-        1.3 + Math.random() * 0.7,
-        (Math.random() - 0.5) * 0.8,
+      /*
+       * The deliberate toss dominates, and the jitter only breaks the
+       * symmetry. It was the other way round — a weak toss under a strong
+       * random pop upward — which carried a clod less than two millimetres
+       * back before gravity took it, so a nine-millimetre ant was still
+       * standing in it. She has to throw the spoil clear of herself.
+       */
+      velocity: normal.multiplyScalar(2.8).add(new THREE.Vector3(
+        (Math.random() - 0.5) * 0.6,
+        0.7 + Math.random() * 0.5,
+        (Math.random() - 0.5) * 0.6,
       )),
       age: 0,
     });
@@ -732,7 +859,32 @@ export class DensityTerrainLabScene {
   }
 
   /**
-   * Which way is up under an ant of HER size.
+   * March out from her jaws along a direction and return the first packed soil
+   * within reach, or null. Half-cell steps, so nothing thinner than a bite can
+   * be stepped over.
+   */
+  private firstSoilFromJaws(jaws: any, direction: any): any {
+    const probe = new THREE.Vector3();
+    const steps = Math.ceil(JAW_REACH / (CELL_SIZE * 0.5));
+    for (let i = 0; i <= steps; i += 1) {
+      probe.copy(jaws).addScaledVector(direction, (i / steps) * JAW_REACH);
+      if (this.solidAt(probe)) return probe.clone();
+    }
+    return null;
+  }
+
+  /** Is this world point inside packed soil? */
+  private solidAt(point: any): boolean {
+    const x = point.x - this.stream.originWorldX;
+    const z = point.z - this.stream.originWorldZ;
+    const span = WINDOW_CELLS * CELL_SIZE;
+    if (x < 0 || x > span || z < 0 || z > span) return false;
+    if (point.y < 0 || point.y > CELLS_Y * CELL_SIZE) return false;
+    return this.stream.field.sample(x, point.y, z) > 0;
+  }
+
+  /**
+   * How high she stands and which way is up, at HER size.
    *
    * Measured from ground heights a body-length apart, not from the density
    * gradient at a point. The gradient is the surface normal of the soil at
@@ -746,11 +898,32 @@ export class DensityTerrainLabScene {
    * overhang that can turn her over — a bound the gradient version could not
    * give at any sampling radius.
    */
-  private groundNormal(worldX: number, worldZ: number): any {
+  private stance(worldX: number, worldZ: number): { height: number; up: any } {
     const reach = (CASTE_LENGTH_MM.queen / WORLD_UNIT_MM) * STANCE;
-    const slopeX = this.groundAt(worldX + reach, worldZ) - this.groundAt(worldX - reach, worldZ);
-    const slopeZ = this.groundAt(worldX, worldZ + reach) - this.groundAt(worldX, worldZ - reach);
-    return new THREE.Vector3(-slopeX, 2 * reach, -slopeZ).normalize();
+    const west = this.groundAt(worldX - reach, worldZ);
+    const east = this.groundAt(worldX + reach, worldZ);
+    const south = this.groundAt(worldX, worldZ - reach);
+    const north = this.groundAt(worldX, worldZ + reach);
+
+    /*
+     * Her body rides on her FEET, not on the point under her belly.
+     *
+     * Reading the ground at her centre alone means a hole narrower than she is
+     * swallows her: dig a four-millimetre pit under her middle and the body
+     * drops two and a half into it while all six feet stay on the rim, which
+     * no amount of leg solving can undo because a leg cannot fold that far. An
+     * ant standing over a small hole is held up by the rim, so the support
+     * height is the average under her stance.
+     *
+     * The max against the centre is the other half of it: her root sits at
+     * foot level, so letting it fall below the ground directly beneath her
+     * would bury her belly in any ridge she straddles.
+     */
+    const support = (west + east + south + north) / 4;
+    return {
+      height: Math.max(support, this.groundAt(worldX, worldZ)),
+      up: new THREE.Vector3(-(east - west), 2 * reach, -(north - south)).normalize(),
+    };
   }
 
   /**
@@ -763,7 +936,8 @@ export class DensityTerrainLabScene {
    * that is most obvious.
    */
   private stand(): void {
-    this.antPosition.y = this.groundAt(this.antPosition.x, this.antPosition.z);
+    const ground = this.stance(this.antPosition.x, this.antPosition.z);
+    this.antPosition.y = ground.height;
     if (!this.queenReady) return;
     this.queen.root.position.copy(this.antPosition);
 
@@ -780,8 +954,7 @@ export class DensityTerrainLabScene {
      * quarter-millimetre grit on it, so taking each frame's slope literally
      * makes her shiver.
      */
-    const up = this.groundNormal(this.antPosition.x, this.antPosition.z);
-    this.up.lerp(up, 0.15).normalize();
+    this.up.lerp(ground.up, 0.15).normalize();
     const forward = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
     forward.addScaledVector(this.up, -forward.dot(this.up));
     if (forward.lengthSq() < 1e-8) forward.set(0, 0, 1);
@@ -869,7 +1042,9 @@ export class DensityTerrainLabScene {
       Removed: ${this.totalRemoved.toFixed(1)} voxel³ · ${physicalVolumeMm3.toFixed(0)} mm³<br>
       World: ${WORLD_TILES}×${WORLD_TILES} tiles of ${TILE_MM} mm = ${WORLD_SPAN * WORLD_UNIT_MM} mm<br>
       Tile ${tileX},${tileZ} · window ${WINDOW_CELLS}×${CELLS_Y}×${WINDOW_CELLS} = ${megabytes} MB<br>
-      Queen: ${this.queenReady ? `${CASTE_LENGTH_MM.queen} mm long` : 'loading…'}<br>
+      Queen: ${this.queenReady
+        ? `${CASTE_LENGTH_MM.queen} mm · feet ${(this.footPenetration * WORLD_UNIT_MM).toFixed(2)} mm corrected`
+        : 'loading…'}<br>
       Mesh: ${this.lastMeshMs.toFixed(1)} ms · scroll ${this.lastScrollMs.toFixed(1)} ms${queued}<br>
       Dug: ${this.stream.editedSamples} samples kept
     `;
@@ -917,6 +1092,16 @@ export class DensityTerrainLabScene {
         digging: this.digPulse,
         carrying: 0,
       });
+      /*
+       * Feet AFTER the gait, every frame. The gait poses her legs from the
+       * body's frame alone and cannot know what the ground is doing, so
+       * without this her feet sink into every rise she walks over and hang
+       * above every hollow — and into her own diggings most of all, which is
+       * the one place the lab guarantees the ground is not flat.
+       */
+      this.footPenetration = this.queen.solveFeet(
+        (x, z) => this.groundAt(x, z), FOOT_CLEARANCE, FOOT_PLANT_BAND,
+      );
     }
     this.controls.update();
     this.drainPending(now - this.previousFrameStart);

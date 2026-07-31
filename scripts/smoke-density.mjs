@@ -123,7 +123,7 @@ for (const view of CASES) {
    */
   const banner = (await page.locator('.density-lab-status').innerText()).replace(/\s+/g, ' ');
   if (/failed to load|loading/.test(banner)) fail(`queen model did not load: "${banner}"`);
-  else if (!/Queen: \d+ mm long/.test(banner)) fail(`HUD does not report the queen: "${banner}"`);
+  else if (!/Queen: \d+ mm/.test(banner)) fail(`HUD does not report the queen: "${banner}"`);
   else ok(`queen loaded and scaled (${/Queen: [^·<]*/.exec(banner)?.[0].trim()})`);
 
   /*
@@ -178,7 +178,13 @@ for (const view of CASES) {
     const lab = window.labScene;
     if (!lab) return null;
     const before = lab.antPosition.y;
-    const r = lab.stream.field.cellSize * 8;
+    /*
+     * Wider than she is. Her body rides on her stance, so a hole narrower than
+     * her footprint is one she straddles rather than falls into — which is
+     * correct, and which makes a narrow hole the wrong instrument for asking
+     * whether she follows the ground down.
+     */
+    const r = lab.stream.field.cellSize * 40;
     for (let i = 0; i < 6; i += 1) {
       lab.stream.subtractSphere(
         { x: lab.antPosition.x, y: before + r - i * 0.1, z: lab.antPosition.z }, r,
@@ -193,6 +199,91 @@ for (const view of CASES) {
   } else {
     const mm = (drop.before - drop.after) * 5;
     ok(`she drops ${mm.toFixed(2)} mm when the soil under her is removed`);
+  }
+
+  /*
+   * The DRAWN legs against the soil, not the skeleton.
+   *
+   * The first version of this check measured foot BONES, found all six sitting
+   * a hundredth of a millimetre above the ground exactly as designed, and
+   * passed — while 5,875 of her 80,754 rendered vertices were under the
+   * surface, the worst by 0.4 mm, which is what you actually see. A skeleton
+   * is a set of lines; a leg is a tube drawn around them, and the joint above
+   * the foot was a quarter-millimetre under with the tube's radius below that
+   * again. Measuring the thing that is displayed is the only version of this
+   * question that means anything.
+   */
+  const legs = await page.evaluate(() => {
+    const lab = window.labScene;
+    if (!lab?.queenReady) return null;
+    lab.queen.root.updateMatrixWorld(true);
+    const legBones = new Set(lab.queen.rig.legs.flatMap((l) => l.bones));
+    let checked = 0;
+    let buried = 0;
+    let deepest = 0;
+    let touching = 0;
+    const scratch = { x: 0, y: 0, z: 0 };
+    lab.queen.root.traverse((n) => {
+      if (!n.isSkinnedMesh) return;
+      const position = n.geometry.attributes.position;
+      const skinIndex = n.geometry.attributes.skinIndex;
+      const skinWeight = n.geometry.attributes.skinWeight;
+      for (let i = 0; i < position.count; i++) {
+        let best = 0, bestWeight = -1;
+        for (let k = 0; k < 4; k++) {
+          const w = skinWeight.getComponent(i, k);
+          if (w > bestWeight) { bestWeight = w; best = skinIndex.getComponent(i, k); }
+        }
+        const bone = n.skeleton.bones[best];
+        if (!bone || !legBones.has(bone.name)) continue;
+        const v = n.getVertexPosition(i, n.position.clone());
+        n.localToWorld(v);
+        const gap = v.y - lab.groundAt(v.x, v.z);
+        checked++;
+        if (gap < 0) { buried++; deepest = Math.min(deepest, gap); }
+        if (gap >= 0 && gap * 5 < 0.25) touching++;
+      }
+    });
+    return { checked, buried, deepestMm: deepest * 5, touching };
+  });
+  if (!legs || legs.checked < 1000) fail(`could not measure the drawn legs (${legs?.checked})`);
+  else if (legs.buried > 0) {
+    fail(`${legs.buried} of ${legs.checked} leg vertices are under the soil, worst ${legs.deepestMm.toFixed(3)} mm`);
+  } else {
+    ok(`no part of a drawn leg is under the soil (${legs.checked} vertices)`);
+    // And they must REACH it — six legs held clear of the ground would pass
+    // the check above while looking like she is hovering.
+    if (legs.touching < 20) fail(`her legs are not touching the ground (${legs.touching} vertices within 0.25 mm)`);
+    else ok(`${legs.touching} leg vertices are resting on the surface`);
+  }
+
+  /*
+   * Does she dig with her FACE?
+   *
+   * Reported as her lying across the hole like a plank over it, which is what
+   * digging at the camera's crosshair produces: the crosshair is the centre of
+   * the screen, the camera looks at her, so the crater opens under her middle.
+   * The bite has to start at her mouthparts instead. Measured as a comparison
+   * rather than a threshold, because the right number depends on her size and
+   * the answer either way is unambiguous: the crater is nearer her jaws than
+   * her belly, or the change did not happen.
+   */
+  const bite = await page.evaluate(() => {
+    const lab = window.labScene;
+    if (!lab?.queenReady) return null;
+    const jaws = new (lab.antPosition.constructor)();
+    if (!lab.queen.jawPosition(jaws)) return null;
+    return {
+      toJaws: lab.lastBite.distanceTo(jaws),
+      toBelly: lab.lastBite.distanceTo(lab.antPosition),
+    };
+  });
+  if (!bite) fail('could not locate the last bite');
+  else if (!(bite.toJaws < bite.toBelly)) {
+    const mm = (v) => (v * 5).toFixed(2);
+    fail(`the bite landed under her body: ${mm(bite.toJaws)} mm from the jaws, ${mm(bite.toBelly)} mm from the centre`);
+  } else {
+    ok(`bite lands at her jaws (${(bite.toJaws * 5).toFixed(2)} mm) not her centre (${(bite.toBelly * 5).toFixed(2)} mm)`);
   }
 
   const status = (await page.locator('.density-lab-status').innerText()).replace(/\s+/g, ' ');

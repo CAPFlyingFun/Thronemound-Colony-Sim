@@ -84,6 +84,25 @@ export const CLOD_ROUGHNESS = 0.17;
 export const CLOD_SQUASH = 0.86;
 
 /**
+ * A look adjustment on the drawn pellet, and the one number here that is NOT
+ * derived from anything.
+ *
+ * A clod sized to hold what a 4 mm x 0.5 mm scrape removes comes out about
+ * 2.9 mm across, which next to a 9 mm queen is a third of her body — asked to
+ * be halved, and halved it is. Radius scales as the cube root of volume, so a
+ * half-size clod holds an EIGHTH of what the bite took: the pellets no longer
+ * carry the soil away, and roughly seven eighths of every scrape simply
+ * vanishes.
+ *
+ * That is a real property being given up, not a rounding, so it lives behind
+ * its own name rather than being folded into `PELLET_SOLIDITY` where it would
+ * read as part of the geometry. Two ways to get it back if it is ever wanted:
+ * drop the bite to about 0.06 mm deep, which makes 1.5 mm the honest size, or
+ * spawn eight clods a bite instead of one.
+ */
+export const CLOD_DISPLAY_SCALE = 0.5;
+
+/**
  * Volume of the drawn pellet per unit of radius cubed.
  *
  * The pellet used to be `CylinderGeometry(r, 0.92r, 1.45r, 8)` — an octagonal
