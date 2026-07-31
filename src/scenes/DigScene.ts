@@ -15,6 +15,7 @@ import {
   isSolid, layeredGenerator, materialOf, type VoxelId,
 } from '../voxel/VoxelWorld';
 import { clodMassGrams, haulFactor } from '../voxel/mass';
+import { groundHeight, terrainGenerator, type TerrainOptions } from '../voxel/terrain';
 import { FACES, burialShade, meshChunk } from '../voxel/mesher';
 import {
   buildFracture, cellCentre, chipHalfExtent, chipMeshData, chipOffset, eventsBetween, hashVoxel,
@@ -135,7 +136,9 @@ const EDGE_ARC = 0.55;
  * surface is correct, because you are gripping the walls of the hole you are
  * standing in.
  */
-const UNDERGROUND_Y = SURFACE_Y + 0.9;
+const UNDERGROUND_COVER = 0.9;
+/** The world's own relief, shared by the generator, spawning and depth. */
+const TERRAIN: TerrainOptions = { surfaceY: SURFACE_Y, size: WORLD_SIZE, seed: 7 };
 /** Constant descent when nothing is underfoot below ground. 1 cm/s. */
 const SETTLE_SPEED = 2;
 /**
@@ -497,7 +500,7 @@ export class DigScene {
   /** Grace remaining on wall contact, so the block/creep stutter reads as continuous. */
   private wallContact = 0;
 
-  private readonly founding = new QueenFounding(SURFACE_Y, VOXEL_MM);
+  private readonly founding = new QueenFounding((x, z) => groundHeight(x, z, TERRAIN), VOXEL_MM);
   /** After founding, the camera detaches from the queen and orbits the den. */
   private debug = false;
   private colonyView = false;
@@ -572,7 +575,7 @@ export class DigScene {
     this.scene.fog = new THREE.Fog(SKY_HORIZON, 40, 150);
     this.loadSky();
 
-    this.world = new VoxelWorld(WORLD_SIZE, WORLD_SIZE, WORLD_SIZE, layeredGenerator(SURFACE_Y));
+    this.world = new VoxelWorld(WORLD_SIZE, WORLD_SIZE, WORLD_SIZE, terrainGenerator(TERRAIN));
     // One cube at a time. An ant carries a grain, not a wheelbarrow — and it
     // makes the mound something you actually build rather than dump.
     this.session = new DigSession(this.world, { capacityVoxels: 1 });
@@ -639,7 +642,18 @@ export class DigScene {
     this.scene.add(this.highlight);
     box.dispose();
 
-    this.position.set(WORLD_SIZE / 2 + 0.5, SURFACE_Y + 3, WORLD_SIZE / 2 + 0.5);
+    /*
+     * Stood on the ground rather than at a fixed height.
+     *
+     * The middle of the world is no longer at SURFACE_Y — it can be anywhere
+     * between the hollow and the hill — so spawning at a constant would drop
+     * her through the floor in one place and bury her in the other.
+     */
+    const spawnX = Math.floor(WORLD_SIZE / 2);
+    const spawnZ = Math.floor(WORLD_SIZE / 2);
+    this.position.set(
+      spawnX + 0.5, groundHeight(spawnX, spawnZ, TERRAIN) + 3, spawnZ + 0.5,
+    );
 
     // ?debug=den pre-carves a qualifying shaft + chamber and drops the queen in
     // it. Founding otherwise needs 40 voxels of hand-digging, which makes both
@@ -2243,6 +2257,25 @@ export class DigScene {
   }
 
   /**
+   * Is she under the ground, rather than under a fixed height?
+   *
+   * Weightlessness and the close-work speed both hang off this, and both used
+   * to compare against SURFACE_Y + 0.9 — a single plane. On a world with a hill
+   * in it that is wrong twice over: standing on top of the hill she would be
+   * "underground" for the whole ten voxels of it, gripping the air and moving
+   * at tunnel pace, while the floor of the hollow is genuinely enclosed and
+   * would have read as open sky.
+   *
+   * So it asks the column: is there soil over her head. Which is what being
+   * underground has always meant.
+   */
+  private underground(): boolean {
+    const x = Math.floor(this.position.x);
+    const z = Math.floor(this.position.z);
+    return this.position.y < groundHeight(x, z, TERRAIN) + UNDERGROUND_COVER;
+  }
+
+  /**
    * What she is carrying, in grams.
    *
    * Summed from the load's own source cells rather than from a count, because
@@ -2500,7 +2533,7 @@ export class DigScene {
     // Underground is close work, and a loaded ant is a working ant. Keyed off
     // depth rather than `weightless`, so speed depends on where she is and not
     // on what she happens to be brushing against.
-    const load = this.position.y < UNDERGROUND_Y ? UNDERGROUND_SPEED : 1;
+    const load = this.underground() ? UNDERGROUND_SPEED : 1;
     const haul = haulFactor(this.carriedMass());
     const gait = this.keyGait ?? this.gait;
     const targetSpeed = moving ? speedForStick(magnitude, gait, DEFAULT_BANDS) * load * haul : 0;
@@ -2544,7 +2577,7 @@ export class DigScene {
     const touching = rankSurfaces(this.world, this.position, this.surface, wish).length > 0;
     // `airborne` is what makes "jump releases you" true underground: without
     // it the leap would be cancelled by the weightlessness it is escaping.
-    this.weightless = !this.airborne && this.position.y < UNDERGROUND_Y && touching;
+    this.weightless = !this.airborne && this.underground() && touching;
     if (this.weightless) {
       /*
        * Always settle, and let COLLISION decide when she has landed.
@@ -2862,8 +2895,9 @@ export class DigScene {
   private carveDebugDen(): void {
     const cx = Math.floor(WORLD_SIZE / 2);
     const cz = Math.floor(WORLD_SIZE / 2);
-    const floorY = SURFACE_Y - DEN_MIN_DEPTH - 2;
-    for (let y = SURFACE_Y; y >= floorY; y--) this.world.dig(cx, y, cz);
+    const top = groundHeight(cx, cz, TERRAIN);
+    const floorY = top - DEN_MIN_DEPTH - 2;
+    for (let y = top; y >= floorY; y--) this.world.dig(cx, y, cz);
     for (let dy = 0; dy < 3; dy++) {
       for (let dz = -1; dz <= 1; dz++) {
         for (let dx = -1; dx <= 1; dx++) this.world.dig(cx + dx, floorY + dy, cz + dz);
