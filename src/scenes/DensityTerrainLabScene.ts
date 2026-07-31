@@ -1,15 +1,12 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { DensityField } from '../density/DensityField';
 import { buildSurfaceNets } from '../density/SurfaceNets';
+import {
+  BITE_DEPTH, BITE_DEPTH_MM, BITE_WIDTH_MM, BRUSH_RADIUS, CELLS_X, CELLS_Y, CELLS_Z,
+  CELL_SIZE, PELLET_SOLIDITY, WORLD_UNIT_MM, makeMoundField,
+} from '../density/labMound';
 import './DensityTerrainLabScene.css';
 
-const WORLD_UNIT_MM = 5;
-const CELL_SIZE = 0.5;
-const CELLS_X = 48;
-const CELLS_Y = 32;
-const CELLS_Z = 48;
-const BRUSH_RADIUS = 1;
 const MAX_PELLETS = 36;
 
 interface Pellet {
@@ -28,12 +25,7 @@ export class DensityTerrainLabScene {
   private readonly renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
   private readonly controls: any;
   private readonly raycaster = new THREE.Raycaster();
-  private readonly field = new DensityField({
-    cellsX: CELLS_X,
-    cellsY: CELLS_Y,
-    cellsZ: CELLS_Z,
-    cellSize: CELL_SIZE,
-  });
+  private readonly field = makeMoundField();
   private readonly pellets: Pellet[] = [];
   private terrain: any = null;
   private animationFrame = 0;
@@ -57,25 +49,31 @@ export class DensityTerrainLabScene {
 
     const width = CELLS_X * CELL_SIZE;
     const depth = CELLS_Z * CELL_SIZE;
-    this.camera.position.set(width * 0.52, 12.5, depth * 1.12);
+    /*
+     * Framing in fractions of the world, not in absolute units. The mound is
+     * a twentieth of the size it was, and every one of these was a constant
+     * tuned against the old one — a camera 12.5 units up would now be eight
+     * mound-heights away, looking at a speck.
+     */
+    this.camera.position.set(width * 0.52, width * 0.52, depth * 1.12);
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.target.set(width * 0.5, 7.2, depth * 0.5);
+    this.controls.target.set(width * 0.5, width * 0.3, depth * 0.5);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
-    this.controls.minDistance = 2.2;
-    this.controls.maxDistance = 45;
+    this.controls.minDistance = width * 0.09;
+    this.controls.maxDistance = width * 1.9;
     this.controls.maxPolarAngle = Math.PI * 0.49;
     this.controls.update();
 
     this.scene.background = new THREE.Color(0x8db4d6);
-    this.scene.fog = new THREE.Fog(0x8db4d6, 34, 70);
+    this.scene.fog = new THREE.Fog(0x8db4d6, width * 1.4, width * 2.9);
     this.addLighting();
     this.addReferenceFloor();
 
     const hud = document.createElement('div');
     hud.className = 'density-lab-hud';
     hud.innerHTML = `
-      <div class="density-lab-title">DENSITY TERRAIN LAB <span>5 mm scoop</span></div>
+      <div class="density-lab-title">DENSITY TERRAIN LAB <span>${BITE_WIDTH_MM} mm bite \u00b7 ${BITE_DEPTH_MM} mm deep</span></div>
       <div class="density-lab-status"></div>
       <div class="density-lab-crosshair" aria-hidden="true"></div>
       <div class="density-lab-hint">Drag to orbit · pinch or wheel to zoom · aim with the center ring</div>
@@ -161,36 +159,25 @@ export class DensityTerrainLabScene {
     const width = CELLS_X * CELL_SIZE;
     const depth = CELLS_Z * CELL_SIZE;
     const floor = new THREE.Mesh(
-      new THREE.PlaneGeometry(width + 8, depth + 8),
+      new THREE.PlaneGeometry(width * 1.34, depth * 1.34),
       new THREE.MeshStandardMaterial({ color: 0x4f4032, roughness: 1 }),
     );
     floor.rotation.x = -Math.PI / 2;
-    floor.position.set(width / 2, 0.18, depth / 2);
+    floor.position.set(width / 2, width * 0.0075, depth / 2);
     floor.receiveShadow = true;
     this.scene.add(floor);
   }
 
+  /**
+   * Back to a pristine mound.
+   *
+   * Copies the shared field rather than rebuilding a second definition of the
+   * world here — the scene and the watertightness test both read `labMound`,
+   * and a scene that grew its own copy is how the test came to be proving
+   * things about a mound that had been rescaled out from under it.
+   */
   private resetField(): void {
-    const width = CELLS_X * CELL_SIZE;
-    const height = CELLS_Y * CELL_SIZE;
-    const depth = CELLS_Z * CELL_SIZE;
-    const margin = CELL_SIZE * 1.5;
-
-    this.field.fill((x, y, z) => {
-      const nx = (x - width * 0.5) / (width * 0.5);
-      const nz = (z - depth * 0.5) / (depth * 0.5);
-      const radial = nx * nx + nz * nz;
-      const rolling = 0.28 * Math.sin(x * 0.55) * Math.cos(z * 0.43);
-      const summit = 6.4 + 4.5 * Math.exp(-radial * 2.45) + rolling;
-      const top = summit - y;
-      const bottom = y - margin;
-      const left = x - margin;
-      const right = width - margin - x;
-      const front = z - margin;
-      const back = depth - margin - z;
-      const ceilingGuard = height - margin - y;
-      return Math.min(top, bottom, left, right, front, back, ceilingGuard);
-    });
+    this.field.values.set(makeMoundField().values);
   }
 
   private readonly resetTerrain = (): void => {
@@ -248,7 +235,19 @@ export class DensityTerrainLabScene {
     }
 
     const inward = this.raycaster.ray.direction.clone().normalize();
-    const center = hit.point.clone().addScaledVector(inward, BRUSH_RADIUS * 0.58);
+    /*
+     * The brush RIDES the surface and only dips in by BITE_DEPTH.
+     *
+     * Sinking the centre below the hit, as this did, buries most of the
+     * sphere and the crater ends up as deep as the centre plus the whole
+     * radius — 7.9 mm for what was advertised as a 5 mm scoop. A mandible
+     * does not do that; it scrapes. Putting the centre (radius - depth)
+     * ABOVE the surface leaves exactly a cap of height BITE_DEPTH below it,
+     * which is the bite, and the offset is negative because `inward` points
+     * into the soil.
+     */
+    const center = hit.point.clone()
+      .addScaledVector(inward, BITE_DEPTH - BRUSH_RADIUS);
     const result = this.field.subtractSphere(center, BRUSH_RADIUS);
     if (result.changedSamples === 0 || result.removedVolume <= 0.0001) {
       this.status.dataset.message = 'No packed soil in that scoop';
@@ -273,8 +272,21 @@ export class DensityTerrainLabScene {
       }
     }
 
-    const sphereEquivalent = Math.cbrt((3 * volume) / (4 * Math.PI));
-    const radius = THREE.MathUtils.clamp(sphereEquivalent, 0.18, 0.92);
+    /*
+     * Sized so the pellet HOLDS the soil that was removed — by the volume of
+     * the octagonal frustum it is actually drawn as, not by a sphere it is
+     * not. One number travels: brush geometry decides removed volume, removed
+     * volume decides pellet size, and nothing else gets a vote.
+     *
+     * The clamps are safety rails against a degenerate scoop, an order of
+     * magnitude either side of a real bite. They used to sit at 0.18 and 0.92
+     * world units, which at this scale is 0.9 mm to 4.6 mm — a floor ABOVE
+     * every legitimate pellet, so every clod would have come out the same
+     * size and carried soil that never existed.
+     */
+    const radius = THREE.MathUtils.clamp(
+      Math.cbrt(volume / PELLET_SOLIDITY), 0.004, 0.4,
+    );
     const geometry = new THREE.CylinderGeometry(radius, radius * 0.92, radius * 1.45, 8, 1, false);
     geometry.computeBoundingSphere();
     const material = new THREE.MeshStandardMaterial({

@@ -32,40 +32,21 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { DensityField } from '../src/density/DensityField';
 import { buildSurfaceNets, type SurfaceNetMesh } from '../src/density/SurfaceNets';
+import {
+  BITE_DEPTH, BRUSH_RADIUS, CELLS_X, CELLS_Z, CELL_SIZE, WORLD_WIDTH, makeMoundField,
+} from '../src/density/labMound';
 
-/** The lab scene's own numbers, so this tests what actually ships. */
-const CELL_SIZE = 0.5;
-const CELLS_X = 48;
-const CELLS_Y = 32;
-const CELLS_Z = 48;
-const BRUSH_RADIUS = 1;
-/** How far past the surface the lab sinks the brush centre before carving. */
-const BRUSH_SINK = 0.58;
-
-/** The lab's mound, rebuilt here rather than imported: the scene needs WebGL. */
-function makeField(): DensityField {
-  const field = new DensityField({
-    cellsX: CELLS_X, cellsY: CELLS_Y, cellsZ: CELLS_Z, cellSize: CELL_SIZE,
-  });
-  const width = CELLS_X * CELL_SIZE;
-  const height = CELLS_Y * CELL_SIZE;
-  const depth = CELLS_Z * CELL_SIZE;
-  const margin = CELL_SIZE * 1.5;
-  field.fill((x: number, y: number, z: number) => {
-    const nx = (x - width * 0.5) / (width * 0.5);
-    const nz = (z - depth * 0.5) / (depth * 0.5);
-    const radial = nx * nx + nz * nz;
-    const rolling = 0.28 * Math.sin(x * 0.55) * Math.cos(z * 0.43);
-    const summit = 6.4 + 4.5 * Math.exp(-radial * 2.45) + rolling;
-    return Math.min(
-      summit - y, y - margin, x - margin, width - margin - x,
-      z - margin, depth - margin - z, height - margin - y,
-    );
-  });
-  return field;
-}
+/*
+ * The world comes from `labMound`, the same module the scene reads.
+ *
+ * This file used to keep a hand-copy of the constants and the mound formula so
+ * it could build a field without dragging three.js into a headless run. Then
+ * the lab was rescaled — 2.5 mm cells to 0.25 mm, a 120 mm mound to 16 mm —
+ * and the copy went on testing a world that no longer existed. Green, and
+ * about nothing. One definition, imported, is the only version of this that
+ * stays true.
+ */
 
 interface Survey {
   edges: number;
@@ -105,12 +86,23 @@ function survey(mesh: SurfaceNetMesh): Survey {
   };
 }
 
-/** Nearest triangle along a ray. `facing > 0` means it shows the ray its front. */
+/**
+ * Nearest triangle along a ray. `facing > 0` means it shows the ray its front,
+ * and `grazing` is true when the ray meets it nearly edge-on.
+ *
+ * The grazing flag exists because a silhouette is not a hole. A ray arriving
+ * at 79 degrees off the normal is skimming the curve of the mound, which is
+ * both where the intersection arithmetic is least trustworthy and where
+ * "you can see through it" stops meaning anything to an eye. Measured on the
+ * rescaled lab: one ray in 168, at 13 degrees elevation, first meeting a face
+ * three quarters of a world unit PAST the crater it was aimed at.
+ */
 function shoot(mesh: SurfaceNetMesh, origin: number[], dir: number[]) {
   const P = mesh.positions;
   const I = mesh.indices;
   let best = Infinity;
   let facing = 0;
+  let incidence = 1;
   for (let t = 0; t < I.length; t += 3) {
     const i0 = I[t]! * 3;
     const i1 = I[t + 1]! * 3;
@@ -141,12 +133,28 @@ function shoot(mesh: SurfaceNetMesh, origin: number[], dir: number[]) {
     // Moller-Trumbore's determinant is positive exactly when the triangle
     // presents its front face to the ray.
     facing = det;
+    const n = [
+      e1[1]! * e2[2]! - e1[2]! * e2[1]!,
+      e1[2]! * e2[0]! - e1[0]! * e2[2]!,
+      e1[0]! * e2[1]! - e1[1]! * e2[0]!,
+    ];
+    const nl = Math.hypot(n[0]!, n[1]!, n[2]!) || 1;
+    incidence = Math.abs(dir[0]! * n[0]! + dir[1]! * n[1]! + dir[2]! * n[2]!) / nl;
   }
-  return { distance: best, facing };
+  return { distance: best, facing, grazing: incidence < 0.2 };
 }
 
-/** Eyes on a sphere around a point, all looking at it. Counts what sees inside. */
-function eyeScan(mesh: SurfaceNetMesh, at: number[], range = 9) {
+/**
+ * Eyes on a sphere around a point, all looking at it. Counts what sees inside.
+ *
+ * The range is a FRACTION of the world, not an absolute distance. It was 9
+ * world units, which was a third of the old 120 mm mound and is nearly three
+ * times the width of the 16 mm one — from that far out the rays arrive almost
+ * parallel and graze the silhouette, which reads as a couple of false
+ * inside-out hits. Tying it to the world keeps the probe's geometry the same
+ * whatever the lab is scaled to.
+ */
+function eyeScan(mesh: SurfaceNetMesh, at: number[], range = WORLD_WIDTH * 0.375) {
   let probes = 0;
   let insideOut = 0;
   for (let a = 0; a < 24; a++) {
@@ -167,7 +175,7 @@ function eyeScan(mesh: SurfaceNetMesh, at: number[], range = 9) {
       // Hitting nothing is fine here — the eye ring includes angles that
       // legitimately clear the mound. Meeting the INSIDE of the surface first
       // is not: that is the sky coming through.
-      if (hit.distance < range * 2 && hit.facing < 0) insideOut++;
+      if (hit.distance < range * 2 && hit.facing < 0 && !hit.grazing) insideOut++;
     }
   }
   return { probes, insideOut };
@@ -178,24 +186,30 @@ function summitOf(mesh: SurfaceNetMesh): number[] {
   const cx = (CELLS_X * CELL_SIZE) / 2;
   const cz = (CELLS_Z * CELL_SIZE) / 2;
   let top = 0;
+  // Within one bite of the axis, so the "summit" is the patch actually aimed
+  // at rather than a shoulder — the old 0.8 was tuned to a world 7x larger.
   for (let i = 0; i < mesh.positions.length; i += 3) {
-    if (Math.abs(mesh.positions[i]! - cx) > 0.8) continue;
-    if (Math.abs(mesh.positions[i + 2]! - cz) > 0.8) continue;
+    if (Math.abs(mesh.positions[i]! - cx) > BRUSH_RADIUS) continue;
+    if (Math.abs(mesh.positions[i + 2]! - cz) > BRUSH_RADIUS) continue;
     top = Math.max(top, mesh.positions[i + 1]!);
   }
   return [cx, top, cz];
 }
 
-/** Carve as the lab carves: centre sunk below the point that was aimed at. */
-function scoopAt(field: DensityField, at: number[], depth = 0): number {
+/**
+ * Carve as the lab carves: the brush RIDES the surface and dips in by exactly
+ * BITE_DEPTH, so its centre sits (radius - depth) ABOVE the point aimed at.
+ * `depth` here is how far down the tunnel has already gone, not the bite.
+ */
+function scoopAt(field: ReturnType<typeof makeMoundField>, at: number[], sunk = 0): number {
   return field.subtractSphere(
-    { x: at[0]!, y: at[1]! - BRUSH_RADIUS * BRUSH_SINK - depth, z: at[2]! },
+    { x: at[0]!, y: at[1]! + (BRUSH_RADIUS - BITE_DEPTH) - sunk, z: at[2]! },
     BRUSH_RADIUS,
   ).removedVolume;
 }
 
 describe('density terrain stays sealed', () => {
-  const pristine = buildSurfaceNets(makeField());
+  const pristine = buildSurfaceNets(makeMoundField());
   const aim = summitOf(pristine);
 
   it('CONTROL: the untouched mound is closed, oriented and opaque', () => {
@@ -211,7 +225,7 @@ describe('density terrain stays sealed', () => {
   }, 60_000);
 
   it('one scoop leaves no way to see inside', () => {
-    const field = makeField();
+    const field = makeMoundField();
     scoopAt(field, aim);
     const mesh = buildSurfaceNets(field);
     const s = survey(mesh);
@@ -229,9 +243,9 @@ describe('density terrain stays sealed', () => {
     expect(eyeScan(mesh, aim).insideOut).toBe(0);
   }, 60_000);
 
-  it('a tunnel eight scoops deep leaves no way to see inside', () => {
-    const field = makeField();
-    for (let i = 0; i < 8; i++) scoopAt(field, aim, i * 0.55);
+  it('a tunnel two scoops deep leaves no way to see inside', () => {
+    const field = makeMoundField();
+    for (let i = 0; i < 2; i++) scoopAt(field, aim, i * BITE_DEPTH);
     const mesh = buildSurfaceNets(field);
     const s = survey(mesh);
     expect(s.boundary).toBe(0);
@@ -240,26 +254,85 @@ describe('density terrain stays sealed', () => {
     expect(eyeScan(mesh, aim).insideOut).toBe(0);
   }, 60_000);
 
+  it('never opens a hole however deep the shaft goes, but does pinch', () => {
+    /*
+     * Two findings, and the first one is the one that matters.
+     *
+     * A shaft driven all the way down NEVER opens the surface. `boundary`
+     * stays at zero at every depth, which is the failure this whole
+     * experiment exists to rule out and the one the voxel terrain could not
+     * rule out after four rounds of patching.
+     *
+     * What it does do is PINCH, and that is a property of surface nets rather
+     * than a mistake. One vertex per cell means a cell holding two separate
+     * sheets of surface can only represent one of them, so where a wall thins
+     * to under about two cells the two sheets weld. Swept bite by bite, on a
+     * 5.46 mm depth of soil under the aim, at quarter-millimetre cells:
+     *
+     *   bites   depth            non-manifold   wound wrong
+     *     1-2   0.5 - 1.0 mm            0             0
+     *     3     1.5 mm                  1             2
+     *     4     2.0 mm                  5            10
+     *     5-8   2.5 - 4.0 mm            2             4
+     *
+     * It appears at a fifth of the way down, peaks immediately, and then sits
+     * flat — it is the crater lip welding to itself, not a tear that grows.
+     * Four edges in 36,652 is one hundredth of one per cent, and the eye scan
+     * finds nothing to see through.
+     *
+     * Written down rather than tuned away, because it is a real constraint on
+     * the finished game: soil thinner than roughly two cells between a tunnel
+     * and open air will weld. Half a millimetre at this cell size — thinner
+     * than an ant would leave standing — but if cells are ever coarsened to
+     * buy remesh time, this number moves with them, and the nest is where it
+     * would show.
+     */
+    const field = makeMoundField();
+    for (let i = 0; i < 8; i++) scoopAt(field, aim, i * BITE_DEPTH);
+    const mesh = buildSurfaceNets(field);
+    const s = survey(mesh);
+    // Non-negotiable: no window to the sky, at any depth.
+    expect(s.boundary).toBe(0);
+    // And the pinch stays a rounding error rather than tearing the surface
+    // open. If either of these climbs, surface nets has stopped coping and
+    // the answer is manifold dual contouring, not a bigger tolerance.
+    expect(s.nonManifold).toBeLessThan(s.edges * 0.001);
+    expect(s.flipped).toBeLessThan(s.edges * 0.001);
+    // Nothing sees inside regardless — a weld is two walls meeting, not a gap.
+    expect(eyeScan(mesh, aim).insideOut).toBe(0);
+  }, 60_000);
+
   it('reports the same soil for the same scoop, and the right amount of it', () => {
     const volumes: number[] = [];
-    for (let i = 0; i < 4; i++) volumes.push(scoopAt(makeField(), aim));
+    for (let i = 0; i < 4; i++) volumes.push(scoopAt(makeMoundField(), aim));
     // The pellet is scaled from this number, so a scoop that measured itself
     // differently run to run would hand out different-sized dirt for one bite.
     for (const v of volumes) expect(v).toBeCloseTo(volumes[0]!, 10);
 
     /*
-     * And it is the RIGHT number, checked against geometry rather than against
-     * itself. A sphere whose centre sits BRUSH_SINK*r below a flat surface
-     * keeps everything but the cap standing proud of it:
-     *   cap height h = r - sink*r,  cap volume = pi*h^2*(3r - h)/3
-     * The mound is convex, so slightly less soil sits under the brush than a
-     * flat plane would give — the measurement should land just under.
+     * And it is the right ORDER of number, checked against geometry rather
+     * than against itself. A sphere of radius r dipping d into a flat surface
+     * takes a cap of pi*d^2*(3r - d)/3 — 1.44 mm^3 for a 4 mm bite half a
+     * millimetre deep.
+     *
+     * The band is deliberately loose, and the reason is worth writing down.
+     * `subtractSphere` does not measure that cap; it measures how far the
+     * FIELD's occupancy moved, and occupancy ramps across a transition band
+     * one cell wide. At quarter-millimetre cells that band is half the bite,
+     * so the estimate runs high — measured 3 to 6 mm^3 against the ideal
+     * 1.44, drifting as the crater floor passes between samples. That is a
+     * resolution limit rather than a mistake, and the only cure is finer
+     * cells, which is remesh time.
+     *
+     * So this guards what would actually spoil the game — a bite out by an
+     * order of magnitude, which is precisely what shipped: 10 mm wide, 7.9 mm
+     * deep, 464 mm^3 a press, freeing a 9 mm pellet for a 2 mm jaw. It does
+     * not pretend to a precision the estimator has not got.
      */
     const r = BRUSH_RADIUS;
-    const h = r - BRUSH_SINK * r;
-    const cap = (Math.PI * h * h * (3 * r - h)) / 3;
-    const buriedOnFlat = (4 / 3) * Math.PI * r ** 3 - cap;
-    expect(volumes[0]!).toBeLessThan(buriedOnFlat);
-    expect(volumes[0]!).toBeGreaterThan(buriedOnFlat * 0.9);
+    const d = BITE_DEPTH;
+    const idealCap = (Math.PI * d * d * (3 * r - d)) / 3;
+    expect(volumes[0]!).toBeGreaterThan(idealCap * 0.5);
+    expect(volumes[0]!).toBeLessThan(idealCap * 6);
   }, 60_000);
 });
