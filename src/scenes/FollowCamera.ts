@@ -238,6 +238,16 @@ export class FollowCamera {
     heading: number,
     solidAt: (point: THREE.Vector3) => boolean,
     step: number,
+    /**
+     * The height of the OPEN-AIR surface at an x and z — the land as seen
+     * from the sky, craters and the treetop included. When given, the
+     * third-person camera is never allowed below it plus its own clearance.
+     * Measured before it existed: the rig rode 0.02 mm off the soil through
+     * a cratered walk, and with a 0.1 mm near plane that draws the ground
+     * sliced open — the reported clipping, with the camera centre still
+     * technically above the surface the whole time.
+     */
+    surfaceY?: (x: number, z: number) => number,
   ): void {
     const yaw = heading + this.yawOffset;
 
@@ -266,15 +276,51 @@ export class FollowCamera {
      * anything. Soil within a body length of her is not what the camera is
      * trying to avoid; it is the floor.
      */
-    let clear = this.distance;
     const probe = new THREE.Vector3();
-    for (let d = this.options.minDistance * 0.5; d <= this.distance; d += step) {
-      probe.copy(this.target).addScaledVector(back, d);
-      if (solidAt(probe)) {
-        clear = d - this.options.clearance;
-        break;
+    const reachAlong = (arm: THREE.Vector3, want: number): number => {
+      for (let d = this.options.minDistance * 0.5; d <= want; d += step) {
+        probe.copy(this.target).addScaledVector(arm, d);
+        if (solidAt(probe)) return d - this.options.clearance;
+      }
+      return want;
+    };
+
+    /*
+     * A blocked shot resolves by coming CLOSER AND UP, never by burrowing.
+     *
+     * Shortening along the boom was the whole of the old answer, and it is
+     * why the camera skimmed the ground and clipped banks: the player's
+     * pitch is usually shallow, so a shortened arm ends low — exactly where
+     * the terrain is. What a camera operator does when the subject walks
+     * behind a rise is step in and crane up. So the rig tries the player's
+     * own pitch at full distance first, and each failed try steepens the
+     * boom and pulls it in. The player's framing returns by itself the
+     * moment the ground stops crowding it, because every frame's search
+     * starts over from their pitch.
+     */
+    let clear = reachAlong(back, this.distance);
+    let wantedDistance = this.distance;
+    if (clear < this.distance) {
+      const craned = new THREE.Vector3();
+      for (const lift of [0.18, 0.4, 0.7, 1.0]) {
+        const pitch = Math.min(this.pitch + lift, 1.45);
+        const distance = Math.max(
+          this.options.minDistance, this.distance * (1 - lift * 0.4),
+        );
+        craned.copy(forward).negate()
+          .multiplyScalar(Math.cos(pitch))
+          .addScaledVector(up, Math.sin(pitch))
+          .normalize();
+        const reach = reachAlong(craned, distance);
+        if (reach >= distance || reach > clear) {
+          back.copy(craned);
+          clear = reach;
+          wantedDistance = distance;
+          if (reach >= distance) break;
+        }
       }
     }
+    clear = Math.min(clear, wantedDistance);
 
     /*
      * When there is not enough room behind her for a view OF her, ride her
@@ -318,6 +364,16 @@ export class FollowCamera {
     const wanted = this.onboard
       ? this.eyePoint(solidAt, eyeRight, flat, step)
       : this.target.clone().addScaledVector(back, Math.max(clear, this.options.minDistance));
+    /*
+     * And NEVER under the open-air land. The march sees the first solid
+     * thing along the boom, which in a cratered field can be a rim it stops
+     * short of on the wrong side. This is the flat guarantee the player
+     * actually wants from a follow camera: whatever else happens, the shot
+     * is from above the ground.
+     */
+    if (!this.onboard && surfaceY) {
+      wanted.y = Math.max(wanted.y, surfaceY(wanted.x, wanted.z) + this.options.clearance);
+    }
 
     /*
      * Smoothed, except the first frame and the frame the mode changes on.
@@ -349,6 +405,13 @@ export class FollowCamera {
      * checked its destination dipped through the lip of a shaft on the way
      * down — a frame or two of the inside of the world, once per descent.
      */
+    if (!this.onboard && surfaceY) {
+      // The EASED position honours the floor too — easing toward a legal
+      // point still travels through the rim between here and there.
+      this.smoothed.y = Math.max(
+        this.smoothed.y, surfaceY(this.smoothed.x, this.smoothed.z) + this.options.clearance,
+      );
+    }
     if (!this.onboard && solidAt(this.smoothed)) this.smoothed.copy(wanted);
 
     this.camera.position.copy(this.smoothed);

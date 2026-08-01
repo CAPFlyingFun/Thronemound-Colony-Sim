@@ -933,14 +933,32 @@ for (const view of CASES) {
   const walked = await page.evaluate(() => {
     const lab = window.labScene;
     const from = { x: lab.antPosition.x, z: lab.antPosition.z };
+    /*
+     * The camera floor rides along: at no third-person instant may the shot
+     * be under the open-air land. Before the crane-and-clamp rig this walk
+     * measured 0.02 mm of margin — the camera skimming the soil closer than
+     * the near plane, which is what "clipping into the terrain" looked like.
+     */
+    let camMarginMm = Infinity;
     lab.input.walk = 1;
-    lab.stepForTest(1 / 60, 60 * 8);
+    for (let f = 0; f < 60 * 8; f += 1) {
+      lab.stepForTest(1 / 60, 1);
+      if (!lab.follow.firstPerson) {
+        const cam = lab.camera.position;
+        const surface = lab.groundAt(cam.x, cam.z, 128 * 0.05);
+        camMarginMm = Math.min(camMarginMm, (cam.y - surface) * 5);
+      }
+    }
     lab.input.walk = 0;
     return {
       movedMm: Math.hypot(lab.antPosition.x - from.x, lab.antPosition.z - from.z) * 5,
       scrollMs: lab.lastScrollMs,
+      camMarginMm: +camMarginMm.toFixed(2),
     };
   });
+  if (!(walked.camMarginMm > 0.5)) {
+    fail(`the follow camera came within ${walked.camMarginMm} mm of being under the land`);
+  } else ok(`the follow camera stays ${walked.camMarginMm} mm above the land at its closest`);
   if (!(walked.movedMm > 20)) fail(`eight seconds of walking moved her ${walked.movedMm.toFixed(1)} mm`);
   else ok(`she walks ${walked.movedMm.toFixed(0)} mm in eight seconds`);
 

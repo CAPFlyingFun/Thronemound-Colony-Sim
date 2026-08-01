@@ -3080,6 +3080,16 @@ export class DensityTerrainLabScene {
      * The shadow keeps its head either way; see `showHead`.
      */
     if (this.queenReady) {
+      /*
+       * The dig room's whole trick is that there is nothing to clip: a
+       * camera and a capsule. So while the view is from inside her head AND
+       * the dig is live — armed, or genuinely under the land — the model
+       * goes away entirely and the lab IS the dig room. Above ground in
+       * first person by choice she keeps her jaws and antennae in frame,
+       * which is how you tell where a bite will land.
+       */
+      const capsule = this.follow.firstPerson && (this.underground || this.bore.digging);
+      this.queen.root.visible = !capsule;
       this.queen.showHead(!(this.follow.firstPerson && this.underground));
     }
     this.follow.target.copy(this.antPosition).addScaledVector(this.up, CAMERA_LOOK_AT);
@@ -3087,6 +3097,8 @@ export class DensityTerrainLabScene {
     this.follow.body.copy(this.antPosition);
     this.follow.update(
       delta, this.facing, (point) => this.barrierAt(point), CELL_SIZE * 2,
+      // The land as seen from the sky — crater rims and the treetop count.
+      (x, z) => this.groundAt(x, z, CELLS_Y * CELL_SIZE),
     );
     this.updatePellets(delta);
     if (this.sun) {
