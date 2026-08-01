@@ -221,6 +221,44 @@ describe('the stride', () => {
     }
   });
 
+  /*
+   * Turning on the spot, which is the case every heading-based rule is blind
+   * to. `trail` is measured along her heading, and a pivot changes her heading
+   * without moving her, so the ordinary trigger reads nothing at all while the
+   * hips swing her feet a long way. What is left is the out-of-reach rule, and
+   * that one fires exactly AT the limit — by which time the other tripod may
+   * still be in the air, and a tripod may not leave the ground until the other
+   * lands. Measured over ten seconds of pivot, a front foot was dragged to 0.97
+   * of its own leg length, and 12% of frames had some foot past the limit.
+   *
+   * The skid in `hold` is what holds the line: a foot that cannot be picked up
+   * yet gives way toward its shoulder rather than stretching the leg. Borrowed
+   * from the Godot port of this rig, which ran into the same wall and solved it
+   * the same way.
+   */
+  it('never lets a pivot drag a foot past the leg it hangs from', () => {
+    const gait = new TripodGait(LEGS);
+    const dt = 1 / 60;
+    let heading = 0;
+    for (let i = 0; i < 600; i += 1) {
+      heading += 1.6 * dt;
+      const stride: Stride = { position: [0, 1, 0], heading, speed: 0.04 };
+      const sin = Math.sin(heading);
+      const cos = Math.cos(heading);
+      for (const state of gait.step(dt, stride, FLAT)) {
+        if (state.swinging) continue;
+        const leg = LEGS.find((l) => l.slot === state.slot)!;
+        const span = Math.hypot(
+          state.target[0] - (leg.home[0] * cos + leg.home[2] * sin),
+          state.target[2] - (-leg.home[0] * sin + leg.home[2] * cos),
+        );
+        // Nothing may sit outside 0.9 of its reach, at any instant.
+        expect(span, `${state.slot} strung out at frame ${i}`)
+          .toBeLessThanOrEqual(leg.reach * 0.9 + 1e-9);
+      }
+    }
+  });
+
   it('does not step at all when she is standing still', () => {
     const gait = new TripodGait(LEGS);
     gait.reset(at(0, 0), FLAT);

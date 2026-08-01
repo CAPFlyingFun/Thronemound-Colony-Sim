@@ -184,38 +184,91 @@ export class TripodGait {
      * leg that has drifted sideways has not taken a step — she may have turned,
      * or be walking a slope, and neither is a reason to pick a foot up.
      */
+    /*
+     * Whichever tripod needs it most goes, preferring the one whose turn it is.
+     *
+     * Strict alternation deadlocks, and the case that finds it is turning on
+     * the spot. A pivot swings the hips a long way while the body's own travel
+     * stays near zero, so `trail` — which is measured along her heading — reads
+     * nothing, and the only rule left is the out-of-reach one. Asking that
+     * question of the DUE tripod alone means a leg strung out in the other one
+     * is never seen: the due tripod has no reason to move, so nothing steps and
+     * the stretched leg stays stretched. Measured over a ten-second pivot, a
+     * front leg reached 0.97 of its own length and 12% of frames had some foot
+     * past the limit it is supposed to be held inside.
+     */
     if (!airborne) {
       const due = this.last === 0 ? 1 : 0;
-      let worst = 0;
-      let stranded = false;
-      for (const leg of this.legs) {
-        if (tripodOf(leg.slot) !== due) continue;
-        worst = Math.max(worst, -this.trail(leg, stride));
-        stranded = stranded || this.outOfReach(leg, stride);
+      if (this.urgency(due, stride) >= 1) this.begin(due, stride, groundAt);
+      else if (this.urgency(due === 0 ? 1 : 0, stride) >= 1) {
+        this.begin(due === 0 ? 1 : 0, stride, groundAt);
       }
-      /*
-       * A foot further from its shoulder than the leg is long has to move NOW,
-       * whichever way it is trailing and whether or not she is walking.
-       *
-       * Nothing in the normal rules covers it, because the normal rules assume
-       * she got here by walking: the anchor drifts backwards a little each
-       * frame and trips the trigger long before it is out of range. Surfacing
-       * from a burrow is not walking — the stepper is off underground and
-       * restarts when she comes up, and she can be metres from where her feet
-       * were left. She came out of a hole with her legs stretched out behind
-       * her like a landed spider.
-       */
-      if (stranded) { this.begin(due, stride, groundAt); return this.legs.map((l) => this.stateOf(l, stride)); }
-      /*
-       * One number for the whole tripod. Stepping legs individually as each
-       * one passes its own limit is a smoother-looking rule and a worse one:
-       * the three feet drift out of step, and once they do there is no instant
-       * at which a clean triangle is on the ground.
-       */
-      if (worst >= this.strideOf(this.legs[0]!)) this.begin(due, stride, groundAt);
     }
 
-    return this.legs.map((leg) => this.stateOf(leg, stride));
+    return this.legs.map((leg) => this.stateOf(leg, stride, groundAt));
+  }
+
+  /**
+   * Keep hold of a foothold, or skid to one she can still hold.
+   *
+   * The trigger fires the instant a foot reaches its limit, but a tripod may
+   * not leave the ground while the other one is still in the air — so a foot
+   * that comes due mid-swing has to wait, and the body keeps moving while it
+   * does. Turning on the spot is the worst of it: measured over a pivot, a
+   * front foot was dragged to 0.97 of its own leg length, well past the 0.9 it
+   * is supposed to be held inside, purely in the frames it spent waiting.
+   *
+   * Rather than let the solver strain at an anchor out of range — which either
+   * drags the claw through the soil or leaves the leg straightened into a
+   * spike — the claw slips toward its shoulder. A skid is what a real claw does
+   * when it loses purchase, and at five millimetres to the world unit it is
+   * invisible. A leg stretched past its own length is not.
+   */
+  private hold(leg: Leg, stride: Stride, groundAt: GroundAt): Vec3 {
+    const anchor = this.anchor.get(leg.slot);
+    if (!anchor) return this.homeOf(leg, stride);
+    const limit = leg.reach * OVERREACH;
+    const home = this.homeOf(leg, stride);
+    const span = Math.hypot(anchor[0] - home[0], anchor[2] - home[2]);
+    if (span <= limit) return anchor;
+    const pull = 1 - limit / span;
+    const x = anchor[0] + (home[0] - anchor[0]) * pull;
+    const z = anchor[2] + (home[2] - anchor[2]) * pull;
+    const skidded: Vec3 = [x, groundAt(x, z), z];
+    this.anchor.set(leg.slot, skidded);
+    return skidded;
+  }
+
+  /**
+   * How badly one tripod needs to step, normalised so that 1.0 always means
+   * "now" whichever of the two reasons got it there.
+   *
+   * Both reasons are a distance over the distance at which that reason becomes
+   * urgent, so they are directly comparable and a single `>= 1` covers them:
+   *
+   *   - the foot has trailed a full half-sweep behind its shoulder, which is
+   *     the ordinary walking trigger and the thing that makes a stride a
+   *     function of ground covered rather than of time; and
+   *   - the foot is nearly as far from where it hangs as the leg is long,
+   *     which is not a walking condition at all. She reaches it by turning on
+   *     the spot, and by surfacing from a burrow, where the stepper restarts
+   *     metres from where her feet were left and she comes up with her legs
+   *     stretched out behind her like a landed spider.
+   *
+   * One number for the WHOLE tripod — the worst of its three legs. Stepping
+   * legs individually as each passes its own limit is a smoother-looking rule
+   * and a worse one: the three feet drift out of step, and once they do there
+   * is no instant at which a clean triangle is on the ground.
+   */
+  private urgency(tripod: 0 | 1, stride: Stride): number {
+    const sweep = this.strideOf(this.legs[0]!);
+    let worst = 0;
+    for (const leg of this.legs) {
+      if (tripodOf(leg.slot) !== tripod) continue;
+      worst = Math.max(worst, -this.trail(leg, stride) / sweep);
+      worst = Math.max(worst, this.strain(leg, stride));
+    }
+    return worst;
   }
 
   /** Where this leg's foot naturally sits right now, in world space. */
@@ -231,16 +284,21 @@ export class TripodGait {
   }
 
   /**
-   * Is this foot stranded — further from where the leg hangs than the leg can
-   * stretch? Measured in the horizontal plane, since a step is a step whichever
-   * direction the foot has been left in.
+   * How stranded this foot is: how far it sits from where the leg hangs, as a
+   * fraction of the furthest it is allowed to sit. One means it is exactly at
+   * the limit and the leg must step.
+   *
+   * Measured in the horizontal plane, since a step is a step whichever
+   * direction the foot has been left in — which is the point. This is the one
+   * rule that is blind to heading, and so the only one that can see a foot
+   * strung out sideways by a pivot.
    */
-  private outOfReach(leg: Leg, stride: Stride): boolean {
+  private strain(leg: Leg, stride: Stride): number {
     const anchor = this.anchor.get(leg.slot);
-    if (!anchor) return false;
+    if (!anchor) return 0;
     const home = this.homeOf(leg, stride);
     const span = Math.hypot(anchor[0] - home[0], anchor[2] - home[2]);
-    return span > leg.reach * OVERREACH;
+    return span / (leg.reach * OVERREACH);
   }
 
   /** Signed distance of the anchor ahead of home, along her heading. */
@@ -300,14 +358,18 @@ export class TripodGait {
     this.last = tripod;
   }
 
-  private stateOf(leg: Leg, stride: Stride): LegState {
-    const anchor = this.anchor.get(leg.slot) ?? this.homeOf(leg, stride);
+  private stateOf(leg: Leg, stride: Stride, groundAt: GroundAt): LegState {
     const phase = this.swing.get(leg.slot) ?? 1;
     if (phase >= 1) {
-      // Planted. The target is a world position and nothing moves it, which is
-      // the entire reason there is no sliding.
-      return { slot: leg.slot, target: anchor, swinging: false, phase: 1 };
+      /*
+       * Planted. The target is a world position and nothing moves it, which is
+       * the entire reason there is no sliding — with the one exception in
+       * `hold`, where a foot the body has dragged past its own reach gives way
+       * rather than let the leg straighten into a spike.
+       */
+      return { slot: leg.slot, target: this.hold(leg, stride, groundAt), swinging: false, phase: 1 };
     }
+    const anchor = this.anchor.get(leg.slot) ?? this.homeOf(leg, stride);
     const from = this.from.get(leg.slot) ?? anchor;
     // Eased across, so the foot leaves and lands slowly and crosses quickly.
     const t = phase * phase * (3 - 2 * phase);
