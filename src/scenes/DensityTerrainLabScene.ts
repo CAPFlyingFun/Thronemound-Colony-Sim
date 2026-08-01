@@ -311,6 +311,25 @@ const CAMERA_PREFS = 'thronemound.lab.camera';
 
 /** Scratch for the camera sight-line march, so it allocates nothing. */
 const PROBE = new THREE.Vector3();
+/** Scratch for the roof sense, which runs while PROBE may be in use. */
+const SENSE = new THREE.Vector3();
+
+/**
+ * The cone that decides whether she has a ceiling: straight up, and four rays
+ * at forty degrees. See `underground` — a majority of these hitting soil is
+ * what "covered" means, so a shaft counts (walls all round), a tunnel counts
+ * (roof plus its two walls), and an open crater does not (rim on one side at
+ * most).
+ */
+const ROOF_RAYS: ReadonlyArray<readonly [number, number, number]> = (() => {
+  const tilt = 40 * Math.PI / 180;
+  const out = Math.sin(tilt);
+  const rise = Math.cos(tilt);
+  return [
+    [0, 1, 0],
+    [out, rise, 0], [-out, rise, 0], [0, rise, out], [0, rise, -out],
+  ];
+})();
 const SPEED_EASE = 7;
 
 /**
@@ -1691,40 +1710,108 @@ export class DensityTerrainLabScene {
   /**
    * Is she below the surface of the mound?
    *
-   * Asked of the UNDUG land, not of the soil actually above her head, and that
-   * distinction is the whole bug. This used to probe five millimetres straight
-   * up from her and call her underground if it hit soil — but straight up from
-   * an ant at the bottom of a shaft is the shaft, which is open by
-   * construction, because she is the one who dug it. So ten millimetres down
-   * her own hole she was reported as standing in a field.
+   * Two wrong definitions came before this one, and they failed in opposite
+   * directions, which is why both halves of the test below are load-bearing.
    *
-   * Everything downstream believed it. `stand` ran instead of `holdTunnel`, the
-   * stance median took five samples across a hole narrower than she is, four
-   * landed on the rim, and it heaved her four millimetres up out of her own
-   * tunnel the moment she stopped digging. Reported as being teleported out.
+   * Probing straight up from her head called a shaft "open field", because
+   * straight up from the bottom of a shaft is the shaft — open by
+   * construction, she dug it. Ten millimetres down her own hole, `stand` ran,
+   * the stance median landed four of five samples on the rim, and she was
+   * heaved out. Reported as being teleported out of the hole.
    *
-   * The procedural height is the land as it was before anybody dug, which is
-   * exactly the right reference: being underground means having got below it,
-   * however much open air you have carved for yourself since.
+   * Comparing against the UNDUG procedural land fixed that and failed the
+   * other way: a crater floor is also below the undug land, while being open
+   * sky. So she came up out of a dive into her own crater and stood there in
+   * daylight with the flag still set — the gait dead, her feet four
+   * millimetres wrong, her head hidden in first person, tunnel physics holding
+   * her — until she happened to walk over the rim and everything snapped back
+   * in a single frame. Reported as the ant dying and getting stuck
+   * underground for a moment before popping back to normal, and measured at
+   * 2.3 seconds of it on the round trip the smoke test drives.
+   *
+   * What tells a tunnel from a crater is a ROOF. Underground means below the
+   * undug land AND under solid cover — and cover is sensed with a small cone
+   * of rays overhead, because no single ray can answer it: the vertical one is
+   * open in every shaft she digs, and any one slanted ray brushes the rim of
+   * an open crater. A majority of a cone is what "covered" actually means. In
+   * a vertical shaft the slanted rays strike the walls within a millimetre; in
+   * an open crater they rise past the rim into sky.
    */
   private get underground(): boolean {
+    return this.roofedNow;
+  }
+
+  /**
+   * Is any of her still below the land as it was before digging?
+   *
+   * NOT the same question as `underground`, and the difference was measured
+   * before it was believed. This is the coarse, geometric fact — her body has
+   * not yet cleared the undug surface — and it is the right gate for GRAVITY
+   * while the bore is armed, because what holds a digging ant up is being
+   * wedged in her own workings, and she is wedged for exactly as long as she
+   * is below the land she cut into.
+   *
+   * Gating gravity on the roof sense instead put a limit cycle at the mouth of
+   * every shaft: the roof opens a few millimetres before she is clear, gravity
+   * came on against the reverse climb, she sank until the roof closed, the
+   * fall reset, she climbed, and around again — measured bouncing between 7.0
+   * and 9.8 mm for as long as the reverse was held, which is "it seems to not
+   * go out the hole" in its exact spelling.
+   */
+  private get wedged(): boolean {
+    const half = this.queenReady ? this.queen.bodyRadius() : 0;
+    return this.antPosition.y + half
+      < streamGroundHeight(this.antPosition.x, this.antPosition.z);
+  }
+
+  /**
+   * Recomputed once per simulated frame, after she has moved and before the
+   * standing/tunnelling branch reads it — five rays through the density field
+   * are cheap, but not so cheap that every one of the six reads a frame makes
+   * should pay for its own.
+   */
+  private roofedNow = false;
+
+  private senseUnderground(): boolean {
     /*
      * Her own half-thickness, not a camera constant.
      *
      * This compared her against the surface plus CAMERA_LOOK_AT, which is how
      * far ABOVE her the third-person rig aims — a framing number that found its
      * way into a question about her body. At 2.5 mm it meant she had to climb
-     * two and a half millimetres clear of the ground before she counted as out,
-     * so reversing up her own shaft left her reported as underground while
-     * standing at the mouth of it, and `stand` never took over. It also does
-     * not scale: 2.5 mm is a quarter of a queen and more than half a worker.
-     *
+     * two and a half millimetres clear of the ground before she counted as out.
      * Her body radius is the honest measure and it is measured off each caste's
      * own mesh — she is under the ground when all of her is.
      */
     const half = this.queenReady ? this.queen.bodyRadius() : 0;
-    return this.antPosition.y + half
-      < streamGroundHeight(this.antPosition.x, this.antPosition.z);
+    const eye = this.antPosition.y + half;
+    if (eye >= streamGroundHeight(this.antPosition.x, this.antPosition.z)) return false;
+
+    /*
+     * Below the undug land. Underground only if she is also COVERED: the
+     * vertical ray plus four at forty degrees, counted by majority. One wall
+     * beside her — standing against the flank of her own crater — lights up
+     * two rays at most and she still counts as being in daylight, which she
+     * is. A tunnel lights the vertical ray on its roof and the cross-tunnel
+     * pair on its walls; a shaft lights all four slanted rays at once.
+     *
+     * The march is capped at four units — twenty millimetres, two body lengths
+     * of queen. Cover further away than that is scenery, not a ceiling.
+     */
+    const reach = 4;
+    const step = CELL_SIZE * 2;
+    let hits = 0;
+    for (const [dx, dy, dz] of ROOF_RAYS) {
+      for (let d = step; d <= reach; d += step) {
+        SENSE.set(
+          this.antPosition.x + dx * d, eye + dy * d, this.antPosition.z + dz * d,
+        );
+        if (SENSE.y > CELLS_Y * CELL_SIZE) break;
+        if (this.solidAt(SENSE)) { hits += 1; break; }
+      }
+      if (hits >= 3) return true;
+    }
+    return false;
   }
 
   /**
@@ -1781,7 +1868,13 @@ export class DensityTerrainLabScene {
      * The median cannot be used underground: it samples wider than a bore, so
      * four of five land on the rim and it holds her on top of her own shaft.
      */
-    const floor = this.underground
+    /*
+     * `wedged`, not `underground`, on both reads in here — this is the digging
+     * physics, and what matters to it is her body against the undug land, not
+     * whether the player-facing world counts her as being in daylight. See
+     * `wedged` for the limit cycle that using the roof sense here produced.
+     */
+    const floor = this.wedged
       ? this.groundAt(
         this.antPosition.x, this.antPosition.z, this.antPosition.y + FOOT_CLEARANCE,
       )
@@ -1792,7 +1885,7 @@ export class DensityTerrainLabScene {
       const ease = 1 - Math.exp(-HEIGHT_EASE * dt);
       this.antPosition.y += (floor - this.antPosition.y) * ease;
       this.fallSpeed = 0;
-    } else if (!(this.bore.digging && this.underground)) {
+    } else if (!(this.bore.digging && this.wedged)) {
       /*
        * And DROPPED onto it when the bore has left her over open space.
        *
@@ -2429,6 +2522,9 @@ export class DensityTerrainLabScene {
     // is set to — otherwise she would dive before she had finished turning to
     // face the dive.
     this.travel(delta, this.headPitch, bore.digging);
+    // Sensed HERE — after she has moved, before anything reads it — and then
+    // held for the frame, so the six readers below all agree on the answer.
+    this.roofedNow = this.senseUnderground();
     /*
      * With the dig armed she is committed to the hole, whether or not there is
      * yet soil over her head. `stand` puts her on the surface, and while she is
