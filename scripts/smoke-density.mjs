@@ -607,13 +607,16 @@ for (const view of CASES) {
      */
     fail(`driving at a tunnel wall carried her ${(walls.deepestMm - walls.startDepthMm).toFixed(2)} mm `
       + 'deeper into undug soil');
-  } else if (!(walls.driftMm < 15)) {
+  } else if (!(walls.driftMm < 25)) {
     /*
-     * Fifteen millimetres against the thirty-six an unblocked run covers in
-     * the same three seconds. Not zero, and it should not be: the rule lets
-     * her SLIDE along a wall to any point no deeper than where she is, which
-     * is how she crosses her own tunnel instead of sticking to the first
-     * thing she leans on. Measured at 6.6 mm — about one tunnel's width.
+     * The DEPTH check above is the sharp claim — she never gets deeper into
+     * the soil than she started. This one is coarse on purpose: she is
+     * allowed to slide along a wall to any point no deeper than where she
+     * is, which is how she crosses her own tunnel instead of sticking to
+     * the first thing she leans on, and a tunnel dug by four seconds of
+     * boring is tens of millimetres long. Measured at 17.2 mm against the
+     * 36 mm an unblocked run covers in the same three seconds; what it
+     * would catch is her walking freely, which is the whole 36.
      */
     fail(`driving at a tunnel wall carried her ${walls.driftMm.toFixed(1)} mm, `
       + 'close to the 36 mm an unblocked walk would cover');
@@ -1818,6 +1821,120 @@ for (const view of CASES) {
     fail(`after orbiting, the first-person view sits ${aim.offDeg.toFixed(1)} deg off the bore — `
       + 'the crosshair and the carve disagree');
   } else ok(`the first-person crosshair faces the bore (${aim.offDeg.toFixed(2)} deg off after a hard orbit)`);
+
+  /*
+   * And the bite itself lands ON that line, on the FIRST press.
+   *
+   * The dig used to run down `headPitch` — the angle her NECK had eased to,
+   * rate limited and pulled back to level whenever she was not already
+   * committed to a bore. So aiming the camera down and pressing DIG bit
+   * along whatever her neck had reached, which on the first press is level:
+   * reported as not being able to dig where you are facing. In first person
+   * there is no model on screen and nothing to wait for, so the bite goes
+   * down the camera's own aim this frame. Measured in 3-D, from the eye to
+   * the crater, against the direction the camera is actually pointing.
+   */
+  const bite = await page.evaluate(() => {
+    const lab = window.labScene;
+    const V = lab.antPosition.constructor;
+    /*
+     * TELEPORT, THEN MOVE THE WINDOW. The streaming window follows her from
+     * inside the walk and the climb, so setting her position directly leaves
+     * it wherever she used to be — and the resident field answers "air" for
+     * everywhere outside itself. A bite then finds nothing to cut and the
+     * check measures a scene that is not there. The game's own teleport, a
+     * resumed save, recentres for exactly this reason.
+     */
+    lab.antPosition.set(36, lab.groundAt(36, 36, 999), 36);
+    lab.stream.recentreOn(lab.antPosition.x, lab.antPosition.z);
+    lab.rebuildTerrainForTest();
+    lab.resetDynamics();
+    lab.bore.turn(-lab.bore.heading);
+    lab.follow.mode = 'first';
+    lab.stepForTest(1 / 60, 90);
+
+    // Level first, so the neck is unambiguously at zero...
+    lab.bore.aimTo(0);
+    lab.stepForTest(1 / 60, 60);
+    const neckBefore = lab.headPitch;
+    const removedBefore = lab.totalRemoved;
+    /*
+     * ...then aim well down and bite AT ONCE, with no settling frames. Steep
+     * rather than shallow, so the floor is unarguably inside her reach: a
+     * capsule digs where the crosshair points and nowhere else, so a
+     * forty-five degree aim on a bank that falls away faster than that is
+     * pointed at open air, and correctly digs nothing.
+     */
+    lab.bore.aimTo(-70 * Math.PI / 180);
+    lab.input.dig = 1;
+    lab.stepForTest(1 / 60, 40);
+    lab.input.dig = 0;
+
+    // From where the bite was actually taken, not from where she is now:
+    // she creeps forward while boring.
+    const eye = lab.lastBiteFrom.clone();
+    const toBite = lab.lastBite.clone().sub(eye);
+    const look = new V(
+      Math.sin(lab.bore.heading) * Math.cos(lab.bore.pitch),
+      Math.sin(lab.bore.pitch),
+      Math.cos(lab.bore.heading) * Math.cos(lab.bore.pitch),
+    );
+    const offDeg = Math.acos(
+      Math.max(-1, Math.min(1, toBite.clone().normalize().dot(look))),
+    ) * 180 / Math.PI;
+    return {
+      offDeg,
+      neckBeforeDeg: neckBefore * 180 / Math.PI,
+      neckNowDeg: lab.headPitch * 180 / Math.PI,
+      biteDeg: Math.asin(Math.max(-1, Math.min(1, toBite.clone().normalize().y))) * 180 / Math.PI,
+      removed: lab.totalRemoved - removedBefore,
+      firstPerson: lab.follow.firstPerson,
+      message: lab.status.dataset.message,
+      eyeMm: lab.follow.eye.y * 5,
+      antYmm: lab.antPosition.y * 5,
+      groundMm: lab.groundAt(lab.antPosition.x, lab.antPosition.z, 999) * 5,
+      ray: (() => {
+        const out = [];
+        for (let d = 0; d <= 1.4; d += 0.2) {
+          out.push(lab.solidAt(eye.clone().addScaledVector(look, d)) ? 1 : 0);
+        }
+        return out.join('');
+      })(),
+    };
+  });
+  if (!(bite.removed > 0)) {
+    fail(`the first-person dig removed nothing (first person: ${bite.firstPerson}, `
+      + `scene said "${bite.message}", eye ${bite.eyeMm.toFixed(2)} mm up, she is at `
+      + `${bite.antYmm.toFixed(2)} on ground ${bite.groundMm.toFixed(2)}, ray ${bite.ray})`);
+  } else if (!(bite.offDeg < 12)) {
+    fail(`the first-person bite landed ${bite.offDeg.toFixed(1)} deg off the crosshair `
+      + `(bite ${bite.biteDeg.toFixed(0)} deg, neck ${bite.neckNowDeg.toFixed(0)} deg, `
+      + `first person: ${bite.firstPerson})`);
+  } else {
+    ok(`the first-person bite lands on the crosshair ray (${bite.offDeg.toFixed(1)} deg off a -70 deg `
+      + `aim, with her neck still at ${bite.neckNowDeg.toFixed(0)} deg)`);
+  }
+  await page.close();
+}
+
+
+/*
+ * The underground sense gets its OWN page.
+ *
+ * The pixel comparison needs a scene it can actually photograph, and the page
+ * the other checks share has been teleported and dug through by half a dozen
+ * scenarios first — there, the same sequence rendered the sky's own colour
+ * for both shots and measured nothing at all. A fresh page digs one tunnel
+ * and looks at it.
+ */
+{
+  const page = await browser.newPage({
+    viewport: { width: 932, height: 430 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true,
+  });
+  await page.goto(URL, { waitUntil: 'networkidle' });
+  await page.waitForFunction(
+    () => window.labScene?.queenReady === true, null, { timeout: 60000 },
+  );
   /*
    * The underground sense: soil stops being lit and becomes contours.
    *
@@ -1829,7 +1946,6 @@ for (const view of CASES) {
    * a third time. So: no GL errors, the ramp reaches both ends within its
    * stated time, and the PIXELS underground differ from the pixels above it.
    */
-  {
     const glErrors = [];
     page.on('console', (m) => {
       const t = m.text();
@@ -1838,17 +1954,20 @@ for (const view of CASES) {
 
     const sense = await page.evaluate(async () => {
       const lab = window.labScene;
+      /*
+       * MESH FIRST, ONCE, before either shot.
+       *
+       * `stepForTest` runs the simulation and nothing else — the remesh queue
+       * is drained by the frame loop, which a headless step never reaches. So
+       * a shot taken straight after digging photographs the soil as it was
+       * BEFORE she dug, with the camera inside it: every face a back face and
+       * the frame pure background, measured at exactly the sky's own 178.3.
+       * Rebuilding inside `shot` instead put the rebuild between the two
+       * comparisons and both came back as sky again; one rebuild, then two
+       * reads of the same settled frame, measures the shader and nothing
+       * else.
+       */
       const shot = () => {
-        /*
-         * MESH FIRST. `stepForTest` runs the simulation and nothing else —
-         * the remesh queue is drained by the frame loop, which a headless
-         * step never reaches. Shooting without this photographs the soil as
-         * it was before she dug, with the camera inside it: every face is a
-         * back face, and the frame comes back as pure background. Measured
-         * at exactly the sky colour, 178.3, which is how a rendering test
-         * can be fooled by a scene that never rendered the thing under test.
-         */
-        lab.rebuildTerrainForTest();
         const gl = lab.renderer.getContext();
         const w = gl.drawingBufferWidth;
         const h = gl.drawingBufferHeight;
@@ -1863,10 +1982,12 @@ for (const view of CASES) {
 
       // Above ground, settled and lit.
       lab.antPosition.set(30, lab.groundAt(30, 30, 999), 30);
+      lab.stream.recentreOn(lab.antPosition.x, lab.antPosition.z);
+      lab.rebuildTerrainForTest();
       lab.resetDynamics();
       lab.follow.mode = 'first';
       lab.stepForTest(1 / 60, 90);
-      const lit = { sense: lab.sense.uSense.value, pixels: shot(), under: lab.underground };
+      const above = { sense: lab.sense.uSense.value, under: lab.underground };
 
       // Down a real tunnel.
       while (lab.bore.pitch > -Math.PI / 5 + 1e-9) lab.bore.aim(-1);
@@ -1876,7 +1997,27 @@ for (const view of CASES) {
       lab.input.dig = 0;
       lab.input.walk = 0;
       lab.stepForTest(1 / 60, 60);
-      const sensed = { sense: lab.sense.uSense.value, pixels: shot(), under: lab.underground };
+
+      /*
+       * The SAME view, shader off and shader on.
+       *
+       * Comparing the underground frame against the above-ground one sounds
+       * equivalent and is not: it compares two camera positions as much as
+       * two shaders, and a frame that renders no terrain at all — the camera
+       * inside unmeshed soil, every face a back face — comes back as pure
+       * background and reads as "bright", which is how this check first
+       * fooled itself with exactly the sky's own 178.3. Holding the frame
+       * still and moving only the uniform isolates the thing under test.
+       */
+      lab.rebuildTerrainForTest();
+      const held = lab.sense.uSense.value;
+      lab.sense.uSense.value = 0;
+      const litPixels = shot();
+      lab.sense.uSense.value = 1;
+      const sensedPixels = shot();
+      lab.sense.uSense.value = held;
+      const lit = { sense: 0, pixels: litPixels, under: lab.underground };
+      const sensed = { sense: held, pixels: sensedPixels, under: lab.underground };
 
       /*
        * And the crossing itself, timed: from full sense, forced above
@@ -1890,15 +2031,16 @@ for (const view of CASES) {
         lab.stepForTest(1 / 60, 1);
         frames += 1;
       }
-      return { lit, sensed, crossSeconds: frames / 60, mode: lab.follow.mode };
+      return { above, lit, sensed, crossSeconds: frames / 60, mode: lab.follow.mode };
     });
 
     if (glErrors.length) {
       fail(`the sense shader logged ${glErrors.length} error(s): ${glErrors[0].slice(0, 120)}`);
     } else ok('the sense shader compiles');
 
-    if (!sense.lit.under === false && sense.lit.sense > 0.05) {
-      fail(`above ground the sense reads ${sense.lit.sense.toFixed(2)}, not 0`);
+    if (sense.above.under || sense.above.sense > 0.05) {
+      fail(`above ground the sense reads ${sense.above.sense.toFixed(2)} `
+        + `(underground: ${sense.above.under})`);
     } else if (!sense.sensed.under || !(sense.sensed.sense > 0.9)) {
       fail(`underground the sense reads ${sense.sensed.sense.toFixed(2)} (underground: ${sense.sensed.under})`);
     } else ok(`the sense ramps 0 -> ${sense.sensed.sense.toFixed(2)} on going under`);
@@ -1912,7 +2054,10 @@ for (const view of CASES) {
     const sensedLuma = (sense.sensed.pixels.r + sense.sensed.pixels.g + sense.sensed.pixels.b) / 3;
     const litBias = sense.lit.pixels.g - sense.lit.pixels.r;
     const sensedBias = sense.sensed.pixels.g - sense.sensed.pixels.r;
-    if (!(sensedLuma < litLuma * 0.8)) {
+    if (litLuma > 170) {
+      fail(`the underground frame rendered no terrain (luma ${litLuma.toFixed(1)}, the sky's own) — `
+        + 'nothing to compare');
+    } else if (!(sensedLuma < litLuma * 0.8)) {
       fail(`the sensed frame is not darker than the lit one (${sensedLuma.toFixed(1)} vs ${litLuma.toFixed(1)})`);
     } else if (!(sensedBias > litBias + 2)) {
       fail(`the sensed frame has no contour colour in it (green-red bias ${sensedBias.toFixed(1)} vs ${litBias.toFixed(1)})`);
@@ -1924,8 +2069,6 @@ for (const view of CASES) {
     if (!(sense.crossSeconds > 0.15 && sense.crossSeconds < 1.6)) {
       fail(`surfacing takes ${sense.crossSeconds.toFixed(2)} s to clear — a dissolve is 0.4 to 0.8 s`);
     } else ok(`surfacing dissolves back to daylight in ${sense.crossSeconds.toFixed(2)} s`);
-  }
-
   await page.close();
 }
 

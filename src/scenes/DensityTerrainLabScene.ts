@@ -295,6 +295,10 @@ const BORE_CREEP = 0.28;
  * without the player having to discover that they must aim down first.
  */
 const BORE_SWEEP = [0, -0.3, -0.6, -0.9, -1.2];
+/** The capsule's "sweep": the aimed ray, and nothing else. */
+const CAPSULE_SWEEP = [0];
+/** How far the capsule can reach down its crosshair: one body length. */
+const CAPSULE_REACH = 9 / WORLD_UNIT_MM;
 
 /**
  * How far ahead of her jaws the bore is aimed — one centimetre.
@@ -680,6 +684,14 @@ export class DensityTerrainLabScene {
   private readonly digPoint = new THREE.Vector3();
   /** Where the last bite was centred, and where it sat relative to her then. */
   private readonly lastBite = new THREE.Vector3();
+  /**
+   * Where that bite was taken FROM — her jaws, or the capsule's eye.
+   *
+   * Recorded because the pair is the only honest way to ask which direction
+   * a bite went: she creeps forward while boring, so measuring from where
+   * she is a moment later reads a -70 degree bore as -22.
+   */
+  private readonly lastBiteFrom = new THREE.Vector3();
   private lastBiteAhead = 0;
   private lastBiteSideways = 0;
   /** How far the fail-safe had to lift her on the last frame. */
@@ -1778,8 +1790,24 @@ export class DensityTerrainLabScene {
    * cost a raycast against a quarter of a million triangles on every bite.
    */
   private carveAlongBore(pitch: number): void {
+    /*
+     * WHERE THE BITE STARTS, and in first person that is not the model.
+     *
+     * Third person digs from her JAWS, which is right: you are watching an
+     * animal, and the crater opening at her mouth is the whole picture.
+     * First person has no model on screen and must not have one in the
+     * arithmetic either — it digs from the capsule's own eye, built from
+     * her position and the seat height, so the ray that carves is the ray
+     * the crosshair is drawn down. It also means a first-person dig no
+     * longer depends on the model having loaded at all.
+     */
+    const capsule = this.follow.firstPerson && !this.gripping;
     const jaws = new THREE.Vector3();
-    if (!this.queenReady || !this.queen.jawPosition(jaws)) return;
+    if (capsule) {
+      jaws.copy(this.antPosition).addScaledVector(WORLD_UP, this.follow.eye.y);
+    } else if (!this.queenReady || !this.queen.jawPosition(jaws)) {
+      return;
+    }
 
     /*
      * WORLD up, not the terrain normal, because this ray must be the
@@ -1812,17 +1840,37 @@ export class DensityTerrainLabScene {
      * opened underneath her instead of in front. Sweeping the PITCH keeps every
      * attempt pointing where she is going.
      */
+    /*
+     * The capsule does NOT sweep. The sweep is an animal hunting with its
+     * mouthparts for ground its level jaws cannot reach; from inside a
+     * crosshair it is the bite quietly landing somewhere other than where
+     * you pointed, which is the same complaint as digging along the neck's
+     * eased angle. One ray, where you are looking, or nothing — and aiming
+     * at open sky digging nothing is the correct answer, not a bug.
+     */
+    const sweep = capsule ? CAPSULE_SWEEP : BORE_SWEEP;
+    /*
+     * A capsule reaches from its EYE rather than from its face, and it gets
+     * one body length to do it with — nine millimetres, against the jaws'
+     * three. The eye is set back and up, so the shorter reach missed
+     * anything she was standing above on a downhill slope: aim at a bank
+     * four millimetres away, press DIG, and the answer was "nothing in
+     * reach" while the crosshair sat squarely on soil.
+     */
+    const reach = capsule ? CAPSULE_REACH : JAW_REACH;
     let surface = null;
-    for (const extra of BORE_SWEEP) {
+    for (const extra of sweep) {
       const tilted = forward.clone().multiplyScalar(Math.cos(pitch + extra))
         .addScaledVector(up, Math.sin(pitch + extra)).normalize();
-      surface = this.firstSoilFromJaws(jaws, tilted, JAW_REACH);
+      surface = this.firstSoilFromJaws(jaws, tilted, reach);
       if (!surface) continue;
       direction.copy(tilted);
       break;
     }
     if (!surface) {
-      this.status.dataset.message = 'Nothing in reach of her jaws';
+      this.status.dataset.message = capsule
+        ? 'Nothing in reach — aim at the soil'
+        : 'Nothing in reach of her jaws';
       this.updateStatus();
       return;
     }
@@ -1832,13 +1880,36 @@ export class DensityTerrainLabScene {
      * centre below the hit buries most of the sphere and the crater ends up as
      * deep as the centre plus the whole radius. A mandible does not do that;
      * it scrapes.
+     *
+     * The CAPSULE aims from further back, so it centres its brush ON the
+     * point the crosshair hits instead. Her jaws are pressed into the working
+     * face, so a brush hung a radius behind the first soil they touch still
+     * sits in fresh soil; the capsule's ray starts at the eye, inside the
+     * pocket she has already dug, and the same offset hangs the brush in her
+     * own empty hole. Measured over four seconds of boring at forty-five
+     * degrees: 8.9 voxel³ and 21.5 mm of progress from the jaws against
+     * 1.5 voxel³ and 4.6 mm from the eye, which in the hand reads as digging
+     * that has stopped working.
+     *
+     * Pushing the brush a full radius PAST the hit fixed the volume and
+     * broke the advance: at shallow angles the pocket then opens five
+     * millimetres beyond her, she cannot reach it, and the next stroke digs
+     * the same unreachable hole — 2.8 voxel³ removed for 0.03 mm of
+     * progress. Centred on the hit, the sphere takes fresh soil on the far
+     * side and clears the near side she has to walk through, which measures
+     * 9.4 to 9.9 voxel³ at every angle from -20 to -90 degrees and clods of
+     * 3.88 mm against the mandibles' 3.94 — the same bite, aimed by a
+     * crosshair instead of by a face.
      */
-    const center = surface.clone().addScaledVector(direction, BITE_DEPTH - BRUSH_RADIUS);
+    const center = capsule
+      ? surface.clone()
+      : surface.clone().addScaledVector(direction, BITE_DEPTH - BRUSH_RADIUS);
     const result = this.stream.subtractSphere(center, BRUSH_RADIUS);
     if (result.changedSamples === 0 || result.removedVolume <= 0.0001) return;
 
     this.totalRemoved += result.removedVolume;
     this.lastBite.copy(center);
+    this.lastBiteFrom.copy(jaws);
     /*
      * Where the bite landed RELATIVE TO HER, recorded now rather than worked
      * out later. She creeps forward while boring, so a few seconds after the
@@ -3002,6 +3073,8 @@ export class DensityTerrainLabScene {
       this.refreshResidency(false, scroll.retained);
       this.updateStatus();
     }
+
+
     if (!this.queenReady) return;
     this.queen.root.position.copy(this.antPosition);
     this.orientQueen();
@@ -3205,6 +3278,7 @@ export class DensityTerrainLabScene {
       this.refreshResidency(false, scroll.retained);
       this.updateStatus();
     }
+
   }
 
   private updateStatus(): void {
@@ -3465,6 +3539,27 @@ export class DensityTerrainLabScene {
     // and levels out only once she is clear of it.
     const aim = this.boreEngaged && !this.gripping ? bore.pitch : 0;
     this.headPitch += THREE.MathUtils.clamp(aim - this.headPitch, -swing, swing);
+    /*
+     * FIRST PERSON IS A CAPSULE, and the capsule is the authority.
+     *
+     * `headPitch` is an ANIMATION: the angle her neck has eased to, rate
+     * limited so a nine-millimetre animal does not snap from level to
+     * nose-down in a frame, and pulled back to zero whenever she is not
+     * committed to a bore. Posing a model with it is right. Digging with it
+     * is not, and digging with it is what this did — so aiming the camera
+     * down thirty degrees and pressing DIG bit along whatever angle her neck
+     * had reached, which on the first press is level. Reported as not being
+     * able to dig where you are facing, and it is the same complaint as the
+     * model and the capsule being welded together.
+     *
+     * So they come apart. In first person there is no model on screen at all
+     * and nothing to wait for: the bite and the drive go down the camera's
+     * own aim, this frame. In third person the animal is the thing you are
+     * watching, and her body leading the dig is the whole point of the
+     * lean — that keeps the eased angle.
+     */
+    const capsule = this.follow.firstPerson && !this.gripping;
+    const drive = capsule ? bore.pitch : this.headPitch;
     this.thoraxPitch += THREE.MathUtils.clamp(
       this.headPitch - this.thoraxPitch, -swing * THORAX_RATE, swing * THORAX_RATE,
     );
@@ -3479,7 +3574,7 @@ export class DensityTerrainLabScene {
       // She travels along the pitch her BODY has reached, not the one the dial
       // is set to — otherwise she would dive before she had finished turning to
       // face the dive.
-      this.travel(delta, this.headPitch, bore.digging);
+      this.travel(delta, drive, bore.digging);
       // Sensed HERE — after she has moved, before anything reads it — and then
       // held for the frame, so the six readers below all agree on the answer.
       this.roofedNow = this.senseUnderground();
@@ -3502,7 +3597,7 @@ export class DensityTerrainLabScene {
       // Only after she has settled: the feeler reads her resolved position.
       this.tryMount();
     }
-    if (bore.bite && !this.gripping) this.carveAlongBore(this.headPitch);
+    if (bore.bite && !this.gripping) this.carveAlongBore(drive);
     // The gait's dig level IS the head's dip, so the animation and the moment
     // soil leaves are the same event rather than two things kept in step.
     this.digPulse = bore.dip;
