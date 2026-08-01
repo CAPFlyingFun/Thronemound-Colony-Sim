@@ -1,0 +1,687 @@
+/**
+ * The block room: one cube of dirt, and an ant who can walk all the way
+ * round it.
+ *
+ * This is a deliberate restart. The colony sim grew a streamed world, a
+ * climb, a save, a menu and a first-person capsule, and somewhere in that
+ * pile the feel of digging broke and stayed broken. Rather than keep
+ * bisecting a large room, this is the smallest room that can still be wrong
+ * in an interesting way: a 64 mm block of soil, the queen standing on it,
+ * and two verbs — walk, dig.
+ *
+ * Three things are copied from the Godot build rather than invented here,
+ * because they are known to work there:
+ *
+ *   1. THE BLOCK. A cube, not a landscape. Six faces, eight corners, twelve
+ *      edges, and every one of them a case that walking has to survive.
+ *   2. ADHESION. She walks on the top, the sides and the UNDERSIDE without
+ *      falling off. Her "down" is the surface she is on, not the world's.
+ *   3. DIGGING AT THE MANDIBLE. The bite is taken at the jaw bone and
+ *      reaches out by the caste's own bite width — see `CASTE_BITE_MM` —
+ *      rather than from a crosshair in the middle of the screen.
+ *
+ * ## What is deliberately NOT here
+ *
+ * No streaming, no save, no menu, no climb machinery, no underground sense,
+ * no HUD instruments. Those are the things being re-added one at a time, and
+ * a room that starts with them has nothing to tell us.
+ *
+ * The head does not yet track the camera, which is the next piece and the
+ * one that decides whether she can aim a dig downward at all: the gait holds
+ * her head up, so a jaw-mounted bite aims where the ANIMATION points and not
+ * where the player is looking. The seam for it is `aimPitch` below.
+ */
+
+import * as THREE from 'three';
+import './DensityTerrainLabScene.css';
+import { DensityField } from '../density/DensityField';
+import { buildSurfaceNets } from '../density/SurfaceNets';
+import { QueenModel } from '../anim/QueenModel';
+import { CASTE_BITE_MM, CASTE_LENGTH_MM } from '../anim/hexapod';
+import { FollowCamera } from './FollowCamera';
+import { clampStickOrigin, stickVector } from '../voxel/locomotion';
+
+/** Millimetres per world unit, the scale the whole project runs on. */
+const MM = 5;
+
+/**
+ * The block: 64 mm on a side, sampled every half millimetre.
+ *
+ * Both halves are chosen against the same constraint — the bite. A queen's
+ * mandible is 1.75 mm across, so at half-millimetre cells a bite spans three
+ * and a half of them, which is enough for the brush to read as a bite rather
+ * than a stairstep. Finer would be prettier and cost four times the memory
+ * for a room whose whole point is to be small: 129³ samples is 8.6 MB, and
+ * the quarter-millimetre version of the same cube would be 69 MB.
+ *
+ * Sixty-four millimetres is about seven queens end to end — big enough that
+ * walking round it is a journey and the faces are not all in shot at once,
+ * small enough to see the whole experiment.
+ */
+const BLOCK_MM = 64;
+const CELL_MM = 0.5;
+const CELL = CELL_MM / MM;
+const CELLS = Math.round(BLOCK_MM / CELL_MM);
+const SPAN = CELLS * CELL;
+
+/** Cells per meshed chunk, so a bite rebuilds a corner and not the cube. */
+const CHUNK = 32;
+
+/** How far off the soil her body rides, and how far a foot may reach. */
+const RIDE = 1.4 / MM;
+/** The adhesion cast: from this far off her back, in through her soles. */
+const GRIP_LIFT = 3 / MM;
+const GRIP_REACH = 9 / MM;
+/** Looking for the far side of an edge: behind and below, in her own frame. */
+const WRAP_ARCS = [0.6, 1.1, 1.7, 2.4];
+
+/** World units per second. Slower than the sim's run — this is a small room. */
+const WALK_SPEED = 1.6;
+const YAW_RATE = 2.2;
+/** How fast her up eases onto a new face. Snappy, or corners read as slides. */
+const ALIGN = 12;
+const SNAP = 14;
+const GRAVITY = 9;
+
+const STICK_RADIUS = 70;
+const LOOK_PER_PIXEL = 0.005;
+
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
+
+export class BlockScene {
+  private readonly renderer: THREE.WebGLRenderer;
+  private readonly scene = new THREE.Scene();
+  private readonly camera: THREE.PerspectiveCamera;
+  private readonly follow: FollowCamera;
+  private readonly field: DensityField;
+  private readonly queen: QueenModel;
+  private readonly chunks = new Map<string, THREE.Mesh>();
+  private readonly material = new THREE.MeshStandardMaterial({
+    color: 0x7a5136, roughness: 0.95, metalness: 0,
+  });
+
+  /** Where she is, and the frame she is in. `up` is the face she is on. */
+  private readonly at = new THREE.Vector3();
+  private readonly up = new THREE.Vector3(0, 1, 0);
+  private readonly forward = new THREE.Vector3(0, 0, 1);
+  private readonly velocity = new THREE.Vector3();
+  private gripping = true;
+  private fallSpeed = 0;
+  private walkSpeed = 0;
+  private turnRate = 0;
+  private ready = false;
+  private removed = 0;
+
+  /**
+   * Where the player is looking, as a pitch. The seam the head tracking will
+   * plug into: today it aims the CAMERA only, and the jaws point wherever
+   * the gait is holding her head, which is the open problem.
+   */
+  private aimPitch = 0;
+
+  private readonly input = { walk: 0, yaw: 0, dig: false };
+  private digCooldown = 0;
+  /** Why the last bite did nothing, for probes. Cleared on a real bite. */
+  private lastBiteWhy = 'never ran';
+
+  private readonly status: HTMLDivElement;
+  private readonly stick = document.createElement('div');
+  private readonly stickKnob = document.createElement('div');
+  private readonly stickOrigin = { x: 0, y: 0 };
+  private stickPointer: number | null = null;
+  private lookPointer: number | null = null;
+  private lookAt = { x: 0, y: 0 };
+  private frame = 0;
+  private previous = performance.now();
+  private resizeObserver: ResizeObserver | null = null;
+
+  constructor(private readonly host: HTMLElement) {
+    host.replaceChildren();
+    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+    this.renderer.shadowMap.enabled = true;
+    host.appendChild(this.renderer.domElement);
+
+    this.scene.background = new THREE.Color(0x8db4d6);
+    this.camera = new THREE.PerspectiveCamera(60, 1, 0.02, 400);
+    this.follow = new FollowCamera(this.camera, {
+      distance: 24 / MM, minDistance: 2.4, maxDistance: 24, eyeHeight: 1.8 / MM,
+      clearance: CELL * 2, ease: 8,
+    });
+    this.follow.mode = 'third';
+
+    this.field = new DensityField({
+      cellsX: CELLS, cellsY: CELLS, cellsZ: CELLS, cellSize: CELL,
+    });
+    /*
+     * A cube as a signed field: the distance to the nearest face, positive
+     * inside. Surface nets rounds the edges by about a cell, which is what a
+     * block of soil looks like anyway — a machined corner would be the
+     * surprising part.
+     */
+    this.field.fill((x, y, z) => Math.min(
+      x, SPAN - x, y, SPAN - y, z, SPAN - z,
+    ));
+    this.remeshAll();
+
+    this.addLighting();
+    this.queen = new QueenModel('queen');
+    this.scene.add(this.queen.root);
+
+    // On top of the block, in the middle, facing +Z.
+    this.at.set(SPAN * 0.5, SPAN + RIDE, SPAN * 0.5);
+    this.follow.body.copy(this.at);
+    this.follow.target.copy(this.at);
+
+    const hud = document.createElement('div');
+    hud.className = 'density-lab-hud';
+    host.appendChild(hud);
+    this.status = document.createElement('div');
+    this.status.className = 'density-lab-status';
+    hud.appendChild(this.status);
+    this.buildControls(hud);
+
+    void this.queen.load().then((ok) => {
+      this.ready = ok;
+      if (ok) this.queen.root.visible = true;
+    });
+
+    (window as unknown as { blockScene?: unknown }).blockScene = this;
+
+    this.resizeObserver = new ResizeObserver(() => this.resize());
+    this.resizeObserver.observe(host);
+    this.resize();
+    this.animate();
+  }
+
+  dispose(): void {
+    cancelAnimationFrame(this.frame);
+    this.resizeObserver?.disconnect();
+    for (const mesh of this.chunks.values()) {
+      this.scene.remove(mesh);
+      mesh.geometry.dispose();
+    }
+    this.chunks.clear();
+    this.material.dispose();
+    this.queen.dispose();
+    this.renderer.dispose();
+    this.host.replaceChildren();
+  }
+
+  private addLighting(): void {
+    this.scene.add(new THREE.HemisphereLight(0xc9e6ff, 0x4a2f1f, 1.8));
+    const sun = new THREE.DirectionalLight(0xfff1ce, 2.6);
+    sun.position.set(SPAN * 1.4, SPAN * 2, SPAN * 0.9);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(1024, 1024);
+    const extent = SPAN * 0.9;
+    sun.shadow.camera.left = -extent;
+    sun.shadow.camera.right = extent;
+    sun.shadow.camera.top = extent;
+    sun.shadow.camera.bottom = -extent;
+    sun.shadow.camera.far = SPAN * 6;
+    this.scene.add(sun);
+    /*
+     * A second light from BELOW, which a landscape would never want and this
+     * room cannot do without: she spends a third of her time on the
+     * underside, and an unlit underside is a black screen with an ant on it.
+     */
+    const bounce = new THREE.DirectionalLight(0xbfd8ff, 0.9);
+    bounce.position.set(-SPAN * 0.6, -SPAN * 2, -SPAN * 0.4);
+    this.scene.add(bounce);
+  }
+
+  /* ----------------------------------------------------------- the soil */
+
+  /** Signed density at a world point: positive inside the soil. */
+  densityAt(x: number, y: number, z: number): number {
+    if (x < 0 || y < 0 || z < 0 || x > SPAN || y > SPAN || z > SPAN) return -1;
+    return this.field.sample(x, y, z);
+  }
+
+  solidAt(p: THREE.Vector3): boolean {
+    return this.densityAt(p.x, p.y, p.z) > 0;
+  }
+
+  /**
+   * The outward normal of the soil at a point, from the field's gradient.
+   *
+   * Central differences at one cell, which on a rounded cube edge gives the
+   * blend between two faces rather than a jump — the reason she rounds a
+   * corner instead of snapping to the next face.
+   */
+  normalAt(p: THREE.Vector3, into: THREE.Vector3): THREE.Vector3 {
+    const h = CELL;
+    into.set(
+      this.densityAt(p.x - h, p.y, p.z) - this.densityAt(p.x + h, p.y, p.z),
+      this.densityAt(p.x, p.y - h, p.z) - this.densityAt(p.x, p.y + h, p.z),
+      this.densityAt(p.x, p.y, p.z - h) - this.densityAt(p.x, p.y, p.z + h),
+    );
+    if (into.lengthSq() < 1e-12) into.copy(WORLD_UP);
+    return into.normalize();
+  }
+
+  /** March for the first solid point, and bisect once it is found. */
+  private cast(
+    from: THREE.Vector3, dir: THREE.Vector3, reach: number,
+  ): THREE.Vector3 | null {
+    const step = CELL * 0.5;
+    const probe = new THREE.Vector3();
+    let previous = 0;
+    for (let d = 0; d <= reach; d += step) {
+      probe.copy(from).addScaledVector(dir, d);
+      if (this.solidAt(probe)) {
+        let lo = previous;
+        let hi = d;
+        for (let i = 0; i < 6; i += 1) {
+          const mid = (lo + hi) * 0.5;
+          probe.copy(from).addScaledVector(dir, mid);
+          if (this.solidAt(probe)) hi = mid;
+          else lo = mid;
+        }
+        return probe.copy(from).addScaledVector(dir, hi);
+      }
+      previous = d;
+    }
+    return null;
+  }
+
+  /* --------------------------------------------------------- the meshing */
+
+  private chunkKey(cx: number, cy: number, cz: number): string {
+    return `${cx},${cy},${cz}`;
+  }
+
+  private remeshAll(): void {
+    const n = Math.ceil(CELLS / CHUNK);
+    for (let cz = 0; cz < n; cz += 1) {
+      for (let cy = 0; cy < n; cy += 1) {
+        for (let cx = 0; cx < n; cx += 1) this.remeshChunk(cx, cy, cz);
+      }
+    }
+  }
+
+  private remeshChunk(cx: number, cy: number, cz: number): void {
+    const key = this.chunkKey(cx, cy, cz);
+    const existing = this.chunks.get(key);
+    if (existing) {
+      this.scene.remove(existing);
+      existing.geometry.dispose();
+      this.chunks.delete(key);
+    }
+    const data = buildSurfaceNets(this.field, 0, {
+      x0: cx * CHUNK, y0: cy * CHUNK, z0: cz * CHUNK,
+      x1: Math.min(CELLS, (cx + 1) * CHUNK),
+      y1: Math.min(CELLS, (cy + 1) * CHUNK),
+      z1: Math.min(CELLS, (cz + 1) * CHUNK),
+    });
+    if (data.indices.length === 0) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+    geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
+    geometry.computeVertexNormals();
+    const mesh = new THREE.Mesh(geometry, this.material);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    this.scene.add(mesh);
+    this.chunks.set(key, mesh);
+  }
+
+  /* ---------------------------------------------------------- the digging */
+
+  /**
+   * A bite, taken AT THE MANDIBLE.
+   *
+   * The jaw bone is where an ant's dig happens, so it is where this happens:
+   * the brush is centred a bite-radius out along her head's own forward, so
+   * the sphere sits against the soil in front of her mouthparts instead of
+   * inside her face. The radius is her caste's — 1.75 mm across for a queen,
+   * 0.75 for a worker, 2.5 for a major.
+   *
+   * Nothing here consults a crosshair. Where the jaws point is where the
+   * hole appears, which is the whole reason this room exists.
+   */
+  private bite(): void {
+    this.lastBiteWhy = 'ran';
+    if (!this.ready) { this.lastBiteWhy = 'model not ready'; return; }
+    const jaw = new THREE.Vector3();
+    if (!this.queen.jawPosition(jaw)) { this.lastBiteWhy = 'no jaw bone'; return; }
+    const radius = CASTE_BITE_MM.queen / 2 / MM;
+
+    /*
+     * WHICH WAY THE JAWS POINT, and this is the whole open question.
+     *
+     * Not `root.getWorldDirection`, which is three.js's -Z and therefore the
+     * back of a queen who faces +Z — measured as a bite taken into the air
+     * behind her. And not her forward alone either: on a flat face her
+     * forward is a TANGENT, so a bite along it never meets the soil she is
+     * standing on, which is exactly the "hard to dig down" the Godot build
+     * ran into with the head held up by the gait.
+     *
+     * So the direction is her forward pitched by the player's aim, in her
+     * own frame — down INTO the face when you drag down. When the head
+     * tracks the camera this same angle poses the head and nothing here
+     * changes: the jaws will already be pointing where this digs.
+     */
+    const aim = this.aimPitch;
+    const dir = this.forward.clone().multiplyScalar(Math.cos(aim))
+      .addScaledVector(this.up, Math.sin(aim)).normalize();
+
+    /*
+     * And the bite lands on the SOIL, not at arm's length in the air. Her
+     * jaws ride above the surface, so the sphere is centred on the first
+     * solid point along the aim — measured in the sim as the placement that
+     * takes fresh soil on the far side while clearing the near side.
+     */
+    const hit = this.cast(jaw, dir, radius + 9 / MM);
+    if (!hit) {
+      this.lastBiteWhy = `no soil within reach of the jaws at ${(aim * 180 / Math.PI).toFixed(0)} deg`;
+      return;
+    }
+    const result = this.field.subtractSphere(hit, radius);
+    if (result.changedSamples === 0) { this.lastBiteWhy = 'brush changed nothing'; return; }
+    this.lastBiteWhy = '';
+    this.removed += result.removedVolume;
+
+    const lo = (v: number) => Math.max(0, Math.floor((v - 1) / CHUNK));
+    const hi = (v: number, max: number) => Math.min(
+      Math.ceil(max / CHUNK) - 1, Math.floor((v + 1) / CHUNK),
+    );
+    for (let cz = lo(result.bounds.minZ); cz <= hi(result.bounds.maxZ, CELLS); cz += 1) {
+      for (let cy = lo(result.bounds.minY); cy <= hi(result.bounds.maxY, CELLS); cy += 1) {
+        for (let cx = lo(result.bounds.minX); cx <= hi(result.bounds.maxX, CELLS); cx += 1) {
+          this.remeshChunk(cx, cy, cz);
+        }
+      }
+    }
+  }
+
+  /* --------------------------------------------------------- the walking */
+
+  /**
+   * One step, in HER frame.
+   *
+   * Her up is the face she is on and her forward is a tangent of it, so the
+   * same code walks the top, a side and the underside — there is no special
+   * case for "upside down", because nothing here refers to the world's
+   * vertical except gravity, and gravity only applies once she has let go.
+   */
+  private step(dt: number): void {
+    const yaw = this.input.yaw * YAW_RATE * dt;
+    if (Math.abs(yaw) > 1e-9) {
+      this.forward.applyAxisAngle(this.up, -yaw).normalize();
+    }
+    this.turnRate = this.input.yaw * YAW_RATE;
+
+    const wanted = this.forward.clone().multiplyScalar(WALK_SPEED * this.input.walk);
+    this.velocity.lerp(wanted, 1 - Math.exp(-10 * dt));
+    this.walkSpeed = this.velocity.length();
+    this.at.addScaledVector(this.velocity, dt);
+
+    if (this.gripping) this.hold(dt);
+    else this.fall(dt);
+
+    // The forward is re-flattened against whatever up she ended on.
+    this.forward.addScaledVector(this.up, -this.forward.dot(this.up));
+    if (this.forward.lengthSq() < 1e-8) this.forward.set(this.up.z, this.up.x, this.up.y);
+    this.forward.normalize();
+  }
+
+  /**
+   * Hold on: cast from off her back, in through her soles.
+   *
+   * When it lands she is drawn onto the contact and her up eases onto its
+   * normal — that is the whole of walking round a corner. When it finds
+   * nothing she has walked over an edge, so the wrap search looks BEHIND AND
+   * BELOW her, in her own frame, which is where the far side of an edge is.
+   * Only when that is empty too has she genuinely walked off into the air.
+   */
+  private hold(dt: number): void {
+    const from = this.at.clone().addScaledVector(this.up, GRIP_LIFT);
+    const dir = this.up.clone().negate();
+    let hit = this.cast(from, dir, GRIP_LIFT + GRIP_REACH);
+    let normal = new THREE.Vector3();
+
+    if (!hit) {
+      for (const arc of WRAP_ARCS) {
+        const wrapDir = this.up.clone().multiplyScalar(-Math.cos(arc))
+          .addScaledVector(this.forward, -Math.sin(arc)).normalize();
+        const wrapFrom = this.at.clone().addScaledVector(this.up, GRIP_LIFT * 0.5);
+        hit = this.cast(wrapFrom, wrapDir, GRIP_REACH);
+        if (hit) break;
+      }
+    }
+    if (!hit) {
+      this.gripping = false;
+      this.fallSpeed = 0;
+      return;
+    }
+    this.normalAt(hit, normal);
+    const seat = hit.clone().addScaledVector(normal, RIDE);
+    this.at.lerp(seat, 1 - Math.exp(-SNAP * dt));
+    this.up.lerp(normal, 1 - Math.exp(-ALIGN * dt)).normalize();
+  }
+
+  /** Off the block: straight down, world frame, until something catches. */
+  private fall(dt: number): void {
+    this.fallSpeed += GRAVITY * dt;
+    this.at.y -= this.fallSpeed * dt;
+    const probe = this.at.clone();
+    if (this.solidAt(probe) || this.at.y < -SPAN) {
+      // Landed (or lost): put her back on the block's top and re-grip.
+      const from = new THREE.Vector3(
+        THREE.MathUtils.clamp(this.at.x, CELL * 4, SPAN - CELL * 4),
+        SPAN + GRIP_LIFT * 2,
+        THREE.MathUtils.clamp(this.at.z, CELL * 4, SPAN - CELL * 4),
+      );
+      const hit = this.cast(from, new THREE.Vector3(0, -1, 0), SPAN * 2);
+      if (hit) {
+        this.normalAt(hit, this.up);
+        this.at.copy(hit).addScaledVector(this.up, RIDE);
+        this.gripping = true;
+        this.fallSpeed = 0;
+        this.velocity.set(0, 0, 0);
+      }
+    }
+  }
+
+  /* ------------------------------------------------------------- the loop */
+
+  /** Advance the room deterministically. For tests. */
+  stepForTest(dt: number, steps: number): void {
+    for (let i = 0; i < steps; i += 1) this.simulate(dt);
+  }
+
+  private simulate(dt: number): void {
+    this.step(dt);
+
+    this.digCooldown = Math.max(0, this.digCooldown - dt);
+    if (this.input.dig && this.digCooldown === 0) {
+      this.bite();
+      this.digCooldown = 0.25;
+    }
+
+    if (this.ready) {
+      this.queen.root.position.copy(this.at);
+      /*
+       * Her whole body is oriented by the frame she is standing in — up off
+       * the face, nose along her forward. On the underside that is upside
+       * down in world terms and perfectly ordinary in hers.
+       */
+      const right = new THREE.Vector3().crossVectors(this.up, this.forward).normalize();
+      const basis = new THREE.Matrix4().makeBasis(right, this.up, this.forward);
+      this.queen.root.quaternion.setFromRotationMatrix(basis);
+      this.queen.update(dt, {
+        speed: this.walkSpeed,
+        turn: this.turnRate,
+        digging: this.input.dig ? 1 : 0,
+        carrying: 0,
+      });
+      /*
+       * Feet onto the soil, in her frame: elevation is measured along HER
+       * up, and the surface under a foot is found by casting in through it.
+       * The same call the sim uses, handed a frame instead of a height map.
+       */
+      this.queen.solveFeet(
+        (x, z, y) => this.surfaceUnder(x, y, z),
+        CELL,
+        RIDE * 2,
+        undefined,
+        {
+          up: [this.up.x, this.up.y, this.up.z],
+          surface: (x, y, z) => this.surfaceUnder(x, y, z),
+        },
+      );
+    }
+
+    this.follow.body.copy(this.at);
+    this.follow.target.copy(this.at).addScaledVector(this.up, RIDE);
+    this.follow.up.copy(this.up);
+    this.follow.aimPitch = this.aimPitch;
+    this.follow.update(
+      dt,
+      Math.atan2(this.forward.x, this.forward.z),
+      (p) => this.solidAt(p),
+      CELL * 2,
+      undefined,
+      this.forward,
+    );
+  }
+
+  /**
+   * How high the soil is under a point, measured along HER up.
+   *
+   * The foot solver wants an elevation, and on a wall or an underside there
+   * is no such thing in world terms — so the cast goes in along her own down
+   * and the answer is reported as a distance along her own up. Off the block
+   * entirely, the answer is "far below", which parks the foot rather than
+   * planting it in mid-air.
+   */
+  private surfaceUnder(x: number, y: number, z: number): number {
+    const from = new THREE.Vector3(x, y, z).addScaledVector(this.up, GRIP_LIFT);
+    const hit = this.cast(from, this.up.clone().negate(), GRIP_LIFT + GRIP_REACH);
+    if (!hit) return -SPAN;
+    return hit.dot(this.up);
+  }
+
+  private animate = (): void => {
+    const now = performance.now();
+    const dt = Math.min(0.05, (now - this.previous) / 1000);
+    this.previous = now;
+    this.simulate(dt);
+    this.renderer.render(this.scene, this.camera);
+    this.updateStatus();
+    this.frame = requestAnimationFrame(this.animate);
+  };
+
+  private updateStatus(): void {
+    const face = this.up.y > 0.7 ? 'top'
+      : this.up.y < -0.7 ? 'UNDERSIDE'
+        : 'side';
+    this.status.innerHTML = `<strong>BLOCK ROOM — walk anywhere, DIG at the jaws</strong><br>
+      Block: ${BLOCK_MM} mm cube · ${CELL_MM} mm cells · ${CELLS}³<br>
+      Bite: ${CASTE_BITE_MM.queen} mm (queen) · removed ${(this.removed * MM ** 3).toFixed(0)} mm³<br>
+      On the ${face} · up ${this.up.x.toFixed(2)}, ${this.up.y.toFixed(2)}, ${this.up.z.toFixed(2)}<br>
+      Queen: ${CASTE_LENGTH_MM.queen} mm · ${this.gripping ? 'gripping' : 'FALLING'}`;
+  }
+
+  /* ------------------------------------------------------------ the input */
+
+  private buildControls(hud: HTMLElement): void {
+    this.stick.className = 'density-lab-stick';
+    this.stickKnob.className = 'density-lab-stick-knob';
+    this.stick.appendChild(this.stickKnob);
+    hud.appendChild(this.stick);
+
+    const actions = document.createElement('div');
+    actions.className = 'density-lab-actions';
+    hud.appendChild(actions);
+    const dig = document.createElement('button');
+    dig.className = 'density-lab-button density-lab-dig';
+    dig.textContent = 'DIG';
+    actions.appendChild(dig);
+    const hold = (on: boolean) => (event: PointerEvent) => {
+      event.preventDefault();
+      this.input.dig = on;
+    };
+    dig.addEventListener('pointerdown', hold(true));
+    dig.addEventListener('pointerup', hold(false));
+    dig.addEventListener('pointercancel', hold(false));
+    dig.addEventListener('pointerleave', hold(false));
+
+    const canvas = this.renderer.domElement;
+    canvas.addEventListener('pointerdown', (event) => {
+      if (event.clientX < window.innerWidth * 0.5 && this.stickPointer === null) {
+        this.stickPointer = event.pointerId;
+        const o = clampStickOrigin(event.clientX, event.clientY, {
+          minX: STICK_RADIUS + 12, maxX: window.innerWidth * 0.5 - 12,
+          minY: STICK_RADIUS + 12, maxY: window.innerHeight - STICK_RADIUS - 12,
+        });
+        this.stickOrigin.x = o.x;
+        this.stickOrigin.y = o.y;
+        this.stick.style.left = `${o.x}px`;
+        this.stick.style.top = `${o.y}px`;
+        this.stick.classList.add('is-live');
+        return;
+      }
+      this.lookPointer = event.pointerId;
+      this.lookAt = { x: event.clientX, y: event.clientY };
+    });
+    canvas.addEventListener('pointermove', (event) => {
+      if (event.pointerId === this.stickPointer) {
+        const v = stickVector(
+          event.clientX - this.stickOrigin.x, event.clientY - this.stickOrigin.y, STICK_RADIUS,
+        );
+        this.input.walk = 0;
+        this.input.yaw = 0;
+        if (v.magnitude > 0.12) {
+          if (Math.abs(v.x) > Math.abs(v.y)) this.input.yaw = -Math.sign(v.x) * v.magnitude;
+          else this.input.walk = -Math.sign(v.y) * v.magnitude;
+        }
+        this.stickKnob.style.transform = `translate(${v.x * STICK_RADIUS}px, ${v.y * STICK_RADIUS}px)`;
+        return;
+      }
+      if (event.pointerId !== this.lookPointer) return;
+      const dx = event.clientX - this.lookAt.x;
+      const dy = event.clientY - this.lookAt.y;
+      this.lookAt = { x: event.clientX, y: event.clientY };
+      this.follow.orbit(-dx * LOOK_PER_PIXEL, -dy * LOOK_PER_PIXEL);
+      this.aimPitch = THREE.MathUtils.clamp(
+        this.aimPitch - dy * LOOK_PER_PIXEL, -Math.PI / 2, Math.PI / 2,
+      );
+    });
+    const release = (event: PointerEvent) => {
+      if (event.pointerId === this.stickPointer) {
+        this.stickPointer = null;
+        this.input.walk = 0;
+        this.input.yaw = 0;
+        this.stick.classList.remove('is-live');
+        this.stickKnob.style.transform = '';
+      }
+      if (event.pointerId === this.lookPointer) this.lookPointer = null;
+    };
+    canvas.addEventListener('pointerup', release);
+    canvas.addEventListener('pointercancel', release);
+
+    window.addEventListener('keydown', (event) => {
+      if (event.code === 'KeyW') this.input.walk = 1;
+      if (event.code === 'KeyS') this.input.walk = -1;
+      if (event.code === 'KeyA') this.input.yaw = 1;
+      if (event.code === 'KeyD') this.input.yaw = -1;
+      if (event.code === 'Space') { event.preventDefault(); this.input.dig = true; }
+    });
+    window.addEventListener('keyup', (event) => {
+      if (event.code === 'KeyW' || event.code === 'KeyS') this.input.walk = 0;
+      if (event.code === 'KeyA' || event.code === 'KeyD') this.input.yaw = 0;
+      if (event.code === 'Space') this.input.dig = false;
+    });
+  }
+
+  private resize(): void {
+    const width = Math.max(1, this.host.clientWidth);
+    const height = Math.max(1, this.host.clientHeight);
+    this.camera.aspect = width / height;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(width, height);
+  }
+}

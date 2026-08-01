@@ -40,6 +40,13 @@ if (host) {
   } else if (scene === 'queen') {
     // Model and gait preview. Nothing in the game imports it — see QueenScene.
     void import('./scenes/QueenScene').then(({ QueenScene }) => new QueenScene(host));
+  } else if (scene === 'block' || scene === 'terrainbug') {
+    /*
+     * The restart: one block of dirt, an ant who can walk all the way round
+     * it, and digging at the mandible. Everything else is being re-added one
+     * piece at a time. `terrainbug` is the name it was asked for by.
+     */
+    void import('./scenes/BlockScene').then(({ BlockScene }) => new BlockScene(host));
   } else if (scene === 'hex') {
     // The hex-grid experiment, kept only as the reference the rounded sockets
     // were taken from. See src/voxel/HexGrid.ts for why it could never be the
