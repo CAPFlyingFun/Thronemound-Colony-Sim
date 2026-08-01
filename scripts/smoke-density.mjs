@@ -858,12 +858,17 @@ for (const view of CASES) {
    */
   await page.evaluate(() => {
     const lab = window.labScene;
-    // On her feet and level before the ruler comes out: the dig scenario
-    // above ends nose-down in a bore with her legs at full stretch, and the
-    // widest bone pair of THAT pose measured 10.35 mm on a 9 mm ant.
+    // On her feet, level, and OUT OF THE HOLE before the ruler comes out:
+    // the dig scenario above ends nose-down in a bore with her legs at full
+    // stretch, and the widest bone pair of THAT pose measured 10.35 mm on a
+    // 9 mm ant. Since the world deepened, no amount of settling inside the
+    // shaft reads as a level stance either — legs bridging the shaft walls
+    // measured 10.53 mm — so she measures on flat, untouched ground.
     lab.input.dig = 0;
     lab.input.walk = 0;
     while (lab.bore.pitch < 0) lab.bore.aim(1);
+    lab.antPosition.set(24, 0, 26);
+    lab.resetDynamics();
     lab.stepForTest(1 / 60, 240);
   });
   const size = await page.evaluate(() => {
@@ -1647,6 +1652,32 @@ for (const view of CASES) {
     ok(`the keyboard holds its pace: W ${keys.plain.speed.toFixed(2)}, Shift+W ${keys.shifted.toFixed(2)}, `
       + `C+W ${keys.crawling.toFixed(2)} u/s, S reverses, release restores the pad`);
   }
+
+  /*
+   * From her eyes, the crosshair IS the carve. Orbit the third-person camera
+   * hard first, then drop into first person: the view must face down the
+   * bore's own heading, because the offset wound up on the OTHER camera used
+   * to come along for the ride — and every dig then landed degrees away from
+   * the centre of the screen. Reported from play as "digging doesn't follow
+   * the camera centre".
+   */
+  const aim = await page.evaluate(() => {
+    const lab = window.labScene;
+    lab.follow.orbit(0.9, 0.1);
+    lab.stepForTest(1 / 60, 5);
+    lab.follow.mode = 'first';
+    lab.stepForTest(1 / 60, 10);
+    const dir = lab.camera.getWorldDirection(lab.antPosition.clone());
+    const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+    const offDeg = Math.abs(wrap(Math.atan2(dir.x, dir.z) - lab.bore.heading)) * 180 / Math.PI;
+    lab.follow.mode = 'auto';
+    lab.stepForTest(1 / 60, 5);
+    return { offDeg };
+  });
+  if (!(aim.offDeg < 2)) {
+    fail(`after orbiting, the first-person view sits ${aim.offDeg.toFixed(1)} deg off the bore — `
+      + 'the crosshair and the carve disagree');
+  } else ok(`the first-person crosshair faces the bore (${aim.offDeg.toFixed(2)} deg off after a hard orbit)`);
   await page.close();
 }
 

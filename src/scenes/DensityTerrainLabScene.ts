@@ -371,6 +371,14 @@ const PROBE = new THREE.Vector3();
 const SENSE = new THREE.Vector3();
 
 /**
+ * The formicarium's timber, ported from the dig room: how thick a beam is and
+ * how far one repeat of the walnut grain runs, both in world units. The dig
+ * room's voxel is this room's unit, so the same numbers are the same wood.
+ */
+const FRAME_BEAM = 2.2;
+const GRAIN_UNITS = 5;
+
+/**
  * The camera pod: the dig room's player capsule, made a citizen of this room.
  *
  * Half a queen-head across and about a head tall — big enough to read as an
@@ -731,6 +739,9 @@ export class DensityTerrainLabScene {
   private menu!: LabMenu;
   /** The first-person camera's body, visible whenever the player is not in it. */
   private readonly eyePod: THREE.Group;
+  /** The tank's timber frame, standing at the world's true bounds. */
+  private readonly tank: THREE.Group;
+  private readonly tankGeometry: THREE.BoxGeometry;
 
   constructor(private readonly host: HTMLElement) {
     host.replaceChildren();
@@ -813,6 +824,50 @@ export class DensityTerrainLabScene {
     this.eyePod.add(shell, lens);
     this.eyePod.visible = false;
     this.scene.add(this.eyePod);
+
+    /*
+     * The formicarium frame, the dig room's recipe at this room's bounds:
+     * walnut posts at the world's four corners, rails along the top and
+     * along the foot so the tank reads as sitting in the ground rather than
+     * growing out of it. Furniture, not physics — the density margin is
+     * what actually stops her at the edge — but it makes the world box a
+     * thing you can SEE and walk to, instead of soil that just ends. The
+     * fog hides it from the middle of the map and hands it back as you
+     * near an edge, which is about how a wall across a garden behaves.
+     */
+    const walnut = new THREE.TextureLoader().load(`${import.meta.env.BASE_URL}frame/walnut.jpg`);
+    walnut.colorSpace = THREE.SRGBColorSpace;
+    walnut.wrapS = THREE.RepeatWrapping;
+    walnut.wrapT = THREE.RepeatWrapping;
+    this.tankGeometry = new THREE.BoxGeometry(1, 1, 1);
+    this.tank = new THREE.Group();
+    this.tank.name = 'tank-frame';
+    const beam = (
+      cx: number, cy: number, cz: number, sx: number, sy: number, sz: number,
+    ): void => {
+      const texture = walnut.clone();
+      texture.needsUpdate = true;
+      // Along the beam's longest axis, and across its thickness.
+      const run = Math.max(sx, sy, sz);
+      texture.repeat.set(run / GRAIN_UNITS, Math.min(sx, sy, sz) / GRAIN_UNITS);
+      const timber = new THREE.Mesh(this.tankGeometry, new THREE.MeshStandardMaterial({
+        map: texture, roughness: 0.85, metalness: 0,
+      }));
+      timber.position.set(cx, cy, cz);
+      timber.scale.set(sx, sy, sz);
+      timber.castShadow = true;
+      timber.receiveShadow = true;
+      this.tank.add(timber);
+    };
+    const beamT = FRAME_BEAM;
+    for (const x of [0, WORLD_SPAN]) {
+      for (const z of [0, WORLD_SPAN]) beam(x, SOIL_DEPTH / 2, z, beamT, SOIL_DEPTH, beamT);
+    }
+    for (const y of [0, SOIL_DEPTH]) {
+      for (const z of [0, WORLD_SPAN]) beam(WORLD_SPAN / 2, y, z, WORLD_SPAN, beamT, beamT);
+      for (const x of [0, WORLD_SPAN]) beam(x, y, WORLD_SPAN / 2, beamT, beamT, WORLD_SPAN);
+    }
+    this.scene.add(this.tank);
 
     (window as unknown as { labScene?: unknown }).labScene = this;
 
@@ -1000,6 +1055,14 @@ export class DensityTerrainLabScene {
         if (part.material instanceof THREE.Material) part.material.dispose();
       }
     }
+    this.scene.remove(this.tank);
+    for (const timber of this.tank.children) {
+      if (timber instanceof THREE.Mesh && timber.material instanceof THREE.MeshStandardMaterial) {
+        timber.material.map?.dispose();
+        timber.material.dispose();
+      }
+    }
+    this.tankGeometry.dispose();
     this.queen.dispose();
     for (const pellet of this.pellets) {
       pellet.mesh.geometry.dispose();
@@ -1151,13 +1214,14 @@ export class DensityTerrainLabScene {
      * collapses to zero, and the camera lands ON the bore's floor plane —
      * where the near plane slices the world open and the view goes sky.
      */
-    this.follow.eye.set(0, Math.max(0.35, head[1]), 0.06);
+    this.follow.eye.set(0, Math.max(0.35, head[1]), 0);
     this.repaintCamera?.();
   }
 
   private saveCameraPrefs(): void {
     try {
       window.localStorage.setItem(CAMERA_PREFS, JSON.stringify({
+        v: 2,
         mode: this.follow.mode,
         eye: [this.follow.eye.x, this.follow.eye.y, this.follow.eye.z],
       }));
@@ -1170,12 +1234,22 @@ export class DensityTerrainLabScene {
     try {
       const raw = window.localStorage.getItem(CAMERA_PREFS);
       if (!raw) return;
-      const saved = JSON.parse(raw) as { mode?: CameraMode; eye?: number[] };
+      const saved = JSON.parse(raw) as { v?: number; mode?: CameraMode; eye?: number[] };
       if (saved.mode === 'first' || saved.mode === 'auto' || saved.mode === 'third') {
         this.follow.mode = saved.mode;
       }
+      /*
+       * Only a VERSIONED eye is trusted. Placements saved before the
+       * dig-room seat existed carry the old forward lean, and a leaning eye
+       * is the collapsed-walk-out, camera-on-the-floor first person all over
+       * again — restored silently from storage on a phone that has played
+       * before, which no amount of fixing the default can reach. An
+       * unversioned pref keeps its camera mode and loses its seat; the next
+       * deliberate nudge saves as v2 and sticks.
+       */
       const eye = saved.eye;
-      if (Array.isArray(eye) && eye.length === 3 && eye.every((n) => Number.isFinite(n))) {
+      if (saved.v === 2
+        && Array.isArray(eye) && eye.length === 3 && eye.every((n) => Number.isFinite(n))) {
         this.follow.eye.set(
           THREE.MathUtils.clamp(eye[0]!, -EYE_RANGE, EYE_RANGE),
           THREE.MathUtils.clamp(eye[1]!, -EYE_RANGE, EYE_RANGE),

@@ -265,6 +265,17 @@ export class FollowCamera {
      */
     bodyForward?: THREE.Vector3,
   ): void {
+    /*
+     * First person has NO look offset, by definition. From her eyes, looking
+     * is aiming — the drag turns HER — so the view must be the bore's own
+     * direction and nothing else. The offset the player wound up while
+     * orbiting in third person used to survive the transition, and every
+     * carve then landed that many degrees off the crosshair: the report was
+     * "digging doesn't follow the camera centre", and the cause was a number
+     * from the OTHER camera still being added in. Cleared while onboard, so
+     * stepping out also starts the orbit squarely behind her.
+     */
+    if (this.onboard) this.yawOffset = 0;
     const yaw = heading + this.yawOffset;
 
     /*

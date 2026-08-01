@@ -55,19 +55,26 @@ export const CELL_MM = 0.25;
 export const CELL_SIZE = CELL_MM / WORLD_UNIT_MM;
 
 /*
- * 64 x 32 x 64 mm of soil, sixteen times the footprint the lab started with.
+ * 64 x 48 x 64 mm of soil, sixteen times the footprint the lab started with.
  *
  * The cap here is MEMORY, not speed — remeshing is chunked now, so a tap costs
- * the bite rather than the world. This field is 8.5 million samples at four
- * bytes, which is 34 MB and comfortable on a phone. The same quarter-
+ * the bite rather than the world. This fixed field is 12.6 million samples at
+ * four bytes, 50 MB, and only the tests still build it — the game runs on the
+ * streamed window, whose budget lives in labWorld. The same quarter-
  * millimetre cells stretched over the real 640 mm tank would be 1.6 billion
  * samples and 6.3 GB, so the finished game cannot hold ant-scale detail
  * everywhere at once — it will want coarse soil away from the digging and fine
  * soil only where she has actually been. That is the next thing this lab
  * should answer, and it is a different question from the one it answers now.
+ *
+ * Height went 128 -> 192 cells for DEPTH, reported from play: at 32 mm tall
+ * with the surface riding at 45%, bedrock sat fourteen millimetres down and a
+ * held DIG met it in seconds. At 48 mm with the streamed surface at three
+ * quarters (see `streamHeightAt`), a shaft has the better part of forty
+ * millimetres to go.
  */
 export const CELLS_X = 256;
-export const CELLS_Y = 128;
+export const CELLS_Y = 192;
 export const CELLS_Z = 256;
 
 /**
@@ -216,6 +223,18 @@ export const WORLD_HEIGHT = CELLS_Y * CELL_SIZE;
 export const WORLD_DEPTH = CELLS_Z * CELL_SIZE;
 
 /**
+ * The FIXED test mound keeps the original 128-cell height it was measured
+ * against. Its summit scales off its world height, and the watertightness
+ * tables — pinch counts per bite, written down in densityWatertight — are
+ * calibrated to that exact shape: raising CELLS_Y for the streamed world's
+ * digging depth reshaped the fixture and moved one weld onto a boundary
+ * edge. The stream's depth and the fixture's geometry are different
+ * questions, so they stopped sharing a constant.
+ */
+const MOUND_CELLS_Y = 128;
+const MOUND_HEIGHT = MOUND_CELLS_Y * CELL_SIZE;
+
+/**
  * The test mound: a low rise with a little roughness, walled in by margins so
  * the soil is a closed blob rather than something running off the edge of the
  * field.
@@ -228,10 +247,10 @@ export const WORLD_DEPTH = CELLS_Z * CELL_SIZE;
  */
 export function makeMoundField(): DensityField {
   const field = new DensityField({
-    cellsX: CELLS_X, cellsY: CELLS_Y, cellsZ: CELLS_Z, cellSize: CELL_SIZE,
+    cellsX: CELLS_X, cellsY: MOUND_CELLS_Y, cellsZ: CELLS_Z, cellSize: CELL_SIZE,
   });
   const width = WORLD_WIDTH;
-  const height = WORLD_HEIGHT;
+  const height = MOUND_HEIGHT;
   const depth = WORLD_DEPTH;
   const margin = CELL_SIZE * 1.5;
 

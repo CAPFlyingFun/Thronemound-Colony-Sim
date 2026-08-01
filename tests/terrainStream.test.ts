@@ -130,8 +130,20 @@ describe('streamed soil', () => {
     expect(WORLD_SPAN * WORLD_UNIT_MM).toBe(320);
     expect(WORLD_TILES * WORLD_TILES).toBe(400);
 
+    /*
+     * 29 MB, up from 18 when the world was 32 mm tall. The extra is DEPTH,
+     * bought on request: bedrock at fourteen millimetres was reached in
+     * seconds of held DIG, so the world grew to 48 mm with the surface at
+     * three quarters of it — see `streamHeightAt`. Still well under the
+     * 50 MB fixed field this design replaced.
+     */
     const megabytes = WINDOW_BYTES / 1048576;
-    expect(megabytes).toBeLessThan(24);
+    expect(megabytes).toBeLessThan(32);
+    expect(SOIL_DEPTH * WORLD_UNIT_MM).toBeCloseTo(48, 9);
+    // The point of the raise, measured at the world's centre: the soil
+    // under the surface is most of the world's height, not half of it.
+    const centre = WORLD_SPAN * 0.5;
+    expect(streamGroundHeight(centre, centre) * WORLD_UNIT_MM).toBeGreaterThan(27);
 
     // What the proposal as written would have cost, for contrast.
     const sixtyFour = (64 / CELL_MM + 1) ** 2 * (CELLS_Y + 1) * 4 * WINDOW_TILES ** 2;
@@ -145,7 +157,8 @@ describe('streamed soil', () => {
   it('starts holding exactly what the formula describes', () => {
     const stream = new TerrainStream(WORLD_SPAN * 0.5, WORLD_SPAN * 0.5);
     const drift = driftFromFormula(stream);
-    expect(drift.checked).toBe(28 * 19 * 28);
+    // 193 samples on each axis now (192 cells tall), strided by 7: 28 rows.
+    expect(drift.checked).toBe(28 * 28 * 28);
     expect(drift.worst).toBeLessThan(1e-6);
 
     // And it is the soil at THIS place in the world, not merely soil.

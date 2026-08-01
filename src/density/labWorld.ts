@@ -126,7 +126,16 @@ export const WORLD_MARGIN = CELL_SIZE * 1.5;
  * cost. Measured at 245 ms for one diagonal recentre; a stall you can feel.
  */
 export function streamHeightAt(x: number, z: number): number {
-  return SOIL_DEPTH * 0.45
+  /*
+   * Three quarters of the world's height, not half. The fraction is the
+   * digging depth: everything under this line down to the margin is soil,
+   * everything above is the sky's headroom. At 45% of a 32 mm world the
+   * floor was ~14 mm down — reached in seconds of held DIG, reported from
+   * play — so the world grew to 48 mm and the surface rode up to 75%, which
+   * puts bedrock 27 to 44 mm under the hills. The octaves peak at ±1.71
+   * units, so the tallest hill still clears the world's top by 3 mm.
+   */
+  return SOIL_DEPTH * 0.75
     + 1.10 * Math.sin(x * 0.191) * Math.cos(z * 0.167)
     + 0.45 * Math.sin(x * 0.611 + 1.7) * Math.cos(z * 0.733 - 0.9)
     + 0.16 * Math.sin(x * 2.31 - 0.4) * Math.cos(z * 2.09 + 2.2)
