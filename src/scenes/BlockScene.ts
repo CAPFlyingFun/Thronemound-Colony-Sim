@@ -131,9 +131,14 @@ export class BlockScene {
    * faces up, and +Y is the case that works.
    *
    * Drawing both sides costs fill rate and hides the bug rather than fixing
-   * it; the mesher is shared with the streamed world and its watertightness
-   * suite, so it gets its own pass rather than a guess at the end of this
-   * one.
+   * it. It is not a one-line flip, and that is measured too: inverting the
+   * `flip` rule in `addQuad`'s three call sites (`start < 0` to `start > 0`)
+   * does not correct the negative faces, it reverses the POSITIVE ones as
+   * well — the tally goes from three faces right to none right. So the flag
+   * globally reverses the mesh rather than distinguishing the two directions
+   * a crossing can face, and whatever actually decides orientation is
+   * somewhere else. The next pass at it starts from that, with the
+   * watertightness suite's orientation check as the harness.
    */
   private readonly material = new THREE.MeshStandardMaterial({
     color: 0x7a5136, roughness: 0.95, metalness: 0, side: THREE.DoubleSide,
