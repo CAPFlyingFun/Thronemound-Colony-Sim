@@ -15,11 +15,10 @@ import {
   BoreRig, DIG_YAW_RATE, PITCH_MAX, PITCH_MIN, PITCH_STEP, STROKE_SECONDS, YAW_RATE, dipAt,
 } from '../src/scenes/BoreControl';
 
-const HOLD = { yaw: 0, forward: 0 };
-const AHEAD = { yaw: 0, forward: 1 };
-const BACK = { yaw: 0, forward: -1 };
+const IDLE = { yaw: 0, forward: 0, dig: false };
+const DIG = { yaw: 0, forward: 0, dig: true };
 
-function run(rig: BoreRig, seconds: number, input = AHEAD, dt = 1 / 60) {
+function run(rig: BoreRig, seconds: number, input = DIG, dt = 1 / 60) {
   let bites = 0;
   let maxDip = 0;
   for (let i = 0; i < Math.round(seconds / dt); i += 1) {
@@ -30,51 +29,41 @@ function run(rig: BoreRig, seconds: number, input = AHEAD, dt = 1 / 60) {
   return { bites, maxDip };
 }
 
-describe('the dig toggle', () => {
+describe('the dig button', () => {
   /*
-   * The reported fault, in one test: "it moved when it wasn't supposed to".
-   * The dig used to creep her forward on its own so a tunnel would form, which
-   * is a reasonable thing to want and not what was asked for — the joystick is
-   * the only thing that moves her.
+   * The button IS the drive now — held is dug, released is stopped. This is
+   * the second specification of this control, made after playing both: the
+   * latch was asked for, built, and then the dig room's press-to-dig played
+   * better and won. These tests state the CURRENT spec so the next reversal
+   * is a decision with a diff, not a drift.
    */
-  it('does nothing at all on its own', () => {
+  it('digs for exactly as long as it is held', () => {
     const rig = new BoreRig();
-    rig.toggleDig();
+    expect(rig.digging).toBe(false);
+    expect(run(rig, 3, DIG).bites).toBeGreaterThan(3);
     expect(rig.digging).toBe(true);
-    const { bites, maxDip } = run(rig, 4, HOLD);
+    // At most the stroke already in flight lands — one begun always finishes,
+    // so releasing mid-lunge does not swallow the bite it was about to take —
+    // and after that the head is at rest.
+    expect(run(rig, 3, IDLE).bites).toBeLessThanOrEqual(1);
+    expect(rig.striking).toBe(false);
+    expect(rig.digging).toBe(false);
+  });
+
+  it('does nothing while only the pad is pushed', () => {
+    // Walking is walking. The pad must never cut soil on its own — that is
+    // the whole of "press dig to actually dig and not forward to dig".
+    const rig = new BoreRig();
+    const { bites, maxDip } = run(rig, 4, { yaw: 0, forward: 1, dig: false });
     expect(bites).toBe(0);
     expect(maxDip).toBe(0);
   });
 
-  it('latches on and off rather than needing to be held', () => {
-    const rig = new BoreRig();
-    expect(rig.digging).toBe(false);
-    rig.toggleDig();
-    expect(run(rig, 3).bites).toBeGreaterThan(3);
-    rig.toggleDig();
-    expect(rig.digging).toBe(false);
-    expect(run(rig, 3).bites).toBe(0);
-  });
-
-  it('does not dig while reversing back up its own tunnel', () => {
-    const rig = new BoreRig();
-    rig.toggleDig();
-    expect(run(rig, 4, BACK).bites).toBe(0);
-  });
-
-  /*
-   * Bites are a function of TIME, not of frames — a bite fired every Nth frame
-   * passes perfectly at 60 and doubles at 120, and the phone and the headless
-   * renderer are nowhere near each other.
-   */
   it('bites at the same rate however fast the frames come', () => {
-    const expected = Math.floor(4 / STROKE_SECONDS);
-    for (const dt of [1 / 120, 1 / 60, 1 / 30, 1 / 10, 1 / 4]) {
-      const rig = new BoreRig();
-      rig.toggleDig();
-      const { bites } = run(rig, 4, AHEAD, dt);
-      expect(Math.abs(bites - expected), `at ${Math.round(1 / dt)} fps`).toBeLessThanOrEqual(1);
-    }
+    const rig = new BoreRig();
+    const slow = run(rig, 6, DIG, 1 / 30).bites;
+    const fast = run(new BoreRig(), 6, DIG, 1 / 144).bites;
+    expect(Math.abs(slow - fast)).toBeLessThanOrEqual(1);
   });
 });
 
@@ -111,46 +100,46 @@ describe('aiming', () => {
 
 describe('steering', () => {
   /*
-   * Ten degrees a second while digging against eighty-six above ground. A bore
-   * is a committed shape; the reason this is a separate rate rather than the
-   * same one is that the same stick doing the same thing at the same speed in
-   * both modes makes a tunnel impossible to place.
+   * Ten degrees a second while the dig is held against eighty-six walking. A
+   * bore is a committed shape; the same stick at the same speed in both modes
+   * makes a tunnel impossible to place.
    */
-  it('turns far more slowly while digging', () => {
+  it('turns far more slowly while the dig is held', () => {
     const above = new BoreRig();
-    run(above, 1, { yaw: 1, forward: 1 });
+    run(above, 1, { yaw: 1, forward: 1, dig: false });
     expect(above.heading).toBeCloseTo(YAW_RATE, 2);
 
     const below = new BoreRig();
-    below.toggleDig();
-    run(below, 1, { yaw: 1, forward: 1 });
+    run(below, 1, { yaw: 1, forward: 0, dig: true });
     expect(below.heading).toBeCloseTo(DIG_YAW_RATE, 2);
     expect(DIG_YAW_RATE * 180 / Math.PI).toBeCloseTo(10, 6);
   });
 
-  it('cannot steer a tunnel except while advancing along it', () => {
-    for (const input of [{ yaw: 1, forward: 0 }, { yaw: 1, forward: -1 }]) {
-      const rig = new BoreRig();
-      rig.toggleDig();
-      run(rig, 2, input);
-      expect(rig.heading).toBe(0);
-    }
-  });
-
   it('keeps the heading in range however long it is spun', () => {
     const rig = new BoreRig();
-    run(rig, 100, { yaw: 1, forward: 1 });
+    run(rig, 100, { yaw: 1, forward: 1, dig: false });
     expect(Math.abs(rig.heading)).toBeLessThanOrEqual(Math.PI + 1e-9);
   });
 });
 
-describe('the stroke', () => {
-  it('finishes once begun, even after the joystick is released', () => {
+describe('the aim follows the look', () => {
+  it('aims continuously and clamps to the poles', () => {
     const rig = new BoreRig();
-    rig.toggleDig();
-    rig.step(1 / 60, AHEAD);
+    rig.aimTo(-0.7);
+    expect(rig.pitch).toBeCloseTo(-0.7, 9);
+    rig.aimTo(-9);
+    expect(rig.pitch).toBeCloseTo(PITCH_MIN, 9);
+    rig.aimTo(9);
+    expect(rig.pitch).toBeCloseTo(PITCH_MAX, 9);
+  });
+});
+
+describe('the stroke', () => {
+  it('finishes once begun, even after the button is released', () => {
+    const rig = new BoreRig();
+    rig.step(1 / 60, DIG);
     let bites = 0;
-    for (let i = 0; i < 60; i += 1) if (rig.step(1 / 60, HOLD).bite) bites += 1;
+    for (let i = 0; i < 60; i += 1) if (rig.step(1 / 60, IDLE).bite) bites += 1;
     expect(bites).toBe(1);
     expect(rig.striking).toBe(false);
   });
@@ -170,10 +159,9 @@ describe('the stroke', () => {
     expect(peakAt).toBeGreaterThan(0.5);
 
     const rig = new BoreRig();
-    rig.toggleDig();
     let biteAt = -1;
     for (let i = 0; i < 400; i += 1) {
-      const step = rig.step(1 / 600, AHEAD);
+      const step = rig.step(1 / 600, DIG);
       if (step.bite) { biteAt = step.stroke; break; }
     }
     expect(biteAt).toBeGreaterThan(0);

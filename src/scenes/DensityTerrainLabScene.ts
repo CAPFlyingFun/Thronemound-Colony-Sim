@@ -4,6 +4,7 @@ import { BoreRig, DIG_YAW_RATE, STROKE_SECONDS, YAW_RATE } from './BoreControl';
 import { clampStickOrigin, stickVector } from '../voxel/locomotion';
 import { FollowCamera, type CameraMode } from './FollowCamera';
 import { TripodGait, type SurfaceAt } from '../anim/tripod';
+import { DigHud } from './DigHud';
 import { CASTE_LENGTH_MM } from '../anim/hexapod';
 import { buildSurfaceNets } from '../density/SurfaceNets';
 import { TerrainStream } from '../density/TerrainStream';
@@ -291,16 +292,6 @@ const LOOK_PER_PIXEL = 0.006;
 /** Pixels a pointer may travel and still count as a tap rather than a drag. */
 const TAP_SLOP = 6;
 
-/**
- * How far a first-person look-drag must travel to click the pitch dial one
- * ten-degree step.
- *
- * The dial is discrete and the drag is not, so something has to decide where
- * the notches are. Matching the step to the angle itself would make the aim
- * one-to-one with the view, which sounds right and is not: you would be unable
- * to look at the ceiling without aiming at it.
- */
-const AIM_PER_STEP = 0.28;
 
 /** How much one nudge moves the first-person eye, in world units. */
 const EYE_NUDGE = 0.5 / WORLD_UNIT_MM;
@@ -597,7 +588,29 @@ export class DensityTerrainLabScene {
   private stickY = 0;
   private sun: any = null;
   /** What the controls are asking for: steering, throttle and the dig. */
-  private readonly input = { yaw: 0, walk: 0 };
+  private readonly input = { yaw: 0, walk: 0, dig: 0 };
+  /** The first-person instrument overlay. Fed once a frame from `simulate`. */
+  private readonly digHud = new DigHud();
+  /** Millimetres of tunnel driven since DIG was last pressed. */
+  private dugDistance = 0;
+  private wasCutting = false;
+  /**
+   * Is she committed to a bore? Latched on the first cut and released only
+   * when she has come genuinely clear of her own workings.
+   *
+   * The latch exists because no instantaneous measure survives a SHALLOW
+   * bore. `wedged` asks whether her whole body is below the undug land, and
+   * four millimetres into a dive it is not — so on the old rule, releasing
+   * DIG there meant "level out", and pulling back walked her backwards
+   * across the open mound instead of up the hole she was standing in.
+   * Measured on the round trip: dug to 12.1 mm, "reversed" to 8.4 —
+   * DOWNHILL, away from the shaft, nose flat.
+   *
+   * While the latch is held her travel and her body keep the bore's pitch,
+   * so reverse follows the hole that is already there — however shallow it
+   * still is.
+   */
+  private boreEngaged = false;
   private readonly heldKeys = new Set<string>();
   private animationFrame = 0;
   private previousTime = performance.now();
@@ -612,14 +625,10 @@ export class DensityTerrainLabScene {
   private camPanel!: HTMLDivElement;
   /** Redraws for the eye readouts, so a recentre updates all three. */
   private readonly camReads: Array<() => void> = [];
-  /** Look-drag accumulated toward the next pitch notch. See `AIM_PER_STEP`. */
-  private aimDrag = 0;
   /** True once the player has moved the eye, so the rig default stops applying. */
   private eyePlaced = false;
   private repaintCamera: (() => void) | null = null;
   private readonly walkButton: HTMLButtonElement;
-  private readonly gaugeAnt: HTMLSpanElement;
-  private readonly gaugeRead: HTMLDivElement;
   private readonly padButtons: HTMLButtonElement[] = [];
   private resizeObserver: ResizeObserver | null = null;
 
@@ -732,51 +741,29 @@ export class DensityTerrainLabScene {
     hud.innerHTML = `
       <div class="density-lab-title">DENSITY TERRAIN LAB <span>${BITE_WIDTH_MM} mm bite · ${BITE_DEPTH_MM} mm deep</span></div>
       <div class="density-lab-status"></div>
-      <div class="density-lab-hint">Set pitch with △▽ · press BORE once to arm it · W/S then moves you along that pitch (A/D steers) · RUN toggles pace</div>
-      <div class="density-lab-gauge" aria-live="off">
-        <div class="density-lab-gauge-dial"><span class="density-lab-gauge-ant"></span></div>
-        <div class="density-lab-gauge-read">0\u00b0</div>
-      </div>
+      <div class="density-lab-hint">Hold DIG and she bores where you look · drag to look and aim · the pad walks · RUN toggles pace</div>
       <div class="density-lab-actions"></div>
     `;
     host.appendChild(hud);
+    host.appendChild(this.digHud.root);
 
     const status = hud.querySelector<HTMLDivElement>('.density-lab-status');
     const actions = hud.querySelector<HTMLDivElement>('.density-lab-actions');
-    const dial = hud.querySelector<HTMLSpanElement>('.density-lab-gauge-ant');
-    const read = hud.querySelector<HTMLDivElement>('.density-lab-gauge-read');
-    if (!status || !actions || !dial || !read) {
+    if (!status || !actions) {
       throw new Error('Density terrain lab HUD failed to initialize');
     }
-    this.gaugeAnt = dial;
-    this.gaugeRead = read;
     this.status = status;
 
+    /*
+     * The dig is HELD, like the dig room's: down is cutting, up is stopped.
+     * There is no aim control here any more \u2014 in first person the look is
+     * the aim, which is the whole simplification asked for.
+     */
     this.digButton = document.createElement('button');
     this.digButton.className = 'density-lab-button density-lab-dig';
-    this.digButton.textContent = 'BORE';
-    this.digButton.setAttribute('aria-label', 'Hold to bore along the heading');
+    this.digButton.textContent = 'DIG';
+    this.digButton.setAttribute('aria-label', 'Hold to dig where she is looking');
     actions.appendChild(this.digButton);
-
-    /*
-     * Pitch is set here and nowhere else, in ten-degree steps, so it can be
-     * dialled in and read off the gauge. It is a setting, not a stick.
-     */
-    const aim = document.createElement('div');
-    aim.className = 'density-lab-aim';
-    for (const [glyph, label, steps] of [['\u25b3', 'aim up', 1], ['\u25bd', 'aim down', -1]] as const) {
-      const button = document.createElement('button');
-      button.className = 'density-lab-aimkey';
-      button.textContent = glyph;
-      button.setAttribute('aria-label', label);
-      button.addEventListener('pointerdown', (event) => {
-        event.preventDefault();
-        this.bore.aim(steps);
-        this.updateStatus();
-      });
-      aim.appendChild(button);
-    }
-    actions.insertBefore(aim, this.digButton);
 
     this.walkButton = document.createElement('button');
     this.walkButton.className = 'density-lab-button density-lab-walk';
@@ -798,7 +785,10 @@ export class DensityTerrainLabScene {
     actions.appendChild(this.resetButton);
 
     this.buildStick(hud);
-    this.digButton.addEventListener('pointerdown', this.onDigPointerDown);
+    this.digButton.addEventListener('pointerdown', this.onDigDown);
+    this.digButton.addEventListener('pointerup', this.onDigUp);
+    this.digButton.addEventListener('pointercancel', this.onDigUp);
+    this.digButton.addEventListener('pointerleave', this.onDigUp);
     this.resetButton.addEventListener('click', this.resetTerrain);
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
@@ -821,7 +811,10 @@ export class DensityTerrainLabScene {
     this.renderer.domElement.removeEventListener('pointerup', this.onCameraUp);
     this.renderer.domElement.removeEventListener('pointercancel', this.onCameraUp);
     this.renderer.domElement.removeEventListener('wheel', this.onCameraWheel);
-    this.digButton.removeEventListener('pointerdown', this.onDigPointerDown);
+    this.digButton.removeEventListener('pointerdown', this.onDigDown);
+    this.digButton.removeEventListener('pointerup', this.onDigUp);
+    this.digButton.removeEventListener('pointercancel', this.onDigUp);
+    this.digButton.removeEventListener('pointerleave', this.onDigUp);
     this.resetButton.removeEventListener('click', this.resetTerrain);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
@@ -1030,26 +1023,27 @@ export class DensityTerrainLabScene {
   }
 
   /**
-   * The dig control is a LATCH, not a trigger.
-   *
-   * Pressed once it arms the head; pressed again it stows it. Held-to-dig was
-   * the first spelling and it fought the joystick, because both hands were
-   * then doing continuous work for one action — and it made "pressing Dig will
-   * not automatically move you" impossible to express, since the only way to
-   * dig was to be holding something.
+   * The dig control is HELD — the second specification of it, made after
+   * playing both. The latch was asked for first, because hold-to-dig fought
+   * the joystick when both hands did continuous work; then the dig room
+   * shipped with press-to-dig where the button IS the drive, and it played
+   * better. With the button doing the advancing there is nothing left for
+   * the other hand to hold, and the objection dissolved.
    */
-  private readonly onDigPointerDown = (event: PointerEvent): void => {
+  private readonly onDigDown = (event: PointerEvent): void => {
     event.preventDefault();
-    this.bore.toggleDig();
-    this.updateStatus();
+    this.input.dig = 1;
+  };
+
+  private readonly onDigUp = (): void => {
+    this.input.dig = 0;
   };
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
     if (event.repeat) return;
     if (event.code === 'Space') {
       event.preventDefault();
-      this.bore.toggleDig();
-      this.updateStatus();
+      this.input.dig = 1;
       return;
     }
     // Pitch steps on the press, not on the hold: ten degrees a tap.
@@ -1069,6 +1063,10 @@ export class DensityTerrainLabScene {
   };
 
   private readonly onKeyUp = (event: KeyboardEvent): void => {
+    if (event.code === 'Space') {
+      this.input.dig = 0;
+      return;
+    }
     this.heldKeys.delete(event.code);
     this.applyHeldKeys();
   };
@@ -2084,7 +2082,24 @@ export class DensityTerrainLabScene {
      * whether the player-facing world counts her as being in daylight. See
      * `wedged` for the limit cycle that using the roof sense here produced.
      */
-    const floor = this.wedged
+    /*
+     * In a bore the floor is the single column beneath her — her own shaft,
+     * however shallow it still is. The old gate was `wedged`, which a
+     * four-millimetre dive never satisfies, so the stance median held her at
+     * the rim and the first seconds of every dig were a tug of war the jaws
+     * mostly lost. The "arming must not move her" rule that once forbade
+     * this switch is dead: holding DIG is SUPPOSED to move her now.
+     */
+    /*
+     * The column while she is wedged or actively cutting; the STANCE once
+     * her body is clear. The stance half is not a nicety — at the mouth of a
+     * shaft it reads the rim, and the ease-up branch below is what carries
+     * her the last stretch out of her own hole. Pinning the floor to the
+     * shaft column whenever the bore was engaged left that assist dead, and
+     * a reverse that climbed to the mouth settled back to the shaft floor
+     * the moment the stick was released.
+     */
+    const floor = this.wedged || this.bore.digging
       ? this.groundAt(
         this.antPosition.x, this.antPosition.z, this.antPosition.y + FOOT_CLEARANCE,
       )
@@ -2095,7 +2110,14 @@ export class DensityTerrainLabScene {
       const ease = 1 - Math.exp(-HEIGHT_EASE * dt);
       this.antPosition.y += (floor - this.antPosition.y) * ease;
       this.fallSpeed = 0;
-    } else if (!(this.bore.digging && this.wedged)) {
+    } else if (!(this.wedged && (this.bore.digging || this.input.walk !== 0))) {
+      /*
+       * ^ WEDGED, not the bore latch, and the difference is a launch: what
+       * suspends gravity is her body being in the soil's grip, and holding
+       * reverse does not extend that grip past the surface — gated on the
+       * latch, a held reverse at minus ninety sailed her 46 mm into the sky.
+       * The latch owns her ALIGNMENT; the soil owns her weight.
+       */
       /*
        * And DROPPED onto it when the bore has left her over open space.
        *
@@ -2566,25 +2588,35 @@ export class DensityTerrainLabScene {
    *
    * Above ground with the dig off, pitch is ignored and she simply walks.
    */
-  private travel(dt: number, pitch: number, digging: boolean): void {
+  private travel(dt: number, pitch: number, cutting: boolean): void {
     const ease = 1 - Math.exp(-SPEED_EASE * dt);
-    const throttle = this.input.walk;
+    /*
+     * The DIG button is the drive: held, she advances into the face at jaw
+     * pace with no pad input at all, which is the dig room's model brought
+     * over whole. The pad only ever walks her — and pulling back with the
+     * dig released is how she reverses out of a bore, at walking pace,
+     * because backing out removes nothing and there is no work to pace.
+     */
+    const throttle = cutting ? 1 : this.input.walk;
+    /*
+     * Travel follows the pitch while she is cutting AND for as long as any
+     * of her is still below the undug land. The second half is what lets go
+     * of the button mean "stop", not "level out": release mid-bore and she
+     * holds the bore's line, so pulling back walks her up the hole that is
+     * already there instead of grinding her nose into its wall.
+     */
+    const aligned = cutting || this.boreEngaged;
     const forward = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
 
-    // Down the WORLD's pitch, matching the gauge. Built on the terrain normal
-    // this drifted with the slope, so a dial reading minus ninety drove her
+    // Down the WORLD's pitch, matching the dial. Built on the terrain normal
+    // this drifted with the slope, so an aim of minus ninety drove her
     // along a hillside instead of into it.
-    const heading = digging
+    const heading = aligned
       ? forward.clone().multiplyScalar(Math.cos(pitch))
         .addScaledVector(WORLD_UP, Math.sin(pitch)).normalize()
       : forward;
-    /*
-     * Boring is paced by the JAWS, not by the legs — but only going FORWARD.
-     * Backing out removes nothing, so there is no work to pace against, and
-     * making her reverse at digging speed up a hole that is already there is
-     * just a slow walk home.
-     */
-    let pace = digging && throttle > 0 ? BORE_SPEED : this.speed;
+    // Boring is paced by the JAWS, not by the legs.
+    let pace = cutting ? BORE_SPEED : this.speed;
     /*
      * Footing gone, forward progress gone with it.
      *
@@ -2599,7 +2631,7 @@ export class DensityTerrainLabScene {
      * does the part of that job that matters: with nothing underfoot she
      * scrabbles instead of running, and drops IN rather than across.
      */
-    if (this.overHole && !digging) pace *= HOLE_SCRABBLE;
+    if (this.overHole && !aligned) pace *= HOLE_SCRABBLE;
     const wanted = heading.multiplyScalar(pace * throttle);
 
     this.velocity.lerp(wanted, ease);
@@ -2609,7 +2641,7 @@ export class DensityTerrainLabScene {
       this.walkSpeed = 0;
       return;
     }
-    this.glide(dt, digging);
+    this.glide(dt, aligned);
   }
 
   /**
@@ -2665,29 +2697,7 @@ export class DensityTerrainLabScene {
     }
   }
 
-  /**
-   * The pitch gauge: the number, and an ant tipped to the angle she will bore
-   * at. A dial is worth having because the pitch is a SETTING now — you dial
-   * it in before you commit, and reading it off the stat block is not the same
-   * as seeing which way she is pointed.
-   */
-  private updateGauge(): void {
-    const degrees = Math.round(this.bore.pitch * 180 / Math.PI);
-    this.gaugeRead.textContent = `${degrees}\u00b0`;
-    /*
-     * The needle points the way she will go, so level reads LEVEL.
-     *
-     * The glyph has to be a rightwards arrowhead for that. It was an upwards
-     * one, which put an unrotated needle straight up at 0 degrees \u2014 a dial
-     * reading "level" while pointing at the sky \u2014 and swung it to horizontal at
-     * minus ninety, exactly a quarter turn wrong the whole way round.
-     */
-    this.gaugeAnt.style.transform = `rotate(${-degrees}deg)`;
-    this.gaugeRead.dataset.digging = this.bore.digging ? 'on' : 'off';
-  }
-
   private updateStatus(): void {
-    this.updateGauge();
     const message = this.status.dataset.message ?? 'Walk with the pad, aim, and press DIG';
     const physicalVolumeMm3 = this.totalRemoved * WORLD_UNIT_MM ** 3;
     const tileX = Math.floor(this.antPosition.x / (TILE_CELLS * CELL_SIZE));
@@ -2801,10 +2811,9 @@ export class DensityTerrainLabScene {
        * truth and there is no second copy of the number to disagree with it.
        */
       this.bore.turn(-dx * LOOK_PER_PIXEL);
-      this.aimDrag += dy * LOOK_PER_PIXEL;
-      while (this.aimDrag >= AIM_PER_STEP) { this.bore.aim(-1); this.aimDrag -= AIM_PER_STEP; }
-      while (this.aimDrag <= -AIM_PER_STEP) { this.bore.aim(1); this.aimDrag += AIM_PER_STEP; }
-      this.updateGauge();
+      // The look IS the aim: one continuous number, no notches, no second
+      // copy for a gauge to disagree with. Drag up, dig up.
+      this.bore.aimTo(this.bore.pitch - dy * LOOK_PER_PIXEL);
       return;
     }
     this.follow.orbit(-dx * LOOK_PER_PIXEL, -dy * LOOK_PER_PIXEL);
@@ -2885,7 +2894,10 @@ export class DensityTerrainLabScene {
     // A climb owns the yaw — the bore's heading is kept in step by climbMove
     // so the HUD and an eventual dismount agree with where she is pointed.
     const bore = this.bore.step(delta, {
-      yaw: this.gripping ? 0 : this.input.yaw, forward: this.input.walk,
+      yaw: this.gripping ? 0 : this.input.yaw,
+      forward: this.input.walk,
+      // No jaws on the climb: the bore is a soil tool, and the wall is bark.
+      dig: !this.gripping && this.input.dig > 0,
     });
     if (!this.gripping) this.facing = bore.heading;
 
@@ -2907,7 +2919,25 @@ export class DensityTerrainLabScene {
      * angle yet, and she levels out on the same rate limit she tips down on,
      * so disarming is a controlled rise rather than a snap upright.
      */
-    const aim = bore.digging && !this.gripping ? bore.pitch : 0;
+    if (bore.digging) this.boreEngaged = true;
+    else if (this.boreEngaged) {
+      /*
+       * Released only when she is clear of the workings AND has let go of
+       * reverse. The second clause is the one found by measurement: release
+       * on clearance alone, and the rest of a held reverse walks her
+       * BACKWARD, blind, flat across the mound — straight into whatever
+       * crater is behind her. Reversing means "back out of the bore" for as
+       * long as it is held, so the bore's frame holds with it; the launch
+       * guard already keeps her from sailing off the top. A climb releases
+       * it outright — that frame owns her.
+       */
+      const undug = streamGroundHeight(this.antPosition.x, this.antPosition.z);
+      const clear = this.antPosition.y >= undug - FALL_FROM && this.input.walk >= 0;
+      if (clear || this.gripping) this.boreEngaged = false;
+    }
+    // She holds the bore's angle for as long as she is committed to the bore,
+    // and levels out only once she is clear of it.
+    const aim = this.boreEngaged && !this.gripping ? bore.pitch : 0;
     this.headPitch += THREE.MathUtils.clamp(aim - this.headPitch, -swing, swing);
     this.thoraxPitch += THREE.MathUtils.clamp(
       this.headPitch - this.thoraxPitch, -swing * THORAX_RATE, swing * THORAX_RATE,
@@ -2916,16 +2946,6 @@ export class DensityTerrainLabScene {
       this.thoraxPitch - this.gasterPitch, -swing * GASTER_RATE, swing * GASTER_RATE,
     );
     if (this.gripping) {
-      /*
-       * The jaws cannot cut from a wall — the bore is a soil tool and its
-       * whole physics assumes the undug land above her. Arming it mid-climb
-       * simply disarms again, with a line saying so.
-       */
-      if (this.bore.digging) {
-        this.bore.toggleDig();
-        this.status.dataset.message = 'She cannot dig while she climbs';
-        this.updateStatus();
-      }
       this.climbMove(delta);
       this.roofedNow = this.senseUnderground();
     } else {
@@ -2944,7 +2964,14 @@ export class DensityTerrainLabScene {
        * always wins and the shaft never starts — measured as her rising two
        * millimetres over six seconds of driving straight down.
        */
-      if (bore.digging || this.underground) this.holdTunnel(delta);
+      /*
+       * Committed to a bore — engaged, not merely "button down": a shallow
+       * shaft is not roofed and not deep enough to wedge her, and `stand`
+       * running there eased her back onto the pit floor every frame while
+       * the reverse tried to climb, which is why "reversing did not bring
+       * her up" survived the first latch fix.
+       */
+      if (this.boreEngaged || this.underground) this.holdTunnel(delta);
       else this.stand(delta);
       // Only after she has settled: the feeler reads her resolved position.
       this.tryMount();
@@ -3100,6 +3127,31 @@ export class DensityTerrainLabScene {
       // The land as seen from the sky — crater rims and the treetop count.
       (x, z) => this.groundAt(x, z, CELLS_Y * CELL_SIZE),
     );
+    /*
+     * The instruments, from the same numbers the physics runs on: depth is
+     * the wedged measure's own subtraction, the tunnel length is integrated
+     * from her true velocity while the button is down, soil is the carve's
+     * tally. The HUD wears the first-person view only — over the shoulder,
+     * the animal itself is the instrument.
+     */
+    if (bore.digging && !this.wasCutting) this.dugDistance = 0;
+    if (bore.digging) this.dugDistance += this.walkSpeed * delta;
+    this.wasCutting = bore.digging;
+    this.digHud.visible = this.follow.firstPerson;
+    // The stat block yields to the instruments — dimmed, not removed, so the
+    // debugging numbers stay reachable and the smoke can still read them.
+    this.status.style.opacity = this.follow.firstPerson ? '0.28' : '';
+    this.digHud.update({
+      headingDeg: this.facing * 180 / Math.PI,
+      pitchDeg: this.bore.pitch * 180 / Math.PI,
+      digMm: this.dugDistance * WORLD_UNIT_MM,
+      depthMm: Math.max(0, (
+        streamGroundHeight(this.antPosition.x, this.antPosition.z) - this.antPosition.y
+      ) * WORLD_UNIT_MM),
+      gsMmS: this.walkSpeed * WORLD_UNIT_MM,
+      soilMm3: this.totalRemoved * WORLD_UNIT_MM ** 3,
+      cutting: bore.digging,
+    });
     this.updatePellets(delta);
     if (this.sun) {
       this.sun.position.set(

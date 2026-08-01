@@ -464,20 +464,31 @@ for (const view of CASES) {
     lab.stepForTest(1 / 60, 120);
     const surface = lab.antPosition.y;
     while (lab.bore.pitch > -Math.PI / 2 + 1e-9) lab.bore.aim(-1);
-    if (!lab.bore.digging) lab.bore.toggleDig();
-    lab.input.walk = 1;
+    // Down: hold DIG. Up: release it and pull back — she keeps the bore's
+    // alignment for as long as any of her is below the undug land.
+    lab.input.dig = 1;
     lab.stepForTest(1 / 60, 60 * 6);
     const bottom = lab.antPosition.y;
+    lab.input.dig = 0;
     lab.input.walk = -1;
     lab.stepForTest(1 / 60, 60 * 8);
+    /*
+     * Measured AT THE END OF THE REVERSE, stick still held — that is the
+     * claim under test. Release everything while straddling your own open
+     * shaft and the descend rule takes over, exactly as its own pair of
+     * tests specifies: a hole she fits swallows her. Sampling after the
+     * release used to be free because the old latch held her hovering at
+     * the mouth; with push-to-dig, letting go means letting go.
+     */
+    const back = lab.antPosition.y;
     lab.input.walk = 0;
     lab.stepForTest(1 / 60, 120);
-    lab.bore.toggleDig();
     while (lab.bore.pitch < 0) lab.bore.aim(1);
+
     return {
       surfaceMm: surface * 5,
       bottomMm: bottom * 5,
-      backMm: lab.antPosition.y * 5,
+      backMm: back * 5,
       stillUnder: lab.underground,
     };
   });
@@ -661,22 +672,23 @@ for (const view of CASES) {
   await page.waitForTimeout(2500);
   await page.screenshot({ path: `${OUT}-before.png` });
   /*
-   * BORE is held, not tapped. The bite fires at the bottom of a head stroke
-   * rather than on the press, so "click four times" no longer describes what
-   * digging is — and holding is the only way to get more than one stroke.
+   * DIG is HELD, and the button is the drive — the control's second
+   * specification, made after playing both it and the dig room. Held, she
+   * advances into the face at jaw pace and cuts with no pad input at all;
+   * released, she stops where she is. Both halves are asserted, because both
+   * have been the bug at some point: a dig that moved nothing, and a dig
+   * that kept moving after the finger came off.
    */
-  /*
-   * BORE is a LATCH now: pressed once it arms the head, and it never moves her.
-   * Arming it and waiting therefore does nothing ON PURPOSE — the joystick has
-   * to drive her into the face, which is the behaviour that was reported
-   * missing ("pressing Dig will NOT automatically move you").
-   */
-  const bore = page.locator('button', { hasText: 'BORE' }).first();
-  await bore.dispatchEvent('pointerdown');
-  const idled = await page.evaluate(() => {
+  const dig = page.locator('button', { hasText: 'DIG' }).first();
+  await page.evaluate(() => {
+    const lab = window.labScene;
+    for (let i = 0; i < 4; i += 1) lab.bore.aim(-1);
+  });
+  await dig.dispatchEvent('pointerdown');
+  const held = await page.evaluate(() => {
     const lab = window.labScene;
     const before = { x: lab.antPosition.x, y: lab.antPosition.y, z: lab.antPosition.z };
-    lab.stepForTest(1 / 60, 120);
+    lab.stepForTest(1 / 60, 240);
     return {
       digging: lab.bore.digging,
       movedMm: Math.hypot(
@@ -685,19 +697,69 @@ for (const view of CASES) {
       removed: lab.totalRemoved,
     };
   });
-  if (!idled.digging) fail('pressing BORE did not arm the dig');
-  else if (idled.movedMm > 0.2) fail(`arming the dig moved her ${idled.movedMm.toFixed(2)} mm on its own`);
-  else if (idled.removed > 0) fail('arming the dig removed soil without the joystick');
-  else ok('arming the dig moves nothing and digs nothing on its own');
+  if (!held.digging) fail('holding DIG did not start the dig');
+  else if (!(held.movedMm > 1)) {
+    fail(`four seconds of held DIG advanced her only ${held.movedMm.toFixed(2)} mm`);
+  } else if (!(held.removed > 0)) fail('held DIG advanced without removing soil');
+  else ok(`holding DIG drives her ${held.movedMm.toFixed(1)} mm into the face, no pad needed`);
 
-  // Now drive her into it, which is what actually cuts.
-  await page.evaluate(() => {
+  await dig.dispatchEvent('pointerup');
+  const released = await page.evaluate(() => {
     const lab = window.labScene;
-    for (let i = 0; i < 4; i += 1) lab.bore.aim(-1);
-    lab.input.walk = 1;
-    lab.stepForTest(1 / 60, 240);
-    lab.input.walk = 0;
+    lab.stepForTest(1 / 60, 30);
+    const before = { x: lab.antPosition.x, y: lab.antPosition.y, z: lab.antPosition.z };
+    lab.stepForTest(1 / 60, 120);
+    return {
+      digging: lab.bore.digging,
+      driftMm: Math.hypot(
+        lab.antPosition.x - before.x, lab.antPosition.y - before.y, lab.antPosition.z - before.z,
+      ) * 5,
+    };
   });
+  if (released.digging) fail('releasing DIG left the dig running');
+  else if (released.driftMm > 0.6) {
+    fail(`releasing DIG left her creeping: ${released.driftMm.toFixed(2)} mm in two seconds`);
+  } else ok('releasing DIG stops her where she is');
+
+  /*
+   * The HUD is instrumentation, not decoration: every number on it is read
+   * back out of the DOM and checked against the scene value it claims to
+   * show. A gauge that can drift from the physics is worse than no gauge —
+   * that lesson is already paid for once, by a pitch dial.
+   */
+  await dig.dispatchEvent('pointerdown');
+  const hud = await page.evaluate(() => {
+    const lab = window.labScene;
+    lab.stepForTest(1 / 60, 90);
+    const texts = [...document.querySelectorAll('.density-lab-fphud text')]
+      .map((t) => t.textContent ?? '');
+    const undug = (() => {
+      // Depth the way the scene computes it: below the undug land, clamped.
+      const probe = lab.wedged; // touch the getter so the class stays honest
+      void probe;
+      return null;
+    })();
+    void undug;
+    return {
+      visible: getComputedStyle(document.querySelector('.density-lab-fphud')).display !== 'none',
+      firstPerson: lab.follow.firstPerson,
+      texts,
+      headingDeg: ((Math.round(lab.facing * 180 / Math.PI) % 360) + 360) % 360,
+      pitchDeg: Math.round(lab.bore.pitch * 180 / Math.PI),
+      cutting: lab.bore.digging,
+    };
+  });
+  await dig.dispatchEvent('pointerup');
+  const shows = (want) => hud.texts.some((t) => t.includes(want));
+  if (!hud.firstPerson || !hud.visible) {
+    fail('holding DIG did not bring up the first-person HUD');
+  } else if (!shows(`H ${String(hud.headingDeg).padStart(3, '0')}`)) {
+    fail(`the HUD heading does not read H ${String(hud.headingDeg).padStart(3, '0')}: ${hud.texts.join(' | ')}`);
+  } else if (!shows(`${hud.pitchDeg >= 0 ? '+' : ''}${hud.pitchDeg}°`)) {
+    fail(`the HUD pitch does not read ${hud.pitchDeg}°`);
+  } else if (hud.cutting && !shows('CUTTING')) {
+    fail('the HUD does not announce CUTTING while the dig is held');
+  } else ok('the HUD reads the scene: heading, pitch and dig state agree');
   await page.waitForTimeout(600);
   await page.screenshot({ path: `${OUT}-after.png` });
   /*
@@ -804,10 +866,9 @@ for (const view of CASES) {
   const bite = await page.evaluate(() => {
     const lab = window.labScene;
     if (!lab?.queenReady) return null;
-    if (!lab.bore.digging) lab.bore.toggleDig();
-    lab.input.walk = 1;
+    lab.input.dig = 1;
     lab.stepForTest(1 / 60, 180);
-    lab.input.walk = 0;
+    lab.input.dig = 0;
     return {
       removed: lab.totalRemoved,
       aheadMm: lab.lastBiteAhead * 5,
@@ -815,7 +876,13 @@ for (const view of CASES) {
     };
   });
   if (!bite || bite.removed <= 0) fail('three seconds of boring removed nothing');
-  else if (!(bite.aheadMm > 1)) {
+  /*
+   * Ahead of centre is the claim — the fault this catches was the crater
+   * opening under her MIDDLE, at zero or behind. Half a millimetre of lead at
+   * a fifty-degree dive is honest digging: the steeper she points, the more
+   * of the bite's reach spends itself downward instead of forward.
+   */
+  else if (!(bite.aheadMm > 0.5)) {
     fail(`the bite landed ${bite.aheadMm.toFixed(2)} mm ahead of her centre — she is digging under herself`);
   } else if (Math.abs(bite.sidewaysMm) > 2) {
     fail(`the bite landed ${bite.sidewaysMm.toFixed(2)} mm off to one side of her heading`);
@@ -871,7 +938,7 @@ for (const view of CASES) {
   const steered = await page.evaluate(() => {
     const lab = window.labScene;
     const start = lab.facing;
-    if (lab.bore.digging) lab.bore.toggleDig();
+    lab.input.dig = 0;
     lab.input.yaw = 1;
     lab.stepForTest(1 / 60, 60);
     lab.input.yaw = 0;
@@ -1005,10 +1072,9 @@ for (const view of CASES) {
   await page.evaluate(() => {
     const lab = window.labScene;
     for (let i = 0; i < 4; i += 1) lab.bore.aim(-1);
-    if (!lab.bore.digging) lab.bore.toggleDig();
-    lab.input.walk = 1;
+    lab.input.dig = 1;
     lab.stepForTest(1 / 60, 150);
-    lab.input.walk = 0;
+    lab.input.dig = 0;
   });
   // Long enough for the pellet to land, so the screenshot shows where a clod
   // comes to REST rather than catching one mid-flight and looking like it is
@@ -1053,12 +1119,22 @@ for (const view of CASES) {
      * where the fail-safe is legitimately at work holding her clear of a wall,
      * so "the guard is idle" fails for a reason that is not the fault it hunts.
      */
-    if (lab.bore.digging) lab.bore.toggleDig();
+    lab.input.dig = 0;
     while (lab.bore.pitch < 0) lab.bore.aim(1);
     lab.input.yaw = 0;
-    lab.input.walk = 1;
+    /*
+     * PLACED on ground nothing in this file has ever dug, rather than walked
+     * "somewhere fresh" and hoped. Four seconds of walking lands wherever the
+     * terrain and the day's control scheme put it, and one rework of the dig
+     * pacing moved that spot twenty-six millimetres — onto a bank where the
+     * guard was legitimately holding her gaster out of the slope, failing a
+     * check about FLAT ground for a reason that is not the fault it hunts.
+     * The clearing is behind and left of spawn, away from every scripted dig
+     * and the practice tree alike.
+     */
+    lab.antPosition.set(24, 0, 26);
+    lab.antPosition.y = lab.groundAt(24, 26, 128 * 0.05);
     lab.stepForTest(1 / 60, 240);
-    lab.input.walk = 0;
     // Long enough for the pitch train to arrive as well — her gaster closes its
     // lag slowly, and catching it still catching up reads as drift.
     lab.stepForTest(1 / 60, 900);

@@ -1,16 +1,21 @@
 /**
- * Driving a digging ant like a boring machine.
+ * Driving a digging ant the way the dig room does: HOLD to dig.
  *
- * The model, in the words it was specified in: you SET a pitch, you TOGGLE the
- * dig on, and then the joystick moves you along that pitch. Forward at minus
- * forty-five digs down; leave the pitch alone and pull back and you reverse up
- * the same slope at plus forty-five. The dig button never moves you by itself.
+ * The control has now been specified twice, in opposite directions, both by
+ * the person playing it — which is worth recording so the next reversal is a
+ * decision rather than an accident. The first spec was a latch: press once to
+ * arm, and the joystick drives you along the pitch, because hold-to-dig
+ * "fought the joystick" when both hands were doing continuous work. Then the
+ * dig room shipped with press-to-dig and played better, and the verdict came
+ * back: make it work like the dig room. So the button is the drive again —
+ * hold it and she advances along the aim at jaw pace, cutting; release and
+ * she stops. The pad only ever walks her, and reversing out of a bore is the
+ * pad pulling back with the dig released.
  *
- * The version this replaces got all three of those wrong at once. It was
- * hold-to-dig, it crept you forward on its own so the ant "moved when it wasn't
- * supposed to", and movement ignored the pitch entirely — so the pitch gauge
- * read minus seventy-seven while she scraped a shallow trench along the
- * surface, because the only thing pitch touched was the direction of the bite.
+ * What survives from the latch era is everything that made it honest: pitch
+ * steers the TRAVEL and not just the bite, bites land at the bottom of a
+ * stroke so soil leaves when the jaws arrive, and a tunnel cannot be steered
+ * like a mouse camera.
  *
  * Free of three.js and of the scene, because the whole of it is a small state
  * machine and a few angles, and both are worth checking without a renderer.
@@ -61,12 +66,14 @@ export interface BoreInput {
   yaw: number;
   /** -1, 0 or 1: reverse, hold, advance. */
   forward: number;
+  /** Is the dig button held? Held is dug: the button IS the drive. */
+  dig: boolean;
 }
 
 export interface BoreStep {
   heading: number;
   pitch: number;
-  /** Is the dig toggle on? */
+  /** Is the dig button held this frame? */
   digging: boolean;
   /** 0..1 along the current stroke, for the head animation. */
   stroke: number;
@@ -78,9 +85,9 @@ export interface BoreStep {
 
 export class BoreRig {
   heading: number;
-  /** Radians, 0 down to -PI/2. Negative is downward — there is no aiming up. */
+  /** Radians; negative pitches down, positive up, clamped to a half turn. */
   pitch = 0;
-  /** The dig toggle. Latched, not held. */
+  /** Mirrors the last step's `dig` input, for everything that reads state. */
   digging = false;
   /** Seconds into the current stroke, or -1 when the head is at rest. */
   private phase = -1;
@@ -91,12 +98,6 @@ export class BoreRig {
 
   get striking(): boolean {
     return this.phase >= 0;
-  }
-
-  /** Press the dig control. Toggles; the caller sends the press, not the hold. */
-  toggleDig(): void {
-    this.digging = !this.digging;
-    if (!this.digging) this.phase = -1;
   }
 
   /**
@@ -123,26 +124,41 @@ export class BoreRig {
     this.pitch = Math.min(PITCH_MAX, Math.max(PITCH_MIN, raw * PITCH_STEP));
   }
 
+  /**
+   * Aim exactly here, for the first-person look.
+   *
+   * Continuous where `aim` is stepped, because the look IS the aim now: the
+   * camera's pitch and the dig's pitch are one number, and a drag that moved
+   * the view in tens would judder. The keyboard keeps its ten-degree taps.
+   */
+  aimTo(radians: number): void {
+    this.pitch = Math.min(PITCH_MAX, Math.max(PITCH_MIN, radians));
+  }
+
   step(dt: number, input: BoreInput): BoreStep {
     /*
      * Steering is slow while digging and only counts while ADVANCING. You
      * cannot turn a tunnel by standing in it, and you certainly cannot turn one
      * by backing out of it — reversing follows the hole that is already there.
      */
-    const advancing = input.forward > 0;
-    const rate = this.digging ? (advancing ? DIG_YAW_RATE : 0) : YAW_RATE;
+    /*
+     * Holding the dig IS advancing, so the slow committed steering applies
+     * the whole time it is held. Released, she steers at walking rate — in a
+     * tunnel the walls constrain her far harder than any rate limit could.
+     */
+    this.digging = input.dig;
+    const rate = this.digging ? DIG_YAW_RATE : YAW_RATE;
     this.heading += input.yaw * rate * dt;
     if (this.heading > Math.PI) this.heading -= Math.PI * 2;
     if (this.heading < -Math.PI) this.heading += Math.PI * 2;
 
     /*
-     * Strokes run only while digging AND advancing. The dig toggle arms her; it
-     * is the joystick that drives the head into the face. That is the whole of
-     * "pressing Dig will not automatically move you", and it is why the old
-     * automatic creep had to go rather than merely be slowed down.
+     * Strokes run while the button is down. The button is the drive: soil
+     * leaves at the bottom of each stroke and the scene advances her at jaw
+     * pace for exactly as long as this is held.
      */
     let bite = false;
-    const working = this.digging && advancing;
+    const working = this.digging;
     if (this.phase < 0) {
       if (working) this.phase = 0;
     } else {
