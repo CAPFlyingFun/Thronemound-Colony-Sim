@@ -1708,7 +1708,22 @@ export class DensityTerrainLabScene {
    * however much open air you have carved for yourself since.
    */
   private get underground(): boolean {
-    return this.antPosition.y + CAMERA_LOOK_AT
+    /*
+     * Her own half-thickness, not a camera constant.
+     *
+     * This compared her against the surface plus CAMERA_LOOK_AT, which is how
+     * far ABOVE her the third-person rig aims — a framing number that found its
+     * way into a question about her body. At 2.5 mm it meant she had to climb
+     * two and a half millimetres clear of the ground before she counted as out,
+     * so reversing up her own shaft left her reported as underground while
+     * standing at the mouth of it, and `stand` never took over. It also does
+     * not scale: 2.5 mm is a quarter of a queen and more than half a worker.
+     *
+     * Her body radius is the honest measure and it is measured off each caste's
+     * own mesh — she is under the ground when all of her is.
+     */
+    const half = this.queenReady ? this.queen.bodyRadius() : 0;
+    return this.antPosition.y + half
       < streamGroundHeight(this.antPosition.x, this.antPosition.z);
   }
 
@@ -1750,16 +1765,34 @@ export class DensityTerrainLabScene {
      * five land on the rim and the median holds her on top of her own shaft.
      * Measured — she rose to 13.9 mm and stayed there instead of descending.
      */
-    const floor = this.groundAt(
-      this.antPosition.x, this.antPosition.z, this.antPosition.y + FOOT_CLEARANCE,
-    );
+    /*
+     * UNDER the ground, the floor is the single column beneath her — the
+     * tunnel's own floor. ABOVE it, the floor is the stance, exactly what
+     * `stand` would have used.
+     *
+     * Those two answers differ by about half a millimetre on sloped ground,
+     * because one asks what is directly beneath her and the other where her
+     * feet can support her. Arming the dig switches between the branches, so
+     * while they disagreed, pressing BORE dropped her by the difference — half
+     * a millimetre of movement from the one control whose entire specification
+     * is that it does not move you. Matching them where the switch happens
+     * removes the step by construction rather than by threshold.
+     *
+     * The median cannot be used underground: it samples wider than a bore, so
+     * four of five land on the rim and it holds her on top of her own shaft.
+     */
+    const floor = this.underground
+      ? this.groundAt(
+        this.antPosition.x, this.antPosition.z, this.antPosition.y + FOOT_CLEARANCE,
+      )
+      : this.stance(this.antPosition.x, this.antPosition.z).height;
     if (this.antPosition.y < floor - FOOT_CLEARANCE) {
       // Lifted OUT of the floor: she is holding whatever height the bore gave
       // her, and the floor is a lower bound.
       const ease = 1 - Math.exp(-HEIGHT_EASE * dt);
       this.antPosition.y += (floor - this.antPosition.y) * ease;
       this.fallSpeed = 0;
-    } else if (!this.bore.digging) {
+    } else if (!(this.bore.digging && this.underground)) {
       /*
        * And DROPPED onto it when the bore has left her over open space.
        *
@@ -1769,7 +1802,13 @@ export class DensityTerrainLabScene {
        * height the bore last gave her, indefinitely, in mid-air. A tunnel is
        * exactly the place a game makes holes for a body to fall down.
        *
-       * Not while the bore is CUTTING, though. A body wedged in a hole it is
+       * Not while the bore is cutting AND she is actually UNDER the ground.
+       * What holds her is being wedged in soil, not the button being pressed:
+       * measured, reversing out of a shaft at minus ninety carried her from
+       * 6.6 mm to 76.8 mm — sixty-four millimetres above a twelve-millimetre
+       * surface, still climbing at walking pace, because backing up the bore
+       * kept pointing straight up and nothing was left to pull her down once
+       * she was clear of the hole. A body wedged in a hole it is
        * chewing is held by the whole wall of it, not balanced on the floor —
        * and the two height rules disagree by half a millimetre on sloped
        * ground, because `stand` asks where her feet support her and this asks

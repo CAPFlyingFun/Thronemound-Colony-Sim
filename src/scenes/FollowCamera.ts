@@ -191,7 +191,26 @@ export class FollowCamera {
     if (reach < 1e-6) return this.body.clone();
     const direction = full.clone().divideScalar(reach);
     let usable = reach;
-    for (let d = step; d <= reach; d += step) {
+    /*
+     * Marched PAST where the eye wants to sit, and the last sample is always
+     * the far end.
+     *
+     * `d <= reach` steps in fixed increments, so unless the offset happens to
+     * be a whole number of steps the endpoint is never tested — the loop stops
+     * short and reports the gap clear on the strength of a sample before it.
+     * Measured mid-bore at minus forty: her body clear of soil, every sampled
+     * point clear, and the eye resting inside the wall between two of them.
+     *
+     * Going a clearance further also means the resting point keeps its margin
+     * rather than merely being on the right side of a surface.
+     */
+    const probe = reach + EYE_CLEARANCE;
+    const samples = Math.max(1, Math.ceil(probe / step));
+    for (let i = 1; i <= samples; i += 1) {
+      // Clamped, so the LAST sample is always the far end however the step
+      // divides into it. Counting samples rather than accumulating a distance
+      // is also what keeps this terminating.
+      const d = Math.min(i * step, probe);
       at.copy(this.body).addScaledVector(direction, d);
       /*
        * Stopped a CLEARANCE short of the soil, not at the last sample that

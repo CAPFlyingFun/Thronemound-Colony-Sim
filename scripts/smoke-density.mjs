@@ -449,6 +449,56 @@ for (const view of CASES) {
     ok(`she strides over a crack narrower than her body (${holes.crackDropMm.toFixed(2)} mm)`);
   }
 
+  /*
+   * Down a shaft and back out again — the round trip.
+   *
+   * Reversing is the way out: backing up your own bore removes nothing, so it
+   * runs at walking pace rather than digging pace. What that exposed is that
+   * gravity was suspended for DIGGING rather than for being wedged in soil, so
+   * once she cleared the mouth of the hole nothing pulled her down and she kept
+   * climbing into open sky — measured at 64 mm above a 12 mm surface, still
+   * accelerating. She has to come up and STOP.
+   */
+  const roundTrip = await page.evaluate(() => {
+    const lab = window.labScene;
+    lab.stepForTest(1 / 60, 120);
+    const surface = lab.antPosition.y;
+    while (lab.bore.pitch > -Math.PI / 2 + 1e-9) lab.bore.aim(-1);
+    if (!lab.bore.digging) lab.bore.toggleDig();
+    lab.input.walk = 1;
+    lab.stepForTest(1 / 60, 60 * 6);
+    const bottom = lab.antPosition.y;
+    lab.input.walk = -1;
+    lab.stepForTest(1 / 60, 60 * 8);
+    lab.input.walk = 0;
+    lab.stepForTest(1 / 60, 120);
+    lab.bore.toggleDig();
+    while (lab.bore.pitch < 0) lab.bore.aim(1);
+    return {
+      surfaceMm: surface * 5,
+      bottomMm: bottom * 5,
+      backMm: lab.antPosition.y * 5,
+      stillUnder: lab.underground,
+    };
+  });
+  if (!(roundTrip.bottomMm < roundTrip.surfaceMm - 2)) {
+    fail(`boring down went nowhere: ${roundTrip.surfaceMm.toFixed(1)} -> ${roundTrip.bottomMm.toFixed(1)} mm`);
+  } else if (roundTrip.backMm < roundTrip.bottomMm + 2) {
+    fail(`reversing did not bring her up: dug to ${roundTrip.bottomMm.toFixed(1)}, `
+      + `back to only ${roundTrip.backMm.toFixed(1)} mm`);
+  } else if (roundTrip.backMm > roundTrip.surfaceMm + 4) {
+    fail(`reversing launched her ${(roundTrip.backMm - roundTrip.surfaceMm).toFixed(1)} mm above the surface`);
+  } else {
+    /*
+     * Not asserted: that `underground` goes false. She comes up into the crater
+     * she just dug, whose floor is legitimately below the undug land, so the
+     * flag can stay true while she is plainly standing in daylight. The claim
+     * worth making is that she rises most of the way and STOPS — the fault was
+     * her sailing sixty-four millimetres past the surface, not a boolean.
+     */
+    ok(`down to ${roundTrip.bottomMm.toFixed(1)} mm and back out to ${roundTrip.backMm.toFixed(1)} mm`);
+  }
+
   await page.close();
 }
 
@@ -644,9 +694,24 @@ for (const view of CASES) {
       armMm: Math.hypot(c.x - a.x, c.y - a.y, c.z - a.z) * 5,
       firstPerson: lab.follow.firstPerson,
       inSoil: lab.solidAt(c),
+      /*
+       * Enough to tell WHICH way this failed. "The camera is inside the soil"
+       * has two very different causes: an eye offset pushed into a wall, which
+       * the walk-out should have caught, or her BODY being inside soil in the
+       * first place — in which case there is nowhere clear to walk out from and
+       * the fix is somewhere else entirely.
+       */
+      bodyInSoil: lab.solidAt(lab.follow.body),
+      underground: lab.underground,
+      pitchDeg: Math.round(lab.bore.pitch * 180 / Math.PI),
+      eyeMm: [lab.follow.eye.x, lab.follow.eye.y, lab.follow.eye.z].map((v) => v * 5),
     };
   });
-  if (rig.inSoil) fail('the camera is inside the soil');
+  if (rig.inSoil) {
+    fail(`the camera is inside the soil (body in soil: ${rig.bodyInSoil}, `
+      + `underground: ${rig.underground}, pitch ${rig.pitchDeg}, `
+      + `eye ${rig.eyeMm.map((v) => v.toFixed(2)).join('/')} mm)`);
+  }
   else if (rig.firstPerson) ok(`the rig is riding her head (${rig.armMm.toFixed(1)} mm)`);
   else if (rig.armMm < 12 || rig.armMm > 70) {
     fail(`the camera is ${rig.armMm.toFixed(1)} mm from her — too close to see her, or lost`);
