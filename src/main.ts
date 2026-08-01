@@ -10,24 +10,34 @@ registerServiceWorker();
 /*
  * Routing.
  *
- * The density colony sim IS the game now, so it is the default — the bare
- * URL, and therefore the installed app's `start_url`, opens the room with
- * the menu, the save and the streaming world in it. It used to be the dig
- * prototype, and the dig room is not deleted for the same reason the hex
- * grid was not: it is the reference the first-person camera and the feel of
- * digging were ported FROM, and when a port is questioned the original is
- * the arbiter. It has simply retired from being the front page to living at
- * `?scene=dig`.
+ * The DIG ROOM is the default again, and that is a deliberate step back: the
+ * colony sim grew a streamed world, a model with a full IK stance, a climb,
+ * a menu and a save, and something in that pile broke the feel of digging.
+ * The way back to a known-good is to start from the room that still works
+ * and re-add one thing at a time, so the room that still works is the one
+ * that opens.
+ *
+ * The colony sim keeps every URL it ever had — `?map=densityterrainlab`,
+ * `?scene=density` — and nothing about it is deleted or disowned. It is one
+ * query string away.
  *
  * Everything is imported lazily so a route only pays for its own scene.
  */
 const params = new URLSearchParams(window.location.search);
 const scene = params.get('scene');
+const map = params.get('map');
+const colonySim = scene === 'density'
+  || map === 'densityterrainlab'
+  || params.has('densityterrainlab');
 
 const host = document.getElementById('app');
 if (host) {
   host.classList.add('dig-host');
-  if (scene === 'queen') {
+  if (colonySim) {
+    void import('./scenes/DensityTerrainLabScene').then(
+      ({ DensityTerrainLabScene }) => new DensityTerrainLabScene(host),
+    );
+  } else if (scene === 'queen') {
     // Model and gait preview. Nothing in the game imports it — see QueenScene.
     void import('./scenes/QueenScene').then(({ QueenScene }) => new QueenScene(host));
   } else if (scene === 'hex') {
@@ -35,14 +45,8 @@ if (host) {
     // were taken from. See src/voxel/HexGrid.ts for why it could never be the
     // real grid.
     void import('./scenes/HexScene').then(({ HexScene }) => new HexScene(host));
-  } else if (scene === 'dig') {
-    // The retired voxel dig room, kept as the reference room.
-    void import('./scenes/DigScene').then(({ DigScene }) => new DigScene(host));
   } else {
-    // The game. `?map=densityterrainlab` and `?scene=density` still land
-    // here so every link and test URL written before the flip keeps working.
-    void import('./scenes/DensityTerrainLabScene').then(
-      ({ DensityTerrainLabScene }) => new DensityTerrainLabScene(host),
-    );
+    // The dig room: the reference the rest is measured against.
+    void import('./scenes/DigScene').then(({ DigScene }) => new DigScene(host));
   }
 }

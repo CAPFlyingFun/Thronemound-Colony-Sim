@@ -426,6 +426,29 @@ export const CASTE_LENGTH_MM: Record<RigMap['caste'], number> = {
 };
 
 /**
+ * How wide a bite each caste takes, in millimetres — the MANDIBLE, not the
+ * tunnel.
+ *
+ * From the Godot build, where they were tuned against the models: a queen
+ * bites 1.75 mm, a worker 0.75, a major 2.5. They scale with the animal, and
+ * a major out-digging a queen is most of the point of a major.
+ *
+ * They are far smaller than the single 7 mm bite the density lab was built
+ * around, and that number was itself measured rather than picked — see
+ * `BITE_WIDTH_MM` in labMound: at 4 mm she could not get back into her own
+ * shaft, because her stance spans 6.3 mm and every ground sample landed on
+ * the rim. So a mandible-sized bite means a bore is no longer one stroke
+ * wide: a tunnel she can walk down has to be CUT wide, several bites across,
+ * instead of arriving free with the first one. That is the honest anatomy and
+ * the harder engineering, so the fit is measured rather than assumed.
+ */
+export const CASTE_BITE_MM: Record<RigMap['caste'], number> = {
+  queen: 1.75,
+  worker: 0.75,
+  major: 2.5,
+};
+
+/**
  * Model scale for a rig: its caste's true length over its own measured length.
  *
  * Both halves matter. The exports are height-normalised, so a major measures

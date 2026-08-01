@@ -7,7 +7,7 @@ import { TripodGait, type SurfaceAt } from '../anim/tripod';
 import { DigHud } from './DigHud';
 import { LabMenu } from './LabMenu';
 import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
-import { CASTE_LENGTH_MM } from '../anim/hexapod';
+import { CASTE_BITE_MM, CASTE_LENGTH_MM } from '../anim/hexapod';
 import { buildSurfaceNets } from '../density/SurfaceNets';
 import { TerrainStream } from '../density/TerrainStream';
 import {
@@ -938,7 +938,7 @@ export class DensityTerrainLabScene {
     const hud = document.createElement('div');
     hud.className = 'density-lab-hud';
     hud.innerHTML = `
-      <div class="density-lab-title">DENSITY TERRAIN LAB <span>${BITE_WIDTH_MM} mm bite · ${BITE_DEPTH_MM} mm deep</span></div>
+      <div class="density-lab-title">DENSITY TERRAIN LAB <span>${BITE_DEPTH_MM} mm deep</span></div>
       <div class="density-lab-status"></div>
       <div class="density-lab-hint">Hold DIG and she bores where you look · drag to look and aim · the pad walks · RUN toggles pace</div>
       <div class="density-lab-actions"></div>
@@ -1901,10 +1901,17 @@ export class DensityTerrainLabScene {
      * 3.88 mm against the mandibles' 3.94 — the same bite, aimed by a
      * crosshair instead of by a face.
      */
+    /*
+     * The brush is the DRIVEN ANT'S mandible now, not one size for the whole
+     * colony: 1.75 mm across for a queen, 0.75 for a worker, 2.5 for a major
+     * — see `CASTE_BITE_MM`, which carries the consequence too. One stroke
+     * no longer opens a bore she fits; a tunnel has to be cut wide.
+     */
+    const bite = CASTE_BITE_MM[this.ants[this.driven]!.caste] / 2 / WORLD_UNIT_MM;
     const center = capsule
       ? surface.clone()
-      : surface.clone().addScaledVector(direction, BITE_DEPTH - BRUSH_RADIUS);
-    const result = this.stream.subtractSphere(center, BRUSH_RADIUS);
+      : surface.clone().addScaledVector(direction, BITE_DEPTH - bite);
+    const result = this.stream.subtractSphere(center, bite);
     if (result.changedSamples === 0 || result.removedVolume <= 0.0001) return;
 
     this.totalRemoved += result.removedVolume;
