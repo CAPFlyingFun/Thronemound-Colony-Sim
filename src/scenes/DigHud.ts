@@ -141,30 +141,39 @@ export class DigHud {
       });
       this.depthSlots.push({
         tick: el('line', {}, this.svg),
-        label: text(766, 0, '', this.svg),
+        label: text(730, 0, '', this.svg),
       });
     }
     el('polyline', { points: '196,222 146,222 146,248 196,248 208,235 196,222', fill: 'rgba(0,20,6,0.55)' }, this.svg);
     this.digText = text(152, 242, '0.0', this.svg);
 
-    // Right: depth below the undug land.
-    text(716, 118, 'DEPTH mm', this.svg, 'start', true);
-    el('line', { x1: '742', y1: '130', x2: '742', y2: '340' }, this.svg);
-    el('polyline', { points: '736,222 792,222 792,248 736,248 724,235 736,222', fill: 'rgba(0,20,6,0.55)' }, this.svg);
-    this.depthText = text(744, 242, '0.0', this.svg);
+    /*
+     * Right: depth below the undug land. Everything on this side ends by
+     * x = 756, because the action buttons are wider ON THE DEVICE than in a
+     * headless run — measured from a play screenshot with the DIG button's
+     * left edge at 771, sitting over the old readout, the pitch dial and
+     * the soil line all at once. The headless check renders the same
+     * viewBox with narrower buttons, which is exactly how the collision
+     * shipped unseen.
+     */
+    text(640, 118, 'DEPTH mm', this.svg, 'start', true);
+    el('line', { x1: '706', y1: '130', x2: '706', y2: '340' }, this.svg);
+    el('polyline', { points: '700,222 756,222 756,248 700,248 688,235 700,222', fill: 'rgba(0,20,6,0.55)' }, this.svg);
+    this.depthText = text(708, 242, '0.0', this.svg);
 
-    // The pitch, worn like a VSI beside the depth tape: needle below level
-    // when the aim is set to descend.
-    el('path', { d: 'M 806 190 A 52 52 0 0 1 806 280', 'stroke-dasharray': '3 9' }, this.svg);
-    this.pitchNeedle = el('line', { x1: '806', y1: '235', x2: '766', y2: '235', 'stroke-width': '2.4' }, this.svg);
-    this.pitchText = text(806, 316, '+0°', this.svg, 'middle');
-    text(806, 336, 'PITCH', this.svg, 'middle', true);
+    // The pitch, worn like a VSI: in the top-right corner, above the reach
+    // of the button column, needle below level when the aim is set to
+    // descend.
+    text(838, 32, 'PITCH', this.svg, 'middle', true);
+    el('path', { d: 'M 838 48 A 36 36 0 0 1 838 120', 'stroke-dasharray': '3 9' }, this.svg);
+    this.pitchNeedle = el('line', { x1: '838', y1: '84', x2: '808', y2: '84', 'stroke-width': '2.4' }, this.svg);
+    this.pitchText = text(838, 146, '+0°', this.svg, 'middle');
 
     // Corners.
     this.gsText = text(140, 392, 'GS 0', this.svg);
     this.stateText = text(466, 392, 'DIG READY', this.svg, 'middle');
-    this.soilText = text(792, 392, 'SOIL 0 mm³', this.svg, 'end');
-    text(792, 412, 'BITE 0.5 mm', this.svg, 'end', true);
+    this.soilText = text(756, 392, 'SOIL 0 mm³', this.svg, 'end');
+    text(756, 412, 'BITE 0.5 mm', this.svg, 'end', true);
   }
 
   set visible(show: boolean) {
@@ -210,11 +219,11 @@ export class DigHud {
     this.digText.textContent = state.digMm.toFixed(1);
     this.depthText.textContent = state.depthMm.toFixed(1);
     this.tape(this.digSlots, state.digMm, 190, false);
-    this.tape(this.depthSlots, state.depthMm, 742, true);
+    this.tape(this.depthSlots, state.depthMm, 706, true);
 
     const rad = state.pitchDeg * Math.PI / 180;
-    this.pitchNeedle.setAttribute('x2', (806 - 40 * Math.cos(rad)).toFixed(1));
-    this.pitchNeedle.setAttribute('y2', (235 - 40 * Math.sin(rad)).toFixed(1));
+    this.pitchNeedle.setAttribute('x2', (838 - 30 * Math.cos(rad)).toFixed(1));
+    this.pitchNeedle.setAttribute('y2', (84 - 30 * Math.sin(rad)).toFixed(1));
     const rounded = Math.round(state.pitchDeg);
     this.pitchText.textContent = `${rounded >= 0 ? '+' : ''}${rounded}°`;
 

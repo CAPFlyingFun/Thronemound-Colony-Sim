@@ -1624,6 +1624,20 @@ export class DensityTerrainLabScene {
     this.input.walk = 0;
     this.input.yaw = 0;
     this.input.dig = 0;
+    /*
+     * And the roof sense, which is otherwise a frame stale — the one piece of
+     * state here that is a MEASUREMENT rather than a motion.
+     *
+     * It is read at the top of the next frame to choose between `stand` and
+     * `holdTunnel`, and a stale reading of "open sky" for an ant who has just
+     * been put at the bottom of a shaft runs `stand`, which eases her up to
+     * the surface height at her own x and z — straight into the tunnel's
+     * ceiling. Measured on a resume: placed 26 mm down, hoisted 24 mm into
+     * solid soil within ten frames, and from there the buried-ant rescue
+     * carries her slowly up through undug ground. Requires the streaming
+     * window to already be over her, so every caller recentres FIRST.
+     */
+    this.roofedNow = this.senseUnderground();
   }
 
   /** One place for the pace to change, so the button label cannot go stale. */
@@ -1717,10 +1731,12 @@ export class DensityTerrainLabScene {
     this.bore.turn(this.facing - this.bore.heading);
     this.bore.aimTo(save.pitch);
     this.totalRemoved = save.totalRemoved;
-    this.resetDynamics();
     // The window slides to wherever she was saved, replaying the restored
-    // digs as its strips arrive, and then every mesh is cut afresh.
+    // digs as its strips arrive, and then every mesh is cut afresh. BEFORE
+    // the dynamics reset, which ends by sensing the soil around her and
+    // therefore needs the soil around her to be the saved world.
     this.stream.recentreOn(this.antPosition.x, this.antPosition.z);
+    this.resetDynamics();
     this.rebuildWorld();
     this.updateStatus();
     return true;
@@ -1735,9 +1751,11 @@ export class DensityTerrainLabScene {
     this.facing = 0;
     this.bore.turn(-this.bore.heading);
     this.bore.aimTo(0);
-    this.resetDynamics();
+    // Window first, then the terrain, then the reset — its closing roof sense
+    // has to read the world she is actually starting in.
     this.stream.recentreOn(this.antPosition.x, this.antPosition.z);
     this.resetTerrain();
+    this.resetDynamics();
     this.status.dataset.message = 'Walk with the pad, aim, and press DIG';
     this.updateStatus();
   }
@@ -2096,8 +2114,15 @@ export class DensityTerrainLabScene {
     return this.stream.field.sample(x, point.y, z) > 0;
   }
 
-  /** The signed density at a world point, for the gradient. Air outside. */
-  private densityAt(x: number, y: number, z: number): number {
+  /**
+   * The signed density at a world point, for the gradient — positive inside
+   * soil and roughly how deep, negative in air. Air outside the window.
+   *
+   * Public because it is the honest instrument for "is she buried", which a
+   * boolean cannot express: her body rides ON surfaces, so a threshold reads
+   * true at plenty of legal positions. The smoke measures with it.
+   */
+  densityAt(x: number, y: number, z: number): number {
     const lx = x - this.stream.originWorldX;
     const lz = z - this.stream.originWorldZ;
     const span = WINDOW_CELLS * CELL_SIZE;
@@ -3135,6 +3160,38 @@ export class DensityTerrainLabScene {
       PROBE.copy(next);
       if (this.solidAt(PROBE)) return;
       this.antPosition.y = next.y;
+    } else if (this.roofedNow || this.wedged) {
+      /*
+       * UNDERGROUND, THE WALLS ARE WALLS — with or without the bore's latch.
+       *
+       * The solid check above only ran while she was committed to the bore,
+       * so the frame the latch let go, horizontal motion stopped being
+       * checked against anything: turn in a tunnel and walk, and she ground
+       * straight through undug soil, swimming below the surface until the
+       * buried-ant rescue hoisted her out through solid ground. Seen from
+       * her own eyes that is a sky-blue screen full of backfaces — reported
+       * with a screenshot reading DEPTH 7.7 mm over an open sky.
+       *
+       * The rule is MONOTONE rather than a threshold: she may move to any
+       * point no deeper in the soil than the one she is at. A threshold is
+       * the obvious spelling and it does not survive contact — `solidAt` at
+       * her own centre reads true at plenty of legitimate places, because
+       * her body rides ON surfaces, and it read true at the end of an
+       * ordinary bore and again standing on open ground. Comparing depths
+       * needs no magic height to be right: along a tunnel both readings are
+       * the same wall, so she travels; into the face the reading jumps, so
+       * she stops. And because the bound is her CURRENT depth, it can never
+       * creep — she cannot bury herself a hundredth at a time.
+       *
+       * Sampled a step up, where her body is rather than where her feet are,
+       * and only while she is genuinely under the ground: above it the
+       * stance and its step-up rule own the question, and always have.
+       */
+      const hereDepth = this.densityAt(
+        this.antPosition.x, this.antPosition.y + STEP_UP, this.antPosition.z,
+      );
+      const thereDepth = this.densityAt(next.x, next.y + STEP_UP, next.z);
+      if (thereDepth > 0 && thereDepth > hereDepth) return;
     }
     this.antPosition.x = next.x;
     this.antPosition.z = next.z;

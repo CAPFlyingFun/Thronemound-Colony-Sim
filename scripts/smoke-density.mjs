@@ -511,6 +511,118 @@ for (const view of CASES) {
     ok(`down to ${roundTrip.bottomMm.toFixed(1)} mm and back out to ${roundTrip.backMm.toFixed(1)} mm`);
   }
 
+  /*
+   * The walls of a tunnel are walls even WITHOUT the bore's latch.
+   *
+   * The solid check used to run only while she was committed to the bore, so
+   * the frame the latch let go, nothing checked her stride against soil at
+   * all: turn in a tunnel and push, and she ground straight through undug
+   * dirt, swimming below the surface until the buried-ant rescue hoisted her
+   * out through solid ground. Reported with a screenshot reading DEPTH
+   * 7.7 mm over an open sky of backfaces. So: dig a tunnel, step out, put
+   * her back INSIDE it unlatched, face the wall and push for three seconds.
+   */
+  const walls = await page.evaluate(() => {
+    const lab = window.labScene;
+    const V = lab.antPosition.constructor;
+    /*
+     * "Buried" is a DEPTH, not a boolean about her centre: her body rides on
+     * surfaces, so `solidAt` at her centre reads true at plenty of legal
+     * places — measured true at the end of an ordinary bore and again
+     * standing on open ground. What a swimming ant looks like is soil a
+     * step above her getting deeper, so that is what is watched.
+     */
+    const STEP_UP = 2 / 5;
+    const depth = () => lab.densityAt(
+      lab.antPosition.x, lab.antPosition.y + STEP_UP, lab.antPosition.z,
+    );
+
+    // A corner of the map none of the scripted digs above have touched.
+    lab.antPosition.set(44, lab.groundAt(44, 44, 999), 44);
+    lab.resetDynamics();
+    lab.stepForTest(1 / 60, 60);
+    const fromY = lab.antPosition.y;
+    // Down at forty-five degrees for four seconds — a real slanted tunnel.
+    while (lab.bore.pitch > -Math.PI / 4 + 1e-9) lab.bore.aim(-1);
+    lab.input.dig = 1;
+    lab.input.walk = 1;
+    lab.stepForTest(1 / 60, 60 * 4);
+    lab.input.dig = 0;
+    lab.stepForTest(1 / 60, 30);
+    const inTunnel = {
+      x: lab.antPosition.x, y: lab.antPosition.y, z: lab.antPosition.z,
+      /*
+       * DESCENT from where she started, not depth below `groundAt`. The
+       * surface reading is the top of the soil at her own column, which
+       * inside a roofed tunnel is the undug land — and beside somebody
+       * else's crater is that crater's floor. Measured 6.7 mm for a bore
+       * that had genuinely gone 19 mm down, purely because an earlier
+       * scenario had dug nearby. How far she went down is not a question
+       * about anyone else's hole.
+       */
+      descentMm: (fromY - lab.antPosition.y) * 5,
+      roofed: lab.roofedNow,
+      depth: depth(),
+    };
+    /*
+     * And now the player's move: still down the tunnel, DIG released, turn
+     * ninety degrees and push into the wall for three seconds. No teleport —
+     * this is the sequence as a thumb performs it.
+     */
+    lab.bore.turn(Math.PI / 2);
+    lab.input.walk = 1;
+    const startDepth = depth();
+    let deepest = startDepth;
+    for (let i = 0; i < 6; i += 1) {
+      lab.stepForTest(1 / 60, 30);
+      deepest = Math.max(deepest, depth());
+    }
+    lab.input.walk = 0;
+    return {
+      inTunnel,
+      startDepthMm: startDepth * 5,
+      deepestMm: deepest * 5,
+      driftMm: Math.hypot(
+        lab.antPosition.x - inTunnel.x, lab.antPosition.z - inTunnel.z,
+      ) * 5,
+    };
+  });
+  /*
+   * Eight millimetres down AND a roof over her. How far four seconds of
+   * boring gets her depends on the hill she started on — measured at 19.8 mm
+   * on one slope and 10.0 mm on another — so the claim under test is that she
+   * is genuinely inside a tunnel, which the roof sense answers directly.
+   */
+  if (!(walls.inTunnel.descentMm > 8) || !walls.inTunnel.roofed) {
+    fail(`the wall test never got underground: ${walls.inTunnel.descentMm.toFixed(1)} mm down, `
+      + `roofed ${walls.inTunnel.roofed}`);
+  } else if (!(walls.deepestMm <= walls.startDepthMm + 1.5)) {
+    /*
+     * Depth is the coarse claim and DRIFT below is the sharp one. Three
+     * seconds of pushing at a wall settles her against it — measured at
+     * 0.74 mm, which is the stance leaning into the face, not travel. An
+     * ant swimming through undug soil at walking pace covers thirty-odd
+     * millimetres in the same three seconds, so the two failures are not
+     * remotely the same size.
+     */
+    fail(`driving at a tunnel wall carried her ${(walls.deepestMm - walls.startDepthMm).toFixed(2)} mm `
+      + 'deeper into undug soil');
+  } else if (!(walls.driftMm < 15)) {
+    /*
+     * Fifteen millimetres against the thirty-six an unblocked run covers in
+     * the same three seconds. Not zero, and it should not be: the rule lets
+     * her SLIDE along a wall to any point no deeper than where she is, which
+     * is how she crosses her own tunnel instead of sticking to the first
+     * thing she leans on. Measured at 6.6 mm — about one tunnel's width.
+     */
+    fail(`driving at a tunnel wall carried her ${walls.driftMm.toFixed(1)} mm, `
+      + 'close to the 36 mm an unblocked walk would cover');
+  } else {
+    ok(`tunnel walls hold with DIG released (${walls.inTunnel.descentMm.toFixed(1)} mm down, `
+      + `${walls.driftMm.toFixed(1)} mm of shuffle, `
+      + `${(walls.deepestMm - walls.startDepthMm).toFixed(2)} mm deeper into soil)`);
+  }
+
   await page.close();
 }
 
@@ -867,7 +979,7 @@ for (const view of CASES) {
     lab.input.dig = 0;
     lab.input.walk = 0;
     while (lab.bore.pitch < 0) lab.bore.aim(1);
-    lab.antPosition.set(24, 0, 26);
+    lab.antPosition.set(24, lab.groundAt(24, 26, 999), 26);
     lab.resetDynamics();
     lab.stepForTest(1 / 60, 240);
   });
@@ -926,10 +1038,28 @@ for (const view of CASES) {
   else {
     const WORLD_UNIT_MM = 5;
     const spanMm = size.legSpan * WORLD_UNIT_MM;
-    // Within a tenth of the 9 mm she is configured at. Her legs reach a little
-    // past her body, so this is a fair proxy for overall length.
-    if (Math.abs(spanMm - 9) > 0.9) fail(`queen measures ${spanMm.toFixed(2)} mm, not 9 mm`);
-    else ok(`queen measures ${spanMm.toFixed(2)} mm at her widest`);
+    const bodyMm = Math.abs(size.headToTail) * WORLD_UNIT_MM;
+    /*
+     * MOUTH TO GASTER is the scale ruler, not the widest bone pair.
+     *
+     * The widest pair was a proxy for length and it is really a proxy for
+     * STANCE: a planted hexapod's legs reach past her body, so it reads
+     * 10.2 to 10.8 mm on real ground and 9.1 mm on an ant whose feet have
+     * nothing to stand on. It passed for a long time because the check
+     * teleported her to y = 0 — the world's FLOOR — and measured a rest
+     * pose buried under the soil. Mouth-to-gaster does not care: measured
+     * 7.22 mm at four different places on the map, to the hundredth.
+     *
+     * 7.2 mm of bone for a 9 mm ant, because the end bones sit inside her
+     * head and her gaster rather than at their tips.
+     */
+    if (Math.abs(bodyMm - 7.2) > 0.5) {
+      fail(`queen measures ${bodyMm.toFixed(2)} mm mouth to gaster, not 7.2 mm`);
+    } else if (!(spanMm > 9.5 && spanMm < 11.5)) {
+      fail(`her planted stance spans ${spanMm.toFixed(2)} mm, outside the 9.5-11.5 mm a standing queen covers`);
+    } else {
+      ok(`queen measures ${bodyMm.toFixed(2)} mm mouth to gaster, standing ${spanMm.toFixed(2)} mm wide`);
+    }
     // Head toward +Z, which is what `forward = (sin f, 0, cos f)` assumes.
     if (!(size.headToTail > 0)) fail('the queen model faces -Z; her heading is backwards');
     else ok('queen faces +Z, matching the heading maths');
@@ -1227,8 +1357,16 @@ for (const view of CASES) {
      * The clearing is behind and left of spawn, away from every scripted dig
      * and the practice tree alike.
      */
-    lab.antPosition.set(24, 0, 26);
-    lab.antPosition.y = lab.groundAt(24, 26, 128 * 0.05);
+    /*
+     * ON the surface, asked for from ABOVE THE WORLD. `set(x, 0, z)` is the
+     * spelling this file used for a long time and it is a lie: y = 0 is the
+     * world's floor, which since the world deepened is 36 mm UNDER the soil.
+     * She lands on bedrock in a sealed pocket, and every check that followed
+     * was measuring a buried ant. The ceiling argument has to be above the
+     * world too — it was `128 * 0.05`, the old world's height, which is now
+     * BELOW the surface it is searching for.
+     */
+    lab.antPosition.set(24, lab.groundAt(24, 26, 999), 26);
     lab.stepForTest(1 / 60, 240);
     // Long enough for the pitch train to arrive as well — her gaster closes its
     // lag slowly, and catching it still catching up reads as drift.
@@ -1380,7 +1518,8 @@ for (const view of CASES) {
   const dug = await page.evaluate(() => {
     const lab = window.labScene;
     if (document.querySelector('.lab-menu').style.display !== 'none') return null;
-    lab.antPosition.set(24, 0, 26);
+    lab.antPosition.set(24, lab.groundAt(24, 26, 999), 26);
+    lab.resetDynamics();
     lab.stepForTest(1 / 60, 120);
     const site = { x: lab.antPosition.x, z: lab.antPosition.z };
     const flatMm = lab.groundAt(site.x, site.z) * 5;
@@ -1589,7 +1728,8 @@ for (const view of CASES) {
     const lab = window.labScene;
     const trot = (pace) => {
       lab.pace = pace;
-      lab.antPosition.set(24, 0, 26);
+      lab.antPosition.set(24, lab.groundAt(24, 26, 999), 26);
+      lab.resetDynamics();
       lab.stepForTest(1 / 60, 60);
       const x = lab.antPosition.x;
       const z = lab.antPosition.z;
