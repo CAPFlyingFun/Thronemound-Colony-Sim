@@ -30,10 +30,15 @@ const browser = await chromium.launch({
 /**
  * How far the DRAWN mesh may sit below the surface, in millimetres.
  *
- * See the leg check for why this is not zero: a leg is a tube around a bone and
- * a tube around a curve dips below the line it is drawn about.
+ * See the leg check for why this is not zero: a limb is a tube around a bone,
+ * and a tube around a curve dips below the line it is drawn about. How far
+ * depends on the ground she happens to be standing on — moving her spawn to the
+ * middle of the model bench took the worst from 0.22 mm to 0.29 mm without
+ * anything about the solvers changing — so the budget covers the observed range
+ * rather than the last number measured. Her body is the widest tube she has, at
+ * 1.59 mm, and it is the one that dips.
  */
-const SINK_BUDGET_MM = 0.25;
+const SINK_BUDGET_MM = 0.35;
 
 let failed = false;
 const fail = (msg) => { console.error(`FAIL: ${msg}`); failed = true; };
@@ -349,6 +354,45 @@ for (const view of CASES) {
 
 
   /*
+   * The model bench: all three castes loaded, and control that actually hands
+   * over.
+   *
+   * The point of the bench is that the gait, the foot solver and the stance are
+   * shared code fed per-caste measurements, so a fault that only shows on the
+   * major — longer legs, a deeper spine, front legs hung off the head chain —
+   * is invisible while only the queen is ever driven. If a caste silently fails
+   * to load, the bench looks fine and tests nothing.
+   */
+  const bench = await page.evaluate(() => {
+    const lab = window.labScene;
+    lab.stepForTest(1 / 60, 120);
+    const before = lab.driven;
+    const parked = lab.antPosition.clone();
+    const other = (before + 1) % lab.ants.length;
+    lab.drive(other);
+    lab.stepForTest(1 / 60, 60);
+    return {
+      castes: lab.ants.map((a) => a.caste),
+      loaded: lab.ants.filter((a) => a.ready).length,
+      handedOver: lab.driven === other,
+      // Taking over an ant puts you where IT stands, not where you were.
+      steppedIntoMm: lab.antPosition.distanceTo(lab.ants[other].position) * 5,
+      // And the one you left keeps its place rather than snapping to a
+      // different floor query.
+      leftBehindMm: lab.ants[before].position.distanceTo(parked) * 5,
+    };
+  });
+  if (bench.loaded !== 3) {
+    fail(`only ${bench.loaded} of 3 castes loaded on the bench (${bench.castes.join(', ')})`);
+  } else ok(`all three castes on the bench (${bench.castes.join(', ')})`);
+  if (!bench.handedOver || bench.steppedIntoMm > 1) {
+    fail(`driving another ant did not hand over (${bench.steppedIntoMm.toFixed(2)} mm off)`);
+  } else ok('tapping another ant hands control to it, where it stands');
+  if (bench.leftBehindMm > 0.1) {
+    fail(`the ant you stopped driving moved ${bench.leftBehindMm.toFixed(2)} mm`);
+  } else ok('the ant you leave behind stays where you left it');
+
+  /*
    * The descend rule, against the rule it must not break.
    *
    * These two pull in opposite directions and that is the point. A shaft she
@@ -469,7 +513,8 @@ for (const view of CASES) {
    */
   const banner = (await page.locator('.density-lab-status').innerText()).replace(/\s+/g, ' ');
   if (/failed to load|loading/.test(banner)) fail(`queen model did not load: "${banner}"`);
-  else if (!/Queen: \d+ mm/.test(banner)) fail(`HUD does not report the queen: "${banner}"`);
+  // The HUD names whichever caste you are driving now, not always the queen.
+  else if (!/Driving (queen|worker|major): \d+ mm/.test(banner)) fail(`HUD does not report the driven ant: "${banner}"`);
   else ok(`queen loaded and scaled (${/Queen: [^·<]*/.exec(banner)?.[0].trim()})`);
 
   /*

@@ -108,6 +108,27 @@ const STANCE = 0.35;
  */
 const HOLE_SCRABBLE = 0.2;
 
+/** The castes on the bench, left to right. */
+const CASTES = ['worker', 'queen', 'major'] as const;
+
+/**
+ * How far apart they stand.
+ *
+ * A queen length and a bit: far enough that no two overlap and a tap picks the
+ * one you meant, close enough that all three sit inside the follow camera's
+ * frame at its default arm — about 36 mm wide where they stand.
+ */
+const BENCH_SPACING = 11 / WORLD_UNIT_MM;
+
+/** One ant on the bench. Only the driven one moves; see `ants`. */
+interface LabAnt {
+  caste: (typeof CASTES)[number];
+  model: QueenModel;
+  position: THREE.Vector3;
+  facing: number;
+  ready: boolean;
+}
+
 const BODY_RING: ReadonlyArray<readonly [number, number]> = (() => {
   const ring: Array<[number, number]> = [];
   for (let i = 0; i < 8; i += 1) {
@@ -172,6 +193,8 @@ const STEP_UP = 2 / WORLD_UNIT_MM;
 /** World up and world forward, for anything measured against the horizon. */
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const WORLD_FORWARD = new THREE.Vector3(0, 0, 1);
+/** Scratch for turning a tap into a ray. */
+const POINTER = new THREE.Vector2();
 
 /**
  * Gravity, in world units per second squared. Five, as asked for.
@@ -264,6 +287,9 @@ const STICK_RADIUS = 70;
 
 /** How far the camera swings per pixel dragged. */
 const LOOK_PER_PIXEL = 0.006;
+
+/** Pixels a pointer may travel and still count as a tap rather than a drag. */
+const TAP_SLOP = 6;
 
 /**
  * How far a first-person look-drag must travel to click the pitch dial one
@@ -409,8 +435,43 @@ export class DensityTerrainLabScene {
    * digging until she showed up.
    */
   private readonly antPosition: any;
-  private readonly queen = new QueenModel('queen');
-  private queenReady = false;
+  /**
+   * All three castes, standing side by side, one of them driven.
+   *
+   * A bench rather than a cast list: the gait, the foot solver and the stance
+   * are shared code with per-caste measurements fed into them, so a fault that
+   * only shows on the major — longer legs, a deeper spine, front legs hung off
+   * the head chain — is invisible while only the queen is ever on screen. Being
+   * able to hop into each one and walk it over the same ground is the cheapest
+   * way to find those.
+   *
+   * Only ONE ever moves. Everything about locomotion stays exactly where it
+   * was, reading `this.queen`, which is now whichever ant you are driving; the
+   * other two need no more than a position, a heading and a foot solve.
+   */
+  private readonly ants: LabAnt[] = CASTES.map((caste) => ({
+    caste,
+    model: new QueenModel(caste),
+    position: new THREE.Vector3(),
+    facing: 0,
+    ready: false,
+  }));
+  /*
+   * The QUEEN to begin with, because she is the middle of the bench: driving an
+   * end one puts the other two off to one side and the follow camera frames
+   * whoever you are driving, so two of the three are out of shot on the first
+   * frame.
+   */
+  private driven = CASTES.indexOf('queen');
+
+  /** The ant you are driving. The whole movement core reads this. */
+  private get queen(): QueenModel {
+    return this.ants[this.driven]!.model;
+  }
+
+  private get queenReady(): boolean {
+    return this.ants[this.driven]!.ready;
+  }
   /** Radians. Her heading, eased toward the direction she is walking. */
   private facing = 0;
   /** Radians per second, for the gait's lean into a turn. */
@@ -445,6 +506,10 @@ export class DensityTerrainLabScene {
   private fallSpeed = 0;
   /** Are her feet off the ground? Set by `stand`; damps her stride. */
   private overHole = false;
+  /** For tapping an ant to drive it. */
+  private readonly picker = new THREE.Raycaster();
+  /** Where each pointer went down, so a tap can be told from a drag. */
+  private readonly pressedAt = new Map<number, { x: number; y: number }>();
   /** The tripod walk. Rebuilt when she leaves the ground, null while boring. */
   private gait: TripodGait | null = null;
   /** The point a centimetre ahead that the bore is driving at. */
@@ -509,29 +574,22 @@ export class DensityTerrainLabScene {
     this.stream = new TerrainStream(start, start);
 
     this.antPosition = new THREE.Vector3(start, streamGroundHeight(start, start), start);
-    this.scene.add(this.queen.root);
-    void this.queen.load().then((ok) => {
-      /*
-       * A handle for the smoke test, and the reason it is worth having: "is
-       * she the right size" cannot be answered from a screenshot, and it
-       * cannot be answered from the constants either, because the scale is
-       * applied to a model whose own proportions live in the glb. Measured
-       * through here, her front foot to her rear foot spans 1.815 world units
-       * — 9.07 mm against the 9 mm `CASTE_LENGTH_MM` asks for.
-       *
-       * The same measurement settled which way she faces: her mouth bone sits
-       * at z = +0.82 and her gaster at z = -0.63, so her head is toward +Z and
-       * `forward = (sin f, 0, cos f)` points where she is actually going. From
-       * the side, at the lab's camera angle, +Z and -X look identical.
-       */
-      (window as unknown as { labScene?: unknown }).labScene = this;
-      this.queenReady = ok;
-      if (!ok) this.status.dataset.message = 'Queen model failed to load';
-      // The rig has to exist before its head can be found, so the first-person
-      // default is seated here rather than when the panel was built.
-      this.seatEyeOnHead();
-      this.updateStatus();
-    });
+    /*
+     * Side by side, across her heading rather than along it, so all three are
+     * in frame at once from the follow camera's usual quarter view.
+     */
+    for (let i = 0; i < this.ants.length; i += 1) {
+      const ant = this.ants[i]!;
+      const across = (i - (this.ants.length - 1) / 2) * BENCH_SPACING;
+      ant.position.set(start + across, streamGroundHeight(start + across, start), start);
+      this.scene.add(ant.model.root);
+      void ant.model.load().then((ok) => {
+        ant.ready = ok;
+        if (i === this.driven) this.onDrivenLoaded(ok);
+      });
+    }
+    this.antPosition.copy(this.ants[this.driven]!.position);
+    (window as unknown as { labScene?: unknown }).labScene = this;
 
     /*
      * Framing in fractions of the WINDOW, not of the world. The window is what
@@ -1536,10 +1594,16 @@ export class DensityTerrainLabScene {
    * give at any sampling radius.
    */
   private stance(
-    worldX: number, worldZ: number,
+    worldX: number, worldZ: number, fromY = this.antPosition.y,
   ): { height: number; up: any; overHole: boolean } {
     const reach = (CASTE_LENGTH_MM.queen / WORLD_UNIT_MM) * STANCE;
-    const from = this.antPosition.y + STEP_UP;
+    /*
+     * Probed from the height of whoever is ASKING. It defaulted to the driven
+     * ant's, which is right for her and wrong for the two standing at the other
+     * end of the bench — they would be measured against a column starting above
+     * someone else's head.
+     */
+    const from = fromY + STEP_UP;
     const west = this.groundAt(worldX - reach, worldZ, from);
     const east = this.groundAt(worldX + reach, worldZ, from);
     const south = this.groundAt(worldX, worldZ - reach, from);
@@ -1810,6 +1874,119 @@ export class DensityTerrainLabScene {
     return out;
   }
 
+  /**
+   * Stand the ants you are NOT driving.
+   *
+   * They get the same gait and the same foot solver as the driven one, at zero
+   * speed — which is the point of the bench. A caste whose legs misbehave
+   * standing still on sloped ground shows it here without anyone having to
+   * drive over to check, and the three are on the same soil at the same moment
+   * so the comparison is like for like.
+   */
+  /**
+   * The driven ant has finished loading.
+   *
+   * A handle for the smoke test, and the reason it is worth having: "is she the
+   * right size" cannot be answered from a screenshot, and it cannot be answered
+   * from the constants either, because the scale is applied to a model whose own
+   * proportions live in the glb. Measured through here, her widest span is 9.07
+   * mm against the 9 mm `CASTE_LENGTH_MM` asks for.
+   *
+   * The same measurement settled which way she faces: her mouth bone sits at
+   * z = +0.82 and her gaster at z = -0.63, so her head is toward +Z and
+   * `forward = (sin f, 0, cos f)` points where she is actually going. From the
+   * side, at the lab's camera angle, +Z and -X look identical.
+   */
+  private onDrivenLoaded(ok: boolean): void {
+    if (!ok) this.status.dataset.message = `${this.ants[this.driven]!.caste} model failed to load`;
+    // The rig has to exist before its head can be found, so the first-person
+    // default is seated here rather than when the panel was built.
+    this.seatEyeOnHead();
+    this.updateStatus();
+  }
+
+  private poseBystanders(dt: number): void {
+    for (let i = 0; i < this.ants.length; i += 1) {
+      if (i === this.driven) continue;
+      const ant = this.ants[i]!;
+      if (!ant.ready) continue;
+      /*
+       * The STANCE height, the same floor a driven ant stands on. Using the
+       * single column under them instead made every hand-over drop the ant you
+       * left behind by the half millimetre the two queries disagree by — a
+       * visible twitch, and on the wrong ant, at the moment you look away.
+       */
+      ant.position.y = this.stance(ant.position.x, ant.position.z, ant.position.y).height;
+      ant.model.root.position.copy(ant.position);
+      ant.model.root.quaternion.setFromAxisAngle(WORLD_UP, ant.facing);
+      ant.model.update(dt, { speed: 0, turn: 0, digging: 0, carrying: 0 });
+      ant.model.solveFeet(
+        (x, z, y) => this.groundAt(x, z, y + STEP_UP), FOOT_CLEARANCE, FOOT_PLANT_BAND,
+      );
+      // Whatever the solvers left, nothing drawn may be inside the soil.
+      const lift = ant.model.groundGuard((x, y, z) => {
+        PROBE.set(x, y, z);
+        if (!this.solidAt(PROBE)) return 0;
+        return Math.max(0, this.groundAt(x, z, y) - y + FOOT_CLEARANCE);
+      });
+      ant.model.root.position.y = ant.position.y + lift;
+    }
+  }
+
+  /**
+   * Take over whichever ant was tapped.
+   *
+   * She keeps her own place: you step out of the one you were driving where it
+   * stands and step into the other where IT stands, rather than the model
+   * changing underneath a fixed camera. That is what makes the bench a bench —
+   * you can walk one somewhere interesting, leave it, and come back to it.
+   *
+   * The dynamic state does not transfer. Velocity, fall speed, the pitch train
+   * and the stepper all belong to the body that was doing them, and carrying a
+   * major's momentum into a worker is a bug waiting to be reported as one.
+   */
+  private drive(index: number): void {
+    if (index === this.driven || !this.ants[index]?.ready) return;
+    const leaving = this.ants[this.driven]!;
+    leaving.position.copy(this.antPosition);
+    leaving.facing = this.facing;
+
+    this.driven = index;
+    const taking = this.ants[index]!;
+    this.antPosition.copy(taking.position);
+    this.facing = taking.facing;
+    this.bore.turn(taking.facing - this.bore.heading);
+    this.velocity.set(0, 0, 0);
+    this.walkSpeed = 0;
+    this.fallSpeed = 0;
+    this.overHole = false;
+    this.gait = null;
+    this.headPitch = 0;
+    this.thoraxPitch = 0;
+    this.gasterPitch = 0;
+    this.up.set(0, 1, 0);
+    // Her head is a different place on every caste, so the first-person eye
+    // has to be re-seated unless the player has placed it themselves.
+    this.seatEyeOnHead();
+    this.updateStatus();
+  }
+
+  /** Which ant is under this screen point, if any. */
+  private antAt(clientX: number, clientY: number): number {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    POINTER.set(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.picker.setFromCamera(POINTER, this.camera);
+    for (let i = 0; i < this.ants.length; i += 1) {
+      const ant = this.ants[i]!;
+      if (i === this.driven || !ant.ready) continue;
+      if (this.picker.intersectObject(ant.model.root, true).length > 0) return i;
+    }
+    return -1;
+  }
+
   private orientQueen(): void {
     /*
      * Pitch is measured from the WORLD horizon, never from the ground she
@@ -2000,8 +2177,9 @@ export class DensityTerrainLabScene {
       + ` pitch ${(this.bore.pitch * 180 / Math.PI >= 0 ? '+' : '')}`
       + `${(this.bore.pitch * 180 / Math.PI).toFixed(0)}°`
       + `${this.bore.digging ? ' · DIG ON' : ''} · ${this.running ? 'run' : 'crawl'}<br>
-      Queen: ${this.queenReady
-        ? `${CASTE_LENGTH_MM.queen} mm · feet ${(this.footPenetration * WORLD_UNIT_MM).toFixed(2)} mm`
+      Driving ${this.ants[this.driven]!.caste}: ${this.queenReady
+        ? `${CASTE_LENGTH_MM[this.ants[this.driven]!.caste]} mm`
+          + ` · feet ${(this.footPenetration * WORLD_UNIT_MM).toFixed(2)} mm`
           + ` · guard ${(this.guardLift * WORLD_UNIT_MM).toFixed(3)} mm`
           + `${this.follow.firstPerson ? ' · eye view' : ''}`
         : 'loading…'}<br>
@@ -2041,6 +2219,7 @@ export class DensityTerrainLabScene {
       return;
     }
     this.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    this.pressedAt.set(event.pointerId, { x: event.clientX, y: event.clientY });
   };
 
   private readonly onCameraMove = (event: PointerEvent): void => {
@@ -2115,8 +2294,20 @@ export class DensityTerrainLabScene {
       this.showStick(false);
       return;
     }
+    /*
+     * A TAP picks an ant to drive; a DRAG looks around. The same pointer does
+     * both, so they are told apart by how far it travelled — anything under a
+     * few pixels was a tap, whatever the finger meant by it.
+     */
+    const down = this.pressedAt.get(event.pointerId);
+    this.pressedAt.delete(event.pointerId);
     this.pointers.delete(event.pointerId);
     if (this.pointers.size < 2) this.lastPinch = 0;
+    if (!down) return;
+    const moved = Math.hypot(event.clientX - down.x, event.clientY - down.y);
+    if (moved > TAP_SLOP) return;
+    const picked = this.antAt(event.clientX, event.clientY);
+    if (picked >= 0) this.drive(picked);
   };
 
   private readonly onCameraWheel = (event: WheelEvent): void => {
@@ -2274,6 +2465,7 @@ export class DensityTerrainLabScene {
        * the surface. Near the wall of a shaft those are different questions
        * and only the first one has a sensible answer.
        */
+      this.poseBystanders(delta);
       this.guardLift = this.queen.groundGuard((x, y, z) => {
         PROBE.set(x, y, z);
         if (!this.solidAt(PROBE)) return 0;
