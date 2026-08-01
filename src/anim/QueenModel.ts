@@ -662,6 +662,15 @@ export class QueenModel {
     }
   }
 
+  /**
+   * Which bone is actually this limb's foot — the last one with geometry
+   * skinned to it. Exposed so a probe can measure to the same point the
+   * solver plants, rather than to the auto-rig terminals beyond it.
+   */
+  limbTipName(limb: string): string | null {
+    return this.limbTip.get(limb) ?? null;
+  }
+
   /** Every named group of bones, for measuring thickness and for the guard. */
   private limbGroups(): Array<[string, string[]]> {
     const groups: Array<[string, string[]]> = [

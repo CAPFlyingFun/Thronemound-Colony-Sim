@@ -31,24 +31,42 @@ const out = await page.evaluate(() => {
   const V = lab.at.constructor;
   const rig = queen.rig;
   const bones = queen.bones;
+  /*
+   * THE FOOT IS `limbTip`, NOT THE LAST BONE IN THE CHAIN.
+   *
+   * Every leg on this rig ends in two auto-rig terminals carrying no
+   * geometry, and on the queen they point back UP, about a millimetre above
+   * the foot they trail — QueenModel says so in the comment beside
+   * `limbTip`, and it says it because planting one of those markers is the
+   * old "feet up in the air" bug. Measuring hip-to-LAST-BONE is measuring
+   * to a marker floating above her claw, which is what the first version of
+   * this probe did. The model already publishes the honest answer:
+   * `legPlan()` gives the neutral foot position and the hip-to-foot reach,
+   * both taken to the tip that actually has geometry on it.
+   */
+  const plan = queen.legPlan();
   const rows = [];
   for (const leg of rig.legs) {
+    const entry = plan.find((p) => p.slot === leg.slot);
+    if (!entry) continue;
     const chain = leg.bones.map((n) => bones.get(n)).filter(Boolean);
-    if (chain.length < 2) continue;
     const world = chain.map((b) => b.getWorldPosition(new V()));
-    const hip = world[0];
-    const tip = world[world.length - 1];
+    // Stretched: every bone up to and including the one that IS the foot.
+    const tipName = queen.limbTipName ? queen.limbTipName(leg.slot) : null;
+    const cut = tipName ? leg.bones.indexOf(tipName) : leg.bones.length - 3;
+    const last = cut >= 1 ? cut : leg.bones.length - 3;
     let stretched = 0;
-    for (let i = 1; i < world.length; i += 1) stretched += world[i].distanceTo(world[i - 1]);
+    for (let i = 1; i <= last && i < world.length; i += 1) {
+      stretched += world[i].distanceTo(world[i - 1]);
+    }
     rows.push({
       slot: leg.slot,
-      segments: chain.length,
-      restMm: +(hip.distanceTo(tip) * 5).toFixed(2),
+      segments: last + 1,
+      restMm: +(entry.reach * 5).toFixed(2),
       stretchedMm: +(stretched * 5).toFixed(2),
-      dropMm: +((tip.y - lab.at.y) * 5).toFixed(2),
     });
   }
-  return { rows, bodyYmm: +(lab.at.y * 5).toFixed(2) };
+  return { rows };
 });
 
 const w = (s, n) => String(s).padEnd(n);

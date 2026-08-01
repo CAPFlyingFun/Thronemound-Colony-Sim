@@ -40,6 +40,7 @@ import { QueenModel } from '../anim/QueenModel';
 import { CASTE_BITE_MM, CASTE_LENGTH_MM } from '../anim/hexapod';
 import { FollowCamera } from './FollowCamera';
 import { clampStickOrigin, stickVector } from '../voxel/locomotion';
+import { LegDrive, RIDE_CLEARANCE_MM, type DriveReport, type LegSetup } from '../anim/legDrive';
 
 /** Millimetres per world unit, the scale the whole project runs on. */
 const MM = 5;
@@ -163,6 +164,29 @@ export class BlockScene {
    */
   private aimPitch = 0;
 
+  /**
+   * The legs, and after `plantAll` they are what actually moves her. Null
+   * until the model has loaded, because the leg homes are read off the rig.
+   */
+  private drive: LegDrive | null = null;
+  private report: DriveReport | null = null;
+  /**
+   * How far her body origin rides above the surface — DERIVED from the legs,
+   * not chosen.
+   *
+   * It began as a hand-picked 1.4 mm and that was the whole reason only two
+   * legs could reach the ground: the rig's own foot homes sit at y = +0.27 mm,
+   * so her origin is essentially AT her contact plane rather than above it,
+   * and lifting the body 1.4 mm lifted every foot target 1.7 mm clear of the
+   * block — past the 1.1 mm a front leg has to spare. The rear pair, with
+   * 1.83 mm, could just reach, which is exactly what the first run measured:
+   * two planted, four groping.
+   *
+   * In a design where the legs carry the body, the body's height is the legs'
+   * business. So it is the feet's own offset, plus the ride clearance.
+   */
+  private ride = RIDE;
+
   private readonly input = { walk: 0, yaw: 0, dig: false };
   private digCooldown = 0;
   /** Why the last bite did nothing, for probes. Cleared on a real bite. */
@@ -227,7 +251,9 @@ export class BlockScene {
 
     void this.queen.load().then((ok) => {
       this.ready = ok;
-      if (ok) this.queen.root.visible = true;
+      if (!ok) return;
+      this.queen.root.visible = true;
+      this.buildLegs();
     });
 
     (window as unknown as { blockScene?: unknown }).blockScene = this;
@@ -450,6 +476,43 @@ export class BlockScene {
    * case for "upside down", because nothing here refers to the world's
    * vertical except gravity, and gravity only applies once she has let go.
    */
+  /**
+   * Read the leg homes off the rig itself, in her body frame.
+   *
+   * Not a table of guessed offsets: the model is posed at rest, each leg's
+   * tip bone is asked where it is, and the answer is converted into her own
+   * frame. Whatever the rig says her stance is, that is what the legs return
+   * to — and it stays true if the model is ever re-exported.
+   */
+  private buildLegs(): void {
+    const setup: LegSetup[] = this.queen.legPlan().map((leg) => ({
+      slot: leg.slot,
+      home: new THREE.Vector3(leg.home[0], leg.home[1], leg.home[2]),
+      reach: leg.reach,
+    }));
+    if (setup.length === 0) return;
+    const meanFootY = setup.reduce((sum, leg) => sum + leg.home.y, 0) / setup.length;
+    this.ride = -meanFootY + RIDE_CLEARANCE_MM / 5;
+    // Re-seat her at the height her own legs imply before they take over.
+    this.at.addScaledVector(this.up, this.ride - RIDE);
+    this.drive = new LegDrive(setup);
+    this.drive.plantAll(
+      { at: this.at, up: this.up, forward: this.forward }, this.groundForLegs,
+    );
+  }
+
+  /**
+   * What the legs are allowed to ask the world. Nearest solid to a point,
+   * searched along her own down and then her own up — null is a real answer
+   * and means "nothing to stand on here".
+   */
+  private readonly groundForLegs = {
+    nearest: (at: THREE.Vector3, up: THREE.Vector3, down: number, rise: number) => {
+      const from = at.clone().addScaledVector(up, rise);
+      return this.cast(from, up.clone().negate(), rise + down);
+    },
+  };
+
   private step(dt: number): void {
     /*
      * The sign is REPORTED, not reasoned: pushing the stick right turned her
@@ -459,16 +522,37 @@ export class BlockScene {
      * LEFT of the screen. The arithmetic is consistent and is the mirror of
      * what a thumb means.
      */
-    const yaw = this.input.yaw * YAW_RATE * dt;
-    if (Math.abs(yaw) > 1e-9) {
-      this.forward.applyAxisAngle(this.up, yaw).normalize();
-    }
     this.turnRate = this.input.yaw * YAW_RATE;
+    if (!this.drive) {
+      const yaw = this.input.yaw * YAW_RATE * dt;
+      if (Math.abs(yaw) > 1e-9) this.forward.applyAxisAngle(this.up, yaw).normalize();
+    }
 
-    const wanted = this.forward.clone().multiplyScalar(WALK_SPEED * this.input.walk);
-    this.velocity.lerp(wanted, 1 - Math.exp(-10 * dt));
-    this.walkSpeed = this.velocity.length();
-    this.at.addScaledVector(this.velocity, dt);
+    if (this.drive) {
+      /*
+       * THE LEGS MOVE HER. The stick proposes, the planted feet constrain,
+       * and what survives is her displacement — see `legDrive`.
+       */
+      const before = this.at.clone();
+      this.report = this.drive.step(
+        dt,
+        { at: this.at, up: this.up, forward: this.forward },
+        {
+          walk: this.input.walk,
+          yaw: this.input.yaw,
+          speed: WALK_SPEED,
+          yawRate: YAW_RATE,
+        },
+        this.groundForLegs,
+      );
+      this.walkSpeed = this.at.distanceTo(before) / Math.max(dt, 1e-6);
+      this.velocity.copy(this.at).sub(before).divideScalar(Math.max(dt, 1e-6));
+    } else {
+      const wanted = this.forward.clone().multiplyScalar(WALK_SPEED * this.input.walk);
+      this.velocity.lerp(wanted, 1 - Math.exp(-10 * dt));
+      this.walkSpeed = this.velocity.length();
+      this.at.addScaledVector(this.velocity, dt);
+    }
 
     if (this.gripping) this.hold(dt);
     else this.fall(dt);
@@ -509,7 +593,7 @@ export class BlockScene {
       return;
     }
     this.normalAt(hit, normal);
-    const seat = hit.clone().addScaledVector(normal, RIDE);
+    const seat = hit.clone().addScaledVector(normal, this.ride);
     this.at.lerp(seat, 1 - Math.exp(-SNAP * dt));
     this.up.lerp(normal, 1 - Math.exp(-ALIGN * dt)).normalize();
   }
@@ -529,7 +613,7 @@ export class BlockScene {
       const hit = this.cast(from, new THREE.Vector3(0, -1, 0), SPAN * 2);
       if (hit) {
         this.normalAt(hit, this.up);
-        this.at.copy(hit).addScaledVector(this.up, RIDE);
+        this.at.copy(hit).addScaledVector(this.up, this.ride);
         this.gripping = true;
         this.fallSpeed = 0;
         this.velocity.set(0, 0, 0);
@@ -578,7 +662,7 @@ export class BlockScene {
         (x, z, y) => this.surfaceUnder(x, y, z),
         CELL,
         RIDE * 2,
-        undefined,
+        this.drive ? (slot) => this.drive!.anchorFor(slot) : undefined,
         {
           up: [this.up.x, this.up.y, this.up.z],
           surface: (x, y, z) => this.surfaceUnder(x, y, z),
@@ -634,7 +718,12 @@ export class BlockScene {
       Block: ${BLOCK_MM} mm cube · ${CELL_MM} mm cells · ${CELLS}³<br>
       Bite: ${CASTE_BITE_MM.queen} mm (queen) · removed ${(this.removed * MM ** 3).toFixed(0)} mm³<br>
       On the ${face} · up ${this.up.x.toFixed(2)}, ${this.up.y.toFixed(2)}, ${this.up.z.toFixed(2)}<br>
-      Queen: ${CASTE_LENGTH_MM.queen} mm · ${this.gripping ? 'gripping' : 'FALLING'}`;
+      Queen: ${CASTE_LENGTH_MM.queen} mm · ${this.gripping ? 'gripping' : 'FALLING'}<br>
+      Legs: ${this.report
+    ? `${this.report.planted} planted · ${this.report.groping} reaching · `
+      + `${this.report.movedMm.toFixed(2)} mm moved, ${this.report.heldBackMm.toFixed(2)} held back · `
+      + `${this.report.clearanceMm.toFixed(2)} mm clear`
+    : 'waiting for the model'}`;
   }
 
   /* ------------------------------------------------------------ the input */
