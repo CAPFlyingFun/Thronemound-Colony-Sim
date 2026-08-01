@@ -552,6 +552,7 @@ for (const view of CASES) {
     let vertsInTrunk = 0;
     let deepestVert = 0;
     let toppedOut = false;
+    let spin = null;
     for (let f = 0; f < 60 * 20; f += 1) {
       lab.stepForTest(1 / 60, 1);
       if (lab.gripping) {
@@ -592,7 +593,38 @@ for (const view of CASES) {
           if (deepestVert === 0) deepestVert = -1; // measured, and clean
         }
       }
-      if (!lab.gripping && highestGrip > lab.tree.top - 1) toppedOut = true;
+      if (!lab.gripping && highestGrip > lab.tree.top - 1) {
+        if (!toppedOut && lab.antPosition.y > lab.tree.top - 1) {
+          /*
+           * Measured HERE, standing on the lid, because a moment later she
+           * has crossed it and walked off the far edge — which is the next
+           * thing this scenario asserts.
+           */
+          lab.input.walk = 0;
+          lab.stepForTest(1 / 60, 90);
+          const flat = () => {
+            const d = lab.camera.getWorldDirection(lab.antPosition.clone());
+            return { x: d.x, z: d.z };
+          };
+          const b = flat();
+          const facing0 = lab.facing;
+          lab.input.yaw = 1;
+          lab.stepForTest(1 / 60, 60);
+          lab.input.yaw = 0;
+          const a = flat();
+          const n0 = Math.hypot(b.x, b.z);
+          const n1 = Math.hypot(a.x, a.z);
+          const dot = (b.x * a.x + b.z * a.z) / Math.max(1e-9, n0 * n1);
+          const turn = (r) => Math.abs(((r * 180 / Math.PI) % 360 + 540) % 360 - 180);
+          spin = {
+            upY: lab.up.y,
+            bodyDeg: turn(lab.facing - facing0),
+            cameraDeg: Math.acos(Math.min(1, Math.max(-1, dot))) * 180 / Math.PI,
+          };
+          lab.input.walk = 1;
+        }
+        toppedOut = true;
+      }
     }
     lab.input.walk = 0;
     lab.stepForTest(1 / 60, 120);
@@ -608,6 +640,7 @@ for (const view of CASES) {
       deepestVertMm: deepestVert < 0 ? 0 : deepestVert * 5,
       measuredVerts: deepestVert !== 0,
       toppedOut,
+      spin,
       finalMm: lab.antPosition.y * 5,
       finalGripping: lab.gripping,
       walkedOffToSoil: !lab.gripping
@@ -648,6 +681,30 @@ for (const view of CASES) {
 
   if (!climb.toppedOut) fail('she never rounded the lip onto the treetop');
   else ok('she rounds the lip onto the treetop');
+
+  /*
+   * And she can TURN up there. Reported as yaw being dead at the top of the
+   * pillar, and it was two faults wearing one symptom: on the wall the
+   * camera was built from a ground-plane compass bearing her vertical
+   * forward does not have, and on the lid her own up settled to
+   * (0, 0.10, -0.99) — lying on her side pointing off the rim — because a
+   * stance sample that falls off an edge reported the land sixty
+   * millimetres below and swamped the normal. Both are asserted: her up is
+   * level on the lid, and the VIEW turns with her body.
+   */
+  const spin = climb.spin;
+  if (!spin) fail('the treetop turn was never measured');
+  else if (!(spin.upY > 0.9)) {
+    fail(`on the treetop her up is ${spin.upY.toFixed(3)} — she stands on her side at the rim`);
+  } else if (!(spin.bodyDeg > 30)) {
+    fail(`a second of yaw turned her body only ${spin.bodyDeg.toFixed(1)} degrees up there`);
+  } else if (spin.cameraDeg < spin.bodyDeg * 0.6) {
+    fail(`on the treetop her body turned ${spin.bodyDeg.toFixed(0)} degrees and the view only `
+      + `${spin.cameraDeg.toFixed(0)} — yaw is dead up there`);
+  } else {
+    ok(`she turns on the treetop: body ${spin.bodyDeg.toFixed(0)}°, view `
+      + `${spin.cameraDeg.toFixed(0)}°, up ${spin.upY.toFixed(3)}`);
+  }
 
   if (!climb.walkedOffToSoil) {
     fail(`after the summit she ended at ${climb.finalMm.toFixed(1)} mm, gripping=${

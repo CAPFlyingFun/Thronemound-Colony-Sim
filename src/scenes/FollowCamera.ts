@@ -181,10 +181,12 @@ export class FollowCamera {
     eyeRight: THREE.Vector3,
     flat: THREE.Vector3,
     step: number,
+    /** Which way "up" is for the eye: the horizon, or her own on a wall. */
+    lift: THREE.Vector3,
   ): THREE.Vector3 {
     const full = new THREE.Vector3()
       .addScaledVector(eyeRight, this.eye.x)
-      .addScaledVector(WORLD_UP, this.eye.y)
+      .addScaledVector(lift, this.eye.y)
       .addScaledVector(flat, this.eye.z);
     const reach = full.length();
     const at = new THREE.Vector3();
@@ -248,6 +250,20 @@ export class FollowCamera {
      * technically above the surface the whole time.
      */
     surfaceY?: (x: number, z: number) => number,
+    /**
+     * Which way her BODY faces, when a compass bearing cannot say it.
+     *
+     * `heading` is a yaw about the world's vertical, and that is a complete
+     * description of facing only while she is on the ground. On a wall her
+     * forward points UP THE TRUNK, whose ground-plane bearing is undefined —
+     * so the scene's heading freezes there, and with the camera built from
+     * it the view stopped turning entirely while her body turned underneath
+     * it. Measured mid-climb: the body swung 83 degrees, the camera 0.3.
+     *
+     * Given a forward vector, the rig uses it directly and the player's
+     * look-around is applied about her own up rather than the world's.
+     */
+    bodyForward?: THREE.Vector3,
   ): void {
     const yaw = heading + this.yawOffset;
 
@@ -257,7 +273,9 @@ export class FollowCamera {
      * insisting on a vertical that stopped being meaningful underground.
      */
     const up = this.up.clone().normalize();
-    const forward = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+    const forward = bodyForward
+      ? bodyForward.clone().applyAxisAngle(up, this.yawOffset)
+      : new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
     forward.addScaledVector(up, -forward.dot(up));
     if (forward.lengthSq() < 1e-8) forward.set(0, 0, 1);
     forward.normalize();
@@ -358,11 +376,21 @@ export class FollowCamera {
      * keeps her heading and the angle she is AIMING at, and throws away the
      * rest of her motion: level horizon, no roll, no bob.
      */
-    const flat = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
-    const eyeRight = new THREE.Vector3().crossVectors(WORLD_UP, flat).normalize();
+    /*
+     * The frame the EYE is stabilised in. On the ground that is the horizon,
+     * always — a head-mounted camera that rolls with every pebble is the
+     * "her body moves too much to look at" report. On a wall the horizon is
+     * not a frame she is in at all, so her own up takes over and the view
+     * banks with the surface, which is the only way a climb reads.
+     */
+    const lift = bodyForward ? up : WORLD_UP;
+    const flat = bodyForward
+      ? forward.clone()
+      : new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+    const eyeRight = new THREE.Vector3().crossVectors(lift, flat).normalize();
     const right = new THREE.Vector3().crossVectors(up, forward).normalize();
     const wanted = this.onboard
-      ? this.eyePoint(solidAt, eyeRight, flat, step)
+      ? this.eyePoint(solidAt, eyeRight, flat, step, lift)
       : this.target.clone().addScaledVector(back, Math.max(clear, this.options.minDistance));
     /*
      * And NEVER under the open-air land. The march sees the first solid
@@ -426,7 +454,7 @@ export class FollowCamera {
      */
     if (this.onboard) {
       const look = flat.clone().multiplyScalar(Math.cos(this.aimPitch))
-        .addScaledVector(WORLD_UP, Math.sin(this.aimPitch));
+        .addScaledVector(lift, Math.sin(this.aimPitch));
       /*
        * Straight up and straight down are the two aims where world up cannot be
        * the camera's up: the look direction is parallel to it, `lookAt` has no
@@ -438,8 +466,8 @@ export class FollowCamera {
        * straight down a shaft puts the way she is facing at the top of the
        * screen, which is the convention every map and every cockpit uses.
        */
-      const vertical = Math.abs(look.dot(WORLD_UP));
-      this.camera.up.copy(vertical > 0.999 ? flat : WORLD_UP);
+      const vertical = Math.abs(look.dot(lift));
+      this.camera.up.copy(vertical > 0.999 ? flat : lift);
       this.camera.lookAt(this.smoothed.clone().add(look));
     } else {
       this.camera.up.copy(up);

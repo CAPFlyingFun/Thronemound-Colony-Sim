@@ -190,6 +190,27 @@ const FOOT_PLANT_BAND = 0.6 / WORLD_UNIT_MM;
  */
 const STEP_UP = 2 / WORLD_UNIT_MM;
 
+/**
+ * How far a stance sample may differ from the ground under her before it
+ * stops counting as SLOPE and starts counting as an EDGE.
+ *
+ * An edge is not a slope, and nothing in the stance knew the difference. The
+ * normal is built from ground heights a body-reach apart, so a sample that
+ * falls off a rim reports the land far below and the run-over-rise the normal
+ * is made of goes wildly horizontal. Measured standing two millimetres from
+ * the lip of the practice tree, sixty-five millimetres up: her up settled to
+ * (0, 0.10, -0.99) — lying on her side, pointing off the edge. The camera's
+ * whole basis hangs off that vector, so yaw stopped meaning anything and the
+ * view lurched between wildly different directions. Reported as not being
+ * able to rotate at the top of the pillar.
+ *
+ * Twice a step caps the lean at about thirty-two degrees, which is steeper
+ * than any slope this world grows and far short of the eighty-four a cliff
+ * would ask for. An animal at the rim of a drop stands level; it does not
+ * lie down over the edge.
+ */
+const STANCE_LEAN = STEP_UP * 2;
+
 /** World up and world forward, for anything measured against the horizon. */
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const WORLD_FORWARD = new THREE.Vector3(0, 0, 1);
@@ -588,7 +609,7 @@ export class DensityTerrainLabScene {
   private stickY = 0;
   private sun: any = null;
   /** What the controls are asking for: steering, throttle and the dig. */
-  private readonly input = { yaw: 0, walk: 0, dig: 0, strafe: 0 };
+  private readonly input = { yaw: 0, walk: 0, dig: 0 };
   /** The first-person instrument overlay. Fed once a frame from `simulate`. */
   private readonly digHud = new DigHud();
   /** Millimetres of tunnel driven since DIG was last pressed. */
@@ -1094,8 +1115,6 @@ export class DensityTerrainLabScene {
      */
     this.input.yaw = (held('KeyA') ? 1 : 0) - (held('KeyD') ? 1 : 0);
     this.input.walk = (held('KeyW') ? 1 : 0) - (held('KeyS') ? 1 : 0);
-    // Q/E sidestep, matching the stick's diagonals.
-    this.input.strafe = (held('KeyE') ? 1 : 0) - (held('KeyQ') ? 1 : 0);
   }
 
   private addLighting(): void {
@@ -1869,9 +1888,27 @@ export class DensityTerrainLabScene {
     const ranked = [west, east, south, north, centre].sort((a, b) => a - b);
     const support = ranked[2]!;
     const floor = this.descendInto(worldX, worldZ, from, support);
+    /*
+     * The NORMAL is built only from samples that are SLOPE — see
+     * `STANCE_LEAN`. A sample beyond the limit is a cliff, and it is
+     * DISCARDED rather than clamped: clamped, it still contributes the
+     * steepest lean the rule allows, which left her leaning thirty-two
+     * degrees over the rim of the treetop instead of standing on it. A
+     * cliff should not tilt her at all, so it reads as level ground and the
+     * samples that are real slope decide the lean between them.
+     *
+     * The heights themselves are left alone. The median above still has to
+     * see a real drop to walk her into a shaft, and discarding there would
+     * fill in every hole she digs.
+     */
+    const lean = (height: number): number => (
+      Math.abs(height - support) > STANCE_LEAN ? support : height
+    );
     return {
       height: floor,
-      up: new THREE.Vector3(-(east - west), 2 * reach, -(north - south)).normalize(),
+      up: new THREE.Vector3(
+        -(lean(east) - lean(west)), 2 * reach, -(lean(north) - lean(south)),
+      ).normalize(),
       overHole: floor < support,
     };
   }
@@ -2475,16 +2512,7 @@ export class DensityTerrainLabScene {
     this.turnRate = this.input.yaw * YAW_RATE;
 
     const ease = 1 - Math.exp(-SPEED_EASE * dt);
-    // The stick's eight ways work on the wall too: sidesteps run along her
-    // right in the surface plane, with the same handedness as the ground.
-    CLIMB_V.copy(fwd).multiplyScalar(this.input.walk);
-    if (this.input.strafe !== 0) {
-      GUARD_P.crossVectors(up, fwd);
-      CLIMB_V.addScaledVector(GUARD_P, -this.input.strafe);
-    }
-    const drive = CLIMB_V.length();
-    if (drive > 1) CLIMB_V.divideScalar(drive);
-    CLIMB_V.multiplyScalar(this.speed);
+    CLIMB_V.copy(fwd).multiplyScalar(this.speed * this.input.walk);
     this.velocity.lerp(CLIMB_V, ease);
     this.walkSpeed = this.velocity.length();
     this.antPosition.addScaledVector(this.velocity, dt);
@@ -2535,6 +2563,14 @@ export class DensityTerrainLabScene {
      * yaw her climb most resembles, so it is kept in step whenever her
      * forward has any horizontal meaning at all. Near straight up it has
      * none, and the last good yaw stands.
+     */
+    /*
+     * The HUD's compass and the bore both want a ground-plane bearing, which
+     * a forward pointing straight up a trunk does not have. Kept in step
+     * whenever there is enough horizontal forward to mean anything, and
+     * frozen at the last good value when there is not — the CAMERA no longer
+     * depends on this, so a frozen bearing costs a stale heading readout
+     * rather than a view that will not turn.
      */
     if (this.gripping && Math.hypot(fwd.x, fwd.z) > 0.15) {
       this.facing = Math.atan2(fwd.x, fwd.z);
@@ -2656,21 +2692,7 @@ export class DensityTerrainLabScene {
      * scrabbles instead of running, and drops IN rather than across.
      */
     if (this.overHole && !aligned) pace *= HOLE_SCRABBLE;
-    /*
-     * The eight-way stick: fore and aft along the heading, SIDESTEPS along
-     * her right, spins handled upstream by the yaw axis. The pair is
-     * normalised so a diagonal is a direction, not a speed boost.
-     */
-    const wanted = heading.multiplyScalar(throttle);
-    if (this.input.strafe !== 0) {
-      // Her right agrees with the MEASURED turn sign: "turn right" is facing
-      // decreasing here, so sidestep-right is minus the naive right vector.
-      wanted.x -= Math.cos(this.facing) * this.input.strafe;
-      wanted.z += Math.sin(this.facing) * this.input.strafe;
-    }
-    const drive = wanted.length();
-    if (drive > 1) wanted.divideScalar(drive);
-    wanted.multiplyScalar(pace);
+    const wanted = heading.multiplyScalar(pace * throttle);
 
     this.velocity.lerp(wanted, ease);
     this.walkSpeed = this.velocity.length();
@@ -2813,29 +2835,22 @@ export class DensityTerrainLabScene {
        * fine for anyone on a keyboard.
        */
       /*
-       * EIGHT compass directions, specified with north up: N/S drive her
-       * fore and aft, E/W spin her on the spot, and the four diagonals are
-       * SIDESTEPS — forward-left, forward-right, back-right, back-left —
-       * with no turning at all. Each sector is forty-five degrees, and the
-       * deflection still scales the pace, so a gentle diagonal is a creep.
+       * FOUR ways, north up: N and S drive her fore and aft, E and W spin
+       * her on the spot. The diagonals were eight-way sidesteps for one
+       * revision and are gone by request — a thumb cannot reliably hold a
+       * forty-five degree sector on a phone, and every diagonal it clipped
+       * turned a walk into a sidestep.
+       *
+       * The dominant axis wins, so each way owns a full quadrant and the
+       * boundaries sit at the diagonals, where a wobble costs nothing.
+       * Deflection still scales the pace.
        */
       const mag = v.magnitude;
       this.input.walk = 0;
       this.input.yaw = 0;
-      this.input.strafe = 0;
       if (mag > 0.12) {
-        const octant = ((Math.round(Math.atan2(v.x, -v.y) / (Math.PI / 4)) % 8) + 8) % 8;
-        switch (octant) {
-          case 0: this.input.walk = mag; break;                                // N
-          case 1: this.input.walk = mag; this.input.strafe = mag; break;       // NE
-          case 2: this.input.yaw = -mag; break;                                // E: spin clockwise
-          case 3: this.input.walk = -mag; this.input.strafe = mag; break;      // SE
-          case 4: this.input.walk = -mag; break;                               // S
-          case 5: this.input.walk = -mag; this.input.strafe = -mag; break;     // SW
-          case 6: this.input.yaw = mag; break;                                 // W: spin anticlockwise
-          case 7: this.input.walk = mag; this.input.strafe = -mag; break;      // NW
-          default: break;
-        }
+        if (Math.abs(v.x) > Math.abs(v.y)) this.input.yaw = -Math.sign(v.x) * mag;
+        else this.input.walk = -Math.sign(v.y) * mag;
       }
       this.showStick(true);
       return;
@@ -2887,7 +2902,6 @@ export class DensityTerrainLabScene {
       this.stickY = 0;
       this.input.walk = 0;
       this.input.yaw = 0;
-      this.input.strafe = 0;
       this.showStick(false);
       return;
     }
@@ -3196,6 +3210,9 @@ export class DensityTerrainLabScene {
       delta, this.facing, (point) => this.barrierAt(point), CELL_SIZE * 2,
       // The land as seen from the sky — crater rims and the treetop count.
       (x, z) => this.groundAt(x, z, CELLS_Y * CELL_SIZE),
+      // On a wall a compass bearing cannot say which way she faces; her own
+      // forward can. See `FollowCamera.update`.
+      this.gripping ? this.climbForward : undefined,
     );
     /*
      * The instruments, from the same numbers the physics runs on: depth is
