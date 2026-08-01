@@ -371,20 +371,23 @@ const SENSE = new THREE.Vector3();
  */
 const POD_RADIUS = 0.16;
 const POD_MID = 0.2;
+/** Capsule centre to capsule end — how much of it stands above its base. */
+const POD_HALF = POD_MID * 0.5 + POD_RADIUS;
 /**
- * How far the pod rides ABOVE the eye seat. The seat is at head height — the
- * first-person camera sits inside her head, which is the point of it — so a
- * shell drawn exactly there is half-buried in her own silhouette and reads
- * as a glitch, not a vehicle. Perched a shell's reach higher its base kisses
- * the seat and the whole pod shows; boarding drops the camera to the seat
- * directly beneath it.
+ * Daylight under the parked pod: a hundredth of a millimetre. It STANDS on
+ * the soil rather than floating at the eye seat, because the first draft
+ * floated it there — head height, where the first-person camera actually
+ * boards — and parked over her own neck it read as a glitch riding the
+ * thorax, not as a vehicle. The dig room's capsule is a thing on the ground;
+ * so is this one, waiting at her jawline.
  */
-const POD_PERCH = POD_MID * 0.5 + POD_RADIUS + 0.06;
+const POD_CLEAR = 0.002;
 /** Scratch for seating the pod, all frames, no allocation. */
 const POD_FWD = new THREE.Vector3();
 const POD_RIGHT = new THREE.Vector3();
 const POD_LIFT = new THREE.Vector3();
 const POD_MAT = new THREE.Matrix4();
+const POD_AT = new THREE.Vector3();
 
 /**
  * The cone that decides whether she has a ceiling: straight up, and four rays
@@ -771,13 +774,14 @@ export class DensityTerrainLabScene {
 
     /*
      * The camera pod, parked in the room. The first-person view was an
-     * abstraction — a point the camera teleported to — and now it is a THING:
-     * a little glass capsule riding the driven ant's head, sitting on the
-     * exact eye seat first person uses. In third person you can see where
-     * going first-person will put you; going first person is climbing into
-     * it, so it hides rather than fill the lens with its own shell. There is
-     * one pod, not one per ant, and it hands over with control, because what
-     * it embodies is the player's eye and there is one of those.
+     * abstraction — a point the camera teleported to — and now it is a
+     * THING: the dig room's player capsule, standing on the soil at the
+     * driven ant's jawline with a hundredth of a millimetre of daylight
+     * under it. In third person it waits in front of her; going first
+     * person is boarding it, so it hides rather than fill the lens with its
+     * own shell; stepping out re-parks it. There is one pod, not one per
+     * ant, and it hands over with control, because what it embodies is the
+     * player's eye and there is one of those.
      */
     this.eyePod = new THREE.Group();
     this.eyePod.name = 'eye-pod';
@@ -3524,13 +3528,15 @@ export class DensityTerrainLabScene {
     LAST_AT.copy(this.antPosition);
     this.wasCutting = bore.digging;
     /*
-     * Seat the pod on the eye seat — `follow.eye`, the same local offset the
-     * first-person camera boards, so RECENTRE EYE and a saved placement move
-     * the parked pod too and it never advertises a view the camera will not
-     * actually give. Built on her BODY frame, not the look: dragging the
-     * camera around is the player glancing, and the pod is her hat.
+     * Park the pod ON THE GROUND at her jawline, facing her way — the dig
+     * room's capsule as a vehicle waiting in front of her, not a marker
+     * floating at the eye seat. The floor is asked from just above her, so
+     * in a tunnel it is the tunnel's own floor; on a trunk there is no floor
+     * to stand on and it waits at the jaws themselves. Built on her BODY
+     * frame, not the look: dragging the camera around is the player
+     * glancing, and the pod stays parked.
      */
-    if (this.queenReady) {
+    if (this.queenReady && this.queen.jawPosition(POD_AT)) {
       POD_LIFT.copy(this.gripping ? this.up : WORLD_UP);
       if (this.gripping) POD_FWD.copy(this.climbForward);
       else POD_FWD.set(Math.sin(this.facing), 0, Math.cos(this.facing));
@@ -3538,10 +3544,13 @@ export class DensityTerrainLabScene {
       POD_FWD.crossVectors(POD_LIFT, POD_RIGHT).normalize();
       POD_MAT.makeBasis(POD_RIGHT, POD_LIFT, POD_FWD);
       this.eyePod.quaternion.setFromRotationMatrix(POD_MAT);
-      this.eyePod.position.copy(this.antPosition)
-        .addScaledVector(POD_RIGHT, this.follow.eye.x)
-        .addScaledVector(POD_LIFT, this.follow.eye.y + POD_PERCH)
-        .addScaledVector(POD_FWD, this.follow.eye.z);
+      if (this.gripping) {
+        this.eyePod.position.copy(POD_AT).addScaledVector(POD_LIFT, POD_HALF);
+      } else {
+        const from = Math.max(this.antPosition.y, POD_AT.y) + this.queen.bodyRadius();
+        const floor = this.groundAt(POD_AT.x, POD_AT.z, from);
+        this.eyePod.position.set(POD_AT.x, floor + POD_CLEAR + POD_HALF, POD_AT.z);
+      }
     }
     // Parked and visible from outside; boarded and gone from inside.
     this.eyePod.visible = this.queenReady && !this.follow.firstPerson;

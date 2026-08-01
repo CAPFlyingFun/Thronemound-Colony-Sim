@@ -1514,23 +1514,31 @@ for (const view of CASES) {
 
   /*
    * The camera pod: the first-person eye as an object in the room. In third
-   * person it is parked on the driven ant's head, on the exact seat first
-   * person boards; going first person is climbing in, so the pod and the
-   * model both leave the frame; stepping back out re-parks it.
+   * person it STANDS ON THE SOIL at the driven ant's jawline — a hundredth
+   * of a millimetre of daylight under it, facing her way — because a pod
+   * floated at the eye seat sat half-buried in her own neck and read as a
+   * glitch. Going first person is boarding it, so the pod and the model
+   * both leave the frame; stepping back out re-parks it.
    */
   const pod = await page.evaluate(() => {
     const lab = window.labScene;
+    // Kept in sync with POD_MID / POD_RADIUS / POD_CLEAR in the scene.
+    const HALF = 0.2 * 0.5 + 0.16;
     lab.stepForTest(1 / 60, 30);
-    const read = () => ({
-      shown: lab.eyePod.visible,
-      modelShown: lab.queen.root.visible,
-      first: lab.follow.firstPerson,
-      aboveMm: (lab.eyePod.position.y - lab.antPosition.y) * 5,
-      offMm: Math.hypot(
-        lab.eyePod.position.x - lab.antPosition.x,
-        lab.eyePod.position.z - lab.antPosition.z,
-      ) * 5,
-    });
+    const read = () => {
+      const at = lab.eyePod.position;
+      const dx = at.x - lab.antPosition.x;
+      const dz = at.z - lab.antPosition.z;
+      const ahead = dx * Math.sin(lab.facing) + dz * Math.cos(lab.facing);
+      return {
+        shown: lab.eyePod.visible,
+        modelShown: lab.queen.root.visible,
+        first: lab.follow.firstPerson,
+        clearMm: (at.y - HALF - lab.groundAt(at.x, at.z, at.y + 1)) * 5,
+        aheadMm: ahead * 5,
+        offMm: Math.hypot(dx, dz) * 5,
+      };
+    };
     const parked = read();
     lab.follow.mode = 'first';
     lab.stepForTest(1 / 60, 10);
@@ -1542,16 +1550,20 @@ for (const view of CASES) {
   });
   if (!pod.parked.shown || pod.parked.first) {
     fail('the camera pod is not parked in third person');
-  } else if (!(pod.parked.aboveMm > 0.5 && pod.parked.aboveMm < 5) || !(pod.parked.offMm < 2)) {
-    fail(`the pod parks ${pod.parked.aboveMm.toFixed(2)} mm up and ${pod.parked.offMm.toFixed(2)} mm off her head`);
+  } else if (!(pod.parked.clearMm >= 0 && pod.parked.clearMm < 0.3)) {
+    fail(`the pod stands ${pod.parked.clearMm.toFixed(3)} mm off the floor — it should sit ON the soil`);
+  } else if (!(pod.parked.aheadMm > 1.5 && pod.parked.aheadMm < 7)
+    || !(pod.parked.aheadMm > pod.parked.offMm * 0.7)) {
+    fail(`the pod parks ${pod.parked.aheadMm.toFixed(1)} mm ahead of ${pod.parked.offMm.toFixed(1)} mm total — `
+      + 'it belongs at her jawline');
   } else if (!pod.boarded.first || pod.boarded.shown || pod.boarded.modelShown) {
     fail(`boarding the pod: firstPerson ${pod.boarded.first}, pod shown ${pod.boarded.shown}, `
       + `model shown ${pod.boarded.modelShown}`);
   } else if (!pod.out.shown) {
     fail('stepping back to third person did not re-park the pod');
   } else {
-    ok(`the camera pod parks on her head (${pod.parked.aboveMm.toFixed(1)} mm up, `
-      + `${pod.parked.offMm.toFixed(2)} mm off axis), boards in first person, and returns`);
+    ok(`the pod waits on the soil at her jaws (${pod.parked.clearMm.toFixed(3)} mm clearance, `
+      + `${pod.parked.aheadMm.toFixed(1)} mm ahead), boards in first person, and returns`);
   }
   await page.close();
 }
