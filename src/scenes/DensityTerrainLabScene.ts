@@ -21,11 +21,20 @@ import './DensityTerrainLabScene.css';
 
 const MAX_PELLETS = 36;
 
-/** World units per second she walks. About 12 mm/s — a tile every 1.3 s. */
-const WALK_SPEED = 2.4;
+/** World units per second flat out. About 12 mm/s — a tile every 1.3 s. */
+const RUN_SPEED = 2.4;
 
-/** Crawl is a third of a walk — the pace for placing a tunnel precisely. */
-const CRAWL_FRACTION = 0.34;
+/**
+ * Her three paces, as fractions of flat out. Crawl is for placing a tunnel
+ * precisely; walk is the ordinary gait between the old two-state toggle's
+ * extremes; run is the toggle's old "on". The HUD button cycles them in
+ * ascending order, and on a keyboard they are not a mode at all — W walks,
+ * Shift makes it a run, C makes it a crawl, held, the way sprint keys have
+ * always worked.
+ */
+const PACE_FRACTION = { crawl: 0.34, walk: 0.62, run: 1 } as const;
+type Pace = keyof typeof PACE_FRACTION;
+const NEXT_PACE: Record<Pace, Pace> = { crawl: 'walk', walk: 'run', run: 'crawl' };
 
 /**
  * How fast she advances while BORING, in world units per second.
@@ -608,10 +617,13 @@ export class DensityTerrainLabScene {
   private turnRate = 0;
   /** World units per second, for the gait's cadence. Zero when standing. */
   private walkSpeed = 0;
-  /** Is she running? The HUD's Run/Crawl toggle. */
-  private running = true;
+  /** The pad's pace, cycled by the HUD button. Keys override it while held. */
+  private pace: Pace = 'run';
+  /** The keyboard's say: walk under W alone, Shift runs, C crawls. Null when
+   *  the keys are not driving, so the pad's cycled pace is what counts. */
+  private keyPace: Pace | null = null;
   private get speed(): number {
-    return this.running ? WALK_SPEED : WALK_SPEED * CRAWL_FRACTION;
+    return RUN_SPEED * PACE_FRACTION[this.keyPace ?? this.pace];
   }
   /** Her actual velocity, eased toward what the pad asks for. */
   private readonly velocity = new THREE.Vector3();
@@ -885,12 +897,10 @@ export class DensityTerrainLabScene {
     this.walkButton = document.createElement('button');
     this.walkButton.className = 'density-lab-button density-lab-walk';
     this.walkButton.textContent = 'RUN';
-    this.walkButton.setAttribute('aria-label', 'Switch between running and crawling');
+    this.walkButton.setAttribute('aria-label', 'Cycle pace: crawl, walk, run');
     this.walkButton.addEventListener('pointerdown', (event) => {
       event.preventDefault();
-      this.running = !this.running;
-      this.walkButton.textContent = this.running ? 'RUN' : 'CRAWL';
-      this.updateStatus();
+      this.setPace(NEXT_PACE[this.pace]);
     });
     actions.appendChild(this.walkButton);
 
@@ -926,12 +936,8 @@ export class DensityTerrainLabScene {
           this.follow.mode = mode;
           this.saveCameraPrefs();
         },
-        getRunning: () => this.running,
-        setRunning: (running) => {
-          this.running = running;
-          this.walkButton.textContent = running ? 'RUN' : 'CRAWL';
-          this.updateStatus();
-        },
+        getPace: () => this.pace,
+        setPace: (pace) => this.setPace(pace),
         eraseSave: () => {
           try { window.localStorage.removeItem(SAVE_KEY); } catch { /* storage denied */ }
         },
@@ -1235,8 +1241,7 @@ export class DensityTerrainLabScene {
       return;
     }
     if (event.key.toLowerCase() === 'f') {
-      this.running = !this.running;
-      this.updateStatus();
+      this.setPace(NEXT_PACE[this.pace]);
       return;
     }
     this.heldKeys.add(event.code);
@@ -1266,6 +1271,17 @@ export class DensityTerrainLabScene {
      */
     this.input.yaw = (held('KeyA') ? 1 : 0) - (held('KeyD') ? 1 : 0);
     this.input.walk = (held('KeyW') ? 1 : 0) - (held('KeyS') ? 1 : 0);
+    /*
+     * Pace, spelled the way a keyboard has always spelled it: W walks,
+     * Shift makes the same key a run, C makes it a crawl, and none of it is
+     * a mode — release the modifier and the pace goes with it. Crawl wins
+     * over Shift when both are down because the deliberate gear is the one
+     * you mean when you are contradicting yourself. The pad's cycled pace
+     * only counts while no movement key is held.
+     */
+    this.keyPace = this.input.walk === 0
+      ? null
+      : held('KeyC') ? 'crawl' : held('ShiftLeft', 'ShiftRight') ? 'run' : 'walk';
   }
 
   private addLighting(): void {
@@ -1534,6 +1550,13 @@ export class DensityTerrainLabScene {
     this.input.walk = 0;
     this.input.yaw = 0;
     this.input.dig = 0;
+  }
+
+  /** One place for the pace to change, so the button label cannot go stale. */
+  private setPace(pace: Pace): void {
+    this.pace = pace;
+    this.walkButton.textContent = pace.toUpperCase();
+    this.updateStatus();
   }
 
   private openMenu(): void {
@@ -3065,7 +3088,7 @@ export class DensityTerrainLabScene {
       Bore: ${(((this.facing * 180 / Math.PI) + 360) % 360).toFixed(0).padStart(3, '0')}° ·`
       + ` pitch ${(this.bore.pitch * 180 / Math.PI >= 0 ? '+' : '')}`
       + `${(this.bore.pitch * 180 / Math.PI).toFixed(0)}°`
-      + `${this.bore.digging ? ' · DIG ON' : ''} · ${this.running ? 'run' : 'crawl'}${this.gripping ? ' · CLIMB' : ''}<br>
+      + `${this.bore.digging ? ' · DIG ON' : ''} · ${this.keyPace ?? this.pace}${this.gripping ? ' · CLIMB' : ''}<br>
       Driving ${this.ants[this.driven]!.caste}: ${this.queenReady
         ? `${CASTE_LENGTH_MM[this.ants[this.driven]!.caste]} mm`
           + ` · feet ${(this.footPenetration * WORLD_UNIT_MM).toFixed(2)} mm`
@@ -3547,9 +3570,20 @@ export class DensityTerrainLabScene {
       if (this.gripping) {
         this.eyePod.position.copy(POD_AT).addScaledVector(POD_LIFT, POD_HALF);
       } else {
+        /*
+         * Centred by construction. The jaw bone is only asked how far AHEAD
+         * the jawline is: its sideways component is the rig mid-stride —
+         * the head sways as she walks — and a parked vehicle inheriting the
+         * sway sits visibly off her centreline from above. Projected onto
+         * her heading, the pod parks dead ahead every frame.
+         */
+        const ahead = (POD_AT.x - this.antPosition.x) * POD_FWD.x
+          + (POD_AT.z - this.antPosition.z) * POD_FWD.z;
+        const podX = this.antPosition.x + POD_FWD.x * ahead;
+        const podZ = this.antPosition.z + POD_FWD.z * ahead;
         const from = Math.max(this.antPosition.y, POD_AT.y) + this.queen.bodyRadius();
-        const floor = this.groundAt(POD_AT.x, POD_AT.z, from);
-        this.eyePod.position.set(POD_AT.x, floor + POD_CLEAR + POD_HALF, POD_AT.z);
+        const floor = this.groundAt(podX, podZ, from);
+        this.eyePod.position.set(podX, floor + POD_CLEAR + POD_HALF, podZ);
       }
     }
     // Parked and visible from outside; boarded and gone from inside.

@@ -26,8 +26,8 @@ export interface MenuHooks {
   settings: {
     getMode: () => 'first' | 'auto' | 'third';
     setMode: (mode: 'first' | 'auto' | 'third') => void;
-    getRunning: () => boolean;
-    setRunning: (running: boolean) => void;
+    getPace: () => 'crawl' | 'walk' | 'run';
+    setPace: (pace: 'crawl' | 'walk' | 'run') => void;
     eraseSave: () => void;
   };
 }
@@ -161,13 +161,15 @@ export class LabMenu {
     const pace = document.createElement('div');
     pace.className = 'lab-menu__group';
     pace.insertAdjacentHTML('beforeend', '<div class="lab-menu__label">PACE</div>');
-    const running = this.hooks.settings.getRunning();
-    const paceButton = this.button(running ? 'RUN' : 'CRAWL', 'plain', () => {
-      this.hooks.settings.setRunning(!this.hooks.settings.getRunning());
-      this.settings(boot);
-    });
-    paceButton.classList.add('lab-menu__button--active');
-    pace.appendChild(paceButton);
+    const paces: Array<'crawl' | 'walk' | 'run'> = ['crawl', 'walk', 'run'];
+    for (const gear of paces) {
+      const b = this.button(gear.toUpperCase(), 'plain', () => {
+        this.hooks.settings.setPace(gear);
+        this.settings(boot);
+      });
+      if (this.hooks.settings.getPace() === gear) b.classList.add('lab-menu__button--active');
+      pace.appendChild(b);
+    }
     this.panel.appendChild(pace);
 
     const erase = this.button('ERASE SAVE', 'plain', () => {

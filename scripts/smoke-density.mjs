@@ -1530,12 +1530,16 @@ for (const view of CASES) {
       const dx = at.x - lab.antPosition.x;
       const dz = at.z - lab.antPosition.z;
       const ahead = dx * Math.sin(lab.facing) + dz * Math.cos(lab.facing);
+      // Perpendicular to her heading: the top-down centring the rig's sway
+      // used to leak into the parked pod.
+      const lateral = dx * Math.cos(lab.facing) - dz * Math.sin(lab.facing);
       return {
         shown: lab.eyePod.visible,
         modelShown: lab.queen.root.visible,
         first: lab.follow.firstPerson,
         clearMm: (at.y - HALF - lab.groundAt(at.x, at.z, at.y + 1)) * 5,
         aheadMm: ahead * 5,
+        lateralMm: Math.abs(lateral) * 5,
         offMm: Math.hypot(dx, dz) * 5,
       };
     };
@@ -1556,6 +1560,9 @@ for (const view of CASES) {
     || !(pod.parked.aheadMm > pod.parked.offMm * 0.7)) {
     fail(`the pod parks ${pod.parked.aheadMm.toFixed(1)} mm ahead of ${pod.parked.offMm.toFixed(1)} mm total — `
       + 'it belongs at her jawline');
+  } else if (!(pod.parked.lateralMm < 0.2)) {
+    fail(`the pod parks ${pod.parked.lateralMm.toFixed(2)} mm off her centreline — `
+      + 'the jaw bone sway is leaking into it');
   } else if (!pod.boarded.first || pod.boarded.shown || pod.boarded.modelShown) {
     fail(`boarding the pod: firstPerson ${pod.boarded.first}, pod shown ${pod.boarded.shown}, `
       + `model shown ${pod.boarded.modelShown}`);
@@ -1563,7 +1570,82 @@ for (const view of CASES) {
     fail('stepping back to third person did not re-park the pod');
   } else {
     ok(`the pod waits on the soil at her jaws (${pod.parked.clearMm.toFixed(3)} mm clearance, `
-      + `${pod.parked.aheadMm.toFixed(1)} mm ahead), boards in first person, and returns`);
+      + `${pod.parked.aheadMm.toFixed(1)} mm ahead, ${pod.parked.lateralMm.toFixed(2)} mm off axis), `
+      + 'boards in first person, and returns');
+  }
+
+  /*
+   * Three paces, proved by odometer rather than by label: the same two
+   * seconds of held stick at each gear, and the distances must come back in
+   * gear order. A label that says WALK over a speed that is still RUN is
+   * exactly the kind of lie a screenshot cannot catch.
+   */
+  const gears = await page.evaluate(() => {
+    const lab = window.labScene;
+    const trot = (pace) => {
+      lab.pace = pace;
+      lab.antPosition.set(24, 0, 26);
+      lab.stepForTest(1 / 60, 60);
+      const x = lab.antPosition.x;
+      const z = lab.antPosition.z;
+      lab.input.walk = 1;
+      lab.stepForTest(1 / 60, 120);
+      lab.input.walk = 0;
+      lab.stepForTest(1 / 60, 10);
+      return Math.hypot(lab.antPosition.x - x, lab.antPosition.z - z) * 5;
+    };
+    const crawl = trot('crawl');
+    const walk = trot('walk');
+    const run = trot('run');
+    lab.pace = 'run';
+    return { crawl, walk, run, label: lab.walkButton.textContent };
+  });
+  if (!(gears.crawl < gears.walk && gears.walk < gears.run)) {
+    fail(`the gears are out of order: crawl ${gears.crawl.toFixed(1)}, `
+      + `walk ${gears.walk.toFixed(1)}, run ${gears.run.toFixed(1)} mm in two seconds`);
+  } else if (!(gears.walk / gears.run > 0.4 && gears.walk / gears.run < 0.85)) {
+    fail(`walk covers ${(gears.walk / gears.run * 100).toFixed(0)}% of run — that is not a middle gear`);
+  } else {
+    ok(`three real gears by odometer: crawl ${gears.crawl.toFixed(1)}, walk ${gears.walk.toFixed(1)}, `
+      + `run ${gears.run.toFixed(1)} mm in two seconds`);
+  }
+
+  /*
+   * And the keyboard's spelling of the same thing: W walks, Shift+W runs,
+   * C+W crawls, S reverses — held, not toggled, so releasing the modifier
+   * releases the pace. Dispatched as real window events so the whole
+   * listener chain is what is being tested.
+   */
+  const keys = await page.evaluate(() => {
+    const lab = window.labScene;
+    const tap = (type, code, key) => window.dispatchEvent(
+      new KeyboardEvent(type, { code, key }),
+    );
+    tap('keydown', 'KeyW', 'w');
+    const plain = { speed: lab.speed, walk: lab.input.walk };
+    tap('keydown', 'ShiftLeft', 'Shift');
+    const shifted = lab.speed;
+    tap('keyup', 'ShiftLeft', 'Shift');
+    tap('keydown', 'KeyC', 'c');
+    const crawling = lab.speed;
+    tap('keyup', 'KeyC', 'c');
+    tap('keyup', 'KeyW', 'w');
+    const released = { speed: lab.speed, walk: lab.input.walk };
+    tap('keydown', 'KeyS', 's');
+    const backing = lab.input.walk;
+    tap('keyup', 'KeyS', 's');
+    return { plain, shifted, crawling, released, backing };
+  });
+  if (!(keys.plain.walk === 1 && keys.backing === -1 && keys.released.walk === 0)) {
+    fail(`W/S drive reads walk ${keys.plain.walk} / back ${keys.backing} / released ${keys.released.walk}`);
+  } else if (!(keys.shifted > keys.plain.speed && keys.plain.speed > keys.crawling)) {
+    fail(`held modifiers are out of order: W ${keys.plain.speed.toFixed(2)}, `
+      + `Shift+W ${keys.shifted.toFixed(2)}, C+W ${keys.crawling.toFixed(2)} u/s`);
+  } else if (keys.released.speed !== keys.shifted) {
+    fail(`releasing the keys should hand pace back to the pad's RUN, got ${keys.released.speed.toFixed(2)} u/s`);
+  } else {
+    ok(`the keyboard holds its pace: W ${keys.plain.speed.toFixed(2)}, Shift+W ${keys.shifted.toFixed(2)}, `
+      + `C+W ${keys.crawling.toFixed(2)} u/s, S reverses, release restores the pad`);
   }
   await page.close();
 }
