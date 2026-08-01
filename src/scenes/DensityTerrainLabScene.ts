@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { QueenModel } from '../anim/QueenModel';
-import { BoreRig, DIG_YAW_RATE, YAW_RATE } from './BoreControl';
+import { BoreRig, DIG_YAW_RATE, STROKE_SECONDS, YAW_RATE } from './BoreControl';
 import { clampStickOrigin, stickVector } from '../voxel/locomotion';
 import { FollowCamera, type CameraMode } from './FollowCamera';
 import { TripodGait } from '../anim/tripod';
@@ -26,25 +26,26 @@ const WALK_SPEED = 2.4;
 const CRAWL_FRACTION = 0.34;
 
 /**
- * How fast she advances while BORING, in world units per second — 2.1 mm/s.
+ * How fast she advances while BORING, in world units per second.
  *
- * Derived from the bite rather than chosen, because the complaint was that
- * digging is nothing like the work it depicts. She used to bore at 8.2 mm/s,
- * three quarters of her walking pace, while her jaws could clear 1.2 mm of face
- * per second: she was not digging through the mound, she was swimming through
- * it with the bite as decoration. Nothing stopped her, because the block test
- * is a single point at her centre and the dig point runs a centimetre ahead —
- * so her path is always already cleared by the time she reaches it.
+ * DERIVED, and the derivation is one line: a stroke cuts BITE_DEPTH_MM off the
+ * face and takes STROKE_SECONDS to do it, so the face retreats at exactly that
+ * ratio and so does she. 0.5 mm every 0.42 s is 1.2 mm/s. The width of the bore
+ * does not enter into it — a wider tunnel is more soil per stroke AND more soil
+ * per millimetre of progress, and the two cancel.
  *
- * The honest rate is how fast the jaws can make room for her. One stroke takes
- * a 4 mm x 0.5 mm scoop, about 6.3 mm³, every 0.42 s — call it 15 mm³/s. She is
- * roughly 3 mm across, so pushing her body forward one millimetre needs about
- * 7 mm³ cleared. 15 divided by 7 is close enough to two millimetres a second.
+ * The complaint this answers is that digging was nothing like the work it
+ * depicts. She bored at 8.2 mm/s, three quarters of her walking pace, while her
+ * jaws could clear 1.2 mm of face a second: not tunnelling through the mound,
+ * swimming through it with the bite as decoration. Nothing stopped her, because
+ * the block test is a single point at her centre and the dig point runs a
+ * centimetre ahead, so her path was always already cleared when she reached it.
  *
- * Raise the bite and this should rise with it; they are the same number seen
- * from two ends.
+ * My first attempt at this was a hand-picked 2.1 mm/s dressed up in a volume
+ * argument that divided by HER cross-section instead of the TUNNEL's. Those are
+ * different numbers and only one of them is what has to be removed.
  */
-const BORE_SPEED = 2.1 / WORLD_UNIT_MM;
+const BORE_SPEED = (BITE_DEPTH_MM / STROKE_SECONDS) / WORLD_UNIT_MM;
 
 /** Radians per second she can turn. A little over half a turn a second. */
 const TURN_RATE = 3.6;
@@ -1554,9 +1555,28 @@ export class DensityTerrainLabScene {
    * scrape, where she should still walk on the ground, and being in a tunnel,
    * where the ground has a ceiling and the stance rules stop applying.
    */
+  /**
+   * Is she below the surface of the mound?
+   *
+   * Asked of the UNDUG land, not of the soil actually above her head, and that
+   * distinction is the whole bug. This used to probe five millimetres straight
+   * up from her and call her underground if it hit soil — but straight up from
+   * an ant at the bottom of a shaft is the shaft, which is open by
+   * construction, because she is the one who dug it. So ten millimetres down
+   * her own hole she was reported as standing in a field.
+   *
+   * Everything downstream believed it. `stand` ran instead of `holdTunnel`, the
+   * stance median took five samples across a hole narrower than she is, four
+   * landed on the rim, and it heaved her four millimetres up out of her own
+   * tunnel the moment she stopped digging. Reported as being teleported out.
+   *
+   * The procedural height is the land as it was before anybody dug, which is
+   * exactly the right reference: being underground means having got below it,
+   * however much open air you have carved for yourself since.
+   */
   private get underground(): boolean {
-    PROBE.copy(this.antPosition).addScaledVector(this.up, CAMERA_LOOK_AT * 2);
-    return this.solidAt(PROBE);
+    return this.antPosition.y + CAMERA_LOOK_AT
+      < streamGroundHeight(this.antPosition.x, this.antPosition.z);
   }
 
   /**
@@ -2186,6 +2206,16 @@ export class DensityTerrainLabScene {
      * lean catch up with the decision.
      */
     this.follow.aimPitch = this.bore.pitch;
+    /*
+     * Her head comes off the picture when the camera is INSIDE it and she is
+     * under the ground — the one case where her own skull is the whole view.
+     * Above ground the first-person eye still sees her jaws and antennae in
+     * frame, which is worth keeping: it is how you tell where the bite lands.
+     * The shadow keeps its head either way; see `showHead`.
+     */
+    if (this.queenReady) {
+      this.queen.showHead(!(this.follow.firstPerson && this.underground));
+    }
     this.follow.target.copy(this.antPosition).addScaledVector(this.up, CAMERA_LOOK_AT);
     // The eye hangs off her BODY; only the third-person look target is lifted.
     this.follow.body.copy(this.antPosition);

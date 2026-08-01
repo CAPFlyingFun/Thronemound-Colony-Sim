@@ -174,6 +174,9 @@ export class QueenModel {
   private readonly legHome: Array<{ slot: string; home: Vec3; reach: number }> = [];
   /** Her head in her own frame. See `headOffset`. */
   private head: Vec3 | null = null;
+  /** Materials carrying the head mask, and whether it is currently on. */
+  private readonly headMaterials: THREE.Material[] = [];
+  private hideHead = false;
   private clock = 0;
   /** Gait revolutions, integrated. See `GaitInput.cycle`. */
   private cycle = 0;
@@ -242,6 +245,7 @@ export class QueenModel {
       this.measureLimbs();
       this.measureLegPlan();
       this.measureHead();
+      this.maskHead();
       this.loaded = true;
       return true;
     } catch {
@@ -787,6 +791,95 @@ export class QueenModel {
       TILT.setFromAxisAngle(RIGHT, angle);
       bone.quaternion.multiply(TILT);
     }
+  }
+
+  /**
+   * Hide her head from the CAMERA while leaving her shadow whole.
+   *
+   * For first person underground, where her own skull fills the lens. The two
+   * halves of that sentence pull in opposite directions and three.js has
+   * exactly the seam needed: the shadow map is drawn with a mesh's
+   * `customDepthMaterial` rather than its visible one, so a discard patched
+   * into the visible material alone takes the head out of the picture and
+   * leaves it in the shadow.
+   *
+   * The head cannot simply be hidden as an object — she is one skinned mesh,
+   * so there is nothing to toggle. It is masked per VERTEX instead, by which
+   * bone each one is weighted to, which is the same question `measureLimbs`
+   * already asks and the only honest definition of "the head" on a rig whose
+   * bones are called Bone_041.
+   */
+  showHead(show: boolean): void {
+    this.hideHead = !show;
+    for (const material of this.headMaterials) {
+      const uniform = (material.userData as { headHidden?: { value: number } }).headHidden;
+      if (uniform) uniform.value = show ? 0 : 1;
+    }
+  }
+
+  /** Is the head currently hidden from the camera? */
+  get headHidden(): boolean {
+    return this.hideHead;
+  }
+
+  /**
+   * Mark every vertex that belongs to her head, and teach the material to drop
+   * them on request.
+   *
+   * The mask is an attribute rather than a uniform range because the head's
+   * vertices are scattered through the buffer in whatever order the exporter
+   * felt like; there is no contiguous slice to skip.
+   */
+  private maskHead(): void {
+    const head = new Set<string>([
+      ...this.rig.mouth,
+      ...(this.rig.mandibleLeft ?? []),
+      ...(this.rig.mandibleRight ?? []),
+      ...this.rig.antennaLeft,
+      ...this.rig.antennaRight,
+    ]);
+    // The last thorax bone IS the head — it is the one the gait dips to dig.
+    const crown = this.rig.thorax[this.rig.thorax.length - 1];
+    if (crown) head.add(crown);
+
+    this.headMaterials.length = 0;
+    this.root.traverse((node) => {
+      const mesh = node as THREE.SkinnedMesh;
+      if (!mesh.isSkinnedMesh) return;
+      const position = mesh.geometry.getAttribute('position');
+      const skinIndex = mesh.geometry.getAttribute('skinIndex');
+      const skinWeight = mesh.geometry.getAttribute('skinWeight');
+      if (!position || !skinIndex || !skinWeight) return;
+
+      const mask = new Float32Array(position.count);
+      for (let i = 0; i < position.count; i += 1) {
+        let best = 0;
+        let bestWeight = -1;
+        for (let k = 0; k < 4; k += 1) {
+          const weight = skinWeight.getComponent(i, k);
+          if (weight > bestWeight) { bestWeight = weight; best = skinIndex.getComponent(i, k); }
+        }
+        const bone = mesh.skeleton.bones[best];
+        mask[i] = bone && head.has(bone.name) ? 1 : 0;
+      }
+      mesh.geometry.setAttribute('headMask', new THREE.BufferAttribute(mask, 1));
+
+      const material = mesh.material as THREE.Material;
+      const uniform = { value: 0 };
+      material.userData.headHidden = uniform;
+      material.onBeforeCompile = (shader) => {
+        shader.uniforms.headHidden = uniform;
+        shader.vertexShader = `attribute float headMask;\nvarying float vHeadMask;\n${shader.vertexShader}`
+          .replace('void main() {', 'void main() {\n  vHeadMask = headMask;');
+        shader.fragmentShader = `uniform float headHidden;\nvarying float vHeadMask;\n${shader.fragmentShader}`
+          .replace('void main() {', 'void main() {\n  if (headHidden > 0.5 && vHeadMask > 0.5) discard;');
+      };
+      // A material's compiled program is cached by this key, so the patched and
+      // unpatched versions must not share one.
+      material.customProgramCacheKey = () => 'queen-head-mask';
+      material.needsUpdate = true;
+      this.headMaterials.push(material);
+    });
   }
 
   /** Her mouthparts, in world space. False when the rig has not loaded. */

@@ -25,7 +25,17 @@ export const WORLD_UNIT_MM = 5;
  * times the queen's mandible span — labelled "5 mm scoop" because the label
  * was quoting the radius rather than the width.
  */
-export const BITE_WIDTH_MM = 4;
+/*
+ * Seven millimetres, because a tunnel has to fit the animal that dug it.
+ *
+ * Four was sized on the bite and nothing else, and it made a hole she could not
+ * get back into: her stance spans 6.3 mm, so five of five ground samples never
+ * fit inside a 4 mm shaft, four always landed on the rim, and the median held
+ * her straddling her own tunnel mouth. Walking over the entrance did nothing.
+ * A bore wider than her footprint is the difference between a tunnel and a
+ * groove she can only fall down while cutting.
+ */
+export const BITE_WIDTH_MM = 7;
 export const BITE_DEPTH_MM = 0.5;
 
 /**

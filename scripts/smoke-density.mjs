@@ -439,22 +439,34 @@ for (const view of CASES) {
      * widest axis — the same measure the pose-drift check uses, and it agreed
      * with the configured 9 mm throughout.
      */
-    const lo = [Infinity, Infinity, Infinity];
-    const hi = [-Infinity, -Infinity, -Infinity];
+    /*
+     * The widest distance between any two bones, not the widest world AXIS.
+     *
+     * An axis-aligned box measures a turned ant short: she is 9 mm along her
+     * own length, and at forty-five degrees to the world that is 6.4 mm on each
+     * of two axes. The check read 7.59 mm and called a correctly sized queen
+     * undersized, purely because of which way she happened to be facing. How
+     * long she is does not depend on her heading, so neither should the ruler.
+     */
     const probe = lab.antPosition.constructor;
+    const at = [];
     for (const bone of bones.values()) {
-      const p = bone.getWorldPosition(new probe());
-      const at = [p.x, p.y, p.z];
-      for (let i = 0; i < 3; i += 1) {
-        lo[i] = Math.min(lo[i], at[i]);
-        hi[i] = Math.max(hi[i], at[i]);
+      const q = bone.getWorldPosition(new probe());
+      at.push([q.x, q.y, q.z]);
+    }
+    let widest = 0;
+    for (let i = 0; i < at.length; i += 1) {
+      for (let j = i + 1; j < at.length; j += 1) {
+        widest = Math.max(widest, Math.hypot(
+          at[i][0] - at[j][0], at[i][1] - at[j][1], at[i][2] - at[j][2],
+        ));
       }
     }
     // Kept for the facing check below, which asks which way round she is.
     const mouth = bones.get(lab.queen.rig.mouth.at(-1));
     const gaster = bones.get(lab.queen.rig.gaster.at(-1));
     return {
-      legSpan: Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]),
+      legSpan: widest,
       headToTail: mouth && gaster
         ? mouth.getWorldPosition(new probe()).z - gaster.getWorldPosition(new probe()).z
         : 0,
@@ -467,7 +479,7 @@ for (const view of CASES) {
     // Within a tenth of the 9 mm she is configured at. Her legs reach a little
     // past her body, so this is a fair proxy for overall length.
     if (Math.abs(spanMm - 9) > 0.9) fail(`queen measures ${spanMm.toFixed(2)} mm, not 9 mm`);
-    else ok(`queen measures ${spanMm.toFixed(2)} mm along her longest axis`);
+    else ok(`queen measures ${spanMm.toFixed(2)} mm at her widest`);
     // Head toward +Z, which is what `forward = (sin f, 0, cos f)` assumes.
     if (!(size.headToTail > 0)) fail('the queen model faces -Z; her heading is backwards');
     else ok('queen faces +Z, matching the heading maths');
