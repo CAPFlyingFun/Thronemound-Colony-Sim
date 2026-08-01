@@ -1818,6 +1818,114 @@ for (const view of CASES) {
     fail(`after orbiting, the first-person view sits ${aim.offDeg.toFixed(1)} deg off the bore — `
       + 'the crosshair and the carve disagree');
   } else ok(`the first-person crosshair faces the bore (${aim.offDeg.toFixed(2)} deg off after a hard orbit)`);
+  /*
+   * The underground sense: soil stops being lit and becomes contours.
+   *
+   * Three separate things can silently not work here and none of them throws.
+   * A shader that fails to compile leaves three.js drawing the material
+   * unmodified — the world simply looks normal, which is also what a correct
+   * `uSense = 0` looks like. A uniform that never gets ramped looks the same
+   * again. And a composite that runs but changes nothing visible is the same
+   * a third time. So: no GL errors, the ramp reaches both ends within its
+   * stated time, and the PIXELS underground differ from the pixels above it.
+   */
+  {
+    const glErrors = [];
+    page.on('console', (m) => {
+      const t = m.text();
+      if (/shader|GLSL|WebGL|program/i.test(t) && /error|fail/i.test(t)) glErrors.push(t);
+    });
+
+    const sense = await page.evaluate(async () => {
+      const lab = window.labScene;
+      const shot = () => {
+        /*
+         * MESH FIRST. `stepForTest` runs the simulation and nothing else —
+         * the remesh queue is drained by the frame loop, which a headless
+         * step never reaches. Shooting without this photographs the soil as
+         * it was before she dug, with the camera inside it: every face is a
+         * back face, and the frame comes back as pure background. Measured
+         * at exactly the sky colour, 178.3, which is how a rendering test
+         * can be fooled by a scene that never rendered the thing under test.
+         */
+        lab.rebuildTerrainForTest();
+        const gl = lab.renderer.getContext();
+        const w = gl.drawingBufferWidth;
+        const h = gl.drawingBufferHeight;
+        const px = new Uint8Array(w * h * 4);
+        lab.renderer.render(lab.scene, lab.camera);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        let r = 0; let g = 0; let b = 0;
+        for (let i = 0; i < px.length; i += 4) { r += px[i]; g += px[i + 1]; b += px[i + 2]; }
+        const n = px.length / 4;
+        return { r: r / n, g: g / n, b: b / n };
+      };
+
+      // Above ground, settled and lit.
+      lab.antPosition.set(30, lab.groundAt(30, 30, 999), 30);
+      lab.resetDynamics();
+      lab.follow.mode = 'first';
+      lab.stepForTest(1 / 60, 90);
+      const lit = { sense: lab.sense.uSense.value, pixels: shot(), under: lab.underground };
+
+      // Down a real tunnel.
+      while (lab.bore.pitch > -Math.PI / 5 + 1e-9) lab.bore.aim(-1);
+      lab.input.dig = 1;
+      lab.input.walk = 1;
+      lab.stepForTest(1 / 60, 60 * 5);
+      lab.input.dig = 0;
+      lab.input.walk = 0;
+      lab.stepForTest(1 / 60, 60);
+      const sensed = { sense: lab.sense.uSense.value, pixels: shot(), under: lab.underground };
+
+      /*
+       * And the crossing itself, timed: from full sense, forced above
+       * ground, how long until the world is lit again? The claim is that it
+       * is a DISSOLVE — neither instant nor a fade you wait through.
+       */
+      lab.antPosition.set(30, lab.groundAt(30, 30, 999) + 1, 30);
+      lab.resetDynamics();
+      let frames = 0;
+      while (lab.sense.uSense.value > 0.05 && frames < 240) {
+        lab.stepForTest(1 / 60, 1);
+        frames += 1;
+      }
+      return { lit, sensed, crossSeconds: frames / 60, mode: lab.follow.mode };
+    });
+
+    if (glErrors.length) {
+      fail(`the sense shader logged ${glErrors.length} error(s): ${glErrors[0].slice(0, 120)}`);
+    } else ok('the sense shader compiles');
+
+    if (!sense.lit.under === false && sense.lit.sense > 0.05) {
+      fail(`above ground the sense reads ${sense.lit.sense.toFixed(2)}, not 0`);
+    } else if (!sense.sensed.under || !(sense.sensed.sense > 0.9)) {
+      fail(`underground the sense reads ${sense.sensed.sense.toFixed(2)} (underground: ${sense.sensed.under})`);
+    } else ok(`the sense ramps 0 -> ${sense.sensed.sense.toFixed(2)} on going under`);
+
+    /*
+     * Pixels, not uniforms. Underground the frame must be markedly darker
+     * AND greener than the lit world — darker because soil past her reach is
+     * unknown, greener because what is left is contour lines.
+     */
+    const litLuma = (sense.lit.pixels.r + sense.lit.pixels.g + sense.lit.pixels.b) / 3;
+    const sensedLuma = (sense.sensed.pixels.r + sense.sensed.pixels.g + sense.sensed.pixels.b) / 3;
+    const litBias = sense.lit.pixels.g - sense.lit.pixels.r;
+    const sensedBias = sense.sensed.pixels.g - sense.sensed.pixels.r;
+    if (!(sensedLuma < litLuma * 0.8)) {
+      fail(`the sensed frame is not darker than the lit one (${sensedLuma.toFixed(1)} vs ${litLuma.toFixed(1)})`);
+    } else if (!(sensedBias > litBias + 2)) {
+      fail(`the sensed frame has no contour colour in it (green-red bias ${sensedBias.toFixed(1)} vs ${litBias.toFixed(1)})`);
+    } else {
+      ok(`sensed pixels are darker and greener than lit ones (luma ${litLuma.toFixed(0)} -> `
+        + `${sensedLuma.toFixed(0)}, green bias ${litBias.toFixed(1)} -> ${sensedBias.toFixed(1)})`);
+    }
+
+    if (!(sense.crossSeconds > 0.15 && sense.crossSeconds < 1.6)) {
+      fail(`surfacing takes ${sense.crossSeconds.toFixed(2)} s to clear — a dissolve is 0.4 to 0.8 s`);
+    } else ok(`surfacing dissolves back to daylight in ${sense.crossSeconds.toFixed(2)} s`);
+  }
+
   await page.close();
 }
 

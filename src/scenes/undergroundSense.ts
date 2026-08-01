@@ -1,0 +1,187 @@
+/**
+ * The underground sense: how soil looks to an animal that cannot see it.
+ *
+ * Above ground the world is lit dirt. Inside it, every wall is the same brown
+ * and a tunnel is a featureless void — reported from play as getting lost
+ * enough to end up somewhere she should not have been, and it is a real
+ * problem rather than a taste one: a first-person camera in a 7 mm bore has
+ * no landmarks, no horizon and no parallax to read shape from.
+ *
+ * So underground the terrain stops being lit and becomes SENSED. Near
+ * surfaces keep some of their shading, everything further reads as contour
+ * lines on darkness, and past her reach there is nothing. That gives a tunnel
+ * an obvious shape, a working face an obvious distance, and an old tunnel a
+ * visible mouth — the three things you need to navigate — while keeping the
+ * map honest: this is a bubble around her, NOT an x-ray. Soil fifty
+ * millimetres away is unknown, so where the nest goes next is still a
+ * decision rather than a readout.
+ *
+ * ## Why it is a shader and not geometry
+ *
+ * The terrain already exists as a meshed signed-density field with one shared
+ * material. Contours are a function of world position and surface normal, so
+ * they cost a few instructions in the fragment shader and no new vertices, no
+ * second pass and no CPU work at all — which matters, because the thing this
+ * runs on is a phone that is already meshing soil.
+ *
+ * ## The bands
+ *
+ * Three distances, in millimetres, and they are the whole design:
+ *
+ *   0 - 15 mm   the tunnel she is in: shaded, readable, solid
+ *  15 - 30 mm   contours on darkness — shape without detail
+ *  30 - 50 mm   contours fading out
+ *      > 50 mm  unknown
+ *
+ * Lines are drawn on a world-anchored grid rather than a screen one, so they
+ * belong to the soil and slide past as she moves. Each axis is weighted by
+ * how much the surface faces ACROSS it: a floor gets the two horizontal
+ * families and none of the elevation family, which is the same reason a
+ * contour map has no lines on flat ground.
+ */
+
+import * as THREE from 'three';
+
+/** Millimetres per world unit — the scene's own scale, restated locally. */
+const MM = 5;
+
+export interface SenseUniforms {
+  uSense: { value: number };
+  uNear: { value: number };
+  uMid: { value: number };
+  uFar: { value: number };
+  uBand: { value: number };
+  uLine: { value: THREE.Color };
+  uWash: { value: THREE.Color };
+  uDeep: { value: THREE.Color };
+}
+
+/** How fast the view crosses over, as an exponential rate per second. */
+export const SENSE_EASE = 5.5;
+
+/**
+ * Teach a material to be sensed as well as seen.
+ *
+ * Returns the uniforms so the scene can ramp `uSense` — 0 is the lit world,
+ * 1 is full sense, and everything between is the dissolve. The transition is
+ * deliberately not instant: breaking the surface is one of the moments this
+ * game has, and half a second of contours resolving into daylight is the
+ * whole of the effect.
+ */
+export function makeSensed(material: THREE.Material): SenseUniforms {
+  const uniforms: SenseUniforms = {
+    uSense: { value: 0 },
+    // 15, 30 and 50 mm, in world units.
+    uNear: { value: 15 / MM },
+    uMid: { value: 30 / MM },
+    uFar: { value: 50 / MM },
+    /*
+     * One line every 2 mm. Her body is 9 mm long and a bore is 7 mm across,
+     * so this puts three or four lines across a tunnel — enough to read its
+     * curve, few enough not to moiré into a grey smear at a distance, which
+     * a 1 mm grid did.
+     */
+    uBand: { value: 2 / MM },
+    uLine: { value: new THREE.Color(0x9dffd8) },
+    /*
+     * The surface wash, and it is LIT BY THE SENSE rather than by the scene.
+     *
+     * The first cut dimmed the scene's own shading instead, and underground
+     * the scene's own shading is nothing — a tunnel has no sun in it, so
+     * multiplying it produced a black screen with a few hairlines on it and
+     * none of the "clear tunnel geometry" the near band is supposed to be.
+     * A wash that brightens with how squarely a surface faces her gives the
+     * bore back its shape without pretending there is a light down there.
+     */
+    uWash: { value: new THREE.Color(0x2f7a5e) },
+    uDeep: { value: new THREE.Color(0x040c09) },
+  };
+
+  material.onBeforeCompile = (shader) => {
+    for (const [name, uniform] of Object.entries(uniforms)) {
+      shader.uniforms[name] = uniform as THREE.IUniform;
+    }
+
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>
+        varying vec3 vSenseWorld;
+        varying vec3 vSenseNormal;`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+        vSenseWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;
+        vSenseNormal = normalize(mat3(modelMatrix) * normal);`);
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+        varying vec3 vSenseWorld;
+        varying vec3 vSenseNormal;
+        uniform float uSense;
+        uniform float uNear;
+        uniform float uMid;
+        uniform float uFar;
+        uniform float uBand;
+        uniform vec3 uLine;
+        uniform vec3 uWash;
+        uniform vec3 uDeep;
+
+        /*
+         * One family of lines, anti-aliased by its own screen derivative.
+         * Without the derivative the grid aliases into noise the moment a
+         * band is thinner than a pixel, which at a glancing angle down a
+         * tunnel is most of the screen.
+         */
+        float senseBand(float coordinate) {
+          // 1.6 widens the line to about a pixel and a half. A hairline is
+          // invisible on a phone at arm's length and shimmers when she moves.
+          float w = fwidth(coordinate) * 1.6;
+          float g = abs(fract(coordinate - 0.5) - 0.5) / max(w, 1e-5);
+          return 1.0 - clamp(g, 0.0, 1.0);
+        }`)
+      /*
+       * Composited where the fog would be, and the fog is faded out by the
+       * same amount: the fog colour is the SKY, and a sky-blue haze over a
+       * tunnel wall is the one thing that would give the whole effect away.
+       * The replacement is three.js's own fog block with `(1.0 - uSense)`
+       * folded into the mix.
+       */
+      .replace('#include <fog_fragment>', `
+        if (uSense > 0.001) {
+          float senseDist = distance(vSenseWorld, cameraPosition);
+          vec3 senseCoord = vSenseWorld / uBand;
+          vec3 senseFacing = abs(normalize(vSenseNormal));
+          float senseLines = max(
+            max(senseBand(senseCoord.x) * (1.0 - senseFacing.x),
+                senseBand(senseCoord.y) * (1.0 - senseFacing.y)),
+            senseBand(senseCoord.z) * (1.0 - senseFacing.z));
+
+          // Near: the tunnel she is in, washed enough to read. Far: contours
+          // alone. Past the far reach: nothing, which is the point.
+          float senseClose = 1.0 - smoothstep(uNear, uMid, senseDist);
+          float senseReach = 1.0 - smoothstep(uMid, uFar, senseDist);
+
+          /*
+           * How squarely the surface faces her, standing in for a light she
+           * does not have. A wall she is looking straight at is bright, one
+           * running away down the tunnel falls off — which is exactly the
+           * cue that tells a bore from a chamber.
+           */
+          vec3 senseView = normalize(cameraPosition - vSenseWorld);
+          float senseFace = max(dot(normalize(vSenseNormal), senseView), 0.0);
+
+          vec3 sensed = uDeep;
+          sensed += uWash * (0.30 + 0.70 * senseFace) * (0.20 + 0.80 * senseClose) * senseReach;
+          sensed += uLine * senseLines * (0.45 + 0.55 * senseClose) * senseReach;
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, sensed, uSense);
+        }
+        #ifdef USE_FOG
+          #ifdef FOG_EXP2
+            float fogFactor = 1.0 - exp( - fogDensity * fogDensity * vFogDepth * vFogDepth );
+          #else
+            float fogFactor = smoothstep( fogNear, fogFar, vFogDepth );
+          #endif
+          gl_FragColor.rgb = mix( gl_FragColor.rgb, fogColor, fogFactor * (1.0 - uSense) );
+        #endif`);
+  };
+  material.needsUpdate = true;
+
+  return uniforms;
+}

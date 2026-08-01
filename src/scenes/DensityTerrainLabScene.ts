@@ -6,6 +6,7 @@ import { FollowCamera, type CameraMode } from './FollowCamera';
 import { TripodGait, type SurfaceAt } from '../anim/tripod';
 import { DigHud } from './DigHud';
 import { LabMenu } from './LabMenu';
+import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import { CASTE_LENGTH_MM } from '../anim/hexapod';
 import { buildSurfaceNets } from '../density/SurfaceNets';
 import { TerrainStream } from '../density/TerrainStream';
@@ -572,6 +573,8 @@ export class DensityTerrainLabScene {
   private readonly terrainMaterial = new THREE.MeshStandardMaterial({
     color: 0x6f4931, roughness: 0.96, metalness: 0, flatShading: false, side: THREE.FrontSide,
   });
+  /** The lit-to-sensed dissolve, ramped every frame. See `undergroundSense`. */
+  private readonly sense: SenseUniforms = makeSensed(this.terrainMaterial);
   /**
    * Where the ant IS, as opposed to where she is drawn.
    *
@@ -3719,6 +3722,15 @@ export class DensityTerrainLabScene {
     }
     // Parked and visible from outside; boarded and gone from inside.
     this.eyePod.visible = this.queenReady && !this.follow.firstPerson;
+    /*
+     * The sense crosses over on the same flag the camera and the HUD use, so
+     * "underground" means one thing in this room. Eased rather than switched:
+     * breaking the surface is a moment worth half a second of contours
+     * resolving back into daylight, and a hard cut would also strobe every
+     * time the roof rays disagreed at the mouth of a hole.
+     */
+    this.sense.uSense.value += ((this.underground ? 1 : 0) - this.sense.uSense.value)
+      * (1 - Math.exp(-SENSE_EASE * delta));
     this.digHud.visible = this.follow.firstPerson;
     // The stat block yields to the instruments — dimmed, not removed, so the
     // debugging numbers stay reachable and the smoke can still read them.
