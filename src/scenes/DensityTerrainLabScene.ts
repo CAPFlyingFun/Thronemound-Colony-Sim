@@ -356,6 +356,7 @@ const CAST_N = new THREE.Vector3();
 const CLIMB_V = new THREE.Vector3();
 const GUARD_P = new THREE.Vector3();
 const SPIN = new THREE.Quaternion();
+const LAST_AT = new THREE.Vector3();
 
 /**
  * How much of a frame may go to building newly streamed chunks.
@@ -968,7 +969,16 @@ export class DensityTerrainLabScene {
     if (this.eyePlaced || !this.queenReady) return;
     const head = this.queen.headOffset();
     if (!head) return;
-    this.follow.eye.set(head[0], head[1], head[2]);
+    /*
+     * At head HEIGHT, but with no forward lean — the dig room's rule, ported
+     * after its absence was found the hard way. Its eye is the body plus up
+     * times EYE_HEIGHT, full stop, because the eye's whole walk-out is
+     * along its own offset: seat it 0.35 forward onto her face and the
+     * first sample at a working face is already soil, the walk-out
+     * collapses to zero, and the camera lands ON the bore's floor plane —
+     * where the near plane slices the world open and the view goes sky.
+     */
+    this.follow.eye.set(0, Math.max(0.35, head[1]), 0.06);
     this.repaintCamera?.();
   }
 
@@ -3195,7 +3205,17 @@ export class DensityTerrainLabScene {
      * the animal itself is the instrument.
      */
     if (bore.digging && !this.wasCutting) this.dugDistance = 0;
-    if (bore.digging) this.dugDistance += this.walkSpeed * delta;
+    // ACTUAL displacement, not commanded speed: at a face the drive is
+    // blocked until the bites clear it, and counting the blocked effort read
+    // 58 mm of "tunnel" on a bore that was really 25.
+    if (bore.digging) {
+      this.dugDistance += Math.hypot(
+        this.antPosition.x - LAST_AT.x,
+        this.antPosition.y - LAST_AT.y,
+        this.antPosition.z - LAST_AT.z,
+      );
+    }
+    LAST_AT.copy(this.antPosition);
     this.wasCutting = bore.digging;
     this.digHud.visible = this.follow.firstPerson;
     // The stat block yields to the instruments — dimmed, not removed, so the
