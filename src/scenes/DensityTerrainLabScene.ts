@@ -93,6 +93,31 @@ const DIG_DECAY = 3;
 const STANCE = 0.35;
 
 /**
+ * Eight points around her body's own width, for the descend rule.
+ *
+ * Eight rather than four because a bore met off-centre crosses the ring
+ * diagonally as often as squarely, and four axis points can straddle an opening
+ * that eight would find. Unit vectors; the radius is her measured girth.
+ */
+/**
+ * What is left of her walking speed once her footing has gone — a fifth.
+ *
+ * Not zero: she should still be able to edge forward off a lip, and a hard stop
+ * at the rim is its own kind of wrong. Small enough that she goes DOWN a hole
+ * she is over rather than across it.
+ */
+const HOLE_SCRABBLE = 0.2;
+
+const BODY_RING: ReadonlyArray<readonly [number, number]> = (() => {
+  const ring: Array<[number, number]> = [];
+  for (let i = 0; i < 8; i += 1) {
+    const a = (i / 8) * Math.PI * 2;
+    ring.push([Math.cos(a), Math.sin(a)]);
+  }
+  return ring;
+})();
+
+/**
  * How far past her mouthparts she can bite, in world units — about 2 mm.
  *
  * Her mandibles are not in the rig (the auto-rigger left the queen's out), so
@@ -418,6 +443,8 @@ export class DensityTerrainLabScene {
   private footPenetration = 0;
   /** How fast she is currently falling, in world units per second. */
   private fallSpeed = 0;
+  /** Are her feet off the ground? Set by `stand`; damps her stride. */
+  private overHole = false;
   /** The tripod walk. Rebuilt when she leaves the ground, null while boring. */
   private gait: TripodGait | null = null;
   /** The point a centimetre ahead that the bore is driving at. */
@@ -1508,7 +1535,9 @@ export class DensityTerrainLabScene {
    * overhang that can turn her over — a bound the gradient version could not
    * give at any sampling radius.
    */
-  private stance(worldX: number, worldZ: number): { height: number; up: any } {
+  private stance(
+    worldX: number, worldZ: number,
+  ): { height: number; up: any; overHole: boolean } {
     const reach = (CASTE_LENGTH_MM.queen / WORLD_UNIT_MM) * STANCE;
     const from = this.antPosition.y + STEP_UP;
     const west = this.groundAt(worldX - reach, worldZ, from);
@@ -1531,10 +1560,50 @@ export class DensityTerrainLabScene {
      * own burrow and the fail-safe finished the job by hauling her out.
      */
     const ranked = [west, east, south, north, centre].sort((a, b) => a - b);
+    const support = ranked[2]!;
+    const floor = this.descendInto(worldX, worldZ, from, support);
     return {
-      height: ranked[2]!,
+      height: floor,
       up: new THREE.Vector3(-(east - west), 2 * reach, -(north - south)).normalize(),
+      overHole: floor < support,
     };
+  }
+
+  /**
+   * If nothing within her own footprint is holding her up, she goes down it.
+   *
+   * The median above is a rule about her FEET, and it is the right one for
+   * walking: a pothole narrower than her stance touches one sample of five, the
+   * median ignores it, and she strides over it the way an animal does. The same
+   * rule refuses to let her enter a shaft she would fit down, because three
+   * feet on the rim outvote two in the hole — so her own tunnel was somewhere
+   * she could only ever fall while cutting, never walk back into. Reported as
+   * not being able to get back in the hole.
+   *
+   * What tells a shaft from a crack is not how far her feet reach, it is
+   * whether her BODY is over anything. So this asks a second, tighter ring at
+   * her own width, and takes the HIGHEST ground on it. The highest, not the
+   * lowest, is the whole trick: it is the best support anywhere under her
+   * belly, and if even that has fallen away then there is nothing beneath her
+   * at all and she is standing on the rim of a hole she fits through. A crack
+   * that only crosses part of her leaves solid ground somewhere on the ring,
+   * the maximum stays high, and she keeps walking over it.
+   */
+  private descendInto(
+    worldX: number, worldZ: number, from: number, support: number,
+  ): number {
+    if (!this.queenReady) return support;
+    const girth = this.queen.bodyRadius();
+    if (girth <= 0) return support;
+    let best = this.groundAt(worldX, worldZ, from);
+    for (const [dx, dz] of BODY_RING) {
+      best = Math.max(best, this.groundAt(worldX + dx * girth, worldZ + dz * girth, from));
+    }
+    /*
+     * A step's worth of drop, so this is a HOLE and not the far side of a
+     * ripple. Below that, the stance median stays in charge and she walks.
+     */
+    return support - best > STEP_UP ? best : support;
   }
 
   /**
@@ -1656,7 +1725,17 @@ export class DensityTerrainLabScene {
 
   private stand(dt: number): void {
     const ground = this.stance(this.antPosition.x, this.antPosition.z);
-    if (this.antPosition.y - ground.height > FALL_FROM) {
+    /*
+     * Airborne is the condition, not "the descend rule fired".
+     *
+     * Traced across the mouth of her own shaft, the stance median ALREADY found
+     * the floor eleven millimetres below her — the rule had nothing to override,
+     * so a flag set from it never lit, and she strode across a hole the code
+     * knew perfectly well she was over. What matters is not which rule found
+     * the drop; it is that there is a drop and her feet are in it.
+     */
+    this.overHole = this.antPosition.y - ground.height > FALL_FROM;
+    if (this.overHole) {
       /*
        * Too far above the ground to be standing on it, so she falls.
        *
@@ -1802,7 +1881,22 @@ export class DensityTerrainLabScene {
      * making her reverse at digging speed up a hole that is already there is
      * just a slow walk home.
      */
-    const pace = digging && throttle > 0 ? BORE_SPEED : this.speed;
+    let pace = digging && throttle > 0 ? BORE_SPEED : this.speed;
+    /*
+     * Footing gone, forward progress gone with it.
+     *
+     * Walking her across the mouth of her own shaft dipped her ten millimetres
+     * and carried her out the far side: at eleven millimetres a second she
+     * crosses a seven-millimetre hole in three tenths of a second, and gravity
+     * only draws her down a millimetre in that time. So she sailed it.
+     *
+     * The missing piece is not more gravity, it is that an animal whose feet
+     * have nothing under them does not keep striding. There is no horizontal
+     * collision above ground — she walks straight through the rim — so this
+     * does the part of that job that matters: with nothing underfoot she
+     * scrabbles instead of running, and drops IN rather than across.
+     */
+    if (this.overHole && !digging) pace *= HOLE_SCRABBLE;
     const wanted = heading.multiplyScalar(pace * throttle);
 
     this.velocity.lerp(wanted, ease);

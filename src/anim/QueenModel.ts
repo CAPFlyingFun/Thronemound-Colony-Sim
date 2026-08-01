@@ -882,6 +882,23 @@ export class QueenModel {
     });
   }
 
+  /**
+   * How wide her BODY is, in world units — the radius of the tube her thorax
+   * and gaster are drawn as, ignoring her legs.
+   *
+   * This is the footprint she has to fit THROUGH, which is a different question
+   * from how far her feet can reach and wants a different number. Her legs fold;
+   * her abdomen does not. Measured off the mesh, so it stays true across castes
+   * and re-exports.
+   */
+  bodyRadius(): number {
+    let widest = 0;
+    for (const group of [this.rig.body, this.rig.thorax, this.rig.gaster]) {
+      for (const name of group) widest = Math.max(widest, this.limbRadius.get(name) ?? 0);
+    }
+    return widest;
+  }
+
   /** Her mouthparts, in world space. False when the rig has not loaded. */
   jawPosition(into: THREE.Vector3): boolean {
     const mouth = this.rig.mouth[this.rig.mouth.length - 1];

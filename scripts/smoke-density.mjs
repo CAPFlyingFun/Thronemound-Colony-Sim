@@ -347,6 +347,64 @@ for (const view of CASES) {
     ok(`she drops ${mm.toFixed(2)} mm when the soil under her is removed`);
   }
 
+
+  /*
+   * The descend rule, against the rule it must not break.
+   *
+   * These two pull in opposite directions and that is the point. A shaft she
+   * fits down has to swallow her — her own tunnel used to be somewhere she
+   * could only fall while cutting and never walk back into, because three feet
+   * on the rim outvote two in the hole. A crack narrower than her body has to
+   * be strode over — which is what the stance median was for, and what any
+   * naive "follow the lowest sample" fix would destroy. Passing one of these
+   * alone is easy; the pair is the actual requirement.
+   */
+  const holes = await page.evaluate(() => {
+    const lab = window.labScene;
+    lab.stepForTest(1 / 60, 120);
+    const x = lab.antPosition.x;
+    const z = lab.antPosition.z;
+    const top = lab.antPosition.y;
+
+    // A shaft the width of the bore, straight down at her feet.
+    for (let i = 0; i < 14; i += 1) {
+      lab.stream.subtractSphere({ x, y: top - i * 0.15, z }, 3.5 / 5);
+    }
+    lab.rebuildTerrainForTest();
+    lab.antPosition.set(x, top, z);
+    lab.stepForTest(1 / 60, 180);
+    const shaft = { fromMm: top * 5, toMm: lab.antPosition.y * 5, under: lab.underground };
+
+    // Well clear of it, a slot far narrower than she is.
+    lab.antPosition.x += 6;
+    lab.antPosition.z += 6;
+    lab.antPosition.y = 3;
+    lab.stepForTest(1 / 60, 180);
+    const cx = lab.antPosition.x;
+    const cz = lab.antPosition.z;
+    const stood = lab.antPosition.y;
+    for (let i = 0; i < 14; i += 1) {
+      lab.stream.subtractSphere({ x: cx, y: stood - i * 0.1, z: cz }, 0.6 / 5);
+    }
+    lab.rebuildTerrainForTest();
+    lab.stepForTest(1 / 60, 180);
+    return {
+      shaft,
+      bodyRadiusMm: lab.queen.bodyRadius() * 5,
+      crackDropMm: (stood - lab.antPosition.y) * 5,
+    };
+  });
+  if (!(holes.shaft.toMm < holes.shaft.fromMm - 4) || !holes.shaft.under) {
+    fail(`she will not go down a shaft she fits: ${holes.shaft.fromMm.toFixed(2)} -> ${holes.shaft.toMm.toFixed(2)} mm`);
+  } else {
+    ok(`she descends a shaft she fits (${holes.shaft.fromMm.toFixed(1)} -> ${holes.shaft.toMm.toFixed(1)} mm)`);
+  }
+  if (holes.crackDropMm > 0.5) {
+    fail(`she fell into a crack narrower than her ${holes.bodyRadiusMm.toFixed(2)} mm body: ${holes.crackDropMm.toFixed(2)} mm`);
+  } else {
+    ok(`she strides over a crack narrower than her body (${holes.crackDropMm.toFixed(2)} mm)`);
+  }
+
   await page.close();
 }
 
