@@ -46,7 +46,6 @@ const CRAWL_FRACTION = 0.34;
  * argument that divided by HER cross-section instead of the TUNNEL's. Those are
  * different numbers and only one of them is what has to be removed.
  */
-const BORE_SPEED = (BITE_DEPTH_MM / STROKE_SECONDS) / WORLD_UNIT_MM;
 
 /** Radians per second she can turn. A little over half a turn a second. */
 const TURN_RATE = 3.6;
@@ -588,7 +587,7 @@ export class DensityTerrainLabScene {
   private stickY = 0;
   private sun: any = null;
   /** What the controls are asking for: steering, throttle and the dig. */
-  private readonly input = { yaw: 0, walk: 0, dig: 0 };
+  private readonly input = { yaw: 0, walk: 0, dig: 0, strafe: 0 };
   /** The first-person instrument overlay. Fed once a frame from `simulate`. */
   private readonly digHud = new DigHud();
   /** Millimetres of tunnel driven since DIG was last pressed. */
@@ -1047,8 +1046,8 @@ export class DensityTerrainLabScene {
       return;
     }
     // Pitch steps on the press, not on the hold: ten degrees a tap.
-    if (event.code === 'ArrowUp' || event.code === 'KeyQ') { this.bore.aim(1); this.updateStatus(); return; }
-    if (event.code === 'ArrowDown' || event.code === 'KeyE') { this.bore.aim(-1); this.updateStatus(); return; }
+    if (event.code === 'ArrowUp') { this.bore.aim(1); this.updateStatus(); return; }
+    if (event.code === 'ArrowDown') { this.bore.aim(-1); this.updateStatus(); return; }
     if (event.key.toLowerCase() === 'r') {
       this.resetTerrain();
       return;
@@ -1085,6 +1084,8 @@ export class DensityTerrainLabScene {
      */
     this.input.yaw = (held('KeyA') ? 1 : 0) - (held('KeyD') ? 1 : 0);
     this.input.walk = (held('KeyW') ? 1 : 0) - (held('KeyS') ? 1 : 0);
+    // Q/E sidestep, matching the stick's diagonals.
+    this.input.strafe = (held('KeyE') ? 1 : 0) - (held('KeyQ') ? 1 : 0);
   }
 
   private addLighting(): void {
@@ -1340,11 +1341,16 @@ export class DensityTerrainLabScene {
     const jaws = new THREE.Vector3();
     if (!this.queenReady || !this.queen.jawPosition(jaws)) return;
 
-    const up = this.up.clone().normalize();
+    /*
+     * WORLD up, not the terrain normal, because this ray must be the
+     * CROSSHAIR'S ray: the first-person look is built from the heading and
+     * the world-referenced pitch, and the bite has to land exactly where
+     * that view says it will. Built on the slope's normal, the two drifted
+     * apart by the slope — the crosshair pointed one place and the crater
+     * opened in another.
+     */
+    const up = WORLD_UP.clone();
     const forward = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
-    forward.addScaledVector(up, -forward.dot(up));
-    if (forward.lengthSq() < 1e-8) forward.set(0, 0, 1);
-    forward.normalize();
     const direction = forward.clone().multiplyScalar(Math.cos(pitch))
       .addScaledVector(up, Math.sin(pitch)).normalize();
 
@@ -2459,7 +2465,16 @@ export class DensityTerrainLabScene {
     this.turnRate = this.input.yaw * YAW_RATE;
 
     const ease = 1 - Math.exp(-SPEED_EASE * dt);
-    CLIMB_V.copy(fwd).multiplyScalar(this.speed * this.input.walk);
+    // The stick's eight ways work on the wall too: sidesteps run along her
+    // right in the surface plane, with the same handedness as the ground.
+    CLIMB_V.copy(fwd).multiplyScalar(this.input.walk);
+    if (this.input.strafe !== 0) {
+      GUARD_P.crossVectors(up, fwd);
+      CLIMB_V.addScaledVector(GUARD_P, -this.input.strafe);
+    }
+    const drive = CLIMB_V.length();
+    if (drive > 1) CLIMB_V.divideScalar(drive);
+    CLIMB_V.multiplyScalar(this.speed);
     this.velocity.lerp(CLIMB_V, ease);
     this.walkSpeed = this.velocity.length();
     this.antPosition.addScaledVector(this.velocity, dt);
@@ -2591,13 +2606,13 @@ export class DensityTerrainLabScene {
   private travel(dt: number, pitch: number, cutting: boolean): void {
     const ease = 1 - Math.exp(-SPEED_EASE * dt);
     /*
-     * The DIG button is the drive: held, she advances into the face at jaw
-     * pace with no pad input at all, which is the dig room's model brought
-     * over whole. The pad only ever walks her — and pulling back with the
-     * dig released is how she reverses out of a bore, at walking pace,
-     * because backing out removes nothing and there is no work to pace.
+     * DIGGING NEVER MOVES HER — the dig room's rule, adopted on its third
+     * specification: press DIG and a bite happens where she is looking, over
+     * a stroke's time, and that is ALL that happens. Walking in is the
+     * stick's job, and the advance is paced by the cleared space, because
+     * `glide` will not let her into soil that is still there.
      */
-    const throttle = cutting ? 1 : this.input.walk;
+    const throttle = this.input.walk;
     /*
      * Travel follows the pitch while she is cutting AND for as long as any
      * of her is still below the undug land. The second half is what lets go
@@ -2615,8 +2630,7 @@ export class DensityTerrainLabScene {
       ? forward.clone().multiplyScalar(Math.cos(pitch))
         .addScaledVector(WORLD_UP, Math.sin(pitch)).normalize()
       : forward;
-    // Boring is paced by the JAWS, not by the legs.
-    let pace = cutting ? BORE_SPEED : this.speed;
+    let pace = this.speed;
     /*
      * Footing gone, forward progress gone with it.
      *
@@ -2632,7 +2646,21 @@ export class DensityTerrainLabScene {
      * scrabbles instead of running, and drops IN rather than across.
      */
     if (this.overHole && !aligned) pace *= HOLE_SCRABBLE;
-    const wanted = heading.multiplyScalar(pace * throttle);
+    /*
+     * The eight-way stick: fore and aft along the heading, SIDESTEPS along
+     * her right, spins handled upstream by the yaw axis. The pair is
+     * normalised so a diagonal is a direction, not a speed boost.
+     */
+    const wanted = heading.multiplyScalar(throttle);
+    if (this.input.strafe !== 0) {
+      // Her right agrees with the MEASURED turn sign: "turn right" is facing
+      // decreasing here, so sidestep-right is minus the naive right vector.
+      wanted.x -= Math.cos(this.facing) * this.input.strafe;
+      wanted.z += Math.sin(this.facing) * this.input.strafe;
+    }
+    const drive = wanted.length();
+    if (drive > 1) wanted.divideScalar(drive);
+    wanted.multiplyScalar(pace);
 
     this.velocity.lerp(wanted, ease);
     this.walkSpeed = this.velocity.length();
@@ -2774,8 +2802,31 @@ export class DensityTerrainLabScene {
        * which is why left and right were inverted for anyone on a phone and
        * fine for anyone on a keyboard.
        */
-      this.input.walk = -v.y;
-      this.input.yaw = -v.x;
+      /*
+       * EIGHT compass directions, specified with north up: N/S drive her
+       * fore and aft, E/W spin her on the spot, and the four diagonals are
+       * SIDESTEPS — forward-left, forward-right, back-right, back-left —
+       * with no turning at all. Each sector is forty-five degrees, and the
+       * deflection still scales the pace, so a gentle diagonal is a creep.
+       */
+      const mag = v.magnitude;
+      this.input.walk = 0;
+      this.input.yaw = 0;
+      this.input.strafe = 0;
+      if (mag > 0.12) {
+        const octant = ((Math.round(Math.atan2(v.x, -v.y) / (Math.PI / 4)) % 8) + 8) % 8;
+        switch (octant) {
+          case 0: this.input.walk = mag; break;                                // N
+          case 1: this.input.walk = mag; this.input.strafe = mag; break;       // NE
+          case 2: this.input.yaw = -mag; break;                                // E: spin clockwise
+          case 3: this.input.walk = -mag; this.input.strafe = mag; break;      // SE
+          case 4: this.input.walk = -mag; break;                               // S
+          case 5: this.input.walk = -mag; this.input.strafe = -mag; break;     // SW
+          case 6: this.input.yaw = mag; break;                                 // W: spin anticlockwise
+          case 7: this.input.walk = mag; this.input.strafe = -mag; break;      // NW
+          default: break;
+        }
+      }
       this.showStick(true);
       return;
     }
@@ -2826,6 +2877,7 @@ export class DensityTerrainLabScene {
       this.stickY = 0;
       this.input.walk = 0;
       this.input.yaw = 0;
+      this.input.strafe = 0;
       this.showStick(false);
       return;
     }
@@ -3108,16 +3160,24 @@ export class DensityTerrainLabScene {
      */
     if (this.queenReady) {
       /*
-       * The dig room's whole trick is that there is nothing to clip: a
-       * camera and a capsule. So while the view is from inside her head AND
-       * the dig is live — armed, or genuinely under the land — the model
-       * goes away entirely and the lab IS the dig room. Above ground in
-       * first person by choice she keeps her jaws and antennae in frame,
-       * which is how you tell where a bite will land.
+       * First person IS the dig room: a camera and a capsule, nothing else.
+       * The model is not drawn at all from inside — "she keeps her jaws in
+       * frame" was tried and reported as the model interfering with the
+       * camera, which is exactly what it was. The crosshair says where the
+       * bite lands now; her jaws do not need to.
        */
-      const capsule = this.follow.firstPerson && (this.underground || this.bore.digging);
-      this.queen.root.visible = !capsule;
-      this.queen.showHead(!(this.follow.firstPerson && this.underground));
+      this.queen.root.visible = !this.follow.firstPerson;
+      this.queen.showHead(true);
+    }
+    /*
+     * And the dig room's lens: 78 degrees inside her, the lab's 62 over her
+     * shoulder. One number per world — the capsule view is a wide, close
+     * world and the follow shot is a portrait of an animal.
+     */
+    const wantFov = this.follow.firstPerson ? 78 : 62;
+    if (this.camera.fov !== wantFov) {
+      this.camera.fov = wantFov;
+      this.camera.updateProjectionMatrix();
     }
     this.follow.target.copy(this.antPosition).addScaledVector(this.up, CAMERA_LOOK_AT);
     // The eye hangs off her BODY; only the third-person look target is lifted.

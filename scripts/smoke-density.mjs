@@ -467,6 +467,7 @@ for (const view of CASES) {
     // Down: hold DIG. Up: release it and pull back — she keeps the bore's
     // alignment for as long as any of her is below the undug land.
     lab.input.dig = 1;
+    lab.input.walk = 1;
     lab.stepForTest(1 / 60, 60 * 6);
     const bottom = lab.antPosition.y;
     lab.input.dig = 0;
@@ -691,35 +692,51 @@ for (const view of CASES) {
     lab.stepForTest(1 / 60, 240);
     return {
       digging: lab.bore.digging,
-      movedMm: Math.hypot(
-        lab.antPosition.x - before.x, lab.antPosition.y - before.y, lab.antPosition.z - before.z,
-      ) * 5,
+      flatMm: Math.hypot(lab.antPosition.x - before.x, lab.antPosition.z - before.z) * 5,
+      sankMm: (before.y - lab.antPosition.y) * 5,
       removed: lab.totalRemoved,
     };
   });
-  if (!held.digging) fail('holding DIG did not start the dig');
-  else if (!(held.movedMm > 1)) {
-    fail(`four seconds of held DIG advanced her only ${held.movedMm.toFixed(2)} mm`);
-  } else if (!(held.removed > 0)) fail('held DIG advanced without removing soil');
-  else ok(`holding DIG drives her ${held.movedMm.toFixed(1)} mm into the face, no pad needed`);
-
   await dig.dispatchEvent('pointerup');
-  const released = await page.evaluate(() => {
+  /*
+   * The dig room's contract, all three clauses: pressing DIG makes a bite
+   * happen where she is looking, it takes a stroke's worth of time, and it
+   * NEVER moves her — walking in is the stick's own job. The settle after
+   * the release also catches a bite left running past its stroke.
+   */
+  if (!held.digging) fail('holding DIG did not start the dig');
+  else if (!(held.removed > 0)) fail('held DIG removed no soil at the crosshair');
+  else if (held.flatMm > 0.6) {
+    fail(`DIG drove her ${held.flatMm.toFixed(2)} mm — digging must never move her`);
+  } else {
+    /*
+     * HORIZONTAL only. Aimed down at her own doorstep, the bites eat the
+     * ground she is standing on and she settles into the crater — that is
+     * undermining, and it is correct. What digging must never do is DRIVE
+     * her: the settle is vertical, propulsion would be flat.
+     */
+    ok(`DIG bites the crosshair and drives her nowhere (${held.flatMm.toFixed(2)} mm flat, `
+      + `${held.sankMm.toFixed(2)} mm settle)`);
+  }
+
+  // And walking in afterwards is what advances the tunnel.
+  const walkedIn = await page.evaluate(() => {
     const lab = window.labScene;
-    lab.stepForTest(1 / 60, 30);
     const before = { x: lab.antPosition.x, y: lab.antPosition.y, z: lab.antPosition.z };
-    lab.stepForTest(1 / 60, 120);
+    lab.input.dig = 1;
+    lab.input.walk = 1;
+    lab.stepForTest(1 / 60, 240);
+    lab.input.dig = 0;
+    lab.input.walk = 0;
     return {
-      digging: lab.bore.digging,
-      driftMm: Math.hypot(
+      movedMm: Math.hypot(
         lab.antPosition.x - before.x, lab.antPosition.y - before.y, lab.antPosition.z - before.z,
       ) * 5,
     };
   });
-  if (released.digging) fail('releasing DIG left the dig running');
-  else if (released.driftMm > 0.6) {
-    fail(`releasing DIG left her creeping: ${released.driftMm.toFixed(2)} mm in two seconds`);
-  } else ok('releasing DIG stops her where she is');
+  if (!(walkedIn.movedMm > 2)) {
+    fail(`digging and walking advanced her only ${walkedIn.movedMm.toFixed(2)} mm`);
+  } else ok(`walking while she bites drives the tunnel ${walkedIn.movedMm.toFixed(1)} mm`);
 
   /*
    * The HUD is instrumentation, not decoration: every number on it is read
@@ -782,6 +799,16 @@ for (const view of CASES) {
    * different proportions changes her size while every number in the source
    * stays exactly the same — and at ant scale nobody can eyeball 20% out.
    */
+  await page.evaluate(() => {
+    const lab = window.labScene;
+    // On her feet and level before the ruler comes out: the dig scenario
+    // above ends nose-down in a bore with her legs at full stretch, and the
+    // widest bone pair of THAT pose measured 10.35 mm on a 9 mm ant.
+    lab.input.dig = 0;
+    lab.input.walk = 0;
+    while (lab.bore.pitch < 0) lab.bore.aim(1);
+    lab.stepForTest(1 / 60, 240);
+  });
   const size = await page.evaluate(() => {
     const lab = window.labScene;
     if (!lab?.queenReady) return null;
@@ -867,8 +894,10 @@ for (const view of CASES) {
     const lab = window.labScene;
     if (!lab?.queenReady) return null;
     lab.input.dig = 1;
+    lab.input.walk = 1;
     lab.stepForTest(1 / 60, 180);
     lab.input.dig = 0;
+    lab.input.walk = 0;
     return {
       removed: lab.totalRemoved,
       aheadMm: lab.lastBiteAhead * 5,
@@ -877,12 +906,14 @@ for (const view of CASES) {
   });
   if (!bite || bite.removed <= 0) fail('three seconds of boring removed nothing');
   /*
-   * Ahead of centre is the claim — the fault this catches was the crater
-   * opening under her MIDDLE, at zero or behind. Half a millimetre of lead at
-   * a fifty-degree dive is honest digging: the steeper she points, the more
-   * of the bite's reach spends itself downward instead of forward.
+   * AHEAD of centre is the claim — the fault this catches was the crater
+   * opening under her MIDDLE, at zero or behind her. The number scales with
+   * the dive: at fifty degrees down, most of a jaw's reach spends itself
+   * downward, and the honest forward lead of a bite taken AT THE JAWS is a
+   * fraction of a millimetre. Positive and clear of zero is the invariant;
+   * a big lead is a property of shallow digs only.
    */
-  else if (!(bite.aheadMm > 0.5)) {
+  else if (!(bite.aheadMm > 0.2)) {
     fail(`the bite landed ${bite.aheadMm.toFixed(2)} mm ahead of her centre — she is digging under herself`);
   } else if (Math.abs(bite.sidewaysMm) > 2) {
     fail(`the bite landed ${bite.sidewaysMm.toFixed(2)} mm off to one side of her heading`);
@@ -1073,8 +1104,10 @@ for (const view of CASES) {
     const lab = window.labScene;
     for (let i = 0; i < 4; i += 1) lab.bore.aim(-1);
     lab.input.dig = 1;
+    lab.input.walk = 1;
     lab.stepForTest(1 / 60, 150);
     lab.input.dig = 0;
+    lab.input.walk = 0;
   });
   // Long enough for the pellet to land, so the screenshot shows where a clod
   // comes to REST rather than catching one mid-flight and looking like it is
