@@ -502,6 +502,152 @@ for (const view of CASES) {
   await page.close();
 }
 
+/*
+ * The climb: drive her at the practice tree and she goes up it.
+ *
+ * The whole loop is asserted, because every leg of it broke separately while
+ * it was being built: mounting (the trunk's normal was misread as a soil
+ * slope and she walked straight through the tree), staying on (grip flapped
+ * on and off at the base), topping out (a sharp rim normal left her sawing at
+ * 79 mm forever), and coming down (walking off the far edge is a 60 mm fall
+ * that has to land and recover). The claim "she can climb" is all four.
+ */
+{
+  const page = await browser.newPage({
+    viewport: { width: 932, height: 430 }, deviceScaleFactor: 2,
+  });
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.goto(URL, { waitUntil: 'networkidle' });
+  await page.waitForFunction(
+    () => window.labScene?.queenReady === true, null, { timeout: 60000 },
+  );
+  await page.waitForTimeout(1500);
+
+  const climb = await page.evaluate(() => {
+    const lab = window.labScene;
+    lab.stepForTest(1 / 60, 60);
+    const soil = lab.antPosition.y;
+    const bearing = Math.atan2(
+      lab.tree.x - lab.antPosition.x, lab.tree.z - lab.antPosition.z,
+    );
+    lab.bore.turn(bearing - lab.bore.heading);
+    lab.input.walk = 1;
+
+    let mountedAt = -1;
+    let highestGrip = -Infinity;
+    let offAxisAtHeight = 0;
+    let vertsInTrunk = 0;
+    let deepestVert = 0;
+    let toppedOut = false;
+    for (let f = 0; f < 60 * 20; f += 1) {
+      lab.stepForTest(1 / 60, 1);
+      if (lab.gripping) {
+        if (mountedAt < 0) mountedAt = f;
+        if (lab.antPosition.y > highestGrip) highestGrip = lab.antPosition.y;
+        /*
+         * Mid-trunk, measure the DRAWN mesh against the analytic cylinder —
+         * the one place in the whole game where "does she clip the terrain"
+         * has an exact answer. Once, at the moment she passes half height.
+         */
+        if (!toppedOut && lab.antPosition.y > lab.tree.base + (lab.tree.top - lab.tree.base) * 0.5
+          && vertsInTrunk === 0 && deepestVert === 0) {
+          /*
+           * MID-TRUNK, not at the highest gripped point — the highest gripped
+           * point is the lip, where riding inward off the bark is exactly
+           * what rounding it means, and measuring there failed a correct
+           * climb by a millimetre.
+           */
+          offAxisAtHeight = Math.hypot(
+            lab.antPosition.x - lab.tree.x, lab.antPosition.z - lab.tree.z,
+          );
+          lab.queen.root.updateMatrixWorld(true);
+          lab.queen.root.traverse((n) => {
+            if (!n.isSkinnedMesh) return;
+            const count = n.geometry.attributes.position.count;
+            for (let i = 0; i < count; i += 1) {
+              const v = n.getVertexPosition(i, n.position.clone());
+              n.localToWorld(v);
+              if (v.y > lab.tree.top || v.y < lab.tree.base) continue;
+              const r = Math.hypot(v.x - lab.tree.x, v.z - lab.tree.z);
+              const into = lab.tree.radius - r;
+              if (into > 0) {
+                vertsInTrunk += 1;
+                deepestVert = Math.max(deepestVert, into);
+              }
+            }
+          });
+          if (deepestVert === 0) deepestVert = -1; // measured, and clean
+        }
+      }
+      if (!lab.gripping && highestGrip > lab.tree.top - 1) toppedOut = true;
+    }
+    lab.input.walk = 0;
+    lab.stepForTest(1 / 60, 120);
+    return {
+      soilMm: soil * 5,
+      treeBaseMm: lab.tree.base * 5,
+      treeTopMm: lab.tree.top * 5,
+      radiusMm: lab.tree.radius * 5,
+      mountedAtSeconds: mountedAt < 0 ? -1 : mountedAt / 60,
+      highestGripMm: highestGrip * 5,
+      offAxisAtHeightMm: offAxisAtHeight * 5,
+      vertsInTrunk,
+      deepestVertMm: deepestVert < 0 ? 0 : deepestVert * 5,
+      measuredVerts: deepestVert !== 0,
+      toppedOut,
+      finalMm: lab.antPosition.y * 5,
+      finalGripping: lab.gripping,
+      walkedOffToSoil: !lab.gripping
+        && lab.antPosition.y < lab.tree.base + 2,
+    };
+  });
+
+  if (climb.mountedAtSeconds < 0) fail('she never mounted the tree');
+  else if (climb.mountedAtSeconds > 8) {
+    fail(`mounting took ${climb.mountedAtSeconds.toFixed(1)} s of a straight walk at the trunk`);
+  } else ok(`she mounts the tree after ${climb.mountedAtSeconds.toFixed(1)} s of walking at it`);
+
+  const gained = climb.highestGripMm - climb.treeBaseMm;
+  if (!(gained > 40)) {
+    fail(`the climb gained only ${gained.toFixed(1)} mm of a ${
+      (climb.treeTopMm - climb.treeBaseMm).toFixed(0)} mm trunk`);
+  } else ok(`she climbs ${gained.toFixed(1)} mm up the trunk`);
+
+  /*
+   * Pinned to the bark while she does it: her sole plane rides ON the
+   * cylinder, so her centre's distance from the axis at height is the radius,
+   * give or take the snap ease. Inside it she is embedded; far outside she is
+   * floating off the wall.
+   */
+  const off = climb.offAxisAtHeightMm - climb.radiusMm;
+  if (!(off > -1 && off < 3)) {
+    fail(`at height she rides ${off.toFixed(2)} mm off the bark`);
+  } else ok(`she rides the bark at ${off >= 0 ? '+' : ''}${off.toFixed(2)} mm`);
+
+  if (!climb.measuredVerts) fail('the mid-climb mesh measurement never ran');
+  else if (climb.deepestVertMm > 0.35) {
+    fail(`${climb.vertsInTrunk} of her vertices are inside the trunk, worst ${
+      climb.deepestVertMm.toFixed(3)} mm — she clips the tree`);
+  } else {
+    ok(`nothing of her enters the trunk past the budget (worst ${
+      climb.deepestVertMm.toFixed(3)} mm)`);
+  }
+
+  if (!climb.toppedOut) fail('she never rounded the lip onto the treetop');
+  else ok('she rounds the lip onto the treetop');
+
+  if (!climb.walkedOffToSoil) {
+    fail(`after the summit she ended at ${climb.finalMm.toFixed(1)} mm, gripping=${
+      climb.finalGripping} — she did not come back down`);
+  } else ok(`she walks off the far edge, falls, and lands back on the soil (${
+    climb.finalMm.toFixed(1)} mm)`);
+
+  await page.screenshot({ path: `${OUT}-climb.png` });
+  if (errors.length) fail(`climb run: ${errors.slice(0, 2).join(' | ')}`);
+  await page.close();
+}
+
 /* Digging actually works, and reports soil. Once is enough — the geometry
  * above is what varies by viewport, not the arithmetic. */
 {

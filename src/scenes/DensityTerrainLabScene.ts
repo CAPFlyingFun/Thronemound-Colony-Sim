@@ -3,7 +3,7 @@ import { QueenModel } from '../anim/QueenModel';
 import { BoreRig, DIG_YAW_RATE, STROKE_SECONDS, YAW_RATE } from './BoreControl';
 import { clampStickOrigin, stickVector } from '../voxel/locomotion';
 import { FollowCamera, type CameraMode } from './FollowCamera';
-import { TripodGait } from '../anim/tripod';
+import { TripodGait, type SurfaceAt } from '../anim/tripod';
 import { CASTE_LENGTH_MM } from '../anim/hexapod';
 import { buildSurfaceNets } from '../density/SurfaceNets';
 import { TerrainStream } from '../density/TerrainStream';
@@ -332,6 +332,41 @@ const ROOF_RAYS: ReadonlyArray<readonly [number, number, number]> = (() => {
 })();
 const SPEED_EASE = 7;
 
+/* ---------------------------------------------------------------- the climb */
+
+/** The practice tree: a bark cylinder rising from the mound near the bench. */
+const TREE_RADIUS = 12.5 / WORLD_UNIT_MM;
+const TREE_HEIGHT = 60 / WORLD_UNIT_MM;
+/**
+ * Steeper than this — the surface normal's agreement with world up — and a
+ * surface is a WALL: walking into it mounts it. Flatter than `EXIT_FLAT` and
+ * the wall has become floor again and the climb hands back to the ordinary
+ * walk. The gap between the two is hysteresis, so a rolling lip does not
+ * flicker her between modes.
+ */
+const MOUNT_STEEP = 0.5;
+const EXIT_FLAT = 0.82;
+/** How fast her up rolls onto a new face, and how fast she is drawn onto it. */
+const CLIMB_ALIGN = 9;
+const CLIMB_SNAP = 10;
+/**
+ * The lip wrap: when the surface under her vanishes — she has walked over the
+ * top edge of the trunk — the new surface is behind and below her in her own
+ * frame. These are the angles the search sweeps, from "just below" round to
+ * "behind me", rotating the hold cast from -up toward -forward.
+ */
+const LIP_ARCS = [0.6, 1.2, 1.9];
+
+/* Scratch for the climb's casts; none of these survive a call. */
+const CAST_AT = new THREE.Vector3();
+const CAST_HIT = new THREE.Vector3();
+const CAST_FROM = new THREE.Vector3();
+const CAST_DIR = new THREE.Vector3();
+const CAST_N = new THREE.Vector3();
+const CLIMB_V = new THREE.Vector3();
+const GUARD_P = new THREE.Vector3();
+const SPIN = new THREE.Quaternion();
+
 /**
  * How much of a frame may go to building newly streamed chunks.
  *
@@ -531,6 +566,17 @@ export class DensityTerrainLabScene {
   private readonly pressedAt = new Map<number, { x: number; y: number }>();
   /** The tripod walk. Rebuilt when she leaves the ground, null while boring. */
   private gait: TripodGait | null = null;
+  /**
+   * The climb. While `gripping`, her up is the surface normal, gravity is
+   * adhesion, and the walk runs in her own frame — the smooth-surface cousin
+   * of the dig room's six-axis SurfaceFrame, fitted to a density field and a
+   * tree instead of cube faces.
+   */
+  private gripping = false;
+  private readonly climbUp = new THREE.Vector3(0, 1, 0);
+  private readonly climbForward = new THREE.Vector3(0, 0, 1);
+  /** The practice tree, public so the smoke test can find it. */
+  readonly tree = { x: 0, z: 0, radius: TREE_RADIUS, base: 0, top: 0 };
   /** The point a centimetre ahead that the bore is driving at. */
   private readonly digPoint = new THREE.Vector3();
   /** Where the last bite was centred, and where it sat relative to her then. */
@@ -608,6 +654,28 @@ export class DensityTerrainLabScene {
       });
     }
     this.antPosition.copy(this.ants[this.driven]!.position);
+
+    /*
+     * The practice tree: a plain cylinder — the shape the climb is easiest to
+     * judge against — a short walk ahead-right of the bench. Its collision is
+     * analytic rather than part of the density field, so digging cannot eat
+     * it and the streaming window owes it nothing.
+     */
+    this.tree.x = start + 4;
+    this.tree.z = start + 9;
+    this.tree.base = streamGroundHeight(this.tree.x, this.tree.z);
+    this.tree.top = this.tree.base + TREE_HEIGHT;
+    const trunkHeight = this.tree.top - this.tree.base + 2;
+    const trunk = new THREE.Mesh(
+      new THREE.CylinderGeometry(TREE_RADIUS, TREE_RADIUS, trunkHeight, 28, 1),
+      new THREE.MeshStandardMaterial({ color: 0x6b4a2f, roughness: 0.95 }),
+    );
+    trunk.name = 'practice-tree';
+    trunk.position.set(this.tree.x, this.tree.top - trunkHeight / 2, this.tree.z);
+    trunk.castShadow = true;
+    trunk.receiveShadow = true;
+    this.scene.add(trunk);
+
     (window as unknown as { labScene?: unknown }).labScene = this;
 
     /*
@@ -1521,6 +1589,14 @@ export class DensityTerrainLabScene {
      * ceiling; scanning from a little ABOVE her is what still lets her walk up
      * a rise, because ground she could step onto has to be findable.
      */
+    /*
+     * The treetop is a floor, but only when asked from up there. Asked from
+     * the base, the honest answer is the soil — the trunk overhead is a
+     * ceiling, not ground she could be standing on.
+     */
+    const lid = this.treeLid(worldX, worldZ, fromY);
+    if (lid !== null) return lid;
+
     const top = CELLS_Y;
     const start = Math.max(0, Math.min(top, Math.ceil(fromY / CELL_SIZE)));
     let neighbour = this.stream.field.sample(x, start * CELL_SIZE, z);
@@ -1595,6 +1671,140 @@ export class DensityTerrainLabScene {
     if (x < 0 || x > span || z < 0 || z > span) return false;
     if (point.y < 0 || point.y > CELLS_Y * CELL_SIZE) return false;
     return this.stream.field.sample(x, point.y, z) > 0;
+  }
+
+  /** The signed density at a world point, for the gradient. Air outside. */
+  private densityAt(x: number, y: number, z: number): number {
+    const lx = x - this.stream.originWorldX;
+    const lz = z - this.stream.originWorldZ;
+    const span = WINDOW_CELLS * CELL_SIZE;
+    if (lx < 0 || lx > span || lz < 0 || lz > span) return -1;
+    if (y < 0 || y > CELLS_Y * CELL_SIZE) return -1;
+    return this.stream.field.sample(lx, y, lz);
+  }
+
+  /** Is this world point inside the tree's trunk? */
+  private treeSolidAt(point: THREE.Vector3): boolean {
+    const dx = point.x - this.tree.x;
+    const dz = point.z - this.tree.z;
+    return dx * dx + dz * dz <= this.tree.radius * this.tree.radius
+      && point.y <= this.tree.top && point.y >= 0;
+  }
+
+  /**
+   * Everything a body can press against: the soil, and the tree. The climb,
+   * the camera and the fail-safe all ask THIS, so a trunk is as real to them
+   * as a bank of soil — which is the whole of what makes it climbable.
+   */
+  barrierAt(point: THREE.Vector3): boolean {
+    return this.solidAt(point) || this.treeSolidAt(point);
+  }
+
+  /** The treetop as a floor — see `groundAt`. Null when it does not apply. */
+  private treeLid(x: number, z: number, fromY: number): number | null {
+    const dx = x - this.tree.x;
+    const dz = z - this.tree.z;
+    if (dx * dx + dz * dz > this.tree.radius * this.tree.radius) return null;
+    if (fromY < this.tree.top - STEP_UP) return null;
+    return this.tree.top;
+  }
+
+  /**
+   * The outward normal of whatever `barrierAt` said was there.
+   *
+   * The soil answers through its density gradient — the field's own idea of
+   * its surface. The tree is analytic: radial off the bark, up off the lid.
+   * Soil wins where both could answer, because where they overlap (the
+   * trunk's base) the soil is what she is actually standing on.
+   */
+  private barrierNormal(at: THREE.Vector3, out: THREE.Vector3): void {
+    const h = CELL_SIZE * 1.5;
+    /*
+     * The TREE is asked first, and by proximity to its own surface, because
+     * it is analytic and exact. The gradient was asked first once, and it
+     * cost the whole climb: a density field has a nonzero gradient in open
+     * AIR near the ground too, so a hit on the trunk a millimetre above the
+     * soil read as a gentle soil slope, the steepness test called it
+     * walkable, and she drove straight through the tree without ever
+     * mounting it. The gradient speaks only for points the soil actually
+     * claims.
+     */
+    const dx = at.x - this.tree.x;
+    const dz = at.z - this.tree.z;
+    const r = Math.hypot(dx, dz);
+    const nearTrunk = r <= this.tree.radius + h && at.y <= this.tree.top + h
+      && !this.solidAt(at);
+    if (nearTrunk) {
+      /*
+       * The rim reads as ROUNDED even though the solid is a sharp cylinder.
+       *
+       * With a sharp normal — radial right up to the corner, then suddenly up
+       * — her eased up never gets a reason to start rotating: she climbed to
+       * the rim and sawed there, 78.6 to 79.1 mm, forever, the wrap search
+       * pulling her back to an edge whose normal still said "wall". A corner
+       * band whose normal swings smoothly from radial to up is what lets the
+       * climb ROLL over the lip, the way a real claw walks round an edge.
+       */
+      const EDGE = 0.35;
+      const rr = r - (this.tree.radius - EDGE);
+      const yy = at.y - (this.tree.top - EDGE);
+      if (rr > 0 && yy > 0 && r > 1e-6) {
+        const len = Math.hypot(rr, yy);
+        if (len > 1e-9) {
+          out.set((dx / r) * (rr / len), yy / len, (dz / r) * (rr / len)).normalize();
+          return;
+        }
+      }
+      if (at.y > this.tree.top - EDGE) {
+        out.copy(WORLD_UP);
+        return;
+      }
+      if (r > 1e-6) {
+        out.set(dx / r, 0, dz / r);
+        return;
+      }
+    }
+    const gx = this.densityAt(at.x + h, at.y, at.z) - this.densityAt(at.x - h, at.y, at.z);
+    const gy = this.densityAt(at.x, at.y + h, at.z) - this.densityAt(at.x, at.y - h, at.z);
+    const gz = this.densityAt(at.x, at.y, at.z + h) - this.densityAt(at.x, at.y, at.z - h);
+    // Density rises inward, so the surface faces down the gradient.
+    out.set(-gx, -gy, -gz);
+    if (out.lengthSq() > 1e-10) {
+      out.normalize();
+      return;
+    }
+    out.copy(WORLD_UP);
+  }
+
+  /**
+   * March a ray through everything solid and return the first contact, or
+   * null. The last sample is always the far end — the camera walk-out taught
+   * that lesson — and the contact is bisected to a fraction of a cell, so a
+   * foot planted on it does not visibly hover off the bark.
+   */
+  private castBarrier(
+    from: THREE.Vector3, dir: THREE.Vector3, maxDist: number,
+  ): THREE.Vector3 | null {
+    const step = CELL_SIZE * 0.6;
+    const samples = Math.max(1, Math.ceil(maxDist / step));
+    let clear = 0;
+    for (let i = 1; i <= samples; i += 1) {
+      const d = Math.min(i * step, maxDist);
+      CAST_AT.copy(from).addScaledVector(dir, d);
+      if (this.barrierAt(CAST_AT)) {
+        let lo = clear;
+        let hi = d;
+        for (let split = 0; split < 5; split += 1) {
+          const mid = (lo + hi) / 2;
+          CAST_AT.copy(from).addScaledVector(dir, mid);
+          if (this.barrierAt(CAST_AT)) hi = mid;
+          else lo = mid;
+        }
+        return CAST_HIT.copy(from).addScaledVector(dir, (lo + hi) / 2);
+      }
+      clear = d;
+    }
+    return null;
   }
 
   /**
@@ -1985,7 +2195,9 @@ export class DensityTerrainLabScene {
    */
   private stepFeet(dt: number): Map<string, readonly [number, number, number]> | null {
     if (!this.queenReady) return null;
-    if (this.bore.digging || this.underground) {
+    // A climb IS a walk — underground only kills the gait when she is being
+    // driven along a bore, not when she is gripping the wall of one.
+    if (this.bore.digging || (this.underground && !this.gripping)) {
       this.gait = null;
       return null;
     }
@@ -1996,11 +2208,53 @@ export class DensityTerrainLabScene {
     }
     const ground = (x: number, z: number): number =>
       this.groundAt(x, z, this.antPosition.y + STEP_UP);
-    const states = this.gait.step(dt, {
-      position: [this.antPosition.x, this.antPosition.y, this.antPosition.z],
+
+    let surfaceAt: SurfaceAt;
+    const stride = {
+      position: [this.antPosition.x, this.antPosition.y, this.antPosition.z] as
+        [number, number, number],
       heading: this.facing,
       speed: this.walkSpeed,
-    }, ground);
+      frame: undefined as undefined | {
+        right: [number, number, number];
+        up: [number, number, number];
+        forward: [number, number, number];
+      },
+    };
+    if (this.gripping) {
+      const up = this.climbUp;
+      const fwd = this.climbForward;
+      CAST_N.crossVectors(up, fwd);
+      stride.frame = {
+        right: [CAST_N.x, CAST_N.y, CAST_N.z],
+        up: [up.x, up.y, up.z],
+        forward: [fwd.x, fwd.y, fwd.z],
+      };
+      const reach = Math.max(0.4, this.queen.bodyRadius() * 2 + STEP_UP);
+      surfaceAt = (p, upv) => {
+        CAST_FROM.set(p[0], p[1], p[2])
+          .addScaledVector(CLIMB_V.set(upv[0], upv[1], upv[2]), STEP_UP * 2);
+        CAST_DIR.copy(CLIMB_V).negate();
+        const hit = this.castBarrier(CAST_FROM, CAST_DIR, STEP_UP * 2 + reach);
+        return hit ? [hit.x, hit.y, hit.z] : null;
+      };
+    } else {
+      /*
+       * Level ground keeps its seeded column, with one refusal: a landing
+       * inside the trunk's footprint while she is below the canopy has
+       * nothing under it a leg can use — the "ground" there is soil the
+       * trunk stands on. Null retreats the foot toward home, which is what
+       * stops her legs vanishing into the bark when she walks up to the tree.
+       */
+      surfaceAt = (p) => {
+        const dx = p[0] - this.tree.x;
+        const dz = p[2] - this.tree.z;
+        if (dx * dx + dz * dz <= this.tree.radius * this.tree.radius
+          && p[1] < this.tree.top - STEP_UP) return null;
+        return [p[0], ground(p[0], p[2]), p[2]];
+      };
+    }
+    const states = this.gait.step(dt, stride, ground, surfaceAt);
     const out = new Map<string, readonly [number, number, number]>();
     for (const state of states) out.set(state.slot, state.target);
     return out;
@@ -2119,6 +2373,139 @@ export class DensityTerrainLabScene {
     return -1;
   }
 
+  /**
+   * Walking into a wall mounts it.
+   *
+   * The feeler reaches out from her body along her heading, about a nose
+   * ahead. A hit whose surface is steeper than `MOUNT_STEEP` is a wall — the
+   * flank of the tree, the side of a crater — and driving at a wall is what
+   * asking to climb it looks like. Her first heading on the wall is straight
+   * up it: the steepest ascent is what walking INTO something means.
+   */
+  private tryMount(): void {
+    if (this.gripping || this.bore.digging || this.input.walk <= 0 || !this.queenReady) return;
+    const girth = Math.max(0.2, this.queen.bodyRadius());
+    CAST_DIR.set(Math.sin(this.facing), 0, Math.cos(this.facing));
+    CAST_FROM.copy(this.antPosition).addScaledVector(WORLD_UP, girth);
+    const hit = this.castBarrier(CAST_FROM, CAST_DIR, girth + this.walkSpeed * 0.25 + 0.6);
+    if (!hit) return;
+    this.barrierNormal(hit, CAST_N);
+    if (CAST_N.dot(WORLD_UP) >= MOUNT_STEEP) return;
+    this.gripping = true;
+    this.climbUp.copy(CAST_N);
+    this.climbForward.copy(WORLD_UP).addScaledVector(CAST_N, -WORLD_UP.dot(CAST_N));
+    if (this.climbForward.lengthSq() < 1e-6) this.climbForward.copy(CAST_DIR);
+    this.climbForward.normalize();
+    this.velocity.set(0, 0, 0);
+    this.walkSpeed = 0;
+    this.fallSpeed = 0;
+    this.gait = null;
+    this.status.dataset.message = 'Climbing — steer to spiral, reverse to back down';
+    this.updateStatus();
+  }
+
+  /** The climb is over — flat ground, or nothing left to hold. */
+  private endClimb(): void {
+    this.gripping = false;
+    this.up.copy(this.climbUp);
+    this.fallSpeed = 0;
+    this.gait = null;
+    this.status.dataset.message = 'Walk with the pad, aim, and press DIG';
+    this.updateStatus();
+  }
+
+  /**
+   * One frame of the climb: steer about the surface normal, advance along her
+   * own forward, and hold on.
+   *
+   * Holding on is a cast from just off her back, in through her soles. While
+   * it lands, she is drawn onto the contact and her up eases toward its
+   * normal — adhesion, in place of gravity. When it finds nothing she has
+   * walked over an edge, and the wrap search looks BEHIND AND BELOW her in
+   * her own frame, which is where the far side of a lip is; only when even
+   * that is empty has she genuinely climbed off the end of the world, and
+   * gravity takes her back.
+   */
+  private climbMove(dt: number): void {
+    const up = this.climbUp;
+    const fwd = this.climbForward;
+    const yaw = this.input.yaw * YAW_RATE * dt;
+    if (Math.abs(yaw) > 1e-9) {
+      SPIN.setFromAxisAngle(up, -yaw);
+      fwd.applyQuaternion(SPIN).normalize();
+    }
+    this.turnRate = this.input.yaw * YAW_RATE;
+
+    const ease = 1 - Math.exp(-SPEED_EASE * dt);
+    CLIMB_V.copy(fwd).multiplyScalar(this.speed * this.input.walk);
+    this.velocity.lerp(CLIMB_V, ease);
+    this.walkSpeed = this.velocity.length();
+    this.antPosition.addScaledVector(this.velocity, dt);
+    const margin = CELL_SIZE * 3;
+    this.antPosition.x = THREE.MathUtils.clamp(this.antPosition.x, margin, WORLD_SPAN - margin);
+    this.antPosition.z = THREE.MathUtils.clamp(this.antPosition.z, margin, WORLD_SPAN - margin);
+
+    const girth = this.queenReady ? Math.max(0.2, this.queen.bodyRadius()) : 0.3;
+    CAST_FROM.copy(this.antPosition).addScaledVector(up, girth);
+    CAST_DIR.copy(up).negate();
+    const hold = this.castBarrier(CAST_FROM, CAST_DIR, girth + STEP_UP * 3);
+    if (hold) {
+      this.antPosition.lerp(hold, 1 - Math.exp(-CLIMB_SNAP * dt));
+      this.barrierNormal(hold, CAST_N);
+      up.lerp(CAST_N, 1 - Math.exp(-CLIMB_ALIGN * dt)).normalize();
+      fwd.addScaledVector(up, -fwd.dot(up));
+      if (fwd.lengthSq() < 1e-8) fwd.set(up.z, up.x, up.y);
+      fwd.normalize();
+      /*
+       * Dismount wants BOTH readings flat: this contact's normal, and the up
+       * she has eased onto. One cast alone flapped her on and off at the
+       * trunk's foot — the hold cast grazes the soil there, reads "flat",
+       * dismounts, and the next frame's feeler mounts her again, twice a
+       * second, while her body is still lying against the bark.
+       */
+      if (CAST_N.dot(WORLD_UP) > EXIT_FLAT && up.dot(WORLD_UP) > EXIT_FLAT) this.endClimb();
+    } else {
+      let caught = false;
+      for (const arc of LIP_ARCS) {
+        CAST_DIR.copy(up).multiplyScalar(-Math.cos(arc)).addScaledVector(fwd, -Math.sin(arc)).normalize();
+        CAST_FROM.copy(this.antPosition).addScaledVector(up, girth * 1.2);
+        const wrap = this.castBarrier(CAST_FROM, CAST_DIR, girth * 3);
+        if (wrap) {
+          this.antPosition.lerp(wrap, 0.5);
+          this.barrierNormal(wrap, CAST_N);
+          up.lerp(CAST_N, 0.5).normalize();
+          fwd.addScaledVector(up, -fwd.dot(up));
+          if (fwd.lengthSq() > 1e-8) fwd.normalize();
+          caught = true;
+          break;
+        }
+      }
+      if (!caught) this.endClimb();
+    }
+
+    /*
+     * The rest of the frame — HUD, camera, dismounts — thinks in the world
+     * yaw her climb most resembles, so it is kept in step whenever her
+     * forward has any horizontal meaning at all. Near straight up it has
+     * none, and the last good yaw stands.
+     */
+    if (this.gripping && Math.hypot(fwd.x, fwd.z) > 0.15) {
+      this.facing = Math.atan2(fwd.x, fwd.z);
+      this.bore.turn(this.facing - this.bore.heading);
+    }
+    if (this.gripping) this.up.copy(up);
+
+    const scroll = this.stream.recentreOn(this.antPosition.x, this.antPosition.z);
+    if (scroll) {
+      this.lastScrollMs = scroll.ms;
+      this.refreshResidency(false, scroll.retained);
+      this.updateStatus();
+    }
+    if (!this.queenReady) return;
+    this.queen.root.position.copy(this.antPosition);
+    this.orientQueen();
+  }
+
   private orientQueen(): void {
     /*
      * Pitch is measured from the WORLD horizon, never from the ground she
@@ -2136,9 +2523,16 @@ export class DensityTerrainLabScene {
      * is level does she lie back down along the slope, which is what makes
      * walking over a rise look right.
      */
-    const aimed = Math.abs(this.headPitch) > 1e-6;
-    const up = aimed ? WORLD_UP : this.up;
-    const forward = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
+    /*
+     * On a climb her frame IS the climb's: up off the bark, forward where she
+     * crawls, no world-pitch train — the dig is disarmed on a wall. The
+     * flatten below is a no-op there, since the two are already orthogonal.
+     */
+    const aimed = !this.gripping && Math.abs(this.headPitch) > 1e-6;
+    const up = this.gripping ? this.climbUp : (aimed ? WORLD_UP : this.up);
+    const forward = this.gripping
+      ? this.climbForward.clone()
+      : new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
     forward.addScaledVector(up, -forward.dot(up));
     if (forward.lengthSq() < 1e-8) forward.set(0, 0, 1);
     forward.normalize();
@@ -2308,7 +2702,7 @@ export class DensityTerrainLabScene {
       Bore: ${(((this.facing * 180 / Math.PI) + 360) % 360).toFixed(0).padStart(3, '0')}° ·`
       + ` pitch ${(this.bore.pitch * 180 / Math.PI >= 0 ? '+' : '')}`
       + `${(this.bore.pitch * 180 / Math.PI).toFixed(0)}°`
-      + `${this.bore.digging ? ' · DIG ON' : ''} · ${this.running ? 'run' : 'crawl'}<br>
+      + `${this.bore.digging ? ' · DIG ON' : ''} · ${this.running ? 'run' : 'crawl'}${this.gripping ? ' · CLIMB' : ''}<br>
       Driving ${this.ants[this.driven]!.caste}: ${this.queenReady
         ? `${CASTE_LENGTH_MM[this.ants[this.driven]!.caste]} mm`
           + ` · feet ${(this.footPenetration * WORLD_UNIT_MM).toFixed(2)} mm`
@@ -2488,8 +2882,12 @@ export class DensityTerrainLabScene {
      * is what she moves ALONG and what her jaws follow, and a bite taken
      * against last frame's heading is a tunnel with a kink in it.
      */
-    const bore = this.bore.step(delta, { yaw: this.input.yaw, forward: this.input.walk });
-    this.facing = bore.heading;
+    // A climb owns the yaw — the bore's heading is kept in step by climbMove
+    // so the HUD and an eventual dismount agree with where she is pointed.
+    const bore = this.bore.step(delta, {
+      yaw: this.gripping ? 0 : this.input.yaw, forward: this.input.walk,
+    });
+    if (!this.gripping) this.facing = bore.heading;
 
     /*
      * The head leads and the body follows it. Rate-limited rather than eased,
@@ -2509,7 +2907,7 @@ export class DensityTerrainLabScene {
      * angle yet, and she levels out on the same rate limit she tips down on,
      * so disarming is a controlled rise rather than a snap upright.
      */
-    const aim = bore.digging ? bore.pitch : 0;
+    const aim = bore.digging && !this.gripping ? bore.pitch : 0;
     this.headPitch += THREE.MathUtils.clamp(aim - this.headPitch, -swing, swing);
     this.thoraxPitch += THREE.MathUtils.clamp(
       this.headPitch - this.thoraxPitch, -swing * THORAX_RATE, swing * THORAX_RATE,
@@ -2517,24 +2915,41 @@ export class DensityTerrainLabScene {
     this.gasterPitch += THREE.MathUtils.clamp(
       this.thoraxPitch - this.gasterPitch, -swing * GASTER_RATE, swing * GASTER_RATE,
     );
-    this.turnRate = this.input.yaw * (bore.digging ? DIG_YAW_RATE : YAW_RATE);
-    // She travels along the pitch her BODY has reached, not the one the dial
-    // is set to — otherwise she would dive before she had finished turning to
-    // face the dive.
-    this.travel(delta, this.headPitch, bore.digging);
-    // Sensed HERE — after she has moved, before anything reads it — and then
-    // held for the frame, so the six readers below all agree on the answer.
-    this.roofedNow = this.senseUnderground();
-    /*
-     * With the dig armed she is committed to the hole, whether or not there is
-     * yet soil over her head. `stand` puts her on the surface, and while she is
-     * cutting the first few millimetres of a shaft that is a tug of war she
-     * always wins and the shaft never starts — measured as her rising two
-     * millimetres over six seconds of driving straight down.
-     */
-    if (bore.digging || this.underground) this.holdTunnel(delta);
-    else this.stand(delta);
-    if (bore.bite) this.carveAlongBore(this.headPitch);
+    if (this.gripping) {
+      /*
+       * The jaws cannot cut from a wall — the bore is a soil tool and its
+       * whole physics assumes the undug land above her. Arming it mid-climb
+       * simply disarms again, with a line saying so.
+       */
+      if (this.bore.digging) {
+        this.bore.toggleDig();
+        this.status.dataset.message = 'She cannot dig while she climbs';
+        this.updateStatus();
+      }
+      this.climbMove(delta);
+      this.roofedNow = this.senseUnderground();
+    } else {
+      this.turnRate = this.input.yaw * (bore.digging ? DIG_YAW_RATE : YAW_RATE);
+      // She travels along the pitch her BODY has reached, not the one the dial
+      // is set to — otherwise she would dive before she had finished turning to
+      // face the dive.
+      this.travel(delta, this.headPitch, bore.digging);
+      // Sensed HERE — after she has moved, before anything reads it — and then
+      // held for the frame, so the six readers below all agree on the answer.
+      this.roofedNow = this.senseUnderground();
+      /*
+       * With the dig armed she is committed to the hole, whether or not there is
+       * yet soil over her head. `stand` puts her on the surface, and while she is
+       * cutting the first few millimetres of a shaft that is a tug of war she
+       * always wins and the shaft never starts — measured as her rising two
+       * millimetres over six seconds of driving straight down.
+       */
+      if (bore.digging || this.underground) this.holdTunnel(delta);
+      else this.stand(delta);
+      // Only after she has settled: the feeler reads her resolved position.
+      this.tryMount();
+    }
+    if (bore.bite && !this.gripping) this.carveAlongBore(this.headPitch);
     // The gait's dig level IS the head's dip, so the animation and the moment
     // soil leaves are the same event rather than two things kept in step.
     this.digPulse = bore.dip;
@@ -2580,9 +2995,28 @@ export class DensityTerrainLabScene {
        * before and is right for a body that is swimming through soil.
        */
       const anchors = this.stepFeet(delta);
+      /*
+       * On a climb the solver works in her frame: elevations run along the
+       * surface normal, and "the ground under a joint" is a cast in through
+       * the bark rather than a column through the sky.
+       */
+      const girth = Math.max(0.2, this.queen.bodyRadius());
+      const solveFrame = this.gripping ? {
+        up: [this.climbUp.x, this.climbUp.y, this.climbUp.z] as
+          readonly [number, number, number],
+        surface: (x: number, y: number, z: number): number => {
+          CAST_FROM.set(x, y, z).addScaledVector(this.climbUp, STEP_UP);
+          CAST_DIR.copy(this.climbUp).negate();
+          const hit = this.castBarrier(CAST_FROM, CAST_DIR, STEP_UP + girth * 2);
+          const upv = this.climbUp;
+          if (!hit) return x * upv.x + y * upv.y + z * upv.z;
+          return hit.x * upv.x + hit.y * upv.y + hit.z * upv.z;
+        },
+      } : undefined;
       this.footPenetration = this.queen.solveFeet(
         under, FOOT_CLEARANCE, FOOT_PLANT_BAND,
         anchors ? (slot) => anchors.get(slot) ?? null : undefined,
+        solveFrame,
       );
       /*
        * The fail-safe, after everything else has had its go: whatever the
@@ -2603,10 +3037,19 @@ export class DensityTerrainLabScene {
       this.poseBystanders(delta);
       this.guardLift = this.queen.groundGuard((x, y, z) => {
         PROBE.set(x, y, z);
-        if (!this.solidAt(PROBE)) return 0;
+        if (!this.barrierAt(PROBE)) return 0;
+        if (this.gripping) {
+          // Escape is along HER up — off the bark, not toward the sky.
+          for (let d = CELL_SIZE; d <= STEP_UP * 2; d += CELL_SIZE) {
+            GUARD_P.copy(PROBE).addScaledVector(this.climbUp, d);
+            if (!this.barrierAt(GUARD_P)) return d;
+          }
+          return STEP_UP * 2;
+        }
         return Math.max(0, this.groundAt(x, z, y) - y + FOOT_CLEARANCE);
       });
-      this.queen.root.position.y = this.antPosition.y + this.guardLift;
+      this.queen.root.position.copy(this.antPosition)
+        .addScaledVector(this.gripping ? this.climbUp : WORLD_UP, this.guardLift);
     }
     /*
      * The camera looks at her BODY, not at her feet. `antPosition` is her
@@ -2626,7 +3069,9 @@ export class DensityTerrainLabScene {
      * the soil you are about to take, rather than watching her three-second
      * lean catch up with the decision.
      */
-    this.follow.aimPitch = this.bore.pitch;
+    this.follow.aimPitch = this.gripping
+      ? Math.asin(THREE.MathUtils.clamp(this.climbForward.y, -1, 1))
+      : this.bore.pitch;
     /*
      * Her head comes off the picture when the camera is INSIDE it and she is
      * under the ground — the one case where her own skull is the whole view.
@@ -2641,7 +3086,7 @@ export class DensityTerrainLabScene {
     // The eye hangs off her BODY; only the third-person look target is lifted.
     this.follow.body.copy(this.antPosition);
     this.follow.update(
-      delta, this.facing, (point) => this.solidAt(point), CELL_SIZE * 2,
+      delta, this.facing, (point) => this.barrierAt(point), CELL_SIZE * 2,
     );
     this.updatePellets(delta);
     if (this.sun) {

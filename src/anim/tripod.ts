@@ -101,6 +101,23 @@ export interface LegState {
   phase: number;
 }
 
+/**
+ * The body's own axes, for a walk that is not on level ground.
+ *
+ * Everything in this stepper is relative geometry — a foot trails behind its
+ * shoulder, a stride sweeps fore and aft, a swing lifts away from the surface —
+ * and none of it mentions the world's vertical anywhere except through the
+ * frame it runs in. On flat soil that frame is derived from the heading and
+ * world up; on the flank of a tree it is handed in, with `up` the surface
+ * normal, and every rule works unchanged because no rule ever knew which way
+ * gravity pointed in the first place.
+ */
+export interface Frame {
+  right: Vec3;
+  up: Vec3;
+  forward: Vec3;
+}
+
 /** What the body is doing this frame. */
 export interface Stride {
   /** Body position in world space. */
@@ -109,10 +126,25 @@ export interface Stride {
   heading: number;
   /** Planar speed, only used to decide whether she is walking at all. */
   speed: number;
+  /**
+   * The body's axes when she is NOT walking on level ground — climbing, where
+   * up is the surface normal. When absent, the frame is built from `heading`
+   * and world up, which reproduces the level walk exactly.
+   */
+  frame?: Frame;
 }
 
 /** Ground height at a world x and z. The stepper puts feet ON the ground. */
 export type GroundAt = (x: number, z: number) => number;
+
+/**
+ * Project a point onto the surface along the frame's down, for walks where
+ * the ground is not a heightfield — a trunk, a crater wall. Null when there
+ * is nothing within reach, which is an answer rather than an error: a foot
+ * aimed past the edge of a treetop has nowhere to land, and the stepper
+ * retreats it toward home instead.
+ */
+export type SurfaceAt = (point: Vec3, up: Vec3) => Vec3 | null;
 
 /**
  * Below this she counts as standing, for pacing a swing only.
@@ -134,6 +166,22 @@ const IDLE_SPEED = 0.05;
  */
 const OVERREACH = 0.9;
 
+/*
+ * The little vector algebra the frame needs, on plain tuples. Three.js stays
+ * out of this file so the stepping rules keep their renderer-free tests.
+ */
+const dot = (a: Vec3, b: Vec3): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const addScaled = (a: Vec3, b: Vec3, s: number): Vec3 =>
+  [a[0] + b[0] * s, a[1] + b[1] * s, a[2] + b[2] * s];
+
+/** The frame a stride is walking in — given, or derived from the heading. */
+function frameOf(stride: Stride): Frame {
+  if (stride.frame) return stride.frame;
+  const sin = Math.sin(stride.heading);
+  const cos = Math.cos(stride.heading);
+  return { right: [cos, 0, -sin], up: [0, 1, 0], forward: [sin, 0, cos] };
+}
+
 export class TripodGait {
   private readonly legs: Leg[];
   private readonly anchor = new Map<string, Vec3>();
@@ -147,13 +195,51 @@ export class TripodGait {
     this.legs = legs;
   }
 
+  /**
+   * Put a would-be foothold ON the surface.
+   *
+   * The scalar `groundAt` is the level-ground spelling — replace the point's
+   * height with the ground's. `surfaceAt`, when given, is the general one: it
+   * may fail, and a failed projection retreats toward `home` in steps, the
+   * way a real foot feels back toward footing it knows exists — the body is
+   * standing on some, or it would not be here. The last resort is home
+   * itself at the body's own plane, which keeps the leg in shape even when
+   * the world refuses to offer it anything.
+   */
+  private plant(
+    wanted: Vec3, home: Vec3, frame: Frame, groundAt: GroundAt, surfaceAt?: SurfaceAt,
+  ): Vec3 {
+    if (!surfaceAt) {
+      return [wanted[0], groundAt(wanted[0], wanted[2]), wanted[2]];
+    }
+    for (const back of [0, 0.35, 0.7]) {
+      const at = back === 0 ? wanted : addScaled(wanted, [
+        home[0] - wanted[0], home[1] - wanted[1], home[2] - wanted[2],
+      ] as Vec3, back);
+      const found = surfaceAt(at, frame.up);
+      /*
+       * Reachable means near the plane her body stands on. A projection is a
+       * cast, and a cast from the rim of a treetop finds the soil a body
+       * length below — a real point, on a real surface, that no leg of hers
+       * can stand on. Half a reach either way covers every slope she walks.
+       */
+      if (found && Math.abs(dot([
+        found[0] - home[0], found[1] - home[1], found[2] - home[2],
+      ] as Vec3, frame.up)) <= this.legs[0]!.reach * 0.75) {
+        return found;
+      }
+    }
+    return [...home] as Vec3;
+  }
+
   /** Drop every foot where it stands. Call on a teleport, or the first frame. */
-  reset(stride: Stride, groundAt: GroundAt): void {
+  reset(stride: Stride, groundAt: GroundAt, surfaceAt?: SurfaceAt): void {
+    const frame = frameOf(stride);
     for (const leg of this.legs) {
       const home = this.homeOf(leg, stride);
-      home[1] = groundAt(home[0], home[2]);
-      this.anchor.set(leg.slot, home);
-      this.from.set(leg.slot, [...home] as Vec3);
+      const planted = this.plant(home, home, frame, groundAt, surfaceAt);
+      this.anchor.set(leg.slot, planted);
+      this.from.set(leg.slot, [...planted] as Vec3);
       this.swing.set(leg.slot, 1);
     }
     this.started = true;
@@ -167,8 +253,8 @@ export class TripodGait {
    * the other one is still in the air, and for a moment she would have no feet
    * on the ground at all — which is the difference between a walk and a hop.
    */
-  step(dt: number, stride: Stride, groundAt: GroundAt): LegState[] {
-    if (!this.started) this.reset(stride, groundAt);
+  step(dt: number, stride: Stride, groundAt: GroundAt, surfaceAt?: SurfaceAt): LegState[] {
+    if (!this.started) this.reset(stride, groundAt, surfaceAt);
 
     const swingSeconds = this.swingSeconds(stride.speed);
     let airborne = false;
@@ -199,13 +285,13 @@ export class TripodGait {
      */
     if (!airborne) {
       const due = this.last === 0 ? 1 : 0;
-      if (this.urgency(due, stride) >= 1) this.begin(due, stride, groundAt);
+      if (this.urgency(due, stride) >= 1) this.begin(due, stride, groundAt, surfaceAt);
       else if (this.urgency(due === 0 ? 1 : 0, stride) >= 1) {
-        this.begin(due === 0 ? 1 : 0, stride, groundAt);
+        this.begin(due === 0 ? 1 : 0, stride, groundAt, surfaceAt);
       }
     }
 
-    return this.legs.map((leg) => this.stateOf(leg, stride, groundAt));
+    return this.legs.map((leg) => this.stateOf(leg, stride, groundAt, surfaceAt));
   }
 
   /**
@@ -224,19 +310,31 @@ export class TripodGait {
    * when it loses purchase, and at five millimetres to the world unit it is
    * invisible. A leg stretched past its own length is not.
    */
-  private hold(leg: Leg, stride: Stride, groundAt: GroundAt): Vec3 {
+  private hold(leg: Leg, stride: Stride, groundAt: GroundAt, surfaceAt?: SurfaceAt): Vec3 {
     const anchor = this.anchor.get(leg.slot);
     if (!anchor) return this.homeOf(leg, stride);
     const limit = leg.reach * OVERREACH;
     const home = this.homeOf(leg, stride);
-    const span = Math.hypot(anchor[0] - home[0], anchor[2] - home[2]);
+    const frame = frameOf(stride);
+    const span = this.spanOf(anchor, home, frame);
     if (span <= limit) return anchor;
+    // Slip toward the shoulder IN THE SURFACE PLANE, then put the result back
+    // on the surface — a skid stays a ground contact the whole way.
     const pull = 1 - limit / span;
-    const x = anchor[0] + (home[0] - anchor[0]) * pull;
-    const z = anchor[2] + (home[2] - anchor[2]) * pull;
-    const skidded: Vec3 = [x, groundAt(x, z), z];
+    const slipped = addScaled(anchor, [
+      home[0] - anchor[0], home[1] - anchor[1], home[2] - anchor[2],
+    ] as Vec3, pull);
+    const skidded = this.plant(slipped, home, frame, groundAt, surfaceAt);
     this.anchor.set(leg.slot, skidded);
     return skidded;
+  }
+
+  /** Distance from home in the SURFACE plane — the part the leg must span. */
+  private spanOf(anchor: Vec3, home: Vec3, frame: Frame): number {
+    const v: Vec3 = [anchor[0] - home[0], anchor[1] - home[1], anchor[2] - home[2]];
+    const rise = dot(v, frame.up);
+    const flat = addScaled(v, frame.up, -rise);
+    return Math.hypot(flat[0], flat[1], flat[2]);
   }
 
   /**
@@ -273,14 +371,15 @@ export class TripodGait {
 
   /** Where this leg's foot naturally sits right now, in world space. */
   private homeOf(leg: Leg, stride: Stride): Vec3 {
-    const sin = Math.sin(stride.heading);
-    const cos = Math.cos(stride.heading);
-    // Her local x is to the right of her heading and local z is along it.
-    return [
-      stride.position[0] + leg.home[0] * cos + leg.home[2] * sin,
-      stride.position[1] + leg.home[1],
-      stride.position[2] - leg.home[0] * sin + leg.home[2] * cos,
-    ];
+    // Her local x is to the right of her heading, y toward her own up, z along
+    // her heading — whatever direction each of those happens to point in the
+    // world. On level ground this reduces to the yaw rotation it always was.
+    const frame = frameOf(stride);
+    let at: Vec3 = [...stride.position] as Vec3;
+    at = addScaled(at, frame.right, leg.home[0]);
+    at = addScaled(at, frame.up, leg.home[1]);
+    at = addScaled(at, frame.forward, leg.home[2]);
+    return at;
   }
 
   /**
@@ -297,8 +396,7 @@ export class TripodGait {
     const anchor = this.anchor.get(leg.slot);
     if (!anchor) return 0;
     const home = this.homeOf(leg, stride);
-    const span = Math.hypot(anchor[0] - home[0], anchor[2] - home[2]);
-    return span / (leg.reach * OVERREACH);
+    return this.spanOf(anchor, home, frameOf(stride)) / (leg.reach * OVERREACH);
   }
 
   /** Signed distance of the anchor ahead of home, along her heading. */
@@ -306,8 +404,9 @@ export class TripodGait {
     const anchor = this.anchor.get(leg.slot);
     if (!anchor) return 0;
     const home = this.homeOf(leg, stride);
-    return (anchor[0] - home[0]) * Math.sin(stride.heading)
-      + (anchor[2] - home[2]) * Math.cos(stride.heading);
+    return dot([
+      anchor[0] - home[0], anchor[1] - home[1], anchor[2] - home[2],
+    ] as Vec3, frameOf(stride).forward);
   }
 
   /** Half the sweep, in world units: how far the foot travels either side of home. */
@@ -326,7 +425,8 @@ export class TripodGait {
     return Math.min(SWING_SECONDS, strideTime * SWING_DUTY);
   }
 
-  private begin(tripod: 0 | 1, stride: Stride, groundAt: GroundAt): void {
+  private begin(tripod: 0 | 1, stride: Stride, groundAt: GroundAt, surfaceAt?: SurfaceAt): void {
+    const frame = frameOf(stride);
     for (const leg of this.legs) {
       if (tripodOf(leg.slot) !== tripod) continue;
       const anchor = this.anchor.get(leg.slot);
@@ -346,19 +446,16 @@ export class TripodGait {
        */
       const home = this.homeOf(leg, stride);
       const ahead = this.strideOf(leg) + stride.speed * this.swingSeconds(stride.speed);
-      const landing: Vec3 = [
-        home[0] + Math.sin(stride.heading) * ahead,
-        0,
-        home[2] + Math.cos(stride.heading) * ahead,
-      ];
-      landing[1] = groundAt(landing[0], landing[2]);
+      const landing = this.plant(
+        addScaled(home, frame.forward, ahead), home, frame, groundAt, surfaceAt,
+      );
       this.anchor.set(leg.slot, landing);
       this.swing.set(leg.slot, 0);
     }
     this.last = tripod;
   }
 
-  private stateOf(leg: Leg, stride: Stride, groundAt: GroundAt): LegState {
+  private stateOf(leg: Leg, stride: Stride, groundAt: GroundAt, surfaceAt?: SurfaceAt): LegState {
     const phase = this.swing.get(leg.slot) ?? 1;
     if (phase >= 1) {
       /*
@@ -367,20 +464,27 @@ export class TripodGait {
        * `hold`, where a foot the body has dragged past its own reach gives way
        * rather than let the leg straighten into a spike.
        */
-      return { slot: leg.slot, target: this.hold(leg, stride, groundAt), swinging: false, phase: 1 };
+      return {
+        slot: leg.slot,
+        target: this.hold(leg, stride, groundAt, surfaceAt),
+        swinging: false,
+        phase: 1,
+      };
     }
     const anchor = this.anchor.get(leg.slot) ?? this.homeOf(leg, stride);
     const from = this.from.get(leg.slot) ?? anchor;
     // Eased across, so the foot leaves and lands slowly and crosses quickly.
     const t = phase * phase * (3 - 2 * phase);
+    // The lift is away from the SURFACE, whichever way that faces here.
     const lift = Math.sin(Math.PI * phase) * this.strideOf(leg) * SWING_LIFT;
+    const across: Vec3 = [
+      from[0] + (anchor[0] - from[0]) * t,
+      from[1] + (anchor[1] - from[1]) * t,
+      from[2] + (anchor[2] - from[2]) * t,
+    ];
     return {
       slot: leg.slot,
-      target: [
-        from[0] + (anchor[0] - from[0]) * t,
-        from[1] + (anchor[1] - from[1]) * t + lift,
-        from[2] + (anchor[2] - from[2]) * t,
-      ],
+      target: addScaled(across, frameOf(stride).up, lift),
       swinging: true,
       phase,
     };

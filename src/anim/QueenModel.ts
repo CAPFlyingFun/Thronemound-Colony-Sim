@@ -78,6 +78,9 @@ const FOOT = new THREE.Vector3();
 const JOINT = new THREE.Vector3();
 const TARGET = new THREE.Vector3();
 const AXIS = new THREE.Vector3();
+/* The generalized foot target: a base point plus a lift along the frame's up. */
+const BASE = new THREE.Vector3();
+const UP_SCRATCH = new THREE.Vector3();
 const WORLD_SPIN = new THREE.Quaternion();
 const LOCAL_SPIN = new THREE.Quaternion();
 const PARENT = new THREE.Quaternion();
@@ -345,8 +348,30 @@ export class QueenModel {
      * exactly zero.
      */
     anchorFor?: (limbId: string) => readonly [number, number, number] | null,
+    /**
+     * The walk's frame when she is NOT on level ground — climbing.
+     *
+     * `up` is her surface normal and `surface` answers "the elevation, ALONG
+     * THAT UP, of the surface under this world point". Every height in this
+     * solver is really an elevation along up — on level ground up is world Y
+     * and elevation is just `.y`, which is why the code below reads the same
+     * as it always did. Omitted, the solver behaves exactly as before, to the
+     * digit: the legacy `groundAt` is consulted and up is world vertical.
+     */
+    frame?: {
+      up: readonly [number, number, number];
+      surface: (x: number, y: number, z: number) => number;
+    },
   ): number {
     if (!this.loaded) return 0;
+    const upX = frame?.up[0] ?? 0;
+    const upY = frame?.up[1] ?? 1;
+    const upZ = frame?.up[2] ?? 0;
+    /** Elevation of a point along the frame's up. On level ground: its y. */
+    const elev = (v: THREE.Vector3): number => v.x * upX + v.y * upY + v.z * upZ;
+    const surfaceUnder = frame
+      ? frame.surface
+      : (x: number, y: number, z: number): number => groundAt(x, z, y);
     /*
      * Every joint this solver may rotate goes back to its base first.
      *
@@ -403,8 +428,8 @@ export class QueenModel {
       const lowest = Math.max(0, chain.length - 1 - IK_JOINTS);
 
       foot.getWorldPosition(FOOT);
-      const ground = groundAt(FOOT.x, FOOT.z, FOOT.y);
-      worstPenetration = Math.max(worstPenetration, ground + sole - FOOT.y);
+      const ground = surfaceUnder(FOOT.x, FOOT.y, FOOT.z);
+      worstPenetration = Math.max(worstPenetration, ground + sole - elev(FOOT));
       /*
        * A leg is trying to STAND on the ground and an antenna is not — she
        * sweeps them ahead of her and they should stay where the gait waves
@@ -414,22 +439,25 @@ export class QueenModel {
        * because nothing here was looking at them at all.
        */
       const anchor = limb.plant ? anchorFor?.(limb.id) ?? null : null;
-      let targetX = FOOT.x;
-      let targetZ = FOOT.z;
-      let wanted: number;
+      /*
+       * The target is a BASE POINT plus a lift along up. On level ground this
+       * is the old x/z-plus-height in different clothes; on a wall it is what
+       * lets "raise the foot clear of the surface" mean away from the bark
+       * rather than toward the sky.
+       */
       if (anchor) {
         // The stepper's world point, raised by this bone's own thickness so the
         // drawn claw rests ON the soil rather than inside it.
-        targetX = anchor[0];
-        targetZ = anchor[2];
-        wanted = anchor[1] + sole;
+        BASE.set(anchor[0], anchor[1], anchor[2]).addScaledVector(UP_SCRATCH.set(upX, upY, upZ), sole);
       } else {
-        wanted = footTarget(FOOT.y, ground, sole, limb.plant ? band : 0);
-        if (Math.abs(wanted - FOOT.y) < 1e-7) continue;
+        const wanted = footTarget(elev(FOOT), ground, sole, limb.plant ? band : 0);
+        if (Math.abs(wanted - elev(FOOT)) < 1e-7) continue;
+        BASE.copy(FOOT).addScaledVector(UP_SCRATCH.set(upX, upY, upZ), wanted - elev(FOOT));
       }
 
+      let lift = 0;
       for (let attempt = 0; attempt < IK_ATTEMPTS; attempt += 1) {
-        TARGET.set(targetX, wanted, targetZ);
+        TARGET.copy(BASE).addScaledVector(UP_SCRATCH.set(upX, upY, upZ), lift);
 
         // Tip-first: cyclic coordinate descent converges from either end, and
         // starting at the joint nearest the foot spends the correction on the
@@ -477,10 +505,12 @@ export class QueenModel {
           // Each joint against its OWN thickness. The femur is the fat one and
           // has to clear the soil by more than the tarsus does; one shared
           // number either buries the thigh or floats the foot, and it floated.
-          deepest = Math.max(deepest, groundAt(JOINT.x, JOINT.z, JOINT.y) + soleOf(joint) - JOINT.y);
+          deepest = Math.max(
+            deepest, surfaceUnder(JOINT.x, JOINT.y, JOINT.z) + soleOf(joint) - elev(JOINT),
+          );
         }
         if (deepest <= 1e-6) break;
-        wanted += deepest;
+        lift += deepest;
       }
     }
     return worstPenetration;

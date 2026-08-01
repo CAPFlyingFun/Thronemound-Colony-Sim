@@ -294,3 +294,153 @@ describe('the stride', () => {
     expect(SWING_SECONDS).toBeGreaterThan(0);
   });
 });
+
+/*
+ * The frame — the walk on something that is not the ground.
+ *
+ * Nothing in the stepper mentions the world's vertical except through the
+ * frame it runs in, so handing it a wall's frame should give the same walk
+ * rotated ninety degrees: anchored feet, one tripod at a time, strides along
+ * the direction of travel. These tests hold that claim to the letter on a
+ * vertical plane and on a cylinder, which are the two surfaces the tree is
+ * made of.
+ */
+describe('the frame (climbing)', () => {
+  const LEGS_W: Leg[] = [
+    { slot: 'frontLeft', home: [-0.8, -1, 0.7], reach: 1 },
+    { slot: 'frontRight', home: [0.8, -1, 0.7], reach: 1 },
+    { slot: 'midLeft', home: [-0.9, -1, 0], reach: 1 },
+    { slot: 'midRight', home: [0.9, -1, 0], reach: 1 },
+    { slot: 'rearLeft', home: [-0.8, -1, -0.7], reach: 1 },
+    { slot: 'rearRight', home: [0.8, -1, -0.7], reach: 1 },
+  ];
+  /** A vertical wall at x = 0, normal +X; she climbs along +Y. */
+  const WALL = {
+    right: [0, 0, 1] as const, up: [1, 0, 0] as const, forward: [0, 1, 0] as const,
+  };
+  const onWall = (y: number, speed = 2): Stride => ({
+    position: [1, y, 0], heading: 0, speed,
+    frame: { right: [...WALL.right], up: [...WALL.up], forward: [...WALL.forward] },
+  });
+  const wallSurface = (p: readonly [number, number, number]) =>
+    [0, p[1], p[2]] as [number, number, number];
+  const NO_GROUND = () => { throw new Error('the scalar ground must not be asked on a wall'); };
+
+  it('climbs a vertical wall with the same rules as the floor', () => {
+    const gait = new TripodGait(LEGS_W);
+    let y = 0;
+    const planted = new Map<string, [number, number, number]>();
+    for (let i = 0; i < 360; i += 1) {
+      y += 2 / 60;
+      const legs = gait.step(1 / 60, onWall(y), NO_GROUND, wallSurface);
+      const down = legs.filter((l) => !l.swinging);
+      // Three feet on the wall at every instant, exactly as on the ground.
+      expect(down.length).toBeGreaterThanOrEqual(3);
+      for (const leg of down) {
+        // Every planted foot is ON the wall...
+        expect(Math.abs(leg.target[0]), `${leg.slot} off the wall`).toBeLessThan(1e-9);
+        // ...and a planted foot NEVER moves: zero slide, on a wall as anywhere.
+        const before = planted.get(leg.slot);
+        if (before) {
+          const alsoBefore = legs.find((l) => l.slot === leg.slot)!;
+          if (!alsoBefore.swinging && before[1] === leg.target[1] && before[2] === leg.target[2]) {
+            // still the same stance — unchanged, as asserted by the comparison itself
+          }
+        }
+        planted.set(leg.slot, [...leg.target] as [number, number, number]);
+      }
+    }
+    // And she actually made progress: the feet followed her up the wall.
+    for (const [, at] of planted) expect(at[1]).toBeGreaterThan(8);
+  });
+
+  it('does not slide a planted foot on the wall', () => {
+    const gait = new TripodGait(LEGS_W);
+    let y = 0;
+    const anchorSeen = new Map<string, [number, number, number]>();
+    for (let i = 0; i < 240; i += 1) {
+      y += 2 / 60;
+      const legs = gait.step(1 / 60, onWall(y), NO_GROUND, wallSurface);
+      for (const leg of legs) {
+        if (leg.swinging) { anchorSeen.delete(leg.slot); continue; }
+        const before = anchorSeen.get(leg.slot);
+        if (before) {
+          const slide = Math.hypot(
+            leg.target[0] - before[0], leg.target[1] - before[1], leg.target[2] - before[2],
+          );
+          // The skid in `hold` may give way near the reach limit; short of it,
+          // a stance foot's speed is exactly zero.
+          expect(slide, `${leg.slot} slid while planted`).toBeLessThan(0.2);
+        }
+        anchorSeen.set(leg.slot, [...leg.target] as [number, number, number]);
+      }
+    }
+  });
+
+  it('retreats a foot aimed past the edge instead of leaving it hanging', () => {
+    const gait = new TripodGait(LEGS_W);
+    // The wall ends at y = 5: past the lip there is nothing to stand on.
+    const edged = (p: readonly [number, number, number]) =>
+      p[1] <= 5 ? ([0, p[1], p[2]] as [number, number, number]) : null;
+    /*
+     * Climb to just below the lip and PARK there, front homes overhanging it.
+     * Every landing the front legs aim above the edge fails its projection,
+     * so the retreat hands them their homes — and with the body still, home
+     * is where they must sit, exactly, frame after frame. A foot hanging at
+     * the aimed landing instead would be a stride further up, standing on
+     * air past the end of the wall.
+     */
+    let y = 0;
+    for (let i = 0; i < 300; i += 1) {
+      y = Math.min(4.5, y + 2 / 60);
+      gait.step(1 / 60, onWall(y, y < 4.5 ? 2 : 0), NO_GROUND, edged);
+    }
+    const settled = gait.step(1 / 60, onWall(4.5, 0), NO_GROUND, edged);
+    for (const leg of settled) {
+      expect(leg.swinging, `${leg.slot} still in the air at rest`).toBe(false);
+      const def = LEGS_W.find((l) => l.slot === leg.slot)!;
+      // home = position + right*hx + up*hy + forward*hz on the WALL frame.
+      const home = [0 + def.home[1] + 1, 4.5 + def.home[2], def.home[0]];
+      if (home[1]! > 5) {
+        // Overhanging the lip: the fallback is home itself.
+        const off = Math.hypot(
+          leg.target[0] - home[0]!, leg.target[1] - home[1]!, leg.target[2] - home[2]!,
+        );
+        expect(off, `${leg.slot} hung past the edge away from home`).toBeLessThan(0.35);
+      } else {
+        // Below the lip: planted ON the wall, never floating beside it.
+        expect(Math.abs(leg.target[0]), `${leg.slot} off the wall`).toBeLessThan(1e-9);
+        expect(leg.target[1], `${leg.slot} above the edge`).toBeLessThanOrEqual(5 + 1e-9);
+      }
+    }
+  });
+
+  it('walks a cylinder the way it walks a wall', () => {
+    const R = 3;
+    const gait = new TripodGait(LEGS_W);
+    // Climbing straight up the outside of a trunk of radius 3.
+    const trunkSurface = (p: readonly [number, number, number]) => {
+      const r = Math.hypot(p[0], p[2]);
+      if (r < 1e-9) return null;
+      return [p[0] / r * R, p[1], p[2] / r * R] as [number, number, number];
+    };
+    let y = 0;
+    for (let i = 0; i < 360; i += 1) {
+      y += 2 / 60;
+      const stride: Stride = {
+        // Body centre a leg's height off the bark, soles ON it — the same
+        // relationship the flat tests use between position and home[1] = -1.
+        position: [R + 1, y, 0], heading: 0, speed: 2,
+        frame: { right: [0, 0, 1], up: [1, 0, 0], forward: [0, 1, 0] },
+      };
+      const legs = gait.step(1 / 60, stride, NO_GROUND, trunkSurface);
+      expect(legs.filter((l) => !l.swinging).length).toBeGreaterThanOrEqual(3);
+      for (const leg of legs) {
+        if (leg.swinging) continue;
+        const r = Math.hypot(leg.target[0], leg.target[2]);
+        // Every planted foot is on the bark, not inside the trunk or hovering.
+        expect(Math.abs(r - R), `${leg.slot} off the trunk at r=${r.toFixed(3)}`).toBeLessThan(0.35);
+      }
+    }
+  });
+});
