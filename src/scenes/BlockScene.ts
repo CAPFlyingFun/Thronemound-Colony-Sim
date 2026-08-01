@@ -61,8 +61,26 @@ const MM = 5;
 const BLOCK_MM = 64;
 const CELL_MM = 0.5;
 const CELL = CELL_MM / MM;
-const CELLS = Math.round(BLOCK_MM / CELL_MM);
+const BLOCK_CELLS = Math.round(BLOCK_MM / CELL_MM);
+/**
+ * Air around the block, and it is not padding — it is the only reason the
+ * outside of the cube gets a surface at all.
+ *
+ * Surface nets draws where the field CROSSES zero. Filled as
+ * `min(x, SPAN - x, ...)` the field is zero on the boundary sample and
+ * positive everywhere inside: it never goes negative, so there is no
+ * crossing to draw and the outer faces come out missing or patchy — you can
+ * see straight through the block from outside, which is exactly what was
+ * reported. Three cells of genuinely negative space on every side gives the
+ * mesher the sign change it needs, and the faces close.
+ */
+const MARGIN_CELLS = 3;
+const CELLS = BLOCK_CELLS + MARGIN_CELLS * 2;
 const SPAN = CELLS * CELL;
+/** The block's own bounds inside that field, and its middle. */
+const LOW = MARGIN_CELLS * CELL;
+const HIGH = LOW + BLOCK_CELLS * CELL;
+const MID = (LOW + HIGH) * 0.5;
 
 /** Cells per meshed chunk, so a bite rebuilds a corner and not the cube. */
 const CHUNK = 32;
@@ -96,8 +114,29 @@ export class BlockScene {
   private readonly field: DensityField;
   private readonly queen: QueenModel;
   private readonly chunks = new Map<string, THREE.Mesh>();
+  /*
+   * DOUBLE SIDED, and not as a shrug — as the only honest answer until the
+   * mesher is fixed.
+   *
+   * `buildSurfaceNets` winds its NEGATIVE-facing surfaces backwards. Tallied
+   * on this very block, triangle by triangle: the +X, +Y and +Z faces come
+   * out ~32,000 wound outward and a few hundred not, while X-, Y- and Z-
+   * come out 31,752 wound INWARD and not one correct. Backface culling then
+   * removes exactly those three faces, which is the "terrain is not showing
+   * on all directions" this room was reported for — and, far more
+   * importantly, it is why a tunnel CEILING is invisible from underneath:
+   * a ceiling is a -Y surface.
+   *
+   * The heightfield rooms never showed it because a landscape's surface
+   * faces up, and +Y is the case that works.
+   *
+   * Drawing both sides costs fill rate and hides the bug rather than fixing
+   * it; the mesher is shared with the streamed world and its watertightness
+   * suite, so it gets its own pass rather than a guess at the end of this
+   * one.
+   */
   private readonly material = new THREE.MeshStandardMaterial({
-    color: 0x7a5136, roughness: 0.95, metalness: 0,
+    color: 0x7a5136, roughness: 0.95, metalness: 0, side: THREE.DoubleSide,
   });
 
   /** Where she is, and the frame she is in. `up` is the face she is on. */
@@ -160,7 +199,7 @@ export class BlockScene {
      * surprising part.
      */
     this.field.fill((x, y, z) => Math.min(
-      x, SPAN - x, y, SPAN - y, z, SPAN - z,
+      x - LOW, HIGH - x, y - LOW, HIGH - y, z - LOW, HIGH - z,
     ));
     this.remeshAll();
 
@@ -169,7 +208,7 @@ export class BlockScene {
     this.scene.add(this.queen.root);
 
     // On top of the block, in the middle, facing +Z.
-    this.at.set(SPAN * 0.5, SPAN + RIDE, SPAN * 0.5);
+    this.at.set(MID, HIGH + RIDE, MID);
     this.follow.body.copy(this.at);
     this.follow.target.copy(this.at);
 
@@ -407,9 +446,17 @@ export class BlockScene {
    * vertical except gravity, and gravity only applies once she has let go.
    */
   private step(dt: number): void {
+    /*
+     * The sign is REPORTED, not reasoned: pushing the stick right turned her
+     * left. The lab's own steering carries the same comment for the same
+     * reason — forward is (sin h, 0, cos h), so a rising heading swings her
+     * nose from +Z toward +X, and with the camera behind her that is the
+     * LEFT of the screen. The arithmetic is consistent and is the mirror of
+     * what a thumb means.
+     */
     const yaw = this.input.yaw * YAW_RATE * dt;
     if (Math.abs(yaw) > 1e-9) {
-      this.forward.applyAxisAngle(this.up, -yaw).normalize();
+      this.forward.applyAxisAngle(this.up, yaw).normalize();
     }
     this.turnRate = this.input.yaw * YAW_RATE;
 
@@ -467,12 +514,12 @@ export class BlockScene {
     this.fallSpeed += GRAVITY * dt;
     this.at.y -= this.fallSpeed * dt;
     const probe = this.at.clone();
-    if (this.solidAt(probe) || this.at.y < -SPAN) {
+    if (this.solidAt(probe) || this.at.y < LOW - SPAN) {
       // Landed (or lost): put her back on the block's top and re-grip.
       const from = new THREE.Vector3(
-        THREE.MathUtils.clamp(this.at.x, CELL * 4, SPAN - CELL * 4),
-        SPAN + GRIP_LIFT * 2,
-        THREE.MathUtils.clamp(this.at.z, CELL * 4, SPAN - CELL * 4),
+        THREE.MathUtils.clamp(this.at.x, LOW + CELL * 4, HIGH - CELL * 4),
+        HIGH + GRIP_LIFT * 2,
+        THREE.MathUtils.clamp(this.at.z, LOW + CELL * 4, HIGH - CELL * 4),
       );
       const hit = this.cast(from, new THREE.Vector3(0, -1, 0), SPAN * 2);
       if (hit) {
