@@ -1,4 +1,11 @@
 import './style.css';
+import { registerServiceWorker } from './pwa';
+
+/*
+ * Offline play and the update prompt. First, so a scene that throws while
+ * loading still leaves an installable, updatable app behind it.
+ */
+registerServiceWorker();
 
 /*
  * Routing.
