@@ -1321,6 +1321,22 @@ for (const view of CASES) {
   const page = await browser.newPage({
     viewport: { width: 932, height: 430 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true,
   });
+
+  /*
+   * The bare path with NO query at all is the colony sim now — the routing
+   * flip that retired the dig room to ?scene=dig. Checked by loading it,
+   * because the installed app's start_url is this exact URL and a PWA that
+   * opens the wrong scene is a fault no other block would ever meet: they
+   * all ask for the room by name.
+   */
+  await page.goto(URL.split('?')[0], { waitUntil: 'domcontentloaded' });
+  const landed = await page.waitForFunction(() => {
+    const menu = document.querySelector('.lab-menu');
+    return !!menu && getComputedStyle(menu).display !== 'none';
+  }, null, { timeout: 45000 }).catch(() => null);
+  if (!landed) fail('the bare URL did not boot the colony sim front door');
+  else ok('the bare URL (and so the installed app) opens the colony sim');
+
   const bare = URL.replace('&nomenu=1', '');
   await page.goto(bare, { waitUntil: 'networkidle' });
   await page.waitForFunction(
@@ -1494,6 +1510,48 @@ for (const view of CASES) {
   } else {
     ok(`NEW GAME wipes it all: save gone, 0 samples, ground back to ${wiped.floorMm.toFixed(1)} mm, `
       + `her back on the bench ${wiped.benchMm.toFixed(0)} mm away`);
+  }
+
+  /*
+   * The camera pod: the first-person eye as an object in the room. In third
+   * person it is parked on the driven ant's head, on the exact seat first
+   * person boards; going first person is climbing in, so the pod and the
+   * model both leave the frame; stepping back out re-parks it.
+   */
+  const pod = await page.evaluate(() => {
+    const lab = window.labScene;
+    lab.stepForTest(1 / 60, 30);
+    const read = () => ({
+      shown: lab.eyePod.visible,
+      modelShown: lab.queen.root.visible,
+      first: lab.follow.firstPerson,
+      aboveMm: (lab.eyePod.position.y - lab.antPosition.y) * 5,
+      offMm: Math.hypot(
+        lab.eyePod.position.x - lab.antPosition.x,
+        lab.eyePod.position.z - lab.antPosition.z,
+      ) * 5,
+    });
+    const parked = read();
+    lab.follow.mode = 'first';
+    lab.stepForTest(1 / 60, 10);
+    const boarded = read();
+    lab.follow.mode = 'auto';
+    lab.stepForTest(1 / 60, 10);
+    const out = read();
+    return { parked, boarded, out };
+  });
+  if (!pod.parked.shown || pod.parked.first) {
+    fail('the camera pod is not parked in third person');
+  } else if (!(pod.parked.aboveMm > 0.5 && pod.parked.aboveMm < 5) || !(pod.parked.offMm < 2)) {
+    fail(`the pod parks ${pod.parked.aboveMm.toFixed(2)} mm up and ${pod.parked.offMm.toFixed(2)} mm off her head`);
+  } else if (!pod.boarded.first || pod.boarded.shown || pod.boarded.modelShown) {
+    fail(`boarding the pod: firstPerson ${pod.boarded.first}, pod shown ${pod.boarded.shown}, `
+      + `model shown ${pod.boarded.modelShown}`);
+  } else if (!pod.out.shown) {
+    fail('stepping back to third person did not re-park the pod');
+  } else {
+    ok(`the camera pod parks on her head (${pod.parked.aboveMm.toFixed(1)} mm up, `
+      + `${pod.parked.offMm.toFixed(2)} mm off axis), boards in first person, and returns`);
   }
   await page.close();
 }

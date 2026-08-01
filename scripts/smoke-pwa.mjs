@@ -27,10 +27,10 @@ const context = await browser.newContext({
 });
 const page = await context.newPage();
 /*
- * The lab route rather than the default one: the dig room streams
- * continuously and never reaches `networkidle`, and nothing here is about
- * which scene loads — the manifest, the icons and the worker are the same on
- * every route because they hang off the document.
+ * The colony sim is the default route now, but it is still asked for by name
+ * with the menu suppressed: nothing here is about which scene loads — the
+ * manifest, the icons and the worker are the same on every route because
+ * they hang off the document — and `nomenu` keeps the boot deterministic.
  */
 const GAME = `${URL_BASE}?map=densityterrainlab&nomenu=1`;
 await page.goto(GAME, { waitUntil: 'networkidle' });

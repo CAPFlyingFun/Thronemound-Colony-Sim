@@ -362,6 +362,31 @@ const PROBE = new THREE.Vector3();
 const SENSE = new THREE.Vector3();
 
 /**
+ * The camera pod: the dig room's player capsule, made a citizen of this room.
+ *
+ * Half a queen-head across and about a head tall — big enough to read as an
+ * object riding her, small enough not to be a rider. Sized in world units
+ * rather than off the rig because it is the CAMERA's body, not hers: it must
+ * not change size when control hands over to a different caste.
+ */
+const POD_RADIUS = 0.16;
+const POD_MID = 0.2;
+/**
+ * How far the pod rides ABOVE the eye seat. The seat is at head height — the
+ * first-person camera sits inside her head, which is the point of it — so a
+ * shell drawn exactly there is half-buried in her own silhouette and reads
+ * as a glitch, not a vehicle. Perched a shell's reach higher its base kisses
+ * the seat and the whole pod shows; boarding drops the camera to the seat
+ * directly beneath it.
+ */
+const POD_PERCH = POD_MID * 0.5 + POD_RADIUS + 0.06;
+/** Scratch for seating the pod, all frames, no allocation. */
+const POD_FWD = new THREE.Vector3();
+const POD_RIGHT = new THREE.Vector3();
+const POD_LIFT = new THREE.Vector3();
+const POD_MAT = new THREE.Matrix4();
+
+/**
  * The cone that decides whether she has a ceiling: straight up, and four rays
  * at forty degrees. See `underground` — a majority of these hitting soil is
  * what "covered" means, so a shaft counts (walls all round), a tunnel counts
@@ -689,6 +714,8 @@ export class DensityTerrainLabScene {
   private readonly padButtons: HTMLButtonElement[] = [];
   private resizeObserver: ResizeObserver | null = null;
   private menu!: LabMenu;
+  /** The first-person camera's body, visible whenever the player is not in it. */
+  private readonly eyePod: THREE.Group;
 
   constructor(private readonly host: HTMLElement) {
     host.replaceChildren();
@@ -741,6 +768,35 @@ export class DensityTerrainLabScene {
     trunk.castShadow = true;
     trunk.receiveShadow = true;
     this.scene.add(trunk);
+
+    /*
+     * The camera pod, parked in the room. The first-person view was an
+     * abstraction — a point the camera teleported to — and now it is a THING:
+     * a little glass capsule riding the driven ant's head, sitting on the
+     * exact eye seat first person uses. In third person you can see where
+     * going first-person will put you; going first person is climbing into
+     * it, so it hides rather than fill the lens with its own shell. There is
+     * one pod, not one per ant, and it hands over with control, because what
+     * it embodies is the player's eye and there is one of those.
+     */
+    this.eyePod = new THREE.Group();
+    this.eyePod.name = 'eye-pod';
+    const shell = new THREE.Mesh(
+      new THREE.CapsuleGeometry(POD_RADIUS, POD_MID, 6, 14),
+      new THREE.MeshStandardMaterial({
+        color: 0xdff2ff, transparent: true, opacity: 0.32,
+        roughness: 0.18, metalness: 0, depthWrite: false,
+      }),
+    );
+    // The lens, so the pod shows which way it is looking even parked.
+    const lens = new THREE.Mesh(
+      new THREE.SphereGeometry(POD_RADIUS * 0.42, 10, 8),
+      new THREE.MeshStandardMaterial({ color: 0x20303c, roughness: 0.3 }),
+    );
+    lens.position.set(0, POD_MID * 0.25, POD_RADIUS * 0.78);
+    this.eyePod.add(shell, lens);
+    this.eyePod.visible = false;
+    this.scene.add(this.eyePod);
 
     (window as unknown as { labScene?: unknown }).labScene = this;
 
@@ -927,6 +983,13 @@ export class DensityTerrainLabScene {
     this.pending.length = 0;
     this.pendingKeys.clear();
     this.terrainMaterial.dispose();
+    this.scene.remove(this.eyePod);
+    for (const part of this.eyePod.children) {
+      if (part instanceof THREE.Mesh) {
+        part.geometry.dispose();
+        if (part.material instanceof THREE.Material) part.material.dispose();
+      }
+    }
     this.queen.dispose();
     for (const pellet of this.pellets) {
       pellet.mesh.geometry.dispose();
@@ -3460,6 +3523,28 @@ export class DensityTerrainLabScene {
     }
     LAST_AT.copy(this.antPosition);
     this.wasCutting = bore.digging;
+    /*
+     * Seat the pod on the eye seat — `follow.eye`, the same local offset the
+     * first-person camera boards, so RECENTRE EYE and a saved placement move
+     * the parked pod too and it never advertises a view the camera will not
+     * actually give. Built on her BODY frame, not the look: dragging the
+     * camera around is the player glancing, and the pod is her hat.
+     */
+    if (this.queenReady) {
+      POD_LIFT.copy(this.gripping ? this.up : WORLD_UP);
+      if (this.gripping) POD_FWD.copy(this.climbForward);
+      else POD_FWD.set(Math.sin(this.facing), 0, Math.cos(this.facing));
+      POD_RIGHT.crossVectors(POD_FWD, POD_LIFT).normalize();
+      POD_FWD.crossVectors(POD_LIFT, POD_RIGHT).normalize();
+      POD_MAT.makeBasis(POD_RIGHT, POD_LIFT, POD_FWD);
+      this.eyePod.quaternion.setFromRotationMatrix(POD_MAT);
+      this.eyePod.position.copy(this.antPosition)
+        .addScaledVector(POD_RIGHT, this.follow.eye.x)
+        .addScaledVector(POD_LIFT, this.follow.eye.y + POD_PERCH)
+        .addScaledVector(POD_FWD, this.follow.eye.z);
+    }
+    // Parked and visible from outside; boarded and gone from inside.
+    this.eyePod.visible = this.queenReady && !this.follow.firstPerson;
     this.digHud.visible = this.follow.firstPerson;
     // The stat block yields to the instruments — dimmed, not removed, so the
     // debugging numbers stay reachable and the smoke can still read them.
