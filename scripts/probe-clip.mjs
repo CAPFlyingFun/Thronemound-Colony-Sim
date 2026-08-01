@@ -37,7 +37,7 @@
 import { chromium } from 'playwright';
 
 const URL = process.env.SMOKE_URL
-  ?? 'http://localhost:4173/Thronemound-Colony-Sim/?map=densityterrainlab';
+  ?? 'http://localhost:4173/Thronemound-Colony-Sim/?map=densityterrainlab&nomenu=1';
 
 const browser = await chromium.launch({
   executablePath: process.env.CHROME_PATH ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',

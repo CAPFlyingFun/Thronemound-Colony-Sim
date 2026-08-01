@@ -19,7 +19,7 @@
 import { chromium } from 'playwright';
 
 const URL = process.env.SMOKE_URL
-  ?? 'http://localhost:4173/Thronemound-Colony-Sim/?map=densityterrainlab';
+  ?? 'http://localhost:4173/Thronemound-Colony-Sim/?map=densityterrainlab&nomenu=1';
 const OUT = process.env.SMOKE_OUT ?? '/tmp/density-smoke';
 
 const browser = await chromium.launch({
@@ -1302,6 +1302,199 @@ for (const view of CASES) {
   } else ok('the ground guard is idle, as it should be when the solvers are right');
 
   if (errors.length) fail(`walk run: ${errors.slice(0, 2).join(' | ')}`);
+  await page.close();
+}
+
+/*
+ * The front door, and the save behind it.
+ *
+ * Booted BARE — every other block asks for `nomenu=1` because it is about
+ * ants, but this one is about the menu itself: up before anyone touches
+ * anything, RESUME only offered once there is a world to resume, NEW GAME
+ * costing two taps. The save is proved the only way that means anything: dig
+ * a real shaft, save, tear the whole page down, and demand the same shaft
+ * back — floor height, tally, sample count and her own position inside it —
+ * then erase it and demand the world whole again. Reading the JSON back
+ * without the reload would prove only that JSON.parse works.
+ */
+{
+  const page = await browser.newPage({
+    viewport: { width: 932, height: 430 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true,
+  });
+  const bare = URL.replace('&nomenu=1', '');
+  await page.goto(bare, { waitUntil: 'networkidle' });
+  await page.waitForFunction(
+    () => window.labScene?.queenReady === true, null, { timeout: 60000 },
+  );
+
+  const door = await page.evaluate(() => {
+    const menu = document.querySelector('.lab-menu');
+    return {
+      shown: !!menu && getComputedStyle(menu).display !== 'none',
+      title: menu?.querySelector('.lab-menu__title')?.textContent ?? '',
+      version: menu?.querySelector('.lab-menu__version')?.textContent ?? '',
+      labels: [...menu?.querySelectorAll('.lab-menu__button') ?? []].map((b) => b.textContent),
+    };
+  });
+  if (!door.shown) fail('booting without ?nomenu did not raise the menu');
+  else if (door.title !== 'THRONEMOUND') fail(`the menu is titled "${door.title}"`);
+  else ok('the menu greets a bare boot');
+  if (!/^v\d+\.\d+\.\d+ · build /.test(door.version)) {
+    fail(`the version line reads "${door.version}"`);
+  } else ok(`it carries the version (${door.version.split(' · ')[0]})`);
+  if (!door.labels.includes('START')) {
+    fail(`a fresh profile offers ${door.labels.join(' / ')} — expected START, not a resume of nothing`);
+  } else ok('a fresh profile is offered START, not RESUME');
+
+  const press = (label) => page.evaluate((want) => {
+    const b = [...document.querySelectorAll('.lab-menu__button')]
+      .find((el) => el.textContent === want);
+    if (!b) return false;
+    b.click();
+    return true;
+  }, label);
+
+  // Through the door and down a proving shaft, on untouched ground.
+  if (!(await press('START'))) fail('no START button to press');
+  const dug = await page.evaluate(() => {
+    const lab = window.labScene;
+    if (document.querySelector('.lab-menu').style.display !== 'none') return null;
+    lab.antPosition.set(24, 0, 26);
+    lab.stepForTest(1 / 60, 120);
+    const site = { x: lab.antPosition.x, z: lab.antPosition.z };
+    const flatMm = lab.groundAt(site.x, site.z) * 5;
+    while (lab.bore.pitch > -Math.PI / 2 + 1e-9) lab.bore.aim(-1);
+    lab.input.dig = 1;
+    lab.input.walk = 1;
+    lab.stepForTest(1 / 60, 60 * 5);
+    lab.input.dig = 0;
+    lab.input.walk = 0;
+    lab.stepForTest(1 / 60, 30);
+    return {
+      site,
+      flatMm,
+      floorMm: lab.groundAt(site.x, site.z) * 5,
+      edited: lab.stream.editedSamples,
+      removed: lab.totalRemoved,
+    };
+  });
+  if (!dug) fail('START did not close the menu');
+  else if (!(dug.edited > 0) || !(dug.floorMm < dug.flatMm - 2)) {
+    fail(`the proving shaft did not take: ${dug.flatMm.toFixed(1)} -> ${dug.floorMm.toFixed(1)} mm, `
+      + `${dug.edited} samples edited`);
+  } else {
+    ok(`a proving shaft to save (${dug.flatMm.toFixed(1)} -> ${dug.floorMm.toFixed(1)} mm, `
+      + `${dug.edited} samples, ${dug.removed.toFixed(2)} removed)`);
+  }
+
+  await page.evaluate(() => document.querySelector('.density-lab-reset')?.click());
+  const wrote = await page.evaluate(() => {
+    const b = [...document.querySelectorAll('.lab-menu__button')].find((el) => el.textContent === 'SAVE');
+    if (!b) return null;
+    b.click();
+    return { note: b.textContent, wrote: localStorage.getItem('thronemound.lab.save') !== null };
+  });
+  if (!wrote) fail('the menu offers no SAVE');
+  else if (!wrote.wrote) fail(`SAVE wrote nothing and the button says "${wrote.note}"`);
+  else ok(`SAVE reaches storage and acknowledges ("${wrote.note}")`);
+
+  /*
+   * The page torn down entirely and booted again — the same teardown as a
+   * closed tab, which is what a save is for.
+   */
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForFunction(
+    () => window.labScene?.queenReady === true, null, { timeout: 60000 },
+  );
+  const offer = await page.evaluate(() => {
+    const menu = document.querySelector('.lab-menu');
+    const save = JSON.parse(localStorage.getItem('thronemound.lab.save'));
+    return {
+      shown: !!menu && getComputedStyle(menu).display !== 'none',
+      first: menu?.querySelector('.lab-menu__button')?.textContent ?? '',
+      removed: save.totalRemoved,
+      her: save.ants[save.driven],
+    };
+  });
+  if (!offer.shown || offer.first !== 'RESUME') {
+    fail(`after a save and a reload the menu leads with "${offer.first}"`);
+  } else ok('a reload later, RESUME leads the menu');
+
+  await press('RESUME');
+  const resumed = await page.evaluate((expect) => {
+    const lab = window.labScene;
+    const off = () => Math.hypot(
+      lab.antPosition.x - expect.her.x,
+      lab.antPosition.y - expect.her.y,
+      lab.antPosition.z - expect.her.z,
+    ) * 5;
+    const atOnce = {
+      closed: document.querySelector('.lab-menu').style.display === 'none',
+      edited: lab.stream.editedSamples,
+      removed: lab.totalRemoved,
+      floorMm: lab.groundAt(expect.site.x, expect.site.z) * 5,
+      offMm: off(),
+    };
+    // And she has to STAY: a restored shaft that is mesh but not field would
+    // let her fall straight through the floor she was saved standing on.
+    lab.stepForTest(1 / 60, 90);
+    return { ...atOnce, settledMm: off() };
+  }, { site: dug?.site ?? { x: 24, z: 26 }, her: offer.her });
+  if (!resumed.closed) fail('RESUME left the menu up');
+  if (dug && resumed.edited !== dug.edited) {
+    fail(`the save restored ${resumed.edited} edited samples of ${dug.edited}`);
+  } else if (dug && Math.abs(resumed.floorMm - dug.floorMm) > 0.5) {
+    fail(`the shaft floor came back at ${resumed.floorMm.toFixed(2)} mm, saved at ${dug.floorMm.toFixed(2)}`);
+  } else if (Math.abs(resumed.removed - offer.removed) > 1e-6) {
+    fail(`the tally came back ${resumed.removed} of ${offer.removed}`);
+  } else if (!(resumed.offMm < 2)) {
+    fail(`she resumed ${resumed.offMm.toFixed(2)} mm from where she was saved`);
+  } else if (!(resumed.settledMm < 4)) {
+    fail(`the restored floor did not hold her: ${resumed.settledMm.toFixed(2)} mm adrift after settling`);
+  } else {
+    ok(`RESUME rebuilds the world: ${resumed.edited} samples, floor ${resumed.floorMm.toFixed(1)} mm, `
+      + `she is ${resumed.offMm.toFixed(2)} mm from her save and stays (${resumed.settledMm.toFixed(2)} mm settled)`);
+  }
+
+  // NEW GAME: armed on the first tap, fired on the second, and total.
+  await page.evaluate(() => document.querySelector('.density-lab-reset')?.click());
+  const armed = await page.evaluate(() => {
+    const b = [...document.querySelectorAll('.lab-menu__button')].find((el) => el.textContent === 'NEW GAME');
+    if (!b) return null;
+    b.click();
+    return b.textContent;
+  });
+  if (armed !== 'ERASE SAVE & START OVER?') {
+    fail(`one tap on NEW GAME reads "${armed}" — it should arm, not fire`);
+  } else ok('NEW GAME arms on the first tap instead of firing');
+  const wiped = await page.evaluate((site) => {
+    const b = [...document.querySelectorAll('.lab-menu__button')]
+      .find((el) => el.textContent === 'ERASE SAVE & START OVER?');
+    if (!b) return null;
+    b.click();
+    const lab = window.labScene;
+    return {
+      saveGone: localStorage.getItem('thronemound.lab.save') === null,
+      menuGone: document.querySelector('.lab-menu').style.display === 'none',
+      edited: lab.stream.editedSamples,
+      removed: lab.totalRemoved,
+      floorMm: lab.groundAt(site.x, site.z) * 5,
+      benchMm: Math.hypot(lab.antPosition.x - site.x, lab.antPosition.z - site.z) * 5,
+    };
+  }, dug?.site ?? { x: 24, z: 26 });
+  if (!wiped) fail('the armed NEW GAME button vanished before the second tap');
+  else if (!wiped.saveGone) fail('NEW GAME left the save behind');
+  else if (!wiped.menuGone) fail('NEW GAME left the menu up');
+  else if (wiped.edited !== 0 || wiped.removed !== 0) {
+    fail(`NEW GAME left ${wiped.edited} edited samples and a tally of ${wiped.removed}`);
+  } else if (dug && !(Math.abs(wiped.floorMm - dug.flatMm) < 0.5)) {
+    fail(`NEW GAME left the shaft: floor ${wiped.floorMm.toFixed(2)} mm where flat was ${dug.flatMm.toFixed(2)}`);
+  } else if (!(wiped.benchMm > 25)) {
+    fail(`NEW GAME left her at the shaft (${wiped.benchMm.toFixed(0)} mm from it)`);
+  } else {
+    ok(`NEW GAME wipes it all: save gone, 0 samples, ground back to ${wiped.floorMm.toFixed(1)} mm, `
+      + `her back on the bench ${wiped.benchMm.toFixed(0)} mm away`);
+  }
   await page.close();
 }
 

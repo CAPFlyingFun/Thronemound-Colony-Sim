@@ -5,6 +5,7 @@ import { clampStickOrigin, stickVector } from '../voxel/locomotion';
 import { FollowCamera, type CameraMode } from './FollowCamera';
 import { TripodGait, type SurfaceAt } from '../anim/tripod';
 import { DigHud } from './DigHud';
+import { LabMenu } from './LabMenu';
 import { CASTE_LENGTH_MM } from '../anim/hexapod';
 import { buildSurfaceNets } from '../density/SurfaceNets';
 import { TerrainStream } from '../density/TerrainStream';
@@ -319,6 +320,41 @@ const EYE_NUDGE = 0.5 / WORLD_UNIT_MM;
 const EYE_RANGE = 12 / WORLD_UNIT_MM;
 /** Local-storage key for the camera settings, so a placement survives a reload. */
 const CAMERA_PREFS = 'thronemound.lab.camera';
+/** Local-storage key for the save: the world's digs and everyone's position. */
+const SAVE_KEY = 'thronemound.lab.save';
+
+/**
+ * A terrain buffer is binary and localStorage is strings, so the crossing is
+ * base64 — chunked, because `String.fromCharCode(...megabyte)` blows the
+ * argument limit on the browsers that matter.
+ */
+function toBase64(bytes: Uint8Array): string {
+  let text = '';
+  for (let at = 0; at < bytes.length; at += 0x8000) {
+    text += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+  }
+  return btoa(text);
+}
+
+function fromBase64(text: string): Uint8Array {
+  const binary = atob(text);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+/** What goes to disk. `world` guards against loading across format changes. */
+interface LabSave {
+  v: 1;
+  world: string;
+  when: number;
+  driven: number;
+  facing: number;
+  pitch: number;
+  totalRemoved: number;
+  ants: Array<{ x: number; y: number; z: number; f: number }>;
+  dug: string;
+}
 
 /** Scratch for the camera sight-line march, so it allocates nothing. */
 const PROBE = new THREE.Vector3();
@@ -652,6 +688,7 @@ export class DensityTerrainLabScene {
   private readonly walkButton: HTMLButtonElement;
   private readonly padButtons: HTMLButtonElement[] = [];
   private resizeObserver: ResizeObserver | null = null;
+  private menu!: LabMenu;
 
   constructor(private readonly host: HTMLElement) {
     host.replaceChildren();
@@ -673,10 +710,9 @@ export class DensityTerrainLabScene {
      * Side by side, across her heading rather than along it, so all three are
      * in frame at once from the follow camera's usual quarter view.
      */
+    this.placeBench();
     for (let i = 0; i < this.ants.length; i += 1) {
       const ant = this.ants[i]!;
-      const across = (i - (this.ants.length - 1) / 2) * BENCH_SPACING;
-      ant.position.set(start + across, streamGroundHeight(start + across, start), start);
       this.scene.add(ant.model.root);
       void ant.model.load().then((ok) => {
         ant.ready = ok;
@@ -800,9 +836,16 @@ export class DensityTerrainLabScene {
 
     this.buildCameraPanel(hud, actions);
 
+    /*
+     * MENU where RESET used to be. A bare button that instantly erased the
+     * world was always a misdeal on a phone edge; the same act now lives
+     * behind NEW GAME with a second tap to confirm, and the button that
+     * replaced it is the door to everything else.
+     */
     this.resetButton = document.createElement('button');
     this.resetButton.className = 'density-lab-button density-lab-reset';
-    this.resetButton.textContent = 'RESET';
+    this.resetButton.textContent = 'MENU';
+    this.resetButton.setAttribute('aria-label', 'Open the menu');
     actions.appendChild(this.resetButton);
 
     this.buildStick(hud);
@@ -810,7 +853,44 @@ export class DensityTerrainLabScene {
     this.digButton.addEventListener('pointerup', this.onDigUp);
     this.digButton.addEventListener('pointercancel', this.onDigUp);
     this.digButton.addEventListener('pointerleave', this.onDigUp);
-    this.resetButton.addEventListener('click', this.resetTerrain);
+    this.resetButton.addEventListener('click', () => this.openMenu());
+
+    this.menu = new LabMenu({
+      hasSave: () => this.hasSave(),
+      onResume: (load) => { if (load) this.loadSave(); },
+      onNewGame: () => this.newGame(),
+      onSave: () => this.saveGame(),
+      settings: {
+        getMode: () => this.follow.mode,
+        setMode: (mode) => {
+          this.follow.mode = mode;
+          this.saveCameraPrefs();
+        },
+        getRunning: () => this.running,
+        setRunning: (running) => {
+          this.running = running;
+          this.walkButton.textContent = running ? 'RUN' : 'CRAWL';
+          this.updateStatus();
+        },
+        eraseSave: () => {
+          try { window.localStorage.removeItem(SAVE_KEY); } catch { /* storage denied */ }
+        },
+      },
+    });
+    host.appendChild(this.menu.root);
+    /*
+     * The front door, unless automation asked for the game bare. The world
+     * boots and idles underneath it — three ants standing on a mound are
+     * their own attract screen.
+     */
+    if (!new URLSearchParams(window.location.search).has('nomenu')) this.menu.open(true);
+    /*
+     * And the phone putting the tab away is the save point that costs the
+     * player nothing: backgrounded mid-dig, the mound keeps.
+     */
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden' && this.queenReady) this.saveGame();
+    });
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
 
@@ -836,7 +916,6 @@ export class DensityTerrainLabScene {
     this.digButton.removeEventListener('pointerup', this.onDigUp);
     this.digButton.removeEventListener('pointercancel', this.onDigUp);
     this.digButton.removeEventListener('pointerleave', this.onDigUp);
-    this.resetButton.removeEventListener('click', this.resetTerrain);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     for (const mesh of this.chunks.values()) {
@@ -1071,6 +1150,11 @@ export class DensityTerrainLabScene {
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
     if (event.repeat) return;
+    if (event.key === 'Escape') {
+      if (this.menu.isOpen) this.menu.dismiss();
+      else this.openMenu();
+      return;
+    }
     if (event.code === 'Space') {
       event.preventDefault();
       this.input.dig = 1;
@@ -1332,9 +1416,8 @@ export class DensityTerrainLabScene {
     this.pending.push([gx, gy, gz]);
   }
 
-  private readonly resetTerrain = (): void => {
-    this.stream.reset();
-    this.totalRemoved = 0;
+  /** Throw away every mesh and pellet and rebuild from the field as it is. */
+  private rebuildWorld(): void {
     for (const pellet of this.pellets) {
       this.scene.remove(pellet.mesh);
       pellet.mesh.geometry.dispose();
@@ -1350,7 +1433,150 @@ export class DensityTerrainLabScene {
     this.pending.length = 0;
     this.pendingKeys.clear();
     this.refreshResidency(true);
+  }
+
+  private readonly resetTerrain = (): void => {
+    this.stream.reset();
+    this.totalRemoved = 0;
+    this.rebuildWorld();
   };
+
+  /** Everyone back on the bench, facing forward, as the constructor set them. */
+  private placeBench(): void {
+    const start = WORLD_SPAN * 0.5;
+    for (let i = 0; i < this.ants.length; i += 1) {
+      const ant = this.ants[i]!;
+      const across = (i - (this.ants.length - 1) / 2) * BENCH_SPACING;
+      ant.position.set(start + across, streamGroundHeight(start + across, start), start);
+      ant.facing = 0;
+    }
+  }
+
+  /** Everything that must not survive a teleport: motion, grips, latches. */
+  private resetDynamics(): void {
+    this.velocity.set(0, 0, 0);
+    this.walkSpeed = 0;
+    this.fallSpeed = 0;
+    this.gait = null;
+    this.gripping = false;
+    this.boreEngaged = false;
+    this.overHole = false;
+    this.dugDistance = 0;
+    this.wasCutting = false;
+    this.up.set(0, 1, 0);
+    this.input.walk = 0;
+    this.input.yaw = 0;
+    this.input.dig = 0;
+  }
+
+  private openMenu(): void {
+    // Whatever a thumb was holding is let go of before the sheet covers it.
+    this.input.walk = 0;
+    this.input.yaw = 0;
+    this.input.dig = 0;
+    this.menu.open(false);
+  }
+
+  private hasSave(): boolean {
+    try {
+      return window.localStorage.getItem(SAVE_KEY) !== null;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Snapshot the whole game: every dig in the world, everyone's position, the
+   * bore's aim, the tally. True when it reached disk.
+   */
+  private saveGame(): boolean {
+    if (!this.queenReady) return false;
+    // The driven ant's live state lives outside the bench array; fold it back
+    // the same way handing over control does.
+    const driven = this.ants[this.driven]!;
+    driven.position.copy(this.antPosition);
+    driven.facing = this.facing;
+    const save: LabSave = {
+      v: 1,
+      world: `${WORLD_TILES}x${CELLS_Y}`,
+      when: Date.now(),
+      driven: this.driven,
+      facing: this.facing,
+      pitch: this.bore.pitch,
+      totalRemoved: this.totalRemoved,
+      ants: this.ants.map((ant) => ({
+        x: ant.position.x, y: ant.position.y, z: ant.position.z, f: ant.facing,
+      })),
+      dug: toBase64(this.stream.serializeEdits()),
+    };
+    try {
+      window.localStorage.setItem(SAVE_KEY, JSON.stringify(save));
+      return true;
+    } catch {
+      // Quota, private mode, storage denied — the game keeps running either
+      // way, and the menu tells the player the save did not happen.
+      return false;
+    }
+  }
+
+  /** Restore a snapshot. False — and the save discarded — when it is bad. */
+  private loadSave(): boolean {
+    let save: LabSave;
+    try {
+      const raw = window.localStorage.getItem(SAVE_KEY);
+      if (!raw) return false;
+      save = JSON.parse(raw) as LabSave;
+      if (save.v !== 1 || save.world !== `${WORLD_TILES}x${CELLS_Y}`) throw new Error('format');
+      this.stream.restoreEdits(fromBase64(save.dug));
+    } catch {
+      /*
+       * A save from another world format, or a corrupted one, must not
+       * half-load: the terrain throws before touching its store, and the
+       * file is removed so the menu stops offering a resume it cannot do.
+       */
+      try { window.localStorage.removeItem(SAVE_KEY); } catch { /* denied */ }
+      this.status.dataset.message = 'That save could not be read; starting fresh';
+      this.updateStatus();
+      return false;
+    }
+    for (let i = 0; i < this.ants.length; i += 1) {
+      const at = save.ants[i];
+      const ant = this.ants[i]!;
+      if (!at) continue;
+      ant.position.set(at.x, at.y, at.z);
+      ant.facing = at.f;
+    }
+    this.driven = Math.min(this.ants.length - 1, Math.max(0, save.driven));
+    const driven = this.ants[this.driven]!;
+    this.antPosition.copy(driven.position);
+    this.facing = driven.facing;
+    this.bore.turn(this.facing - this.bore.heading);
+    this.bore.aimTo(save.pitch);
+    this.totalRemoved = save.totalRemoved;
+    this.resetDynamics();
+    // The window slides to wherever she was saved, replaying the restored
+    // digs as its strips arrive, and then every mesh is cut afresh.
+    this.stream.recentreOn(this.antPosition.x, this.antPosition.z);
+    this.rebuildWorld();
+    this.updateStatus();
+    return true;
+  }
+
+  /** The clean slate: wipe the save, refill the world, reseat the bench. */
+  private newGame(): void {
+    try { window.localStorage.removeItem(SAVE_KEY); } catch { /* denied */ }
+    this.placeBench();
+    this.driven = CASTES.indexOf('queen');
+    this.antPosition.copy(this.ants[this.driven]!.position);
+    this.facing = 0;
+    this.bore.turn(-this.bore.heading);
+    this.bore.aimTo(0);
+    this.resetDynamics();
+    this.stream.recentreOn(this.antPosition.x, this.antPosition.z);
+    this.resetTerrain();
+    this.status.dataset.message = 'Walk with the pad, aim, and press DIG';
+    this.updateStatus();
+  }
 
   /**
    * Bite along the bore, from her jaws.

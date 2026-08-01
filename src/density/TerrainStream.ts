@@ -372,4 +372,73 @@ export class TerrainStream {
     this.edits.clear();
     this.generate(0, WINDOW_CELLS + 1, 0, SAMPLES_Y, 0, WINDOW_CELLS + 1);
   }
+
+  /**
+   * The whole world's digs as bytes, for the save file.
+   *
+   * The edit store is already exactly the thing a save needs — sparse,
+   * world-anchored, and replayed onto the window by `generate` — so a save is
+   * a serialization of it and nothing more. The format is binary because the
+   * numbers are dense and JSON is not: a tile key fits sixteen bits
+   * (WORLD_TILES squared is four hundred), the value is the field's own
+   * float32, and the local index takes THIRTY-TWO, because a tile owns
+   * 65 x 129 x 65 = 545,025 sample slots and that is sixty-five times what a
+   * uint16 can say. The first cut wrote sixteen anyway, sized from a
+   * seventeen-sample tile this world does not have, and nothing complained:
+   * `setUint16` wraps modulo 65,536, so 63,145 of one test shaft's 68,045
+   * entries folded onto other samples' indices and a `Map` quietly collapsed
+   * the collisions on load. Measured as a fifth of the tunnel healing itself
+   * after a resume, with every individual step of the pipeline count-exact.
+   * The width is worth checking against the arithmetic, not the comment.
+   *
+   *   [uint32 tiles] then per tile:
+   *   [uint16 key] [uint32 count] then count x ([uint32 local] [float32 value])
+   *
+   * Eight bytes a sample against some forty as JSON text.
+   */
+  serializeEdits(): Uint8Array {
+    let bytes = 4;
+    for (const tile of this.edits.values()) bytes += 6 + tile.size * 8;
+    const out = new Uint8Array(bytes);
+    const view = new DataView(out.buffer);
+    let at = 0;
+    view.setUint32(at, this.edits.size, true); at += 4;
+    for (const [key, tile] of this.edits) {
+      view.setUint16(at, key, true); at += 2;
+      view.setUint32(at, tile.size, true); at += 4;
+      for (const [local, value] of tile) {
+        view.setUint32(at, local, true); at += 4;
+        view.setFloat32(at, value, true); at += 4;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Replace every edit with a serialized set and regenerate the window, so
+   * the soil on screen is the saved world. Throws on a malformed buffer
+   * BEFORE touching the store — a half-restored world is worse than a
+   * refused one.
+   */
+  restoreEdits(bytes: Uint8Array): void {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const parsed = new Map<number, Map<number, number>>();
+    let at = 0;
+    const tiles = view.getUint32(at, true); at += 4;
+    for (let t = 0; t < tiles; t += 1) {
+      const key = view.getUint16(at, true); at += 2;
+      const count = view.getUint32(at, true); at += 4;
+      const tile = new Map<number, number>();
+      for (let i = 0; i < count; i += 1) {
+        const local = view.getUint32(at, true); at += 4;
+        const value = view.getFloat32(at, true); at += 4;
+        tile.set(local, value);
+      }
+      parsed.set(key, tile);
+    }
+    if (at !== bytes.byteLength) throw new Error('trailing bytes in a terrain save');
+    this.edits.clear();
+    for (const [key, tile] of parsed) this.edits.set(key, tile);
+    this.generate(0, WINDOW_CELLS + 1, 0, SAMPLES_Y, 0, WINDOW_CELLS + 1);
+  }
 }

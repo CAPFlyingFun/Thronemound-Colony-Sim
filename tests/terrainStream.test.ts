@@ -280,6 +280,71 @@ describe('streamed soil', () => {
   }, 60000);
 
   /*
+   * The save file: serialize, forget everything, restore, and get the same
+   * soil back sample for sample.
+   *
+   * The precondition assertion in the middle is the whole reason this test
+   * exists. The serialized local index was first written as a uint16, sized
+   * from a seventeen-sample tile this world does not have — a real tile owns
+   * 65 x 129 x 65 = 545,025 sample slots — and `setUint16` wraps rather than
+   * throws, so 63,145 of one shaft's 68,045 entries folded onto other
+   * samples' indices and the restoring `Map` collapsed them. A fifth of the
+   * tunnel healed itself on resume while every step of the pipeline agreed
+   * with itself. A round trip on a store whose indices never leave sixteen
+   * bits would pass over the same bug forever, so the test first proves the
+   * store it is about to save actually exercises the width.
+   */
+  it('round-trips the edit store through bytes exactly', () => {
+    const centre = WORLD_SPAN * 0.5;
+    const stream = new TerrainStream(centre, centre);
+    for (let i = 0; i < 8; i += 1) bite(stream, centre, centre, i);
+    // A second shaft a tile over, so more than one tile carries edits.
+    const tile = TILE_CELLS * CELL_SIZE;
+    for (let i = 0; i < 4; i += 1) bite(stream, centre + tile, centre, i);
+
+    const edits = (stream as unknown as {
+      edits: Map<number, Map<number, number>>;
+    }).edits;
+    let maxLocal = 0;
+    for (const shaft of edits.values()) {
+      for (const local of shaft.keys()) maxLocal = Math.max(maxLocal, local);
+    }
+    expect(maxLocal).toBeGreaterThan(0xffff);
+    expect(edits.size).toBeGreaterThan(1);
+
+    const edited = stream.editedSamples;
+    const dug = snapshot(stream);
+    const bytes = stream.serializeEdits();
+
+    stream.reset();
+    expect(stream.editedSamples).toBe(0);
+    stream.restoreEdits(bytes);
+
+    expect(stream.editedSamples).toBe(edited);
+    let differing = 0;
+    let worst = 0;
+    const back = stream.field.values;
+    for (let i = 0; i < back.length; i += 1) {
+      const delta = Math.abs(back[i]! - dug[i]!);
+      if (delta > 1e-6) differing += 1;
+      worst = Math.max(worst, delta);
+    }
+    expect({ differing, worst }).toEqual({ differing: 0, worst: 0 });
+
+    /*
+     * And a bad buffer refuses WITHOUT touching the store: truncation throws
+     * mid-parse, trailing garbage throws at the length check, and both leave
+     * the world exactly as it was.
+     */
+    expect(() => stream.restoreEdits(bytes.subarray(0, bytes.length - 3))).toThrow();
+    expect(stream.editedSamples).toBe(edited);
+    const padded = new Uint8Array(bytes.length + 2);
+    padded.set(bytes);
+    expect(() => stream.restoreEdits(padded)).toThrow();
+    expect(stream.editedSamples).toBe(edited);
+  }, 120000);
+
+  /*
    * The question the scene gets wrong if it only asks half of it.
    *
    * A scroll leaves most chunks where they are, and the scene keeps their

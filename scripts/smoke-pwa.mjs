@@ -32,7 +32,7 @@ const page = await context.newPage();
  * which scene loads — the manifest, the icons and the worker are the same on
  * every route because they hang off the document.
  */
-const GAME = `${URL_BASE}?map=densityterrainlab`;
+const GAME = `${URL_BASE}?map=densityterrainlab&nomenu=1`;
 await page.goto(GAME, { waitUntil: 'networkidle' });
 
 /* ---------------------------------------------------------------- manifest */

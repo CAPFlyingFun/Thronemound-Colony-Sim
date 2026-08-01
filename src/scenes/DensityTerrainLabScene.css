@@ -487,3 +487,127 @@
 .density-lab-fphud polyline[fill^="rgba"] {
   fill: rgba(0, 20, 6, 0.55);
 }
+
+/* --------------------------------------------------------- the main menu */
+
+/*
+ * The front door and the pause sheet, one component. Under the landscape
+ * lock and the update bar (10000 and up), over everything the game draws.
+ * The world idles behind a dark glass rather than a curtain — three ants on
+ * a mound are their own attract screen.
+ */
+.lab-menu {
+  position: absolute;
+  inset: 0;
+  z-index: 7000;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(ellipse at 50% 30%, rgba(24, 32, 22, 0.55), rgba(12, 16, 10, 0.88));
+  backdrop-filter: blur(3px);
+}
+
+.lab-menu__panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  max-height: 92vh;
+  overflow-y: auto;
+  padding: 18px 26px;
+  font: 600 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.lab-menu__title {
+  color: #f0d88e;
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: 0.34em;
+  /* The tracking adds a phantom space after the last letter; nudge back. */
+  margin-right: -0.34em;
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.55);
+}
+
+.lab-menu__title--small {
+  font-size: 19px;
+}
+
+.lab-menu__subtitle {
+  color: #b9c8ae;
+  letter-spacing: 0.5em;
+  margin-right: -0.5em;
+  font-size: 11px;
+  margin-bottom: 12px;
+}
+
+.lab-menu__button {
+  min-width: 300px;
+  border: 0;
+  border-radius: 999px;
+  padding: 13px 22px;
+  font: 800 14px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.08em;
+  color: #f3ecd8;
+  background: rgba(244, 236, 216, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(244, 236, 216, 0.18);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.lab-menu__button:active {
+  transform: scale(0.97);
+}
+
+.lab-menu__button--primary {
+  color: #1d160e;
+  background: #e9c36f;
+  box-shadow: 0 7px 20px rgba(0, 0, 0, 0.32);
+}
+
+.lab-menu__button--active {
+  box-shadow: inset 0 0 0 2px #9ede63;
+  color: #d9ffc0;
+}
+
+.lab-menu__button--danger {
+  color: #ffd9cf;
+  background: rgba(154, 46, 27, 0.55);
+  box-shadow: inset 0 0 0 1px rgba(255, 160, 130, 0.4);
+}
+
+.lab-menu__group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  margin: 4px 0;
+}
+
+.lab-menu__group .lab-menu__button {
+  min-width: 240px;
+  padding: 10px 18px;
+  font-size: 12px;
+}
+
+.lab-menu__label {
+  color: #8fa383;
+  font-size: 10px;
+  letter-spacing: 0.3em;
+  margin-right: -0.3em;
+}
+
+.lab-menu__version {
+  margin-top: 12px;
+  color: rgba(243, 236, 216, 0.5);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Landscape phones are short: tighten so five buttons and a title fit. */
+@media (max-height: 480px) {
+  .lab-menu__panel { gap: 6px; padding: 10px 20px; }
+  .lab-menu__title { font-size: 22px; }
+  .lab-menu__subtitle { margin-bottom: 4px; }
+  .lab-menu__button { padding: 10px 20px; min-width: 270px; font-size: 13px; }
+  .lab-menu__version { margin-top: 6px; }
+}
