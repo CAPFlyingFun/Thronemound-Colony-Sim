@@ -65,6 +65,9 @@ const out = await page.evaluate(() => {
    * actually draws. Dig once per aim, and measure the centroid of what was
    * removed against the jaw that took it.
    */
+  // DIG mode, or there is no bite to measure — the action is gated on the
+  // mode now, which this probe found out the hard way by removing 0 mm3.
+  lab.setMode(1);
   const rows = [];
   for (const deg of [0, -10, -20, -35, -50, -70, -90]) {
     lab.aimPitch = (deg * Math.PI) / 180;

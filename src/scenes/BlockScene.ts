@@ -26,10 +26,19 @@
  * no HUD instruments. Those are the things being re-added one at a time, and
  * a room that starts with them has nothing to tell us.
  *
- * The head does not yet track the camera, which is the next piece and the
- * one that decides whether she can aim a dig downward at all: the gait holds
- * her head up, so a jaw-mounted bite aims where the ANIMATION points and not
- * where the player is looking. The seam for it is `aimPitch` below.
+ * ## Modes, and the head
+ *
+ * She has a MODE — walk, dig, combat — cycled with `*` and `/` or by tapping
+ * the chip above the action button, and the mode decides two things: which
+ * action button is on screen at all, and whether her head PITCHES.
+ *
+ * Her head yaws toward the camera in every mode, because the view can be
+ * swung right round her and a body facing north while you look south should
+ * not stare rigidly ahead; her gaster swings the other way at 30% of it, as
+ * a counterweight. But she only pitches her face while digging. That was the
+ * open problem this room was built to answer — the gait held her head up, so
+ * a jaw-mounted bite aimed where the ANIMATION pointed rather than where the
+ * player was looking. In DIG mode the two are now the same angle.
  */
 
 import * as THREE from 'three';
@@ -40,6 +49,7 @@ import { QueenModel } from '../anim/QueenModel';
 import { CASTE_BITE_MM, CASTE_LENGTH_MM } from '../anim/hexapod';
 import { FollowCamera } from './FollowCamera';
 import { STICK_DEADZONE, clampStickOrigin, stickVector } from '../voxel/locomotion';
+import { MODES, cycleMode } from './modes';
 import {
   FOOT_CLEARANCE_MM, LegDrive, type DriveReport, type LegSetup,
 } from '../anim/legDrive';
@@ -179,6 +189,18 @@ export class BlockScene {
    */
   private drive: LegDrive | null = null;
   private report: DriveReport | null = null;
+  /**
+   * Which mode she is in, as an index into `MODES`. Decides whether her head
+   * pitches with your look and which action button is on screen.
+   *
+   * Opens in DIG rather than at the top of the ring, because this room exists
+   * to test digging and it is reloaded on a phone dozens of times a session.
+   * A default that costs a tap every single time is the wrong default.
+   */
+  private mode = MODES.findIndex((m) => m.id === 'dig');
+  private readonly modeButton = document.createElement('button');
+  /** The one action button, whose meaning is the mode's. See `setMode`. */
+  private readonly actionButton = document.createElement('button');
   /** The eased stick, which is what actually drives her. See `step`. */
   private driveWalk = 0;
   private driveYaw = 0;
@@ -711,11 +733,20 @@ export class BlockScene {
       const right = new THREE.Vector3().crossVectors(this.up, this.forward).normalize();
       const basis = new THREE.Matrix4().makeBasis(right, this.up, this.forward);
       this.queen.root.quaternion.setFromRotationMatrix(basis);
+      /*
+       * HER HEAD FOLLOWS YOUR LOOK. Yaw always, pitch only where the mode
+       * asks for it — see `modes.ts`. The pitch is the same `aimPitch` the
+       * bite is taken along, so in DIG mode her jaws point at the hole she
+       * is about to make rather than wherever the walk cycle left them.
+       */
+      const mode = MODES[this.mode]!;
       this.queen.update(dt, {
         speed: this.walkSpeed,
         turn: this.turnRate,
         digging: this.input.dig ? 1 : 0,
         carrying: 0,
+        headYaw: this.follow.lookYaw,
+        headPitch: mode.pitchHead ? this.aimPitch : 0,
       });
       /*
        * Feet onto the soil, in her frame: elevation is measured along HER
@@ -747,7 +778,7 @@ export class BlockScene {
      * the screen, dipped into the dig at 0.07 mm.
      */
     this.digCooldown = Math.max(0, this.digCooldown - dt);
-    if (this.input.dig && this.digCooldown === 0) {
+    if (this.input.dig && MODES[this.mode]!.action?.id === 'dig' && this.digCooldown === 0) {
       this.bite();
       this.digCooldown = 0.25;
     }
@@ -796,17 +827,43 @@ export class BlockScene {
     const face = this.up.y > 0.7 ? 'top'
       : this.up.y < -0.7 ? 'UNDERSIDE'
         : 'side';
-    this.status.innerHTML = `<strong>BLOCK ROOM — walk anywhere, DIG at the jaws</strong><br>
+    const mode = MODES[this.mode]!;
+    this.status.innerHTML = `<strong>BLOCK ROOM — ${mode.label}: ${mode.hint}</strong><br>
       Block: ${BLOCK_MM} mm cube · ${CELL_MM} mm cells · ${CELLS}³<br>
       Bite: ${CASTE_BITE_MM.queen} mm (queen) · removed ${(this.removed * MM ** 3).toFixed(0)} mm³<br>
       On the ${face} · up ${this.up.x.toFixed(2)}, ${this.up.y.toFixed(2)}, ${this.up.z.toFixed(2)}<br>
-      Queen: ${CASTE_LENGTH_MM.queen} mm · ${this.gripping ? 'gripping' : 'FALLING'}<br>
+      Queen: ${CASTE_LENGTH_MM.queen} mm · ${this.gripping ? 'gripping' : 'FALLING'} · `
+      + `head ${(this.follow.lookYaw * 180 / Math.PI).toFixed(0)}° off, `
+      + `${mode.pitchHead ? `${(this.aimPitch * 180 / Math.PI).toFixed(0)}° pitch` : 'level'}<br>
       Legs: ${this.report
     ? `${this.report.planted} planted · ${this.report.groping} reaching · `
       + `${this.report.movedMm.toFixed(2)} mm moved, ${this.report.heldBackMm.toFixed(2)} held back · `
       + `stroke ${(this.report.strain * 100).toFixed(0)}% · `
       + `${this.report.clearanceMm.toFixed(2)} mm clear`
     : 'waiting for the model'}`;
+  }
+
+  /**
+   * Change mode, and make the HUD say so.
+   *
+   * The action button is HIDDEN rather than disabled when a mode has no verb,
+   * because a greyed-out button on a phone is a thumb-sized piece of screen
+   * spent saying "not this". A mode with nothing to do gets its space back.
+   *
+   * Anything the old mode had held down is released on the way out — holding
+   * DIG and cycling away from digging must not leave her chewing.
+   */
+  setMode(next: number): void {
+    this.mode = next;
+    this.input.dig = false;
+    const mode = MODES[this.mode]!;
+    this.modeButton.textContent = mode.label;
+    if (mode.action) {
+      this.actionButton.textContent = mode.action.label;
+      this.actionButton.style.display = '';
+    } else {
+      this.actionButton.style.display = 'none';
+    }
   }
 
   /* ------------------------------------------------------------ the input */
@@ -820,18 +877,32 @@ export class BlockScene {
     const actions = document.createElement('div');
     actions.className = 'density-lab-actions';
     hud.appendChild(actions);
-    const dig = document.createElement('button');
-    dig.className = 'density-lab-button density-lab-dig';
-    dig.textContent = 'DIG';
-    actions.appendChild(dig);
+    /*
+     * MODE first, then the action the mode offers.
+     *
+     * One action button that means whatever the mode says, rather than one
+     * button per verb — a phone has room for about two, and this game will
+     * have more verbs than that. Tapping MODE cycles forward; on a keyboard
+     * `*` goes forward and `/` goes back.
+     */
+    this.modeButton.className = 'density-lab-button density-lab-mode';
+    this.modeButton.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      this.setMode(cycleMode(this.mode));
+    });
+    actions.appendChild(this.modeButton);
+
+    this.actionButton.className = 'density-lab-button density-lab-dig';
+    actions.appendChild(this.actionButton);
     const hold = (on: boolean) => (event: PointerEvent) => {
       event.preventDefault();
       this.input.dig = on;
     };
-    dig.addEventListener('pointerdown', hold(true));
-    dig.addEventListener('pointerup', hold(false));
-    dig.addEventListener('pointercancel', hold(false));
-    dig.addEventListener('pointerleave', hold(false));
+    this.actionButton.addEventListener('pointerdown', hold(true));
+    this.actionButton.addEventListener('pointerup', hold(false));
+    this.actionButton.addEventListener('pointercancel', hold(false));
+    this.actionButton.addEventListener('pointerleave', hold(false));
+    this.setMode(this.mode);
 
     const canvas = this.renderer.domElement;
     canvas.addEventListener('pointerdown', (event) => {
@@ -916,6 +987,10 @@ export class BlockScene {
       if (event.code === 'KeyA') this.input.yaw = 1;
       if (event.code === 'KeyD') this.input.yaw = -1;
       if (event.code === 'Space') { event.preventDefault(); this.input.dig = true; }
+      // Named by key, not by code: `*` and `/` live in different places on
+      // a numpad and a main row, and the player means the character.
+      if (event.key === '*') { event.preventDefault(); this.setMode(cycleMode(this.mode)); }
+      if (event.key === '/') { event.preventDefault(); this.setMode(cycleMode(this.mode, -1)); }
     });
     window.addEventListener('keyup', (event) => {
       if (event.code === 'KeyW' || event.code === 'KeyS') this.input.walk = 0;

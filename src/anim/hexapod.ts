@@ -245,6 +245,11 @@ export function stanceRadius(rig: RigMap = QUEEN_RIG): number {
  * standing ant still reported 6.5 mm/s of phantom speed, nothing ever read as
  * stopped, so the distinction could not show.
  */
+/** Symmetric clamp, so a neck limit reads as one number rather than two. */
+function clampAngle(a: number, limit: number): number {
+  return Math.min(limit, Math.max(-limit, a));
+}
+
 export function gaitSpeed(speed: number, turn: number, rig: RigMap = QUEEN_RIG): number {
   return Math.abs(speed) + Math.abs(turn) * stanceRadius(rig);
 }
@@ -252,6 +257,24 @@ export function gaitSpeed(speed: number, turn: number, rig: RigMap = QUEEN_RIG):
 export interface GaitPose {
   /** Per-bone Euler rotation offsets from the rest pose, in radians. */
   rotations: Map<string, [number, number, number]>;
+  /**
+   * Where her head should be AIMED, clamped to a neck's limits — and NOT
+   * baked into `rotations`, on purpose.
+   *
+   * A bone-local Euler cannot express "turn her face toward her own up"
+   * without knowing which local axis that is, and on an auto-rig it is none
+   * of the obvious ones. Measured on the queen's head, `Bone_002`: thirty
+   * degrees about local Y swings her face 2.4 degrees, because Y runs along
+   * the neck. Yaw actually lives on Z, inverted, with a 1.26 gain, and X
+   * gives pitch with fifteen degrees of yaw mixed into it.
+   *
+   * Hard-coding that per rig would be a third table to re-derive every time
+   * a model is re-exported. So the gait states the INTENT in her own frame
+   * and `QueenModel` applies it as a world rotation, where her up and her
+   * right are known and no bone axis has to be guessed.
+   */
+  headYaw: number;
+  headPitch: number;
   /** Body bob along her own up axis, in model units. */
   lift: number;
   /** Body roll and pitch, for the sway that comes off the gait. */
@@ -288,6 +311,25 @@ export interface GaitInput {
   digging: number;
   /** 0..1. Carrying a load spreads the mandibles and lifts the head. */
   carrying: number;
+  /**
+   * Where the player is LOOKING, relative to her body, in radians.
+   *
+   * `headYaw` is how far the camera has been orbited off her heading, and it
+   * applies at all times: with the camera free to swing round her, a body
+   * facing north while the view faces south should not have her staring
+   * rigidly ahead. She turns her face toward it and her gaster swings the
+   * other way — both what a real one does, and the only cue on screen that
+   * the camera and the body have parted company.
+   *
+   * `headPitch` is the look's elevation, and it applies ONLY where the mode
+   * asks for it — digging. An ant that noses at the floor every time the
+   * camera glances down spends the whole game faceplanting.
+   *
+   * Both are clamped in here rather than by the caller, because the limit
+   * belongs to a neck and not to a camera.
+   */
+  headYaw?: number;
+  headPitch?: number;
 }
 
 /** Smooth 0..1 ease, for swings that should not start or stop abruptly. */
@@ -349,6 +391,17 @@ const IDLE_STAGGER = 1.7;
  * quick bites per stride, so tying the jaws to the gait would make them look
  * geared to the feet.
  */
+/**
+ * How far she will turn her face off her body, and how far she will pitch it.
+ *
+ * A neck, not a turret. Sixty degrees of yaw is generous for an ant and still
+ * reads as looking rather than as a broken rig; forty of pitch is enough to
+ * put her jaws on the floor and to lift them clear.
+ */
+const HEAD_YAW_LIMIT = 1.05;
+const HEAD_PITCH_LIMIT = 0.7;
+/** How much of the head's turn the gaster swings against. Her counterweight. */
+export const GASTER_COUNTER = 0.30;
 const MANDIBLE_OPEN = 0.55;
 const MANDIBLE_RATE = 12;
 /** How far they close on a carried load. Held, not chewing. */
@@ -363,6 +416,12 @@ const MANDIBLE_CLOSED = -0.25;
  */
 export function gaitPose(input: GaitInput, rig: RigMap = QUEEN_RIG): GaitPose {
   const { clock, speed, turn, digging, carrying } = input;
+  /*
+   * Clamped here: the caller hands over a raw camera angle and a neck has
+   * limits a camera does not. See `GaitInput.headYaw`.
+   */
+  const headYaw = clampAngle(input.headYaw ?? 0, HEAD_YAW_LIMIT);
+  const headPitch = clampAngle(input.headPitch ?? 0, HEAD_PITCH_LIMIT);
   const rotations = new Map<string, [number, number, number]>();
   // Travelling AND turning: a spin on the spot is locomotion. See `gaitSpeed`.
   const travel = gaitSpeed(speed, turn, rig);
@@ -431,6 +490,18 @@ export function gaitPose(input: GaitInput, rig: RigMap = QUEEN_RIG): GaitPose {
    * and the antennae, where a worker's comes from its mandibles.
    */
   const jawless = !rig.mandibleLeft || !rig.mandibleRight;
+  /*
+   * The look is added ON TOP of the dig dip rather than replacing it, and
+   * that matters: the dip is what brings her jaw from 1.121 mm over the soil
+   * down to 0.070 mm, which is the only reason a bite taken at the mandible
+   * reaches the ground at a level aim. Swap the dip out for the aim and
+   * digging straight ahead stops working again.
+   *
+   * Sign is measured, not reasoned: a POSITIVE rotation here dips her head,
+   * which `scripts/probe-bite.mjs` established by watching the jaw fall as
+   * `digging` rose. The player's pitch is negative when looking down, so it
+   * enters negated.
+   */
   rotations.set(rig.thorax[rig.thorax.length - 1]!, [
     digging * (jawless ? 0.42 : 0.22) - carrying * 0.12,
     0,
@@ -498,7 +569,7 @@ export function gaitPose(input: GaitInput, rig: RigMap = QUEEN_RIG): GaitPose {
     0,
   ]);
 
-  return { rotations, lift, roll, pitch };
+  return { rotations, lift, roll, pitch, headYaw, headPitch };
 }
 
 /**

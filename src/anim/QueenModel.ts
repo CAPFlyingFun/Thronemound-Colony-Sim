@@ -10,8 +10,9 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import {
-  QUEEN_RIG, RIGS, cadenceFor, gaitPose, gaitSpeed, rigBones, rigLengthVoxels, rigScale,
-  type GaitInput, type RigMap,
+  GASTER_COUNTER, QUEEN_RIG, RIGS, cadenceFor, gaitPose, gaitSpeed, rigBones,
+  rigLengthVoxels, rigScale,
+  type GaitInput, type GaitPose, type RigMap,
 } from './hexapod';
 import { aimRotation, distanceToPolyline, footTarget, type Vec3 } from './legIk';
 
@@ -264,6 +265,57 @@ export class QueenModel {
    * because the gait's cadence is a function of speed — pausing the sim has to
    * pause her legs, or she walks on the spot while the world is frozen.
    */
+  /**
+   * Turn her face toward where the player is looking, and swing her gaster
+   * the other way.
+   *
+   * Applied as a rotation in HER frame rather than as a bone-local Euler,
+   * because a bone-local Euler cannot say "about her up" without knowing
+   * which local axis that is — and on this auto-rig it is none of the
+   * obvious ones. Measured on the queen's head bone: thirty degrees about
+   * local Y moves her face 2.4 degrees, local Z gives yaw but inverted and
+   * with a 1.26 gain, and local X gives pitch with fifteen degrees of yaw
+   * mixed in. Any table of that is a third thing to re-derive per model.
+   *
+   * Her frame comes off her own root, which the scene has already oriented:
+   * model +Y is her up and +X her right, so both fall out of the root's
+   * world quaternion and nothing here needs a parameter.
+   *
+   * Neither bone is a limb, so `solveFeet` will not undo this.
+   */
+  private aimHead(pose: GaitPose): void {
+    if (Math.abs(pose.headYaw) < 1e-6 && Math.abs(pose.headPitch) < 1e-6) return;
+    this.root.updateMatrixWorld(true);
+    const frame = this.root.getWorldQuaternion(new THREE.Quaternion());
+    const up = new THREE.Vector3(0, 1, 0).applyQuaternion(frame);
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(frame);
+
+    const turn = (name: string | undefined, yaw: number, pitch: number): void => {
+      const bone = name ? this.bones.get(name) : undefined;
+      if (!bone || !bone.parent) return;
+      const want = new THREE.Quaternion().setFromAxisAngle(up, yaw);
+      if (Math.abs(pitch) > 1e-6) {
+        want.multiply(new THREE.Quaternion().setFromAxisAngle(right, pitch));
+      }
+      /*
+       * A world rotation, expressed in the bone's parent space. Rotating the
+       * bone's own quaternion directly would rotate it about the PARENT's
+       * axes, which on a neck bone is a different thing entirely.
+       */
+      const parent = bone.parent.getWorldQuaternion(new THREE.Quaternion());
+      const inv = parent.clone().invert();
+      bone.quaternion.premultiply(inv.multiply(want).multiply(parent));
+    };
+
+    const head = this.rig.thorax[this.rig.thorax.length - 1];
+    // Pitch is negated: the player's aim is negative looking down, and a
+    // rotation about her right by a negative angle tips her face up.
+    turn(head, pose.headYaw, -pose.headPitch);
+    // The counterweight. Yaw only — a gaster that pitched with the head
+    // would see-saw her whole body every time she looked at the floor.
+    turn(this.rig.gaster[0], -pose.headYaw * GASTER_COUNTER, 0);
+  }
+
   update(dt: number, input: QueenPoseInput): void {
     if (!this.loaded) return;
     this.clock += dt;
@@ -291,6 +343,8 @@ export class QueenModel {
         new THREE.Quaternion().setFromEuler(new THREE.Euler(euler[0], euler[1], euler[2])),
       );
     }
+
+    this.aimHead(pose);
 
     /*
      * Snapshot what the correction passes are allowed to build on, while the

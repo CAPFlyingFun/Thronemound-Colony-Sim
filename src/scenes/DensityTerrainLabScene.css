@@ -114,6 +114,23 @@
   background: #f0d88e;
 }
 
+/*
+ * The mode chip: deliberately NOT the size of the action button under it.
+ * You change mode occasionally and act constantly, so the one you press all
+ * the time is the big round one and this is a small label above it that also
+ * happens to be tappable.
+ */
+.density-lab-mode {
+  padding: 9px 15px;
+  background: rgba(244, 236, 216, 0.9);
+  font-size: 12px;
+}
+
+.density-lab-mode:active {
+  transform: scale(0.96);
+  background: rgba(255, 250, 238, 0.96);
+}
+
 .density-lab-reset {
   padding: 12px 18px;
   background: rgba(244, 236, 216, 0.88);
@@ -137,6 +154,7 @@
    */
   .density-lab-hint { display: none; }
   .density-lab-dig { width: 78px; height: 78px; }
+  .density-lab-mode { padding: 7px 12px; font-size: 11px; }
   .density-lab-walk { width: 62px; height: 62px; font-size: 11px; }
   .density-lab-gauge-dial { width: 44px; height: 44px; }
   .density-lab-aimkey { width: 48px; height: 32px; }

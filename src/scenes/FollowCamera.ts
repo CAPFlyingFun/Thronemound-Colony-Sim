@@ -119,7 +119,19 @@ export class FollowCamera {
    * absolute angle would make her turns spin the camera, which reads as the
    * world lurching every time she changes direction.
    */
-  private yawOffset = 0;
+  yawOffset = 0;
+
+  /**
+   * How far the view has been swung off her heading, in radians.
+   *
+   * Exposed because the ANIMATION needs it: she turns her face toward where
+   * you are looking, and this is the only place that angle exists. A body
+   * facing north while the camera faces south should not have her staring
+   * rigidly ahead.
+   */
+  get lookYaw(): number {
+    return this.yawOffset;
+  }
   private pitch = 0.42;
   private distance: number;
   /** The smoothed position actually used, so the rig never jumps. */
