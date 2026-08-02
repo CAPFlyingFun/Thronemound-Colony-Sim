@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MODES, cycleMode } from '../src/scenes/modes';
 import {
-  HEAD_PITCH_DOWN, HEAD_PITCH_UP, QUEEN_RIG, gaitPose,
+  HEAD_BIND_PITCH, HEAD_PITCH_DOWN, HEAD_PITCH_UP, QUEEN_RIG, gaitPose,
 } from '../src/anim/hexapod';
 
 const base = { clock: 0, cycle: 0, speed: 0, turn: 0, digging: 0, carrying: 0 };
@@ -38,51 +38,24 @@ describe('mode ring', () => {
 });
 
 describe('head aim', () => {
-  it('clamps to a neck rather than a turret, and an ASYMMETRIC one', () => {
-    const down = gaitPose({ ...base, headYaw: 3, headPitch: -3 }, QUEEN_RIG);
-    const up = gaitPose({ ...base, headYaw: -3, headPitch: 3 }, QUEEN_RIG);
-    // Yaw is symmetric — she turns her face either way equally.
-    expect(Math.abs(down.headYaw)).toBeLessThan(1.2);
-    expect(up.headYaw).toBeCloseTo(-down.headYaw, 9);
+  it('takes an ABSOLUTE aim and clamps it there', () => {
     /*
-     * Pitch is not, and that is the point: she works with her face on the
-     * floor, so down is generous and up is fifteen degrees. There is nothing
-     * above her she needs to put her mandibles into, and a head craned back
-     * reads as a rearing horse.
+     * The contract is the simple one: the bone's pitch IS the camera's. So
+     * what goes in is where her face should point, not an offset from
+     * anything, and what comes out is the rotation from the bind pose that
+     * lands it there.
      */
-    /*
-     * Both against the constants, not literals: these are tuning knobs, and
-     * what the test is for is the SHAPE — down and up are different numbers,
-     * both are finite, and the resting posture is added outside them.
-     */
-    expect(down.headPitch).toBeCloseTo(-HEAD_PITCH_DOWN, 6);
-    expect(up.headPitch).toBeCloseTo(HEAD_PITCH_UP, 6);
-    expect(HEAD_PITCH_DOWN).not.toBeCloseTo(HEAD_PITCH_UP, 3);
+    const down = gaitPose({ ...base, headPitch: -3 }, QUEEN_RIG);
+    const up = gaitPose({ ...base, headPitch: 3 }, QUEEN_RIG);
+    expect(down.headPitch).toBeCloseTo(-HEAD_PITCH_DOWN - HEAD_BIND_PITCH, 6);
+    expect(up.headPitch).toBeCloseTo(HEAD_PITCH_UP - HEAD_BIND_PITCH, 6);
+    // Asymmetric, because she works with her face on the floor.
+    expect(HEAD_PITCH_DOWN).toBeGreaterThan(HEAD_PITCH_UP);
   });
 
-  it('lets the caller widen the DOWN limit but never the up one', () => {
-    /*
-     * First person needs the neck to follow the camera all the way down,
-     * because the eye is on her head and a bone that stops at forty while the
-     * view carries on to ninety reads as welded. Up stays a neck either way.
-     */
-    const free = gaitPose(
-      { ...base, headPitch: -3, headPitchDown: Math.PI / 2 }, QUEEN_RIG,
-    );
-    expect(free.headPitch).toBeCloseTo(-Math.PI / 2, 6);
-    // And the default is the shared one, so both cameras stop in the same place.
-    expect(gaitPose({ ...base, headPitch: -3 }, QUEEN_RIG).headPitch)
-      .toBeCloseTo(-HEAD_PITCH_DOWN, 6);
-    const still = gaitPose(
-      { ...base, headPitch: 3, headPitchDown: Math.PI / 2 }, QUEEN_RIG,
-    );
-    expect(still.headPitch).toBeCloseTo(HEAD_PITCH_UP, 6);
-  });
-
-  it('passes small angles straight through', () => {
-    const pose = gaitPose({ ...base, headYaw: 0.2, headPitch: -0.3 }, QUEEN_RIG);
-    expect(pose.headYaw).toBeCloseTo(0.2, 9);
-    expect(pose.headPitch).toBeCloseTo(-0.3, 9);
+  it('holds her BIND pose when no aim is given, rather than snapping level', () => {
+    // Which is what WALK mode passes: her head is not the player's to point.
+    expect(gaitPose({ ...base }, QUEEN_RIG).headPitch).toBeCloseTo(0, 9);
   });
 
   it('keeps the aim OUT of the bone rotations', () => {

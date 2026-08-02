@@ -50,8 +50,7 @@ import { FollowCamera } from './FollowCamera';
 import { STICK_DEADZONE, clampStickOrigin, stickVector } from '../voxel/locomotion';
 import { MODES, cycleMode } from './modes';
 import {
-  CASTE_BITE_MM, CASTE_LENGTH_MM, HEAD_PITCH_DOWN, HEAD_PITCH_UP, HEAD_REST_BIAS,
-  HEAD_REST_PITCH_DEG, HEAD_YAW_LIMIT,
+  CASTE_BITE_MM, CASTE_LENGTH_MM, HEAD_PITCH_DOWN, HEAD_PITCH_UP, HEAD_YAW_LIMIT,
 } from '../anim/hexapod';
 import {
   FOOT_CLEARANCE_MM, LegDrive, type DriveReport, type LegSetup,
@@ -125,13 +124,16 @@ const SNAP = 14;
 const GRAVITY = 9;
 
 /**
- * First person: 120 degrees, as asked for, against the 60 the follow rig uses.
+ * First person: 90 degrees, down from 120.
  *
- * Wide on purpose. An eye at an ant's head is a centimetre from the soil, and
- * at 60 degrees a tunnel wall fills the screen with no sense of where its
- * edges are. A dashcam is about this wide for the same reason.
+ * Wide, because an eye at an ant's head is a centimetre from the soil and a
+ * narrow lens shows a wall with no sense of where its edges are. But 120 was
+ * reported as dizzying, and it would be: at that width the edges of the frame
+ * stretch hard, and everything near the eye — which underground is
+ * everything — sweeps across it far faster than it moves. Ninety keeps the
+ * context and loses most of the distortion.
  */
-const FIRST_PERSON_FOV = 120;
+const FIRST_PERSON_FOV = 90;
 const THIRD_PERSON_FOV = 60;
 
 /**
@@ -155,6 +157,18 @@ const THIRD_PERSON_FOV = 60;
 const HEAD_INSET_MM = 12;
 const HEAD_INSET_SPAN_MM = 6;
 const HEAD_INSET_FRACTION = 0.32;
+/**
+ * How many antenna-to-jaw spans wide a bite is.
+ *
+ * The rule as given was two, and two is what her anatomy says. Four is a
+ * PACING decision on top of it: at two spans a queen's bite takes about
+ * 1.4 mm3 and a burrow is half an hour of tapping, which nobody wants to do.
+ * Doubling the radius is eight times the soil per bite.
+ *
+ * Kept as a multiple of the measured span rather than a millimetre figure, so
+ * a worker and a major still scale off their own heads.
+ */
+const BITE_WIDTH_SPANS = 4;
 const EYE_FORWARD_MM = 0.2;
 const EYE_NUDGE_MM = 0.1;
 const EYE_NUDGE_DEG = 2;
@@ -523,16 +537,16 @@ export class BlockScene {
      * THE BITE IS SIZED BY HER OWN BONES.
      *
      * "Measure from antennas to bottom of jaw bone and double that for the
-     * digging distance" — so the width is twice the antenna-socket-to-jaw
-     * span, and the radius is that span itself. Measured rather than tabled,
-     * which means the worker and the major get their own without anyone
-     * typing a number: `QueenModel.antennaToJaw`.
+     * digging distance" — so the width is a multiple of the antenna-socket-to-
+     * jaw span. Measured rather than tabled, which means the worker and the
+     * major get their own without anyone typing a number: see
+     * `QueenModel.antennaToJaw` and `BITE_WIDTH_SPANS`.
      *
      * It reproduces the hand-picked figure almost exactly, which is the
      * reason to trust it. `CASTE_BITE_MM.queen` was 1.75 mm; twice her
      * measured span is 1.736 mm, inside one percent, off the rig.
      */
-    const radius = this.queen.antennaToJaw();
+    const radius = this.queen.antennaToJaw() * BITE_WIDTH_SPANS / 2;
     if (radius <= 0) { this.lastBiteWhy = 'rig has no antenna-to-jaw span'; return; }
 
     /*
@@ -881,19 +895,18 @@ export class BlockScene {
          * posture — so reading it here applied that posture twice and drove
          * her face past vertical at a level camera.
          */
+        /*
+         * WHERE HER FACE POINTS, absolutely — the camera's own pitch, because
+         * the bone IS the camera. Aim it 43 degrees down and she is 43
+         * degrees down; take it to 75 and so is she.
+         *
+         * Undefined where the mode does not want her pitching, which leaves
+         * her in her bind pose rather than snapping her level. One limit for
+         * both cameras: see `HEAD_PITCH_DOWN`.
+         */
         headPitch: mode.pitchHead
           ? (this.firstPerson ? this.aimPitch : this.follow.lookPitch)
-          : 0,
-        /*
-         * Onboard, her neck follows the camera all the way DOWN. The eye is
-         * on her head, so the bone and the view have to be the same angle or
-         * the head reads as welded down while the picture keeps tilting.
-         * Over her shoulder the anatomical limit stands. Up is her neck's
-         * own fifteen degrees either way — see `HEAD_PITCH_UP`.
-         */
-        // One limit, both cameras. See `HEAD_PITCH_DOWN`.
-        // Her posture, on top of the look. See `HEAD_REST_BIAS`.
-        headRest: HEAD_REST_BIAS,
+          : undefined,
       });
       /*
        * Feet onto the soil, in her frame: elevation is measured along HER
@@ -967,9 +980,9 @@ export class BlockScene {
      * stay the same angle — which is the invariant this whole camera is
      * built on. `eyePitch` is the tuner's share on top.
      */
-    this.follow.aimPitch = this.aimPitch + (this.firstPerson
-      ? (HEAD_REST_PITCH_DEG * Math.PI) / 180 + this.eyePitch
-      : 0);
+    // The view IS the aim now — no posture folded in, because the bone is not
+    // offset from it either. `eyePitch` is the tuner's share and nothing else.
+    this.follow.aimPitch = this.aimPitch + (this.firstPerson ? this.eyePitch : 0);
     this.follow.update(
       dt,
       Math.atan2(this.forward.x, this.forward.z),
@@ -1074,13 +1087,13 @@ export class BlockScene {
     const mode = MODES[this.mode]!;
     this.status.innerHTML = `<strong>BLOCK ROOM — ${mode.label}: ${mode.hint}</strong><br>
       Block: ${BLOCK_MM} mm cube · ${CELL_MM} mm cells · ${CELLS}³<br>
-      Bite: ${(this.queen.antennaToJaw() * 2 * MM).toFixed(2)} mm wide, measured (table said ${CASTE_BITE_MM.queen}) · removed ${(this.removed * MM ** 3).toFixed(0)} mm³<br>
+      Bite: ${(this.queen.antennaToJaw() * BITE_WIDTH_SPANS * MM).toFixed(2)} mm wide, measured (table said ${CASTE_BITE_MM.queen}) · removed ${(this.removed * MM ** 3).toFixed(0)} mm³<br>
       On the ${face} · up ${this.up.x.toFixed(2)}, ${this.up.y.toFixed(2)}, ${this.up.z.toFixed(2)}<br>
       Queen: ${CASTE_LENGTH_MM.queen} mm · ${this.gripping ? 'gripping' : 'FALLING'} · `
       + `head ${(this.follow.lookYaw * 180 / Math.PI).toFixed(0)}° off, `
       + `${mode.pitchHead
         ? `cam ${(this.follow.lookPitch * 180 / Math.PI).toFixed(0)}° → BONE `
-          + `${this.headAngleDeg().toFixed(0)}° (rest ${HEAD_REST_PITCH_DEG})`
+          + `${this.headAngleDeg().toFixed(0)}° (should match)`
         : `level · BONE ${this.headAngleDeg().toFixed(0)}°`}<br>`
       + `${this.firstPerson
         ? `EYE nudge fwd ${(this.eyeNudge.z * MM).toFixed(2)}, up ${(this.eyeNudge.y * MM).toFixed(2)}, `

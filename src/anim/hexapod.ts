@@ -321,9 +321,10 @@ export interface GaitInput {
    * other way — both what a real one does, and the only cue on screen that
    * the camera and the body have parted company.
    *
-   * `headPitch` is the look's elevation, and it applies ONLY where the mode
-   * asks for it — digging. An ant that noses at the floor every time the
-   * camera glances down spends the whole game faceplanting.
+   * `headPitch` is where her face should POINT, absolutely — the camera's own
+   * pitch, since bone equals camera. It applies ONLY where the mode asks for
+   * it: an ant that noses at the floor every time the camera glances down
+   * spends the whole game faceplanting. Omit it and she holds her bind pose.
    *
    * Both are clamped in here rather than by the caller, because the limit
    * belongs to a neck and not to a camera.
@@ -347,11 +348,7 @@ export interface GaitInput {
    */
   headPitchDown?: number;
   headPitchUp?: number;
-  /**
-   * Her resting head posture, in radians, added after the clamp. See
-   * `HEAD_REST_BIAS`.
-   */
-  headRest?: number;
+
 }
 
 /** Smooth 0..1 ease, for swings that should not start or stop abruptly. */
@@ -422,67 +419,36 @@ const IDLE_STAGGER = 1.7;
  */
 export const HEAD_YAW_LIMIT = 1.05;
 /**
- * Where her face RESTS, in degrees, nose-down. The posture the camera counts
- * from: a level camera means her head is here, not level.
+ * Where her face points in the BIND POSE, in degrees, nose-down.
  *
- * CHOSEN, not measured, and worth saying so. Four lines on this rig can each
- * fairly be called "the head angle" and they are tens of degrees apart —
- * measured by `scripts/probe-headrest.mjs`: neck base to jaw -26.94, head
- * joint to jaw -36.35, the mouth chain alone -45.00, antenna sockets to jaw
- * -64.76. This is their mean, 43.26, which is not a measurement of anything
- * physical; it is a way of picking a number between candidates that
- * disagree, and it lands where the posture was eyeballed at from the device.
- *
- * For a posture that is the right kind of number to choose. What matters is
- * that ONE of them is written down, because the whole confusion was two
- * people reading different lines off the same ant.
+ * Not a design choice — a fact about the model, measured by
+ * `scripts/probe-headrest.mjs` from the head joint to the jaw tip. It is here
+ * only so an ABSOLUTE aim can be converted into the rotation the bone needs
+ * from where the rigger left it.
  */
-export const HEAD_REST_PITCH_DEG = -43.26;
+export const HEAD_BIND_PITCH_DEG = -36.35;
 
 /**
- * How far the gait must pitch her head to SIT at that rest.
+ * How far her face may point, ABSOLUTELY, in radians.
  *
- * Her bind pose already hangs the head joint to jaw line at -36.35, so the
- * posture is most of the way there on its own and this is only the remainder.
- * Applied AFTER the neck's look clamp, because it is where she holds her head
- * rather than something the player asked for — clamping it would eat into the
- * range the camera is allowed instead.
+ * The contract is the simple one: the bone's pitch IS the camera's pitch. Aim
+ * the camera 43 degrees down and her face is 43 degrees down; take it to 75
+ * and so does she. There is no resting offset added on top — the familiar
+ * nose-down posture is simply where the third-person camera naturally sits,
+ * so it falls out rather than being applied.
+ *
+ * An earlier version added a posture term on top of the look and had to
+ * defend it against the clamp, the view and the readout separately. Every one
+ * of those was a place for the two to disagree, and they did.
+ *
+ * DOWN is bounded by the eye clipping the soil, measured on the device: past
+ * about -76 the first-person camera is inside the ground. UP is the figure
+ * that looked right there.
  */
-export const HEAD_REST_BIAS = ((HEAD_REST_PITCH_DEG - -36.35) * Math.PI) / 180;
-
-/**
- * Her neck is ASYMMETRIC, because an ant's is.
- *
- * She works with her face on the floor, so down is generous — forty degrees
- * over her shoulder, and as far as the camera goes when the camera IS her
- * head. Up is fifteen and no more: there is nothing above her she needs to
- * put her mandibles into, and a head craned back reads as a rearing horse
- * rather than an ant.
- */
-/*
- * Down is bounded by the CAMERA clipping the soil, not by anatomy.
- *
- * Reported from the device: past about -76 degrees of bone the first-person
- * eye is inside the ground and you can see through it. So -75 is the floor,
- * and since the bone sits at `HEAD_REST_PITCH_DEG` before the look is added,
- * the limit on the look itself is the remainder: 75 - 43.26 = 31.74 degrees.
- *
- * The same number in both cameras, on purpose. It used to be widened onboard
- * and left at forty over her shoulder, so the third-person head stopped short
- * of where the first-person head went — two answers to one question.
- */
-export const HEAD_PITCH_DOWN = ((75 + HEAD_REST_PITCH_DEG) * Math.PI) / 180;
-/**
- * Sixty degrees, opened up from fifteen so the posture can be judged against
- * the head-profile inset rather than guessed at. Expect this to come back
- * down once there is an exact number to set it to.
- *
- * Note what it means with the resting posture underneath it: her face rests
- * 43.26 degrees down, so a full sixty of look only brings it to about
- * seventeen degrees ABOVE level. The limit is on the player's input, not on
- * where her face ends up.
- */
-export const HEAD_PITCH_UP = (60 * Math.PI) / 180;
+export const HEAD_PITCH_DOWN = (75 * Math.PI) / 180;
+export const HEAD_PITCH_UP = (16.71 * Math.PI) / 180;
+/** The bind pose as an angle, for converting an absolute aim into a rotation. */
+export const HEAD_BIND_PITCH = (HEAD_BIND_PITCH_DEG * Math.PI) / 180;
 /** How much of the head's turn the gaster swings against. Her counterweight. */
 export const GASTER_COUNTER = 0.30;
 const MANDIBLE_OPEN = 0.55;
@@ -505,14 +471,16 @@ export function gaitPose(input: GaitInput, rig: RigMap = QUEEN_RIG): GaitPose {
    */
   const headYaw = clampAngle(input.headYaw ?? 0, HEAD_YAW_LIMIT);
   /*
-   * The look is clamped to her neck; the RESTING posture is then added on top
-   * and is not. One is what the player asked for and has a limit, the other
-   * is how she holds her head and would only eat that limit if it shared it.
+   * `headPitch` is where her face should POINT, absolutely, not an offset
+   * from anything. Clamped there, then converted into the rotation the bone
+   * needs from the pose the rigger left it in — which is the only place the
+   * bind angle is allowed to appear.
    */
-  const headPitch = Math.min(
+  const wantPitch = Math.min(
     input.headPitchUp ?? HEAD_PITCH_UP,
-    Math.max(-(input.headPitchDown ?? HEAD_PITCH_DOWN), input.headPitch ?? 0),
-  ) + (input.headRest ?? 0);
+    Math.max(-(input.headPitchDown ?? HEAD_PITCH_DOWN), input.headPitch ?? HEAD_BIND_PITCH),
+  );
+  const headPitch = wantPitch - HEAD_BIND_PITCH;
   const rotations = new Map<string, [number, number, number]>();
   // Travelling AND turning: a spin on the spot is locomotion. See `gaitSpeed`.
   const travel = gaitSpeed(speed, turn, rig);

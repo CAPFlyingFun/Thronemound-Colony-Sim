@@ -35,7 +35,7 @@ const out = await p.evaluate(() => {
   lab.setFirstPerson(true);
   lab.setMode(1);
   const rows = [];
-  for (const deg of [60, 30, 15, 0, -45, -90]) {
+  for (const deg of [17, 0, -20, -43, -60, -75, -90]) {
     lab.setAimPitchForTest((deg * Math.PI) / 180);
     lab.stepForTest(1 / 60, 12);
     rows.push({
@@ -47,11 +47,11 @@ const out = await p.evaluate(() => {
   return rows;
 });
 console.log(JSON.stringify({ errors: errs.slice(0, 2) }));
-console.log('  player      view       BONE     bone - player (must be a constant -43.26)');
+console.log('  player      view       BONE     bone - view (must be 0: bone IS the camera)');
 for (const r of out) {
   console.log(
     `  ${String(r.asked).padStart(6)}° ${r.view.toFixed(1).padStart(9)}° ${r.bone.toFixed(2).padStart(10)}°`,
-    `${(r.bone - r.asked).toFixed(2).padStart(15)}°`,
+    `${(r.bone - r.view).toFixed(2).padStart(15)}°`,
   );
 }
 await b.close();
