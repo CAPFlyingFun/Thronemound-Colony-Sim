@@ -36,14 +36,37 @@ describe('mode ring', () => {
 });
 
 describe('head aim', () => {
-  it('clamps to a neck rather than a turret', () => {
-    const wild = gaitPose({ ...base, headYaw: 3, headPitch: -3 }, QUEEN_RIG);
-    expect(Math.abs(wild.headYaw)).toBeLessThan(1.2);
-    expect(Math.abs(wild.headPitch)).toBeLessThan(0.8);
-    // Symmetric: the limit is one number, not two.
-    const other = gaitPose({ ...base, headYaw: -3, headPitch: 3 }, QUEEN_RIG);
-    expect(other.headYaw).toBeCloseTo(-wild.headYaw, 9);
-    expect(other.headPitch).toBeCloseTo(-wild.headPitch, 9);
+  it('clamps to a neck rather than a turret, and an ASYMMETRIC one', () => {
+    const down = gaitPose({ ...base, headYaw: 3, headPitch: -3 }, QUEEN_RIG);
+    const up = gaitPose({ ...base, headYaw: -3, headPitch: 3 }, QUEEN_RIG);
+    // Yaw is symmetric — she turns her face either way equally.
+    expect(Math.abs(down.headYaw)).toBeLessThan(1.2);
+    expect(up.headYaw).toBeCloseTo(-down.headYaw, 9);
+    /*
+     * Pitch is not, and that is the point: she works with her face on the
+     * floor, so down is generous and up is fifteen degrees. There is nothing
+     * above her she needs to put her mandibles into, and a head craned back
+     * reads as a rearing horse.
+     */
+    expect(down.headPitch).toBeLessThan(-0.6);
+    expect(up.headPitch).toBeCloseTo(0.26, 6);
+    expect(Math.abs(up.headPitch)).toBeLessThan(Math.abs(down.headPitch));
+  });
+
+  it('lets the caller widen the DOWN limit but never the up one', () => {
+    /*
+     * First person needs the neck to follow the camera all the way down,
+     * because the eye is on her head and a bone that stops at forty while the
+     * view carries on to ninety reads as welded. Up stays a neck either way.
+     */
+    const free = gaitPose(
+      { ...base, headPitch: -3, headPitchDown: Math.PI / 2 }, QUEEN_RIG,
+    );
+    expect(free.headPitch).toBeCloseTo(-Math.PI / 2, 6);
+    const still = gaitPose(
+      { ...base, headPitch: 3, headPitchDown: Math.PI / 2 }, QUEEN_RIG,
+    );
+    expect(still.headPitch).toBeCloseTo(0.26, 6);
   });
 
   it('passes small angles straight through', () => {

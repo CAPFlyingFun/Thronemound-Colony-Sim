@@ -330,6 +330,23 @@ export interface GaitInput {
    */
   headYaw?: number;
   headPitch?: number;
+  /**
+   * How far her neck may pitch, in radians, down and up separately. Defaults
+   * to a neck; see `HEAD_PITCH_DOWN`.
+   *
+   * The caller gets to widen the DOWN limit because first person is not the
+   * same problem as third. Over her shoulder the limit is anatomy: a head
+   * bent ninety degrees off the body reads as a broken rig. Onboard the
+   * camera IS the head — so a limit that stops the bone at forty while the
+   * view carries on to ninety protects nothing, it just makes her head look
+   * welded down while you keep looking further. Reported as exactly that.
+   *
+   * The rule is bone EQUALS camera, and where the camera can go further, the
+   * neck goes with it — which means the caller must clamp its own camera to
+   * whatever it passes here, or the two part company again.
+   */
+  headPitchDown?: number;
+  headPitchUp?: number;
 }
 
 /** Smooth 0..1 ease, for swings that should not start or stop abruptly. */
@@ -399,7 +416,17 @@ const IDLE_STAGGER = 1.7;
  * put her jaws on the floor and to lift them clear.
  */
 const HEAD_YAW_LIMIT = 1.05;
-const HEAD_PITCH_LIMIT = 0.7;
+/**
+ * Her neck is ASYMMETRIC, because an ant's is.
+ *
+ * She works with her face on the floor, so down is generous — forty degrees
+ * over her shoulder, and as far as the camera goes when the camera IS her
+ * head. Up is fifteen and no more: there is nothing above her she needs to
+ * put her mandibles into, and a head craned back reads as a rearing horse
+ * rather than an ant.
+ */
+const HEAD_PITCH_DOWN = 0.7;
+export const HEAD_PITCH_UP = 0.26;
 /** How much of the head's turn the gaster swings against. Her counterweight. */
 export const GASTER_COUNTER = 0.30;
 const MANDIBLE_OPEN = 0.55;
@@ -421,7 +448,10 @@ export function gaitPose(input: GaitInput, rig: RigMap = QUEEN_RIG): GaitPose {
    * limits a camera does not. See `GaitInput.headYaw`.
    */
   const headYaw = clampAngle(input.headYaw ?? 0, HEAD_YAW_LIMIT);
-  const headPitch = clampAngle(input.headPitch ?? 0, HEAD_PITCH_LIMIT);
+  const headPitch = Math.min(
+    input.headPitchUp ?? HEAD_PITCH_UP,
+    Math.max(-(input.headPitchDown ?? HEAD_PITCH_DOWN), input.headPitch ?? 0),
+  );
   const rotations = new Map<string, [number, number, number]>();
   // Travelling AND turning: a spin on the spot is locomotion. See `gaitSpeed`.
   const travel = gaitSpeed(speed, turn, rig);

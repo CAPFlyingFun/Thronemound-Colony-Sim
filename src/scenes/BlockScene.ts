@@ -50,6 +50,7 @@ import { CASTE_BITE_MM, CASTE_LENGTH_MM } from '../anim/hexapod';
 import { FollowCamera } from './FollowCamera';
 import { STICK_DEADZONE, clampStickOrigin, stickVector } from '../voxel/locomotion';
 import { MODES, cycleMode } from './modes';
+import { HEAD_PITCH_UP } from '../anim/hexapod';
 import {
   FOOT_CLEARANCE_MM, LegDrive, type DriveReport, type LegSetup,
 } from '../anim/legDrive';
@@ -135,6 +136,26 @@ const THIRD_PERSON_FOV = 60;
  * How far one tap of a tuner button moves the eye, in mm, and its pitch, in
  * degrees. Small enough to land on something, big enough to get there.
  */
+/**
+ * A fifth of a millimetre ahead of the sockets, tuned on the device and kept.
+ *
+ * Dead on the socket the eye sits just far enough back that her own head
+ * clips the near plane. Two taps forward on the tuner cleared it and put the
+ * mandibles in shot, so that is where it starts now; the tuner still moves it
+ * from here.
+ */
+/** How far down she may look onboard, where her neck follows the camera. */
+const HEAD_PITCH_MAX_DOWN = Math.PI / 2;
+/**
+ * The head-profile inset: how far to the side the eye sits, how much of her
+ * it frames, and how much of the screen it takes. Six millimetres of span is
+ * her head and a little of her thorax — enough context to read a nod against,
+ * without her legs cluttering it.
+ */
+const HEAD_INSET_MM = 12;
+const HEAD_INSET_SPAN_MM = 6;
+const HEAD_INSET_FRACTION = 0.32;
+const EYE_FORWARD_MM = 0.2;
 const EYE_NUDGE_MM = 0.1;
 const EYE_NUDGE_DEG = 2;
 
@@ -267,6 +288,15 @@ export class BlockScene {
   private lookPointer: number | null = null;
   private lookAt = { x: 0, y: 0 };
   private frame = 0;
+  /**
+   * The head-profile inset's camera. Orthographic and framed on her head —
+   * see `renderHeadInset`.
+   */
+  private readonly headCam = new THREE.OrthographicCamera(
+    -HEAD_INSET_SPAN_MM / 2 / MM, HEAD_INSET_SPAN_MM / 2 / MM,
+    HEAD_INSET_SPAN_MM / 2 / MM, -HEAD_INSET_SPAN_MM / 2 / MM,
+    0.01, 40 / MM,
+  );
   private previous = performance.now();
   private resizeObserver: ResizeObserver | null = null;
 
@@ -790,6 +820,14 @@ export class BlockScene {
         carrying: 0,
         headYaw: this.follow.lookYaw,
         headPitch: mode.pitchHead ? this.follow.lookPitch : 0,
+        /*
+         * Onboard, her neck follows the camera all the way DOWN. The eye is
+         * on her head, so the bone and the view have to be the same angle or
+         * the head reads as welded down while the picture keeps tilting.
+         * Over her shoulder the anatomical limit stands. Up is her neck's
+         * own fifteen degrees either way — see `HEAD_PITCH_UP`.
+         */
+        headPitchDown: this.firstPerson ? HEAD_PITCH_MAX_DOWN : undefined,
       });
       /*
        * Feet onto the soil, in her frame: elevation is measured along HER
@@ -845,7 +883,7 @@ export class BlockScene {
       this.follow.eye.set(
         d.dot(eyeRight) + this.eyeNudge.x,
         d.dot(this.up) + this.eyeNudge.y,
-        d.dot(this.forward) + this.eyeNudge.z,
+        d.dot(this.forward) + EYE_FORWARD_MM / MM + this.eyeNudge.z,
       );
     }
     this.follow.target.copy(this.at).addScaledVector(this.up, RIDE);
@@ -904,9 +942,55 @@ export class BlockScene {
     this.previous = now;
     this.simulate(dt);
     this.renderer.render(this.scene, this.camera);
+    this.renderHeadInset();
     this.updateStatus();
     this.frame = requestAnimationFrame(this.animate);
   };
+
+  /**
+   * A PROFILE of her head, inset top-right — the instrument for reading a
+   * pitch off the screen.
+   *
+   * An angle is the one thing the main view cannot show you, in either
+   * camera: over her shoulder her head is small and mostly facing away, and
+   * onboard you are inside it. So this looks at her from the side, square on,
+   * where a nod is the whole picture.
+   *
+   * ORTHOGRAPHIC on purpose. The reading has to be an angle and nothing else,
+   * and a perspective lens a few millimetres from a 2 mm head bends every
+   * line it draws. Locked to HER frame rather than the world's, so level in
+   * the inset means level to the ant, on a wall and on the ceiling too.
+   *
+   * It is a debug instrument and it says so: it costs a second scene draw
+   * over a sixth of the screen and comes out when the head is signed off.
+   */
+  private renderHeadInset(): void {
+    if (!this.ready) return;
+    const head = new THREE.Vector3();
+    if (!this.queen.eyePosition(head)) return;
+    /*
+     * Her LEFT, so a nose-down nod reads as clockwise the way a protractor
+     * does. Her own up is the inset's up, so the horizon in here is her body
+     * axis and the angle you read is the angle the bone was given.
+     */
+    const right = new THREE.Vector3().crossVectors(this.up, this.forward).normalize();
+    this.headCam.position.copy(head).addScaledVector(right, -HEAD_INSET_MM / MM);
+    this.headCam.up.copy(this.up);
+    this.headCam.lookAt(head);
+    this.headCam.updateProjectionMatrix();
+
+    const size = this.renderer.getSize(new THREE.Vector2());
+    const w = Math.round(Math.min(size.x, size.y) * HEAD_INSET_FRACTION);
+    const x = Math.round(size.x - w - 12);
+    const y = Math.round(size.y - w - 12);
+    this.renderer.setScissorTest(true);
+    this.renderer.setViewport(x, y, w, w);
+    this.renderer.setScissor(x, y, w, w);
+    this.renderer.clearDepth();
+    this.renderer.render(this.scene, this.headCam);
+    this.renderer.setScissorTest(false);
+    this.renderer.setViewport(0, 0, size.x, size.y);
+  }
 
   private updateStatus(): void {
     const face = this.up.y > 0.7 ? 'top'
@@ -970,6 +1054,13 @@ export class BlockScene {
     this.camera.updateProjectionMatrix();
     this.viewButton.textContent = on ? '1ST' : '3RD';
     this.tuner.style.display = on ? '' : 'none';
+  }
+
+  /** Aim through the same clamp a drag uses. For probes. */
+  setAimPitchForTest(next: number): void {
+    this.aimPitch = THREE.MathUtils.clamp(
+      next, -HEAD_PITCH_MAX_DOWN, this.firstPerson ? HEAD_PITCH_UP : Math.PI / 2,
+    );
   }
 
   /* ------------------------------------------------------------ the input */
@@ -1120,8 +1211,17 @@ export class BlockScene {
       const dy = event.clientY - this.lookAt.y;
       this.lookAt = { x: event.clientX, y: event.clientY };
       this.follow.orbit(-dx * LOOK_PER_PIXEL, -dy * LOOK_PER_PIXEL);
+      /*
+       * Clamped to what her NECK can do, not to what a camera can do.
+       *
+       * In first person the eye is on her head, so any range the view has
+       * that the neck does not is range where the two silently part company.
+       * Fifteen degrees up is the neck's limit, so it is the view's too.
+       */
       this.aimPitch = THREE.MathUtils.clamp(
-        this.aimPitch - dy * LOOK_PER_PIXEL, -Math.PI / 2, Math.PI / 2,
+        this.aimPitch - dy * LOOK_PER_PIXEL,
+        -HEAD_PITCH_MAX_DOWN,
+        this.firstPerson ? HEAD_PITCH_UP : Math.PI / 2,
       );
     });
     const release = (event: PointerEvent) => {
