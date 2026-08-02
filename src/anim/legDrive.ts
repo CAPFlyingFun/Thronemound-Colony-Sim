@@ -12,22 +12,55 @@
  * And an animal who cannot find anything to stand on does not slide — she
  * paddles and stays put, which is what should happen on a smooth overhang.
  *
+ * ## Two references, one answer
+ *
+ * The first version of this file guessed at the two hard parts — what bounds
+ * a stance leg, and what turning even is — and got both wrong in the same
+ * way: it treated them as separate problems. A walking-robot firmware
+ * (JiroRobotics/Hexapod_v4) and the wider literature on foot-driven vehicles
+ * turn out to agree, and to agree with each other:
+ *
+ * 1. **A step goes on a circle about the foot's home.** Hexapod_v4 places
+ *    each swing target at `homePos + radius·(cos θ, sin θ)` and then walks
+ *    the stance feet along a straight line until they leave that same circle
+ *    — `lineCircleIntersect`, solved as a quadratic. CSIRO's OpenSHC does
+ *    the same thing with a per-bearing "walkspace" radius map. The circle is
+ *    the bound. Not, as this file had it, hip-to-foot-plus-spare, which is
+ *    four to five millimetres and therefore never binds on anything.
+ *
+ * 2. **Turning is not a mode.** Both compute a per-leg travel direction from
+ *    one body twist: `stride = v + ω × r`, where `r` is that leg's offset
+ *    from the body origin. Spinning on the spot is `v = 0` down the very
+ *    same path. The outer legs stride further than the inner ones because
+ *    `ω × r` is larger out there — nobody codes a differential, it falls
+ *    out. Hexapod_v4 writes the same thing as a per-leg mounting angle added
+ *    to a shared step bearing, and applies its yaw matrix to the STANCE legs
+ *    only, which is what "the legs turn her" means when the feet are the
+ *    things holding still.
+ *
+ * 3. **The gait is triggered by geometry, not by a clock.** A tripod lifts
+ *    when the feet carrying her have reached the back of their circles. That
+ *    is the whole timing system, and it is why she steps in proportion to
+ *    ground covered and takes no steps at all when she is blocked.
+ *
+ * The literature adds one caution worth writing down: with three-jointed
+ * legs and the feet locked, the body is NOT determined by the feet — it is
+ * a free platform that each leg absorbs independently, and only the legs'
+ * workspace limits couple them. So proposing a body motion and then
+ * clipping it against those limits is not an approximation of a "real"
+ * solve. It is the formulation.
+ *
  * ## How the loop runs
  *
- * 1. The stick PROPOSES a body motion.
- * 2. The planted feet CONSTRAIN it: a stance leg has a maximum reach, and a
- *    body that would over-travel is pulled back until every planted foot is
- *    reachable again. This is where "the legs move her" actually lives.
- * 3. What survives step 2 is her real displacement, and it is what advances
- *    the gait — so legs step in proportion to ground covered, like wheels
- *    turning, and a body that is blocked takes no steps at all.
- * 4. Swing legs reach for a new spot ahead; if there is nothing to stand on,
- *    the leg STAYS UP and the others carry her.
- *
- * Proposing and then constraining, rather than solving the body purely from
- * the feet, is a deliberate choice: a pure fit oscillates when two stance
- * feet disagree, and the disagreement is constant on rough ground. This
- * cannot oscillate — the constraint only ever removes motion.
+ * 1. The stick PROPOSES a twist: a translation and a yaw.
+ * 2. The planted feet CONSTRAIN it, together, as a single fraction of that
+ *    twist — so a foot that is out of room stops the turn as well as the
+ *    walk, which is the case a translation-only clamp used to miss.
+ * 3. What survives is her real displacement.
+ * 4. When nothing is in the air and the most-spent stance foot has reached
+ *    the back of its circle, the other tripod lifts and steps to the FRONT
+ *    of its own circles, along its own `v + ω × r`.
+ * 5. A swing leg that finds nothing to stand on STAYS UP and keeps reaching.
  *
  * ## The numbers are measured, not chosen
  *
@@ -57,11 +90,14 @@ export const TRIPOD_A = ['frontLeft', 'midRight', 'rearLeft'];
 export const TRIPOD_B = ['frontRight', 'midLeft', 'rearRight'];
 
 /**
- * How far a foot travels fore and aft of its home, per gait.
+ * How far a foot travels fore and aft of its home, per gait — the diameter
+ * of the circle a step goes on, so half of each number is its radius.
  *
  * One table, so the modes are compared rather than scattered. Turning takes
  * short steps because a spin on the spot is many small placements, and long
- * ones would have her lurching round in quarters.
+ * ones would have her lurching round in quarters. The two are BLENDED per
+ * leg by how much of that leg's travel is rotation rather than translation,
+ * because there is no moment where she stops walking and starts turning.
  */
 export const STRIDE_MM = { walk: 2.0, turn: 0.8 } as const;
 
@@ -84,8 +120,28 @@ export const REACH_DOWN_MM: Record<string, number> = {
  */
 export const REACH_UP_MM = 2.5;
 
-/** The body keeps this much daylight under it, or the legs push it up. */
+/**
+ * The body keeps this much daylight under it, or the stance legs push it up.
+ *
+ * A SAFETY, engaged only when the ground rises into her — it is not part of
+ * how high she rests. Folding it into the resting height was one of the two
+ * reasons her feet hovered: it lifted the whole animal a quarter of a
+ * millimetre before the IK's own clearance lifted the feet again.
+ */
 export const RIDE_CLEARANCE_MM = 0.25;
+
+/**
+ * And how far a DRAWN foot is held off the soil, which is a different
+ * question and the one that was visibly wrong.
+ *
+ * The block room handed the IK its cell size, 0.5 mm, as this number — 50
+ * times what the colony sim uses (`FOOT_CLEARANCE`, 0.01 mm) and 100 times
+ * what a foot that is meant to be touching should have. That is the gap
+ * under her in the report. Five thousandths of a millimetre is not zero on
+ * purpose: a foot solved to exactly the surface z-fights the soil it stands
+ * on, and at this scale five microns is invisible and cheap.
+ */
+export const FOOT_CLEARANCE_MM = 0.005;
 
 /** Fraction of a swing after which the foot is down and locked. */
 const LOCK_AT = 0.9;
@@ -93,6 +149,8 @@ const LOCK_AT = 0.9;
 const SWING_LIFT = 0.35;
 /** Seconds a swing takes when she is moving at all. */
 const SWING_SECONDS = 0.16;
+/** Bisection steps used to clip the proposed twist. Ten is 0.1% of it. */
+const CLIP_STEPS = 10;
 
 export interface LegSetup {
   slot: string;
@@ -126,7 +184,19 @@ interface Leg {
   at: THREE.Vector3;
   /** True while it is reaching and has found nothing: held up. */
   groping: boolean;
+  /** Spare downward reach, in world units. See `REACH_DOWN_MM`. */
   down: number;
+  /**
+   * How far the foot may be dragged sideways from home before the leg is
+   * out of leg — the STRAIN limit, past the gait circle. See `spread`.
+   */
+  spread: number;
+  /**
+   * Which way this foot is travelling over the ground, unit, world. Held
+   * from the frame it was planted so the excursion is measured against the
+   * stroke it was actually placed for.
+   */
+  dir: THREE.Vector3;
 }
 
 export interface BodyPose {
@@ -153,17 +223,38 @@ export interface DriveReport {
   groping: number;
   /** Daylight under her body at the end of the step. */
   clearanceMm: number;
+  /**
+   * The most-spent stance foot, as a fraction of its gait circle. Reaches 1
+   * and the tripod swaps; goes past 1 only when she is straining because
+   * the swing legs have nothing to land on.
+   */
+  strain: number;
+  /** Fraction of the proposed twist that survived the feet, 0..1. */
+  allowed: number;
+}
+
+/**
+ * How far a foot may be dragged sideways from home before the leg runs out.
+ *
+ * The measured spare (`REACH_DOWN_MM`) is spare along the leg — what is
+ * left when it is pulled straight DOWN. Sideways is a different triangle:
+ * the foot sits `reach` from the hip, and the worst case for a horizontal
+ * drag is that it is square to the hip, so the budget is the other side of
+ * a right triangle whose hypotenuse is the straightened leg. For the front
+ * legs that is √(4.10² − 2.98²) = 2.82 mm, and for the rear 4.28 mm — real
+ * room, and still well outside the 1 mm gait circle that does the work.
+ */
+function spread(reach: number, spare: number): number {
+  const straight = reach + spare;
+  return Math.sqrt(Math.max(0, straight * straight - reach * reach));
 }
 
 export class LegDrive {
   private readonly legs: Leg[] = [];
-  /** Which tripod is currently in the air. */
-  private swinging: 0 | 1 = 0;
-  /** 0..1 through the current half-cycle, advanced by DISTANCE. */
-  private phase = 0;
 
   constructor(setup: LegSetup[]) {
     for (const leg of setup) {
+      const spare = (REACH_DOWN_MM[leg.slot] ?? 1) / MM;
       this.legs.push({
         slot: leg.slot,
         home: leg.home.clone(),
@@ -174,7 +265,11 @@ export class LegDrive {
         t: 1,
         at: new THREE.Vector3(),
         groping: false,
-        down: (REACH_DOWN_MM[leg.slot] ?? 1) / MM,
+        down: spare,
+        // `reach` arrives in world units: the rig is scaled before it is
+        // measured, so it is already in the same units as `home`.
+        spread: spread(leg.reach || leg.home.length(), spare),
+        dir: new THREE.Vector3(0, 0, 1),
       });
     }
   }
@@ -186,11 +281,6 @@ export class LegDrive {
     return [leg.at.x, leg.at.y, leg.at.z];
   }
 
-  /** How far a leg can be from its home before the body has over-travelled. */
-  private maxReach(leg: Leg): number {
-    return leg.home.length() + leg.down;
-  }
-
   /** Home, in the world, for a given body pose. */
   private homeWorld(leg: Leg, body: BodyPose, into: THREE.Vector3): THREE.Vector3 {
     const right = new THREE.Vector3().crossVectors(body.up, body.forward).normalize();
@@ -200,71 +290,203 @@ export class LegDrive {
       .addScaledVector(body.forward, leg.home.z);
   }
 
-  /** Put every foot on the ground under its home. Call once, on spawn. */
+  /**
+   * Where this leg's ground contact is travelling, and how fast — the one
+   * twist, evaluated at this leg: `v + ω × r`.
+   *
+   * `into` comes back unit (or zero when she is not commanding anything).
+   * The return is the speed, and `turn` is how much of that speed is the
+   * rotation term, which is what blends the stride table.
+   */
+  private travel(
+    leg: Leg, body: BodyPose, input: DriveInput, into: THREE.Vector3,
+  ): { speed: number; turn: number } {
+    const right = new THREE.Vector3().crossVectors(body.up, body.forward).normalize();
+    const offset = new THREE.Vector3()
+      .addScaledVector(right, leg.home.x)
+      .addScaledVector(body.up, leg.home.y)
+      .addScaledVector(body.forward, leg.home.z);
+    const linear = body.forward.clone().multiplyScalar(input.speed * input.walk);
+    const angular = new THREE.Vector3()
+      .crossVectors(body.up, offset)
+      .multiplyScalar(input.yawRate * input.yaw);
+    const rotSpeed = angular.length();
+    into.copy(linear).add(angular);
+    const speed = into.length();
+    if (speed > 1e-9) into.divideScalar(speed);
+    return { speed, turn: speed > 1e-9 ? Math.min(1, rotSpeed / speed) : 0 };
+  }
+
+  /** The radius of this leg's gait circle, blended between the two strides. */
+  private radiusFor(turn: number): number {
+    const mm = STRIDE_MM.walk + (STRIDE_MM.turn - STRIDE_MM.walk) * turn;
+    return mm / 2 / MM;
+  }
+
+  /**
+   * Put every foot on the ground under its home. Call once, on spawn.
+   *
+   * The tripods are STAGGERED by half a stroke — 1-4-5 under their homes,
+   * 2-3-6 a radius ahead of theirs — because six feet planted in lockstep
+   * all run out of stroke on the same frame, and the first thing she would
+   * do is stretch three legs past their circle waiting for the other three
+   * to land. Half a stroke apart, one tripod always has room while the
+   * other is in the air, which is what a tripod gait is for.
+   */
   plantAll(body: BodyPose, ground: Ground): void {
     const home = new THREE.Vector3();
+    const lead = this.radiusFor(0);
     for (const leg of this.legs) {
       this.homeWorld(leg, body, home);
-      const hit = ground.nearest(home, body.up, leg.down, REACH_UP_MM / MM);
+      const want = TRIPOD_B.includes(leg.slot)
+        ? home.clone().addScaledVector(body.forward, lead)
+        : home.clone();
+      const hit = ground.nearest(want, body.up, leg.down, REACH_UP_MM / MM)
+        ?? ground.nearest(home, body.up, leg.down, REACH_UP_MM / MM);
       leg.planted = !!hit;
       leg.groping = !hit;
       leg.anchor.copy(hit ?? home);
       leg.at.copy(leg.anchor);
       leg.t = 1;
+      leg.dir.copy(body.forward);
     }
+  }
+
+  /**
+   * How far this foot is from home, measured ACROSS her up — the component
+   * that eats the gait circle. The vertical part is a leg reaching down a
+   * ledge, which is bounded separately and at plant time.
+   */
+  private excursion(leg: Leg, home: THREE.Vector3, up: THREE.Vector3): THREE.Vector3 {
+    const d = home.clone().sub(leg.anchor);
+    return d.addScaledVector(up, -d.dot(up));
   }
 
   /**
    * One step of the whole arrangement. Mutates `body`, returns what happened.
    */
   step(dt: number, body: BodyPose, input: DriveInput, ground: Ground): DriveReport {
-    const turning = Math.abs(input.yaw) > Math.abs(input.walk);
-    const stride = (turning ? STRIDE_MM.turn : STRIDE_MM.walk) / MM;
-
-    /* 1. The stick proposes. */
-    const before = body.at.clone();
-    const proposed = body.at.clone()
-      .addScaledVector(body.forward, input.speed * input.walk * dt);
-    const yaw = input.yawRate * input.yaw * dt;
-
-    /* 2. The planted feet constrain it. */
+    const from = body.at.clone();
+    const forward0 = body.forward.clone();
     const home = new THREE.Vector3();
-    const probe: BodyPose = { at: proposed, up: body.up, forward: body.forward };
-    for (let pass = 0; pass < 2; pass += 1) {
-      for (const leg of this.legs) {
-        if (!leg.planted) continue;
+    const dir = new THREE.Vector3();
+
+    /*
+     * 1. The stick proposes ONE twist — a shove and a spin. They are clipped
+     *    together below, because a foot with no room left has no more room
+     *    for the turn than it does for the walk.
+     */
+    const shove = body.forward.clone().multiplyScalar(input.speed * input.walk * dt);
+    const spin = input.yawRate * input.yaw * dt;
+    const wanted = shove.length();
+
+    /*
+     * 2. The planted feet constrain it. Every stance foot must stay inside
+     *    its own reach; the largest fraction of the twist that keeps all of
+     *    them inside is the one she gets. Bisection rather than algebra
+     *    because the yaw makes it non-linear, and ten halvings of a frame's
+     *    motion is far below anything visible.
+     *
+     *    A leg already outside its limit — because the ground moved, or
+     *    because she is straining with nothing to step onto — is held to
+     *    where it is rather than declared impossible. The clip can only ever
+     *    remove motion, so this cannot oscillate.
+     */
+    const limits: Array<{ leg: Leg; limit: number }> = [];
+    for (const leg of this.legs) {
+      if (!leg.planted) continue;
+      this.homeWorld(leg, body, home);
+      const now = this.excursion(leg, home, body.up).length();
+      limits.push({ leg, limit: Math.max(leg.spread, now) });
+    }
+    const probe: BodyPose = {
+      at: new THREE.Vector3(), up: body.up, forward: new THREE.Vector3(),
+    };
+    const fits = (s: number): boolean => {
+      probe.at.copy(from).addScaledVector(shove, s);
+      probe.forward.copy(forward0);
+      if (Math.abs(spin * s) > 1e-12) probe.forward.applyAxisAngle(body.up, spin * s).normalize();
+      for (const { leg, limit } of limits) {
         this.homeWorld(leg, probe, home);
-        const reach = this.maxReach(leg);
-        const gap = home.distanceTo(leg.anchor);
-        if (gap <= reach) continue;
-        // Pull the body back along the line the foot is straining on.
-        const pull = home.clone().sub(leg.anchor).normalize().multiplyScalar(gap - reach);
-        proposed.sub(pull);
+        if (this.excursion(leg, home, body.up).length() > limit) return false;
       }
+      return true;
+    };
+    let allowed = 1;
+    if (limits.length > 0 && !fits(1)) {
+      let lo = 0;
+      let hi = 1;
+      for (let i = 0; i < CLIP_STEPS; i += 1) {
+        const mid = (lo + hi) / 2;
+        if (fits(mid)) lo = mid; else hi = mid;
+      }
+      allowed = lo;
     }
 
-    const wanted = body.at.distanceTo(
-      body.at.clone().addScaledVector(body.forward, input.speed * input.walk * dt),
-    );
-    body.at.copy(proposed);
-    if (Math.abs(yaw) > 1e-9) body.forward.applyAxisAngle(body.up, yaw).normalize();
-    const moved = before.distanceTo(body.at);
+    body.at.copy(from).addScaledVector(shove, allowed);
+    if (Math.abs(spin * allowed) > 1e-12) {
+      body.forward.applyAxisAngle(body.up, spin * allowed).normalize();
+    }
+    const moved = from.distanceTo(body.at);
 
-    /* 3. Distance advances the gait, so the legs are wheels and not a clock. */
-    if (stride > 1e-6) this.phase += (moved + Math.abs(yaw) * 0.5) / stride;
-    if (this.phase >= 1) {
-      this.phase = 0;
-      this.swinging = this.swinging === 0 ? 1 : 0;
-      const group = this.swinging === 0 ? TRIPOD_A : TRIPOD_B;
+    /*
+     * 3. The gait is triggered by the feet, not by a timer. When nothing is
+     *    in the air and the most-spent stance foot has been dragged to the
+     *    back of its circle, the OTHER tripod lifts. That is the whole of
+     *    the timing: she steps because her feet ran out of stroke, so a
+     *    blocked ant takes no steps and a fast one takes them faster.
+     */
+    let strain = 0;
+    let spentest: Leg | null = null;
+    let inTransit = false;
+    for (const leg of this.legs) {
+      if (!leg.planted) {
+        /*
+         * A leg on its way to a spot it has FOUND blocks the swap — she may
+         * not lift the tripod carrying her while the other one is still in
+         * the air. A leg that has found nothing does NOT block it. That
+         * distinction is the whole of walking off a lip: the front feet
+         * reach into space and stay reaching, and if they counted as "in
+         * the air" the gait would wait for them forever while the legs
+         * still on top stretched to their limit and stopped her dead at the
+         * edge. Which is exactly what she did, at z = 64.3 mm.
+         */
+        if (!leg.groping) inTransit = true;
+        continue;
+      }
+      this.homeWorld(leg, body, home);
+      const { turn } = this.travel(leg, body, input, dir);
+      const radius = this.radiusFor(turn);
+      // Signed along the stroke: -1 just planted ahead, +1 fully spent.
+      const spent = this.excursion(leg, home, body.up).dot(leg.dir) / radius;
+      if (!spentest || spent > strain) {
+        strain = spent;
+        spentest = leg;
+      }
+    }
+    if (!inTransit && spentest && strain >= 1) {
+      /*
+       * Lift the tripod that the most-spent foot belongs to. Alternation is
+       * not bookkept: a group that has just stepped is fresh by definition,
+       * so the other one is always the spent one, and at a lip — where one
+       * tripod is half in space — this picks the group that has somewhere
+       * to go instead of taking a blind turn.
+       */
+      const group = TRIPOD_A.includes(spentest.slot) ? TRIPOD_A : TRIPOD_B;
       for (const leg of this.legs) {
-        if (!group.includes(leg.slot)) continue;
+        if (!group.includes(leg.slot) || !leg.planted) continue;
         leg.planted = false;
         leg.t = 0;
         leg.from.copy(leg.at);
       }
     }
 
-    /* 4. Swing legs reach ahead; a leg that finds nothing stays up. */
+    /*
+     * 4. Swing legs reach for the FRONT of their own circles, each along its
+     *    own `v + ω × r`. On a spin in place that direction is sideways and
+     *    opposite across her, which is the whole of turning — there is no
+     *    turn branch anywhere in this file.
+     */
     let groping = 0;
     let planted = 0;
     for (const leg of this.legs) {
@@ -274,7 +496,16 @@ export class LegDrive {
         continue;
       }
       this.homeWorld(leg, body, home);
-      const ahead = home.clone().addScaledVector(body.forward, stride * 0.5);
+      const { speed, turn } = this.travel(leg, body, input, dir);
+      const radius = this.radiusFor(turn);
+      /*
+       * A leg stepping while she is NOT being driven goes home, not a full
+       * radius ahead of it — that is the foot settling after she stops, and
+       * placing it at the front of a stroke she is not taking would splay
+       * her out on every halt.
+       */
+      if (speed <= 1e-9) dir.copy(leg.dir);
+      const ahead = home.clone().addScaledVector(dir, speed > 1e-9 ? radius : 0);
       const hit = ground.nearest(ahead, body.up, leg.down, REACH_UP_MM / MM);
       if (!hit) {
         /*
@@ -284,27 +515,28 @@ export class LegDrive {
          */
         leg.groping = true;
         groping += 1;
-        leg.at.copy(ahead).addScaledVector(body.up, stride * SWING_LIFT);
+        leg.at.copy(ahead).addScaledVector(body.up, radius * SWING_LIFT);
         continue;
       }
       leg.groping = false;
       leg.to.copy(hit);
       leg.t = Math.min(1, leg.t + dt / SWING_SECONDS);
-      const arc = Math.sin(Math.PI * Math.min(1, leg.t)) * stride * SWING_LIFT;
+      const arc = Math.sin(Math.PI * Math.min(1, leg.t)) * radius * SWING_LIFT;
       leg.at.lerpVectors(leg.from, leg.to, leg.t).addScaledVector(body.up, arc);
       if (leg.t >= LOCK_AT) {
         leg.planted = true;
         leg.anchor.copy(leg.to);
         leg.at.copy(leg.anchor);
+        leg.dir.copy(dir);
         planted += 1;
       }
     }
 
     /*
      * 5. Ride height. She keeps a little daylight under her, and when the
-     * ground rises into her the stance legs push down to lift her clear —
-     * bounded by the same spare reach, so on a hard floor she bottoms out
-     * and drags instead of floating through it.
+     *    ground rises into her the stance legs push down to lift her clear —
+     *    bounded by the same spare reach, so on a hard floor she bottoms out
+     *    and drags instead of floating through it.
      */
     const under = ground.nearest(body.at, body.up, 6 / MM, 0.6 / MM);
     let clearance = Infinity;
@@ -325,6 +557,8 @@ export class LegDrive {
       planted,
       groping,
       clearanceMm: Number.isFinite(clearance) ? clearance * MM : -1,
+      strain,
+      allowed,
     };
   }
 }

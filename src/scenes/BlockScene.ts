@@ -40,7 +40,9 @@ import { QueenModel } from '../anim/QueenModel';
 import { CASTE_BITE_MM, CASTE_LENGTH_MM } from '../anim/hexapod';
 import { FollowCamera } from './FollowCamera';
 import { clampStickOrigin, stickVector } from '../voxel/locomotion';
-import { LegDrive, RIDE_CLEARANCE_MM, type DriveReport, type LegSetup } from '../anim/legDrive';
+import {
+  FOOT_CLEARANCE_MM, LegDrive, type DriveReport, type LegSetup,
+} from '../anim/legDrive';
 
 /** Millimetres per world unit, the scale the whole project runs on. */
 const MM = 5;
@@ -491,8 +493,16 @@ export class BlockScene {
       reach: leg.reach,
     }));
     if (setup.length === 0) return;
+    /*
+     * Rest exactly where her own feet say, and NOT a clearance higher. The
+     * body's minimum clearance is a safety for when the ground rises into
+     * her (see `RIDE_CLEARANCE_MM`); adding it here instead raised her a
+     * quarter of a millimetre off the soil before the IK had even had its
+     * turn, which with the IK's own 0.5 mm was most of the gap reported
+     * under her feet.
+     */
     const meanFootY = setup.reduce((sum, leg) => sum + leg.home.y, 0) / setup.length;
-    this.ride = -meanFootY + RIDE_CLEARANCE_MM / 5;
+    this.ride = -meanFootY;
     // Re-seat her at the height her own legs imply before they take over.
     this.at.addScaledVector(this.up, this.ride - RIDE);
     this.drive = new LegDrive(setup);
@@ -660,7 +670,7 @@ export class BlockScene {
        */
       this.queen.solveFeet(
         (x, z, y) => this.surfaceUnder(x, y, z),
-        CELL,
+        FOOT_CLEARANCE_MM / 5,
         RIDE * 2,
         this.drive ? (slot) => this.drive!.anchorFor(slot) : undefined,
         {
@@ -722,6 +732,7 @@ export class BlockScene {
       Legs: ${this.report
     ? `${this.report.planted} planted · ${this.report.groping} reaching · `
       + `${this.report.movedMm.toFixed(2)} mm moved, ${this.report.heldBackMm.toFixed(2)} held back · `
+      + `stroke ${(this.report.strain * 100).toFixed(0)}% · `
       + `${this.report.clearanceMm.toFixed(2)} mm clear`
     : 'waiting for the model'}`;
   }
