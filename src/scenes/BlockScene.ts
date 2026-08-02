@@ -954,17 +954,31 @@ export class BlockScene {
      * her thorax. Riding the live bone is also the only way "looking down the
      * mandibles" means anything, since the mandibles move.
      */
+    /*
+     * WHERE THE EYE SITS: on her antenna sockets as they are right now, given
+     * to the rig as a WORLD POINT rather than as an offset in her frame.
+     *
+     * The frame round-trip is what broke it. Decomposing the live socket onto
+     * her right/up/forward and letting the rig rebuild it looks harmless, but
+     * the rig rebuilds on axes already turned by the look yaw — so the offset
+     * was rotated twice and the eye swung wide of the head it is bolted to.
+     * Measured: her jaws sat 10 degrees off the view centre looking straight
+     * ahead and 79 degrees off at a sixty degree turn. A world point has no
+     * frame to disagree about.
+     */
     this.follow.body.copy(this.at);
+    this.follow.onboardEye = null;
     const socket = new THREE.Vector3();
     if (this.queen.eyePosition(socket)) {
-      const eyeRight = new THREE.Vector3().crossVectors(this.up, this.forward).normalize();
-      const d = socket.sub(this.at);
-      this.follow.eye.set(
-        d.dot(eyeRight) + this.eyeNudge.x,
-        d.dot(this.up) + this.eyeNudge.y,
-        d.dot(this.forward) + EYE_FORWARD_MM / MM + this.eyeNudge.z,
-      );
+      this.follow.onboardEye = socket.clone()
+        .addScaledVector(this.forward, EYE_FORWARD_MM / MM + this.eyeNudge.z)
+        .addScaledVector(this.up, this.eyeNudge.y)
+        .addScaledVector(
+          new THREE.Vector3().crossVectors(this.up, this.forward).normalize(),
+          this.eyeNudge.x,
+        );
     }
+
     this.follow.target.copy(this.at).addScaledVector(this.up, RIDE);
     this.follow.up.copy(this.up);
     /*
@@ -983,6 +997,46 @@ export class BlockScene {
     // The view IS the aim now — no posture folded in, because the bone is not
     // offset from it either. `eyePitch` is the tuner's share and nothing else.
     this.follow.aimPitch = this.aimPitch + (this.firstPerson ? this.eyePitch : 0);
+    /*
+     * AND ONBOARD, THE VIEW LOOKS ALONG HER HEAD — socket to jaw, the same
+     * two points the eye is placed from, so it points down the mandibles by
+     * construction and stays pointed there however the head moves.
+     *
+     * The camera used to be positionally attached to her head and
+     * rotationally attached to her thorax: the eye rode the live sockets
+     * while the direction was built from her BODY's forward plus a yaw and a
+     * pitch. Looking straight down worked, and turning thirty degrees left
+     * stopped looking through the mandibles while the profile inset plainly
+     * showed the head turned. A head that yaws does not merely rotate — it
+     * swings the eye sideways about the neck, and rolls and pitches on top of
+     * whatever the gait is doing, none of which two body angles can express.
+     *
+     * Geometry rather than a bone axis, for the reason every other head
+     * measurement here is: the auto-rig's local axes mean nothing, and two
+     * points on the model mean exactly what they look like.
+     *
+     * `eyePitch` lifts it off the jaw line, because her mouthparts hang well
+     * below her eyes and looking straight at them fills the frame with floor.
+     * That is what the tuner's PITCH is for now.
+     */
+    this.follow.onboardLook = null;
+    if (this.firstPerson && this.ready) {
+      const jaw = new THREE.Vector3();
+      const from = this.follow.onboardEye ?? socket;
+      if (this.queen.jawPosition(jaw)) {
+        /*
+         * Aimed from the EYE, not the socket. They differ by a fifth of a
+         * millimetre, which sounds like nothing until you remember the jaw is
+         * only 0.87 mm away — that offset is tens of degrees at this scale.
+         */
+        const look = jaw.sub(from).normalize();
+        if (Math.abs(this.eyePitch) > 1e-6) {
+          const across = new THREE.Vector3().crossVectors(this.up, look);
+          if (across.lengthSq() > 1e-8) look.applyAxisAngle(across.normalize(), -this.eyePitch);
+        }
+        this.follow.onboardLook = look;
+      }
+    }
     this.follow.update(
       dt,
       Math.atan2(this.forward.x, this.forward.z),

@@ -114,6 +114,31 @@ export class FollowCamera {
   aimPitch = 0;
 
   /**
+   * Where the first-person eye LOOKS, in world space, when the scene can say.
+   *
+   * Null falls back to building it from her heading and `aimPitch`, which is
+   * right for a bore camera and wrong for one mounted on a head — see the use
+   * in `update`. Set it every frame or not at all; a stale one aims at
+   * wherever the head used to be.
+   */
+  onboardLook: THREE.Vector3 | null = null;
+
+  /**
+   * Where the first-person eye SITS, in world space, when the scene can say.
+   *
+   * The alternative is `eye`, an offset in her frame — and a frame is exactly
+   * what went wrong. A scene that knows the eye's world position has to
+   * decompose it onto her axes to hand it over, and this rig reconstructs it
+   * on axes already turned by the look yaw, so the offset got rotated twice
+   * and the eye swung wide of the head it was supposed to be bolted to.
+   *
+   * A world point has no frame to disagree about. Still marched out of soil
+   * from `body`, because an eye inside a wall is an eye inside a wall however
+   * it was specified.
+   */
+  onboardEye: THREE.Vector3 | null = null;
+
+  /**
    * The player's look, as an offset from her heading rather than as a world
    * angle. Dragging looks around HER; letting go leaves it where it was. An
    * absolute angle would make her turns spin the camera, which reads as the
@@ -227,10 +252,12 @@ export class FollowCamera {
     /** Which way "up" is for the eye: the horizon, or her own on a wall. */
     lift: THREE.Vector3,
   ): THREE.Vector3 {
-    const full = new THREE.Vector3()
-      .addScaledVector(eyeRight, this.eye.x)
-      .addScaledVector(lift, this.eye.y)
-      .addScaledVector(flat, this.eye.z);
+    const full = this.onboardEye
+      ? this.onboardEye.clone().sub(this.body)
+      : new THREE.Vector3()
+        .addScaledVector(eyeRight, this.eye.x)
+        .addScaledVector(lift, this.eye.y)
+        .addScaledVector(flat, this.eye.z);
     const reach = full.length();
     const at = new THREE.Vector3();
     if (reach < 1e-6) return this.body.clone();
@@ -514,8 +541,25 @@ export class FollowCamera {
      * sickness from inside her head.
      */
     if (this.onboard) {
-      const look = flat.clone().multiplyScalar(Math.cos(this.aimPitch))
-        .addScaledVector(lift, Math.sin(this.aimPitch));
+      /*
+       * THE HEAD'S OWN DIRECTION, when the scene supplies one.
+       *
+       * Without it this builds a look out of her BODY's forward plus a yaw
+       * and a pitch — so a camera sitting on her head is positionally
+       * attached to it and rotationally attached to her thorax. Reported
+       * exactly that way: looking straight down worked, then turning thirty
+       * degrees left stopped looking through the mandibles while the profile
+       * inset plainly showed the head turned.
+       *
+       * A head that yaws does not merely rotate — it SWINGS the eye sideways
+       * about the neck, and rolls and pitches on top of whatever the gait is
+       * doing. None of that is recoverable from two angles off the body. The
+       * scene knows where the head actually points, so it passes it.
+       */
+      const look = this.onboardLook
+        ? this.onboardLook.clone().normalize()
+        : flat.clone().multiplyScalar(Math.cos(this.aimPitch))
+          .addScaledVector(lift, Math.sin(this.aimPitch));
       /*
        * Straight up and straight down are the two aims where world up cannot be
        * the camera's up: the look direction is parallel to it, `lookAt` has no
