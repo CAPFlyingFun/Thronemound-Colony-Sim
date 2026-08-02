@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { MODES, cycleMode } from '../src/scenes/modes';
-import { HEAD_PITCH_UP, QUEEN_RIG, gaitPose } from '../src/anim/hexapod';
+import {
+  HEAD_PITCH_DOWN, HEAD_PITCH_UP, QUEEN_RIG, gaitPose,
+} from '../src/anim/hexapod';
 
 const base = { clock: 0, cycle: 0, speed: 0, turn: 0, digging: 0, carrying: 0 };
 
@@ -48,9 +50,14 @@ describe('head aim', () => {
      * above her she needs to put her mandibles into, and a head craned back
      * reads as a rearing horse.
      */
-    expect(down.headPitch).toBeLessThan(-0.6);
-    // Against the constant, not a literal: this is a tuning knob right now.
+    /*
+     * Both against the constants, not literals: these are tuning knobs, and
+     * what the test is for is the SHAPE — down and up are different numbers,
+     * both are finite, and the resting posture is added outside them.
+     */
+    expect(down.headPitch).toBeCloseTo(-HEAD_PITCH_DOWN, 6);
     expect(up.headPitch).toBeCloseTo(HEAD_PITCH_UP, 6);
+    expect(HEAD_PITCH_DOWN).not.toBeCloseTo(HEAD_PITCH_UP, 3);
   });
 
   it('lets the caller widen the DOWN limit but never the up one', () => {
@@ -63,6 +70,9 @@ describe('head aim', () => {
       { ...base, headPitch: -3, headPitchDown: Math.PI / 2 }, QUEEN_RIG,
     );
     expect(free.headPitch).toBeCloseTo(-Math.PI / 2, 6);
+    // And the default is the shared one, so both cameras stop in the same place.
+    expect(gaitPose({ ...base, headPitch: -3 }, QUEEN_RIG).headPitch)
+      .toBeCloseTo(-HEAD_PITCH_DOWN, 6);
     const still = gaitPose(
       { ...base, headPitch: 3, headPitchDown: Math.PI / 2 }, QUEEN_RIG,
     );

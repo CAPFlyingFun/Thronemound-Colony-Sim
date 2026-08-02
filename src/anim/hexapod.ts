@@ -420,28 +420,7 @@ const IDLE_STAGGER = 1.7;
  * reads as looking rather than as a broken rig; forty of pitch is enough to
  * put her jaws on the floor and to lift them clear.
  */
-const HEAD_YAW_LIMIT = 1.05;
-/**
- * Her neck is ASYMMETRIC, because an ant's is.
- *
- * She works with her face on the floor, so down is generous — forty degrees
- * over her shoulder, and as far as the camera goes when the camera IS her
- * head. Up is fifteen and no more: there is nothing above her she needs to
- * put her mandibles into, and a head craned back reads as a rearing horse
- * rather than an ant.
- */
-const HEAD_PITCH_DOWN = 0.7;
-/**
- * Sixty degrees, opened up from fifteen so the posture can be judged against
- * the head-profile inset rather than guessed at. Expect this to come back
- * down once there is an exact number to set it to.
- *
- * Note what it means with the resting posture underneath it: her face rests
- * 43.26 degrees down, so a full sixty of look only brings it to about
- * seventeen degrees ABOVE level. The limit is on the player's input, not on
- * where her face ends up.
- */
-export const HEAD_PITCH_UP = (60 * Math.PI) / 180;
+export const HEAD_YAW_LIMIT = 1.05;
 /**
  * Where her face RESTS, in degrees, nose-down. The posture the camera counts
  * from: a level camera means her head is here, not level.
@@ -470,6 +449,40 @@ export const HEAD_REST_PITCH_DEG = -43.26;
  * range the camera is allowed instead.
  */
 export const HEAD_REST_BIAS = ((HEAD_REST_PITCH_DEG - -36.35) * Math.PI) / 180;
+
+/**
+ * Her neck is ASYMMETRIC, because an ant's is.
+ *
+ * She works with her face on the floor, so down is generous — forty degrees
+ * over her shoulder, and as far as the camera goes when the camera IS her
+ * head. Up is fifteen and no more: there is nothing above her she needs to
+ * put her mandibles into, and a head craned back reads as a rearing horse
+ * rather than an ant.
+ */
+/*
+ * Down is bounded by the CAMERA clipping the soil, not by anatomy.
+ *
+ * Reported from the device: past about -76 degrees of bone the first-person
+ * eye is inside the ground and you can see through it. So -75 is the floor,
+ * and since the bone sits at `HEAD_REST_PITCH_DEG` before the look is added,
+ * the limit on the look itself is the remainder: 75 - 43.26 = 31.74 degrees.
+ *
+ * The same number in both cameras, on purpose. It used to be widened onboard
+ * and left at forty over her shoulder, so the third-person head stopped short
+ * of where the first-person head went — two answers to one question.
+ */
+export const HEAD_PITCH_DOWN = ((75 + HEAD_REST_PITCH_DEG) * Math.PI) / 180;
+/**
+ * Sixty degrees, opened up from fifteen so the posture can be judged against
+ * the head-profile inset rather than guessed at. Expect this to come back
+ * down once there is an exact number to set it to.
+ *
+ * Note what it means with the resting posture underneath it: her face rests
+ * 43.26 degrees down, so a full sixty of look only brings it to about
+ * seventeen degrees ABOVE level. The limit is on the player's input, not on
+ * where her face ends up.
+ */
+export const HEAD_PITCH_UP = (60 * Math.PI) / 180;
 /** How much of the head's turn the gaster swings against. Her counterweight. */
 export const GASTER_COUNTER = 0.30;
 const MANDIBLE_OPEN = 0.55;

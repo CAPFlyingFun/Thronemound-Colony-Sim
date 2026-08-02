@@ -46,11 +46,13 @@ import './DensityTerrainLabScene.css';
 import { DensityField } from '../density/DensityField';
 import { buildSurfaceNets } from '../density/SurfaceNets';
 import { QueenModel } from '../anim/QueenModel';
-import { CASTE_BITE_MM, CASTE_LENGTH_MM } from '../anim/hexapod';
 import { FollowCamera } from './FollowCamera';
 import { STICK_DEADZONE, clampStickOrigin, stickVector } from '../voxel/locomotion';
 import { MODES, cycleMode } from './modes';
-import { HEAD_PITCH_UP, HEAD_REST_BIAS, HEAD_REST_PITCH_DEG } from '../anim/hexapod';
+import {
+  CASTE_BITE_MM, CASTE_LENGTH_MM, HEAD_PITCH_DOWN, HEAD_PITCH_UP, HEAD_REST_BIAS,
+  HEAD_REST_PITCH_DEG, HEAD_YAW_LIMIT,
+} from '../anim/hexapod';
 import {
   FOOT_CLEARANCE_MM, LegDrive, type DriveReport, type LegSetup,
 } from '../anim/legDrive';
@@ -144,8 +146,6 @@ const THIRD_PERSON_FOV = 60;
  * mandibles in shot, so that is where it starts now; the tuner still moves it
  * from here.
  */
-/** How far down she may look onboard, where her neck follows the camera. */
-const HEAD_PITCH_MAX_DOWN = Math.PI / 2;
 /**
  * The head-profile inset: how far to the side the eye sits, how much of her
  * it frames, and how much of the screen it takes. Six millimetres of span is
@@ -255,6 +255,9 @@ export class BlockScene {
   private eyePitch = 0;
   private readonly tuner = document.createElement('div');
   private readonly viewButton = document.createElement('button');
+  /** Instruments off by default: they cover the thing they measure. */
+  private debug = false;
+  private readonly debugButton = document.createElement('button');
   /** The eased stick, which is what actually drives her. See `step`. */
   private driveWalk = 0;
   private driveYaw = 0;
@@ -763,13 +766,66 @@ export class BlockScene {
     this.up.lerp(normal, 1 - Math.exp(-ALIGN * dt)).normalize();
   }
 
+  /** Is this point within the block's own bounds, rather than outside it? */
+  private insideBlock(p: THREE.Vector3): boolean {
+    const m = CELL * 2;
+    return p.x > LOW + m && p.x < HIGH - m
+      && p.y > LOW + m && p.y < HIGH - m
+      && p.z > LOW + m && p.z < HIGH - m;
+  }
+
+  /**
+   * The nearest bit of surface to a point buried in soil, searched outward
+   * along her own axes. What an ant in a tunnel takes hold of.
+   */
+  private nearestSurface(p: THREE.Vector3): { point: THREE.Vector3 } | null {
+    const right = new THREE.Vector3().crossVectors(this.up, this.forward).normalize();
+    const dirs = [
+      this.up.clone().negate(), this.up.clone(),
+      right, right.clone().negate(),
+      this.forward.clone(), this.forward.clone().negate(),
+    ];
+    let best: THREE.Vector3 | null = null;
+    let bestDist = Infinity;
+    for (const dir of dirs) {
+      // From outside the soil, back in through it, so the cast meets a face.
+      const from = p.clone().addScaledVector(dir, GRIP_REACH);
+      const hit = this.cast(from, dir.clone().negate(), GRIP_REACH);
+      if (!hit) continue;
+      const d = hit.distanceTo(p);
+      if (d < bestDist) { bestDist = d; best = hit; }
+    }
+    return best ? { point: best } : null;
+  }
+
   /** Off the block: straight down, world frame, until something catches. */
   private fall(dt: number): void {
     this.fallSpeed += GRAVITY * dt;
     this.at.y -= this.fallSpeed * dt;
     const probe = this.at.clone();
+    /*
+     * INSIDE the block is not the same as landed, and conflating them is the
+     * teleport.
+     *
+     * `solidAt` is true for every point in the soil, so the moment she lost
+     * her grip underground this fired and flung her to the top of the block.
+     * Reported as being teleported to the surface while moving around in a
+     * tunnel. Underground she should simply take hold of whatever is nearest
+     * — a tunnel has a floor, walls and a ceiling and all three are grip.
+     */
+    if (this.solidAt(probe) && this.insideBlock(probe)) {
+      const near = this.nearestSurface(probe);
+      if (near) {
+        this.normalAt(near.point, this.up);
+        this.at.copy(near.point).addScaledVector(this.up, this.ride);
+        this.gripping = true;
+        this.fallSpeed = 0;
+        this.velocity.set(0, 0, 0);
+        return;
+      }
+    }
     if (this.solidAt(probe) || this.at.y < LOW - SPAN) {
-      // Landed (or lost): put her back on the block's top and re-grip.
+      // Landed on the outside, or lost entirely: back onto the top and re-grip.
       const from = new THREE.Vector3(
         THREE.MathUtils.clamp(this.at.x, LOW + CELL * 4, HIGH - CELL * 4),
         HIGH + GRIP_LIFT * 2,
@@ -835,7 +891,7 @@ export class BlockScene {
          * Over her shoulder the anatomical limit stands. Up is her neck's
          * own fifteen degrees either way — see `HEAD_PITCH_UP`.
          */
-        headPitchDown: this.firstPerson ? HEAD_PITCH_MAX_DOWN : undefined,
+        // One limit, both cameras. See `HEAD_PITCH_DOWN`.
         // Her posture, on top of the look. See `HEAD_REST_BIAS`.
         headRest: HEAD_REST_BIAS,
       });
@@ -984,7 +1040,7 @@ export class BlockScene {
    * over a sixth of the screen and comes out when the head is signed off.
    */
   private renderHeadInset(): void {
-    if (!this.ready) return;
+    if (!this.ready || !this.debug) return;
     const head = new THREE.Vector3();
     if (!this.queen.eyePosition(head)) return;
     /*
@@ -1069,13 +1125,21 @@ export class BlockScene {
    * centimetre off the soil at 60 sees a wall and no context, and back to 60
    * over her shoulder where a wide angle would just distort her.
    */
+  /** Show or hide every instrument at once. `B` on a keyboard. */
+  private setDebug(on: boolean): void {
+    this.debug = on;
+    this.debugButton.textContent = on ? 'DEBUG' : 'debug';
+    this.status.style.display = on ? '' : 'none';
+    this.tuner.style.display = on && this.firstPerson ? '' : 'none';
+  }
+
   private setFirstPerson(on: boolean): void {
     this.firstPerson = on;
     this.follow.mode = on ? 'first' : 'third';
     this.camera.fov = on ? FIRST_PERSON_FOV : THIRD_PERSON_FOV;
     this.camera.updateProjectionMatrix();
     this.viewButton.textContent = on ? '1ST' : '3RD';
-    this.tuner.style.display = on ? '' : 'none';
+    this.tuner.style.display = on && this.debug ? '' : 'none';
   }
 
   /**
@@ -1103,9 +1167,7 @@ export class BlockScene {
 
   /** Aim through the same clamp a drag uses. For probes. */
   setAimPitchForTest(next: number): void {
-    this.aimPitch = THREE.MathUtils.clamp(
-      next, -HEAD_PITCH_MAX_DOWN, this.firstPerson ? HEAD_PITCH_UP : Math.PI / 2,
-    );
+    this.aimPitch = THREE.MathUtils.clamp(next, -HEAD_PITCH_DOWN, HEAD_PITCH_UP);
   }
 
   /* ------------------------------------------------------------ the input */
@@ -1154,6 +1216,19 @@ export class BlockScene {
      * doing — you want first person while digging AND while walking, and
      * folding them together would double the ring every time a verb is added.
      */
+    /*
+     * DEBUG off by default. The readout, the tuner and the head inset are
+     * instruments, and instruments covering most of a phone screen make it
+     * impossible to judge how the thing actually looks — which is the whole
+     * reason for looking at it. One tap puts them all back.
+     */
+    this.debugButton.className = 'density-lab-button density-lab-mode';
+    this.debugButton.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      this.setDebug(!this.debug);
+    });
+    actions.appendChild(this.debugButton);
+
     this.viewButton.className = 'density-lab-button density-lab-mode';
     this.viewButton.addEventListener('pointerdown', (event) => {
       event.preventDefault();
@@ -1195,6 +1270,7 @@ export class BlockScene {
     this.tuner.appendChild(reset);
     hud.appendChild(this.tuner);
     this.setFirstPerson(false);
+    this.setDebug(false);
 
     const canvas = this.renderer.domElement;
     canvas.addEventListener('pointerdown', (event) => {
@@ -1265,9 +1341,19 @@ export class BlockScene {
        */
       this.aimPitch = THREE.MathUtils.clamp(
         this.aimPitch - dy * LOOK_PER_PIXEL,
-        -HEAD_PITCH_MAX_DOWN,
-        this.firstPerson ? HEAD_PITCH_UP : Math.PI / 2,
+        -HEAD_PITCH_DOWN,
+        HEAD_PITCH_UP,
       );
+      /*
+       * And the YAW is clamped to her neck too, onboard, for the same reason
+       * the pitch is: the eye is on her head, so a view that can swing
+       * further than the neck is a view that parts company with it.
+       */
+      if (this.firstPerson) {
+        this.follow.yawOffset = THREE.MathUtils.clamp(
+          this.follow.yawOffset, -HEAD_YAW_LIMIT, HEAD_YAW_LIMIT,
+        );
+      }
     });
     const release = (event: PointerEvent) => {
       if (event.pointerId === this.stickPointer) {
@@ -1293,6 +1379,7 @@ export class BlockScene {
       if (event.key === '*') { event.preventDefault(); this.setMode(cycleMode(this.mode)); }
       if (event.key === '/') { event.preventDefault(); this.setMode(cycleMode(this.mode, -1)); }
       if (event.code === 'KeyV') { event.preventDefault(); this.setFirstPerson(!this.firstPerson); }
+      if (event.code === 'KeyB') { event.preventDefault(); this.setDebug(!this.debug); }
     });
     window.addEventListener('keyup', (event) => {
       if (event.code === 'KeyW' || event.code === 'KeyS') this.input.walk = 0;

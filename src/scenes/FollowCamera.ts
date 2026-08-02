@@ -173,10 +173,20 @@ export class FollowCamera {
   /** Radians per pixel is the caller's business; this takes radians. */
   orbit(deltaYaw: number, deltaPitch: number): void {
     this.yawOffset += deltaYaw;
-    // Stopped short of straight down and of the horizon. Straight down loses
-    // the heading entirely — the camera's forward becomes her up and the yaw
-    // has nothing left to mean.
-    this.pitch = THREE.MathUtils.clamp(this.pitch + deltaPitch, -0.35, 1.35);
+    /*
+     * Stopped short of straight down, which loses the heading entirely — the
+     * camera's forward becomes her up and the yaw has nothing left to mean.
+     *
+     * The LOW end used to stop at -0.35, twenty degrees of looking up, and
+     * that was the third-person head "stopping short": the head follows the
+     * view, so a view that cannot rise past twenty leaves the neck sixty
+     * degrees of range it can never be asked for, while first person reached
+     * all of it. Opened to the neck's own limit so the two cameras can land
+     * on the same head angles. Dipping the arm this low puts it near the
+     * ground, which the rig already handles — it floors the shot above the
+     * surface and falls back onboard when there is no room.
+     */
+    this.pitch = THREE.MathUtils.clamp(this.pitch + deltaPitch, -1.05, 1.35);
   }
 
   zoom(factor: number): void {
@@ -299,16 +309,23 @@ export class FollowCamera {
     bodyForward?: THREE.Vector3,
   ): void {
     /*
-     * First person has NO look offset, by definition. From her eyes, looking
-     * is aiming — the drag turns HER — so the view must be the bore's own
-     * direction and nothing else. The offset the player wound up while
-     * orbiting in third person used to survive the transition, and every
-     * carve then landed that many degrees off the crosshair: the report was
-     * "digging doesn't follow the camera centre", and the cause was a number
-     * from the OTHER camera still being added in. Cleared while onboard, so
-     * stepping out also starts the orbit squarely behind her.
+     * First person KEEPS its look offset, and that is a reversal.
+     *
+     * It used to be cleared onboard: from her eyes, looking was aiming, so
+     * the view had to be the bore's own direction and nothing else. That was
+     * right when a carve was fired down the middle of the screen — a stale
+     * offset from the third-person orbit put every hole that many degrees
+     * off the crosshair.
+     *
+     * The bite has no crosshair any more. It is placed under her jaw, so
+     * there is nothing left for a look offset to throw off, and clearing it
+     * only meant a horizontal drag did NOTHING in first person while working
+     * perfectly in third. Reported as not being able to turn her head left
+     * or right onboard.
+     *
+     * The caller must clamp its own drag to the neck's yaw limit, or the
+     * view and the head part company the way the pitch did.
      */
-    if (this.onboard) this.yawOffset = 0;
     const yaw = heading + this.yawOffset;
 
     /*
