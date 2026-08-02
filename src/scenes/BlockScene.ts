@@ -356,6 +356,8 @@ export class BlockScene {
    */
   private readonly trim = { on: false, pitch: 0 };
   private digCooldown = 0;
+  /** Set by `setPausedForTest` so probes own the clock. Never set in play. */
+  private paused = false;
   /** Why the last bite did nothing, for probes. Cleared on a real bite. */
   private lastBiteWhy = 'never ran';
 
@@ -808,6 +810,31 @@ export class BlockScene {
   }
 
   /**
+   * How far she can be lifted off her own back before the lift itself is
+   * INSIDE something. Nought means she is embedded.
+   *
+   * `cast` reports a hit at zero distance when its origin is already solid,
+   * which is correct for a ray and catastrophic here: `hold()` used to start
+   * three millimetres above her without asking whether there was three
+   * millimetres of room. Her own tunnels are about five millimetres across, so
+   * underground that start point sits in the CEILING — the cast then "hit" the
+   * ceiling at zero range, seated her a body-height above it, and did it again
+   * the next frame. An elevator to the surface, running at up to three
+   * millimetres a frame, dressed up as a grip. Reported twice: teleported to
+   * the surface while moving in a tunnel, and now jumping out as soon as she
+   * gets underground.
+   */
+  private clearLift(): number {
+    const probe = new THREE.Vector3();
+    const step = CELL * 0.5;
+    for (let lift = GRIP_LIFT; lift > 0; lift -= step) {
+      probe.copy(this.at).addScaledVector(this.up, lift);
+      if (!this.solidAt(probe)) return lift;
+    }
+    return 0;
+  }
+
+  /**
    * Hold on: cast from off her back, in through her soles.
    *
    * When it lands she is drawn onto the contact and her up eases onto its
@@ -817,9 +844,27 @@ export class BlockScene {
    * Only when that is empty too has she genuinely walked off into the air.
    */
   private hold(dt: number): void {
-    const from = this.at.clone().addScaledVector(this.up, GRIP_LIFT);
+    /*
+     * Embedded is its own case, and casting cannot answer it. Her origin being
+     * inside soil means every ray out of her starts solid and reports itself
+     * at zero range, so the only honest question is which way is OUT — which
+     * is what `nearestSurface` marches for.
+     */
+    if (this.solidAt(this.at)) {
+      const out = this.nearestSurface(this.at);
+      if (out) {
+        const normalOut = new THREE.Vector3();
+        this.normalAt(out.point, normalOut);
+        this.at.lerp(out.point.clone().addScaledVector(normalOut, this.ride),
+          1 - Math.exp(-SNAP * dt));
+        this.up.lerp(this.trimmedUp(normalOut), 1 - Math.exp(-ALIGN * dt)).normalize();
+        return;
+      }
+    }
+    const lift = this.clearLift();
+    const from = this.at.clone().addScaledVector(this.up, lift);
     const dir = this.up.clone().negate();
-    let hit = this.cast(from, dir, GRIP_LIFT + GRIP_REACH);
+    let hit = this.cast(from, dir, lift + GRIP_REACH);
     let normal = new THREE.Vector3();
 
     if (!hit) {
@@ -897,15 +942,29 @@ export class BlockScene {
       right, right.clone().negate(),
       this.forward.clone(), this.forward.clone().negate(),
     ];
+    /*
+     * Marched OUT of the soil, not cast back into it.
+     *
+     * This used to start `GRIP_REACH` away and cast inward, which only works
+     * when that start point is in open air. Buried deeper than the reach it is
+     * in soil too, so `cast` returned its own origin — nine millimetres from
+     * her, in the middle of solid ground, reported as a face. Every direction
+     * tied at exactly that distance, the first won, and she was seated on a
+     * fiction with a zero-gradient normal that falls back to world up. Walking
+     * out of the soil to where it STOPS being solid needs no such assumption
+     * and is the boundary by definition.
+     */
+    const step = CELL * 0.5;
+    const probe = new THREE.Vector3();
     let best: THREE.Vector3 | null = null;
     let bestDist = Infinity;
     for (const dir of dirs) {
-      // From outside the soil, back in through it, so the cast meets a face.
-      const from = p.clone().addScaledVector(dir, GRIP_REACH);
-      const hit = this.cast(from, dir.clone().negate(), GRIP_REACH);
-      if (!hit) continue;
-      const d = hit.distanceTo(p);
-      if (d < bestDist) { bestDist = d; best = hit; }
+      for (let d = 0; d <= GRIP_REACH; d += step) {
+        probe.copy(p).addScaledVector(dir, d);
+        if (this.solidAt(probe)) continue;
+        if (d < bestDist) { bestDist = d; best = probe.clone(); }
+        break;
+      }
     }
     return best ? { point: best } : null;
   }
@@ -955,6 +1014,21 @@ export class BlockScene {
   }
 
   /* ------------------------------------------------------------- the loop */
+
+  /**
+   * Stop the live loop advancing her, so `stepForTest` is the ONLY thing that
+   * does. Rendering carries on, so screenshot probes still work.
+   *
+   * Without this, "deterministic" was a lie: the animation loop calls
+   * `simulate` with wall-clock dt, so every probe was measuring its own steps
+   * PLUS however many frames the browser happened to slip in, at whatever dt
+   * the machine was managing. It showed up as the same probe on the same build
+   * reporting she ended up thirteen millimetres down on one run and on the
+   * surface on the next.
+   */
+  setPausedForTest(on: boolean): void {
+    this.paused = on;
+  }
 
   /** Advance the room deterministically. For tests. */
   stepForTest(dt: number, steps: number): void {
@@ -1204,7 +1278,7 @@ export class BlockScene {
     const now = performance.now();
     const dt = Math.min(0.05, (now - this.previous) / 1000);
     this.previous = now;
-    this.simulate(dt);
+    if (!this.paused) this.simulate(dt);
     /*
      * Eased toward the depth's answer rather than snapped to it. The depth
      * itself is the fade — a hard cut would flicker every time her head
@@ -1339,12 +1413,19 @@ export class BlockScene {
    * as the one to hold.
    *
    * A numeric dial would need a row of buttons and a value to read before it
-   * meant anything. This is one tap: aim her head where you want to go, engage,
-   * and the body flies the line her face was on — the way a backhoe's boom is
-   * placed and then held, rather than a camera hand-held on target. Releasing
-   * hands her straight back to the soil.
+   * meant anything. This is one tap: aim where you want to go, engage, and the
+   * body flies the line the view was on — the way a backhoe's boom is placed
+   * and then held, rather than a camera hand-held on target. Releasing hands
+   * her straight back to the soil.
+   *
+   * The grade comes from the VIEW, in the world. It first came from
+   * `aimPitch`, which is neither: that is the head's aim relative to her body,
+   * and it saturates at the neck's limit of +16.71 degrees. So every press
+   * read "HOLD 17°" whatever the screen was pointing at — nose UP, which
+   * underground is a command to climb out. Reported as defaulting to the same
+   * angle every time and then crawling backwards out of the tunnel.
    */
-  setTrim(on: boolean, grade = this.aimPitch): void {
+  setTrim(on: boolean, grade = this.lookGrade()): void {
     this.trim.on = on;
     if (on) this.trim.pitch = THREE.MathUtils.clamp(grade, -TRIM_LIMIT, TRIM_LIMIT);
     this.trimButton.textContent = on
@@ -1382,6 +1463,15 @@ export class BlockScene {
     if (!this.queen.headJointPosition(head) || !this.queen.jawPosition(jaw)) return 0;
     const d = jaw.sub(head).normalize();
     return (Math.asin(Math.max(-1, Math.min(1, d.dot(this.up)))) * 180) / Math.PI;
+  }
+
+  /**
+   * The grade the VIEW is on, against world horizontal. What "hold this line"
+   * means when you press the button while looking somewhere.
+   */
+  lookGrade(): number {
+    const dir = this.camera.getWorldDirection(new THREE.Vector3());
+    return Math.asin(THREE.MathUtils.clamp(dir.y, -1, 1));
   }
 
   /**

@@ -36,6 +36,8 @@ const out = await p.evaluate(() => {
   const lab = window.blockScene;
   const MM = 5;
   const D = Math.PI / 180;
+  // Probes own the clock; the live loop must not also advance her.
+  lab.setPausedForTest(true);
   const report = {};
 
   /*
@@ -138,6 +140,7 @@ const digCase = async (grade, walk) => {
   const row = await page.evaluate(({ grade: g, walk: w }) => {
     const lab = window.blockScene;
     const MM = 5;
+    lab.setPausedForTest(true);
     if (g !== null) lab.setTrim(true, (g * Math.PI) / 180);
     lab.setMode(1);
     lab.setAimPitchForTest(-Math.PI / 2.4);
@@ -187,6 +190,7 @@ const tunnelCase = async (hold) => {
   const row = await page.evaluate((holdIt) => {
     const lab = window.blockScene;
     const MM = 5;
+    lab.setPausedForTest(true);
     lab.setMode(1);
     lab.setAimPitchForTest(-Math.PI / 2.4);
     // Bury her identically in both runs: no gyro on the way in.
