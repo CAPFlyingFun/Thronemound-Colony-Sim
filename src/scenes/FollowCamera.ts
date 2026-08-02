@@ -123,6 +123,9 @@ export class FollowCamera {
    */
   onboardLook: THREE.Vector3 | null = null;
 
+  /** Tuner lift off `onboardLookAt`, in radians. See its use in `update`. */
+  onboardLookPitch = 0;
+
   /**
    * Where the first-person eye SITS, in world space, when the scene can say.
    *
@@ -137,6 +140,22 @@ export class FollowCamera {
    * it was specified.
    */
   onboardEye: THREE.Vector3 | null = null;
+
+  /**
+   * A world POINT the first-person view should be centred on, when the scene
+   * can say — her jaws.
+   *
+   * A point rather than a direction, and that is the whole reason it exists.
+   * A direction is computed against where the eye was ASKED to go, and the
+   * eye does not always get there: it is marched out of soil, which at a
+   * steep look with her head buried moves it a long way. The jaws then slid
+   * 106 degrees off the centre of a view that was pointing exactly where it
+   * had been told. Aiming at a point is aimed from wherever the eye actually
+   * ended up, so it cannot drift.
+   *
+   * Takes precedence over `onboardLook`.
+   */
+  onboardLookAt: THREE.Vector3 | null = null;
 
   /**
    * The player's look, as an offset from her heading rather than as a world
@@ -556,10 +575,23 @@ export class FollowCamera {
        * doing. None of that is recoverable from two angles off the body. The
        * scene knows where the head actually points, so it passes it.
        */
-      const look = this.onboardLook
-        ? this.onboardLook.clone().normalize()
-        : flat.clone().multiplyScalar(Math.cos(this.aimPitch))
-          .addScaledVector(lift, Math.sin(this.aimPitch));
+      const aimed = this.onboardLookAt
+        ? this.onboardLookAt.clone().sub(this.smoothed)
+        : null;
+      const look = aimed && aimed.lengthSq() > 1e-12
+        ? aimed.normalize()
+        : (this.onboardLook
+          ? this.onboardLook.clone().normalize()
+          : flat.clone().multiplyScalar(Math.cos(this.aimPitch))
+            .addScaledVector(lift, Math.sin(this.aimPitch)));
+      if (this.onboardLookAt && Math.abs(this.onboardLookPitch) > 1e-6) {
+        // The tuner's lift off the jaw line, applied about the view's own
+        // across-axis so it stays a pitch and never becomes a roll.
+        const across = new THREE.Vector3().crossVectors(lift, look);
+        if (across.lengthSq() > 1e-8) {
+          look.applyAxisAngle(across.normalize(), -this.onboardLookPitch);
+        }
+      }
       /*
        * Straight up and straight down are the two aims where world up cannot be
        * the camera's up: the look direction is parallel to it, `lookAt` has no
