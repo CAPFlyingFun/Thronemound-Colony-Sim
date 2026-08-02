@@ -39,7 +39,7 @@ import { buildSurfaceNets } from '../density/SurfaceNets';
 import { QueenModel } from '../anim/QueenModel';
 import { CASTE_BITE_MM, CASTE_LENGTH_MM } from '../anim/hexapod';
 import { FollowCamera } from './FollowCamera';
-import { clampStickOrigin, stickVector } from '../voxel/locomotion';
+import { STICK_DEADZONE, clampStickOrigin, stickVector } from '../voxel/locomotion';
 import {
   FOOT_CLEARANCE_MM, LegDrive, type DriveReport, type LegSetup,
 } from '../anim/legDrive';
@@ -829,11 +829,34 @@ export class BlockScene {
         const v = stickVector(
           event.clientX - this.stickOrigin.x, event.clientY - this.stickOrigin.y, STICK_RADIUS,
         );
+        /*
+         * BOTH axes, proportionally. This is where "it snaps from forward to
+         * turn" actually lived.
+         *
+         * The stick used to be quantised to ONE axis — whichever component
+         * was larger won, and it won at `sign(component) × magnitude`, the
+         * full throw. So she could never walk and turn at once, a lean of
+         * one degree past the diagonal swapped a full walk for a full spin in
+         * a single frame, and nothing in between the four compass points
+         * existed. Easing the command afterwards, which is what the last
+         * change did, can only smooth the edges of a square wave; it cannot
+         * make the square wave a curve.
+         *
+         * Passing both through is all it takes, because the legs already
+         * handle a mixed twist properly — `v + ω × r` per leg — and have
+         * since they were built from Hexapod_v4. A diagonal thumb is a
+         * curved walk, and rolling right round the pad sweeps continuously
+         * from walk to spin and back.
+         */
         this.input.walk = 0;
         this.input.yaw = 0;
-        if (v.magnitude > 0.12) {
-          if (Math.abs(v.x) > Math.abs(v.y)) this.input.yaw = -Math.sign(v.x) * v.magnitude;
-          else this.input.walk = -Math.sign(v.y) * v.magnitude;
+        if (v.magnitude > STICK_DEADZONE) {
+          // Rescale so the throw starts at zero just outside the deadzone
+          // rather than jumping to 0.12 the moment it is crossed.
+          const throwOut = (v.magnitude - STICK_DEADZONE) / (1 - STICK_DEADZONE);
+          const k = throwOut / v.magnitude;
+          this.input.walk = -v.y * k;
+          this.input.yaw = -v.x * k;
         }
         this.stickKnob.style.transform = `translate(${v.x * STICK_RADIUS}px, ${v.y * STICK_RADIUS}px)`;
         return;

@@ -88,6 +88,42 @@ const out = await page.evaluate(() => {
     };
   };
 
+  /**
+   * Can she walk and turn AT THE SAME TIME?
+   *
+   * Driven through the REAL pointer handler with synthetic events, because
+   * the question is about the stick's mapping and setting `input` directly
+   * would answer a question nobody asked. A thumb is dragged round the pad in
+   * sixteen steps and what the scene received is read back at each.
+   *
+   * Both columns non-zero on a diagonal is a curved walk. One column zero is
+   * the old square wave, where whichever axis was larger took the whole
+   * throw and the other got nothing.
+   */
+  const mix = () => {
+    reset();
+    const canvas = document.querySelector('canvas');
+    const cx = Math.round(window.innerWidth * 0.25);
+    const cy = Math.round(window.innerHeight * 0.6);
+    const send = (type, x, y) => canvas.dispatchEvent(new PointerEvent(type, {
+      pointerId: 77, clientX: x, clientY: y, bubbles: true,
+    }));
+    send('pointerdown', cx, cy);
+    const rows = [];
+    for (let i = 0; i < 16; i += 1) {
+      const a = (i / 16) * Math.PI * 2;
+      // Screen y grows downward, so "up the screen" is -sin here.
+      send('pointermove', cx + Math.sin(a) * 70, cy - Math.cos(a) * 70);
+      rows.push({
+        deg: Math.round((a * 180) / Math.PI),
+        walk: +lab.input.walk.toFixed(3),
+        yaw: +lab.input.yaw.toFixed(3),
+      });
+    }
+    send('pointerup', cx, cy);
+    return rows;
+  };
+
   return {
     // Full forward for a second, then hard left in a single frame.
     snap: run((t) => (t < 1 ? [1, 0] : [0, 1]), 2.5),
@@ -96,10 +132,25 @@ const out = await page.evaluate(() => {
       const a = (t / 2) * Math.PI * 2;
       return [Math.cos(a), Math.sin(a)];
     }, 2),
+    mix: mix(),
   };
 });
 
 console.log(JSON.stringify({ errors: errors.slice(0, 3) }));
+console.log('\nthumb dragged round the pad, what the scene received:');
+console.log('  bearing    walk      yaw    both?');
+for (const r of out.mix) {
+  const both = Math.abs(r.walk) > 0.05 && Math.abs(r.yaw) > 0.05;
+  console.log(
+    `  ${String(r.deg).padStart(5)}deg`,
+    r.walk.toFixed(3).padStart(8), r.yaw.toFixed(3).padStart(8),
+    both ? '   yes' : '',
+  );
+}
+const diagonals = out.mix.filter((r) => r.deg % 90 !== 0);
+const curved = diagonals.filter((r) => Math.abs(r.walk) > 0.05 && Math.abs(r.yaw) > 0.05);
+console.log(`\n${curved.length} of ${diagonals.length} off-axis bearings give a curve rather than a square-wave switch\n`);
+delete out.mix;
 for (const [tag, r] of Object.entries(out)) {
   console.log(
     tag.padEnd(8),
