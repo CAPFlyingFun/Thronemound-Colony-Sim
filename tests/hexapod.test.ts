@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   CADENCE, CASTE_LENGTH_MM, MAJOR_RIG, MODEL_LENGTH_UNITS, QUEEN_LENGTH_MM,
   QUEEN_RIG, RIGS, VOXEL_MM, WORKER_RIG,
-  cadenceFor, gaitPose, legPhase, legSwing, queenScale, rigBones,
+  cadenceFor, gaitPose, gaitSpeed, legPhase, legSwing, queenScale, rigBones,
+  stanceRadius,
   rigLengthVoxels, rigScale, tripodOf,
   type LegSlot, type RigMap,
 } from '../src/anim/hexapod';
@@ -193,6 +194,25 @@ describe('cadence', () => {
 
   it('does not run backwards when she does', () => {
     expect(cadenceFor(-3)).toBe(cadenceFor(3));
+  });
+
+  it('counts a spin on the spot as locomotion, because it is', () => {
+    /*
+     * She covers no ground turning in place, and her feet are going round at
+     * omega x r the whole time — 8.9 mm/s at full yaw against a walk's 8.0.
+     * Ask the travel speed and a spin animates like a nap; that is exactly
+     * what happened the moment travel speed stopped lying.
+     */
+    expect(gaitSpeed(0, 0)).toBe(0);
+    expect(gaitSpeed(0, 2.2)).toBeGreaterThan(gaitSpeed(1.5, 0));
+    expect(gaitSpeed(0, -2.2)).toBe(gaitSpeed(0, 2.2));
+  });
+
+  it('takes the stance radius from each rig rather than one number', () => {
+    // Measured 4.03 mm on the 9 mm queen; the others get theirs from theirs.
+    expect(stanceRadius(QUEEN_RIG) * VOXEL_MM).toBeCloseTo(4.03, 1);
+    const radii = ALL_RIGS.map((r) => stanceRadius(r));
+    expect(new Set(radii).size).toBe(ALL_RIGS.length);
   });
 });
 

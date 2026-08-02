@@ -10,7 +10,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import {
-  QUEEN_RIG, RIGS, cadenceFor, gaitPose, rigBones, rigLengthVoxels, rigScale,
+  QUEEN_RIG, RIGS, cadenceFor, gaitPose, gaitSpeed, rigBones, rigLengthVoxels, rigScale,
   type GaitInput, type RigMap,
 } from './hexapod';
 import { aimRotation, distanceToPolyline, footTarget, type Vec3 } from './legIk';
@@ -274,7 +274,7 @@ export class QueenModel {
      * TRAVELLED — a foot advances one stride per stride of ground covered, at
      * any pace, through any acceleration. That is what stops the skating.
      */
-    this.cycle += cadenceFor(input.speed) * dt;
+    this.cycle += cadenceFor(gaitSpeed(input.speed, input.turn, this.rig)) * dt;
     const pose = gaitPose({ ...input, clock: this.clock, cycle: this.cycle }, this.rig);
 
     for (const [name, euler] of pose.rotations) {

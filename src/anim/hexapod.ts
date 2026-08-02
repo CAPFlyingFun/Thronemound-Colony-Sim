@@ -213,12 +213,40 @@ export const CADENCE = 1.35;
  * reads as dancing, which is exactly what it was called.
  *
  * A standing ant is not a slow-motion walking ant. Idle gets its OWN motion —
- * a small desynchronised weight shift in `IDLE_SWAY`, and antennae that work
- * HARDER at rest than in motion, which is what a real one does. See
- * `gaitPose`.
+ * a small desynchronised weight shift in `IDLE_SWAY`. See `gaitPose`.
+ *
+ * Feed this `gaitSpeed`, not a travel speed, or a spin on the spot freezes.
  */
 export function cadenceFor(speed: number): number {
   return Math.abs(speed) * CADENCE;
+}
+
+/**
+ * How far her feet sit from the axis she spins about, as a fraction of her
+ * own length — 4.03 mm of mean stance radius on a 9 mm queen, read off the
+ * rig by `scripts/probe-stanceradius.mjs` rather than picked. A fraction, so
+ * the worker and the major get their own number from their own size.
+ */
+export const STANCE_FRACTION = 0.448;
+
+export function stanceRadius(rig: RigMap = QUEEN_RIG): number {
+  return STANCE_FRACTION * rigLengthVoxels(rig);
+}
+
+/**
+ * How fast she is LOCOMOTING — travelling and turning together.
+ *
+ * An ant spinning on the spot covers no ground and is not remotely at rest:
+ * her feet are going round at `ω × r`, which at full yaw is 8.9 mm/s against
+ * a walk's 8.0. Everything downstream that asks "is she moving" has to ask
+ * this rather than the travel speed, or a spin in place animates like a nap.
+ *
+ * This only started to matter once travel speed became honest. While a
+ * standing ant still reported 6.5 mm/s of phantom speed, nothing ever read as
+ * stopped, so the distinction could not show.
+ */
+export function gaitSpeed(speed: number, turn: number, rig: RigMap = QUEEN_RIG): number {
+  return Math.abs(speed) + Math.abs(turn) * stanceRadius(rig);
 }
 
 export interface GaitPose {
@@ -296,6 +324,8 @@ const ROLL_ANGLE = 0.035;
 const LEAN_PER_TURN = 0.12;
 /** Antennae never stop moving, even at rest. That is most of feeling alive. */
 const ANTENNA_SWEEP = 0.3;
+/** A faster, smaller search that only runs when she is standing still. */
+const ANTENNA_FLICK = 0.09;
 const GASTER_SWAY = 0.09;
 /**
  * What a leg does when she is NOT walking: a slow weight shift, and a small
@@ -334,10 +364,12 @@ const MANDIBLE_CLOSED = -0.25;
 export function gaitPose(input: GaitInput, rig: RigMap = QUEEN_RIG): GaitPose {
   const { clock, speed, turn, digging, carrying } = input;
   const rotations = new Map<string, [number, number, number]>();
-  const moving = Math.min(1, Math.abs(speed) / 0.6);
+  // Travelling AND turning: a spin on the spot is locomotion. See `gaitSpeed`.
+  const travel = gaitSpeed(speed, turn, rig);
+  const moving = Math.min(1, travel / 0.6);
   // See `GaitInput.cycle`: the caller's integrated phase when it has one, and
   // the constant-speed equivalent when it does not.
-  const cycle = input.cycle ?? clock * cadenceFor(speed);
+  const cycle = input.cycle ?? clock * cadenceFor(travel);
 
   for (let i = 0; i < rig.legs.length; i += 1) {
     const leg = rig.legs[i]!;
@@ -436,25 +468,33 @@ export function gaitPose(input: GaitInput, rig: RigMap = QUEEN_RIG): GaitPose {
    * cheapest thing in here and the most valuable: a still ant reads as a prop,
    * and two moving antennae read as an animal even when nothing else moves.
    *
-   * They are UNCHANGED by the idle rework, and that is a reported result
-   * rather than an oversight. The obvious other half of "quiet legs, busy
-   * feelers" is to sweep them wider at rest, and three variants of it were
-   * measured in the block room: widening both axes moved the tips LESS
-   * (1.53 mm of travel down to 1.22), sideways-only was still less (1.39),
-   * and adding a second faster wave came out bit-identical to doing nothing.
-   * Something downstream in `QueenModel.solveFeet` re-solves this chain and
-   * governs what the tips actually do. Until that is understood, turning the
-   * number up here buys nothing, so the number stays where it was.
+   * They work HARDEST at rest, which is the other half of fixing idle. It was
+   * the wrong way round — 0.6 of the sweep standing still, rising to full at
+   * a walk. A moving ant has her feelers streamed forward and fairly steady;
+   * a stopped one casts them about, because standing still is when she is
+   * finding out about things. Now rest is the full sweep plus a second faster
+   * wave, and walking is three quarters of it, so when the legs go quiet the
+   * antennae are what carries the animal.
+   *
+   * This was tried once and REVERTED on a measurement saying it made the tips
+   * move LESS. The measurement was right and the conclusion was wrong:
+   * `moving` was pinned at 1 by 6.5 mm/s of phantom speed, so the antennae
+   * were already sweeping at the walking amplitude and an "idle" multiplier
+   * of 0.75 could only reduce it. A broken instrument reading a real number.
+   * With speed honest, the same change measures 0.62 mm of idle tip travel up
+   * to 1.23 — against 0.005 mm for the busiest leg bone.
    */
-  const sweep = ANTENNA_SWEEP * (0.6 + 0.4 * moving) * (1 + digging);
+  const idle = 1 - moving;
+  const sweep = ANTENNA_SWEEP * (1 - 0.25 * moving) * (1 + digging);
+  const flick = ANTENNA_FLICK * idle * (1 + digging);
   rotations.set(rig.antennaLeft[0]!, [
     Math.sin(clock * 3.1) * sweep * 0.6,
-    Math.sin(clock * 2.3) * sweep,
+    Math.sin(clock * 2.3) * sweep + Math.sin(clock * 5.9) * flick,
     0,
   ]);
   rotations.set(rig.antennaRight[0]!, [
     Math.sin(clock * 3.1 + 1.9) * sweep * 0.6,
-    Math.sin(clock * 2.3 + 2.4) * sweep,
+    Math.sin(clock * 2.3 + 2.4) * sweep + Math.sin(clock * 5.9 + 1.2) * flick,
     0,
   ]);
 

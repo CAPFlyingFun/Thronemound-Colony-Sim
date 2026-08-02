@@ -213,6 +213,24 @@ export interface DriveInput {
   yaw: number;
   speed: number;
   yawRate: number;
+  /**
+   * Whether the LEGS are allowed to set her height. Default true.
+   *
+   * A room that seats the body itself must say no, and the block room does.
+   * Two systems both deciding how high she rides do not average out, they
+   * FIGHT. `BlockScene.hold()` seats her origin 0.26 mm inside the contact,
+   * because her rig's foot homes sit ABOVE her origin and that is where her
+   * own feet say she belongs. Step 6 below then read 0.26 mm of penetration
+   * against a wanted 0.25 mm of daylight, shoved her half a millimetre out,
+   * and hold() hauled her straight back the next frame.
+   *
+   * The oscillation costs her nothing in position — she drifts 0.0004 mm —
+   * but it registers as 6.5 mm/s of SPEED, four fifths of a walk, on an ant
+   * standing perfectly still. The gait believed it and ran the walk cycle at
+   * full tilt: 162 degrees per second of coxa rotation with the stick
+   * untouched. That is the wiggle, and this is half of why.
+   */
+  settle?: boolean;
 }
 
 export interface DriveReport {
@@ -610,7 +628,9 @@ export class LegDrive {
      *    bounded by the same spare reach, so on a hard floor she bottoms out
      *    and drags instead of floating through it.
      */
-    const under = ground.nearest(body.at, body.up, 6 / MM, 0.6 / MM);
+    const under = (input.settle ?? true)
+      ? ground.nearest(body.at, body.up, 6 / MM, 0.6 / MM)
+      : null;
     let clearance = Infinity;
     if (under) {
       clearance = body.at.clone().sub(under).dot(body.up);

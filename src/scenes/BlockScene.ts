@@ -99,6 +99,13 @@ const WRAP_ARCS = [0.6, 1.1, 1.7, 2.4];
 /** World units per second. Slower than the sim's run — this is a small room. */
 const WALK_SPEED = 1.6;
 const YAW_RATE = 2.2;
+/**
+ * How fast the eased stick catches the real one, per second. Ten is a time
+ * constant of a tenth of a second: 63% of the way there in 100 ms, 95% in
+ * 300. Fast enough to feel direct, slow enough that rolling a thumb round
+ * the pad reads as one curve instead of a walk and a turn taking turns.
+ */
+const STICK_EASE = 10;
 /** How fast her up eases onto a new face. Snappy, or corners read as slides. */
 const ALIGN = 12;
 const SNAP = 14;
@@ -172,6 +179,9 @@ export class BlockScene {
    */
   private drive: LegDrive | null = null;
   private report: DriveReport | null = null;
+  /** The eased stick, which is what actually drives her. See `step`. */
+  private driveWalk = 0;
+  private driveYaw = 0;
   /**
    * How far her body origin rides above the surface — DERIVED from the legs,
    * not chosen.
@@ -532,9 +542,33 @@ export class BlockScene {
      * LEFT of the screen. The arithmetic is consistent and is the mirror of
      * what a thumb means.
      */
-    this.turnRate = this.input.yaw * YAW_RATE;
+    /*
+     * The stick is EASED before anything reads it.
+     *
+     * A thumb rolling from twelve o'clock round to nine is a smooth path, but
+     * the two axes it lands on are read straight, and the leg system turns
+     * them into a per-leg travel direction — `v + ω × r`. Swap walk for yaw in
+     * one frame and every one of those six directions swings, so the step
+     * targets jump and she snaps from striding to spinning. Easing the
+     * COMMAND, not the result, fixes it at the source and leaves the feet's
+     * own geometry alone: the twist she is asked for turns over about a tenth
+     * of a second, which is quick enough to feel direct and long enough that
+     * a full lap of the stick reads as one curve.
+     */
+    const ease = 1 - Math.exp(-STICK_EASE * dt);
+    this.driveWalk += (this.input.walk - this.driveWalk) * ease;
+    this.driveYaw += (this.input.yaw - this.driveYaw) * ease;
+    /*
+     * The sign is REPORTED, not reasoned: pushing the stick right turned her
+     * left. The lab's own steering carries the same comment for the same
+     * reason — forward is (sin h, 0, cos h), so a rising heading swings her
+     * nose from +Z toward +X, and with the camera behind her that is the
+     * LEFT of the screen. The arithmetic is consistent and is the mirror of
+     * what a thumb means.
+     */
+    this.turnRate = this.driveYaw * YAW_RATE;
     if (!this.drive) {
-      const yaw = this.input.yaw * YAW_RATE * dt;
+      const yaw = this.driveYaw * YAW_RATE * dt;
       if (Math.abs(yaw) > 1e-9) this.forward.applyAxisAngle(this.up, yaw).normalize();
     }
 
@@ -548,17 +582,28 @@ export class BlockScene {
         dt,
         { at: this.at, up: this.up, forward: this.forward },
         {
-          walk: this.input.walk,
-          yaw: this.input.yaw,
+          walk: this.driveWalk,
+          yaw: this.driveYaw,
           speed: WALK_SPEED,
           yawRate: YAW_RATE,
+          // hold() owns how high she rides in this room. See `DriveInput`.
+          settle: false,
         },
         this.groundForLegs,
       );
-      this.walkSpeed = this.at.distanceTo(before) / Math.max(dt, 1e-6);
-      this.velocity.copy(this.at).sub(before).divideScalar(Math.max(dt, 1e-6));
+      /*
+       * Speed is what she TRAVELS, measured across her own up — never how far
+       * she was re-seated along it. The gait takes this number and decides
+       * from it whether she is walking, and a body being nudged up and down
+       * by half a millimetre a frame is not walking. Reading the raw
+       * displacement had a motionless ant reporting 6.5 mm/s.
+       */
+      const moved = this.at.clone().sub(before);
+      this.velocity.copy(moved).divideScalar(Math.max(dt, 1e-6));
+      moved.addScaledVector(this.up, -moved.dot(this.up));
+      this.walkSpeed = moved.length() / Math.max(dt, 1e-6);
     } else {
-      const wanted = this.forward.clone().multiplyScalar(WALK_SPEED * this.input.walk);
+      const wanted = this.forward.clone().multiplyScalar(WALK_SPEED * this.driveWalk);
       this.velocity.lerp(wanted, 1 - Math.exp(-10 * dt));
       this.walkSpeed = this.velocity.length();
       this.at.addScaledVector(this.velocity, dt);
