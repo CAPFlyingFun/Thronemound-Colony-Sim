@@ -51,6 +51,7 @@ import { STICK_DEADZONE, clampStickOrigin, stickVector } from '../voxel/locomoti
 import { MODES, cycleMode } from './modes';
 import { RAIL_SMOOTH_MM, TunnelRail, railFromPlan } from './tunnelRail';
 import { senseRoom, type RoomSense } from '../voxel/room';
+import { anyOf, bore, box, carve } from '../voxel/carve';
 import {
   DigPlanRunner, PIECE_LIMITS, PLAN_SPEED_MM_S, clampPiece, type DigPiece,
 } from './digPlan';
@@ -108,6 +109,19 @@ const MID = (LOW + HIGH) * 0.5;
  * she is. The bore then goes into rock rather than over a lip.
  */
 const STEP_TOP = MID;
+
+/* ------------------------------------------------- the pre-cut test warren */
+
+/** Where the shaft drops, in millimetres from the block's low corner. */
+const SHAFT_AT = BLOCK_MM / 2;
+/** Across the bore. Ten millimetres total, so five of radius. */
+const SHAFT_WIDE = 10;
+/** The room at the bottom: ten across, ten tall, twenty long. */
+const ROOM_W = 10;
+const ROOM_H = 10;
+const ROOM_LONG = 20;
+/** How far up from the block's floor the room's floor sits. */
+const ROOM_FLOOR = 6;
 
 /** Cells per meshed chunk, so a bite rebuilds a corner and not the cube. */
 const CHUNK = 32;
@@ -181,9 +195,16 @@ const ROOM_EVERY = 4;
  * surface she is gripping, so soil along it means something over her head and
  * nothing else: sky on the top face, open air off a side or the underside, and
  * a ceiling only when she is genuinely in a hole.
+ *
+ * The reach is generous on purpose, and was not generous enough at first. Six
+ * millimetres is about right for the four-millimetre bores she chews, and in a
+ * pre-cut shaft ten millimetres across the far wall is eight and a half away —
+ * so she crawled the whole length of a vertical shaft with the readout calling
+ * it the surface. Being generous costs nothing, because on any face of the
+ * block the cast along her up goes to the sky and misses at any range at all.
  */
-const CEILING_ENTER_MM = 6;
-const CEILING_LEAVE_MM = 10;
+const CEILING_ENTER_MM = 13;
+const CEILING_LEAVE_MM = 18;
 /**
  * Wider than this and it is a ROOM, not a tunnel: enclosed on all sides but
  * with space to walk about in, so she comes off the rails and is free.
@@ -288,9 +309,12 @@ export class BlockScene {
    * Which block to build. `cube` is the room; `cliff` is a measuring rig — see
    * where the field is filled. Chosen with `?shape=cliff`.
    */
-  private readonly shape: 'cube' | 'cliff' = new URLSearchParams(
-    typeof location === 'undefined' ? '' : location.search,
-  ).get('shape') === 'cliff' ? 'cliff' : 'cube';
+  private readonly shape: 'cube' | 'cliff' | 'shaft' = (() => {
+    const asked = new URLSearchParams(
+      typeof location === 'undefined' ? '' : location.search,
+    ).get('shape');
+    return asked === 'cliff' || asked === 'shaft' ? asked : 'cube';
+  })();
 
   /**
    * Whether the coaster builder is offered at all.
@@ -570,7 +594,34 @@ export class BlockScene {
      * block of soil looks like anyway — a machined corner would be the
      * surprising part.
      */
-    if (this.shape === 'cliff') {
+    if (this.shape === 'shaft') {
+      /*
+       * A SHAFT AND A ROOM, cut to a number before anything is bitten.
+       *
+       * A tunnel she dug is a recording of every wobble she had while digging
+       * it, so measuring her in one measures the digging as much as the thing
+       * under test. This is a bore of exactly ten millimetres running exactly
+       * straight down into a room of exactly ten by ten by twenty — which
+       * makes it possible to ask what her grip and the camera do at ninety
+       * degrees with nothing else going on at all.
+       *
+       * The shaft's bottom end sits INSIDE the room's ceiling on purpose. Stop
+       * it at the ceiling and a wafer of soil is left across the opening, and
+       * she arrives at a lid instead of a doorway.
+       */
+      const mm = (v: number): number => LOW + v / MM;
+      const room = box(
+        [mm(SHAFT_AT - ROOM_W / 2), mm(ROOM_FLOOR), mm(SHAFT_AT - ROOM_LONG / 2)],
+        [mm(SHAFT_AT + ROOM_W / 2), mm(ROOM_FLOOR + ROOM_H), mm(SHAFT_AT + ROOM_LONG / 2)],
+      );
+      const shaft = bore(
+        [mm(SHAFT_AT), mm(BLOCK_MM + 4), mm(SHAFT_AT)],
+        [mm(SHAFT_AT), mm(ROOM_FLOOR + ROOM_H - 2), mm(SHAFT_AT)],
+        SHAFT_WIDE / 2 / MM,
+      );
+      const solid = box([LOW, LOW, LOW], [HIGH, HIGH, HIGH]);
+      this.field.fill(carve(solid, anyOf([room, shaft])));
+    } else if (this.shape === 'cliff') {
       /*
        * A STEP, for measuring rather than for playing: a flat plateau to walk
        * in on and a face at exactly ninety degrees to drill into.
@@ -600,7 +651,10 @@ export class BlockScene {
     // On top of the block, in the middle, facing +Z. On the step, back from
     // the face with a clear run at it.
     if (this.shape === 'cliff') this.at.set(MID, STEP_TOP + RIDE, MID - 20 / MM);
-    else this.at.set(MID, HIGH + RIDE, MID);
+    else if (this.shape === 'shaft') {
+      // Beside the mouth, facing it, so walking forward takes her over the lip.
+      this.at.set(LOW + SHAFT_AT / MM, HIGH + RIDE, LOW + (SHAFT_AT - 11) / MM);
+    } else this.at.set(MID, HIGH + RIDE, MID);
     this.follow.target.copy(this.at);
 
     const hud = document.createElement('div');
