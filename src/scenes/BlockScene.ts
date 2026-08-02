@@ -50,7 +50,7 @@ import { CASTE_BITE_MM, CASTE_LENGTH_MM } from '../anim/hexapod';
 import { FollowCamera } from './FollowCamera';
 import { STICK_DEADZONE, clampStickOrigin, stickVector } from '../voxel/locomotion';
 import { MODES, cycleMode } from './modes';
-import { HEAD_PITCH_UP, HEAD_REST_PITCH_DEG } from '../anim/hexapod';
+import { HEAD_PITCH_UP, HEAD_REST_BIAS, HEAD_REST_PITCH_DEG } from '../anim/hexapod';
 import {
   FOOT_CLEARANCE_MM, LegDrive, type DriveReport, type LegSetup,
 } from '../anim/legDrive';
@@ -819,7 +819,15 @@ export class BlockScene {
         digging: this.input.dig ? 1 : 0,
         carrying: 0,
         headYaw: this.follow.lookYaw,
-        headPitch: mode.pitchHead ? this.follow.lookPitch : 0,
+        /*
+         * The PLAYER's look, not the biased view. Onboard, `lookPitch`
+         * returns the camera's own pitch — which now carries her resting
+         * posture — so reading it here applied that posture twice and drove
+         * her face past vertical at a level camera.
+         */
+        headPitch: mode.pitchHead
+          ? (this.firstPerson ? this.aimPitch : this.follow.lookPitch)
+          : 0,
         /*
          * Onboard, her neck follows the camera all the way DOWN. The eye is
          * on her head, so the bone and the view have to be the same angle or
@@ -828,6 +836,8 @@ export class BlockScene {
          * own fifteen degrees either way — see `HEAD_PITCH_UP`.
          */
         headPitchDown: this.firstPerson ? HEAD_PITCH_MAX_DOWN : undefined,
+        // Her posture, on top of the look. See `HEAD_REST_BIAS`.
+        headRest: HEAD_REST_BIAS,
       });
       /*
        * Feet onto the soil, in her frame: elevation is measured along HER
@@ -894,7 +904,16 @@ export class BlockScene {
      * head joint — so a first-person eye aimed along her forward looks over
      * the top of the work. `eyePitch` is the tuner's share of that.
      */
-    this.follow.aimPitch = this.aimPitch + (this.firstPerson ? this.eyePitch : 0);
+    /*
+     * Onboard the view sits at her REST posture and moves from there, so a
+     * level camera is already looking down the mandibles at the work rather
+     * than out over the top of them. Same offset the bone gets, so the two
+     * stay the same angle — which is the invariant this whole camera is
+     * built on. `eyePitch` is the tuner's share on top.
+     */
+    this.follow.aimPitch = this.aimPitch + (this.firstPerson
+      ? (HEAD_REST_PITCH_DEG * Math.PI) / 180 + this.eyePitch
+      : 0);
     this.follow.update(
       dt,
       Math.atan2(this.forward.x, this.forward.z),

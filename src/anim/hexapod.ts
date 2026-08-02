@@ -347,6 +347,11 @@ export interface GaitInput {
    */
   headPitchDown?: number;
   headPitchUp?: number;
+  /**
+   * Her resting head posture, in radians, added after the clamp. See
+   * `HEAD_REST_BIAS`.
+   */
+  headRest?: number;
 }
 
 /** Smooth 0..1 ease, for swings that should not start or stop abruptly. */
@@ -426,18 +431,45 @@ const HEAD_YAW_LIMIT = 1.05;
  * rather than an ant.
  */
 const HEAD_PITCH_DOWN = 0.7;
-export const HEAD_PITCH_UP = 0.26;
 /**
- * Where her face points at REST, in degrees, nose-down — measured off the
- * queen's rig by `scripts/probe-headrest.mjs`, head joint to jaw tip.
+ * Sixty degrees, opened up from fifteen so the posture can be judged against
+ * the head-profile inset rather than guessed at. Expect this to come back
+ * down once there is an exact number to set it to.
  *
- * Recorded because it is the number two people reading the same ant disagree
- * over. Her head is not level when the camera is level: it hangs by its own
- * construction, and which line you call "the head" moves the answer a long
- * way. The neck base to the jaw is -26.94, this is -36.35, the mouth chain on
- * its own -45.00, and the antenna sockets to the jaw -64.76.
+ * Note what it means with the resting posture underneath it: her face rests
+ * 43.26 degrees down, so a full sixty of look only brings it to about
+ * seventeen degrees ABOVE level. The limit is on the player's input, not on
+ * where her face ends up.
  */
-export const HEAD_REST_PITCH_DEG = -36.35;
+export const HEAD_PITCH_UP = (60 * Math.PI) / 180;
+/**
+ * Where her face RESTS, in degrees, nose-down. The posture the camera counts
+ * from: a level camera means her head is here, not level.
+ *
+ * CHOSEN, not measured, and worth saying so. Four lines on this rig can each
+ * fairly be called "the head angle" and they are tens of degrees apart —
+ * measured by `scripts/probe-headrest.mjs`: neck base to jaw -26.94, head
+ * joint to jaw -36.35, the mouth chain alone -45.00, antenna sockets to jaw
+ * -64.76. This is their mean, 43.26, which is not a measurement of anything
+ * physical; it is a way of picking a number between candidates that
+ * disagree, and it lands where the posture was eyeballed at from the device.
+ *
+ * For a posture that is the right kind of number to choose. What matters is
+ * that ONE of them is written down, because the whole confusion was two
+ * people reading different lines off the same ant.
+ */
+export const HEAD_REST_PITCH_DEG = -43.26;
+
+/**
+ * How far the gait must pitch her head to SIT at that rest.
+ *
+ * Her bind pose already hangs the head joint to jaw line at -36.35, so the
+ * posture is most of the way there on its own and this is only the remainder.
+ * Applied AFTER the neck's look clamp, because it is where she holds her head
+ * rather than something the player asked for — clamping it would eat into the
+ * range the camera is allowed instead.
+ */
+export const HEAD_REST_BIAS = ((HEAD_REST_PITCH_DEG - -36.35) * Math.PI) / 180;
 /** How much of the head's turn the gaster swings against. Her counterweight. */
 export const GASTER_COUNTER = 0.30;
 const MANDIBLE_OPEN = 0.55;
@@ -459,10 +491,15 @@ export function gaitPose(input: GaitInput, rig: RigMap = QUEEN_RIG): GaitPose {
    * limits a camera does not. See `GaitInput.headYaw`.
    */
   const headYaw = clampAngle(input.headYaw ?? 0, HEAD_YAW_LIMIT);
+  /*
+   * The look is clamped to her neck; the RESTING posture is then added on top
+   * and is not. One is what the player asked for and has a limit, the other
+   * is how she holds her head and would only eat that limit if it shared it.
+   */
   const headPitch = Math.min(
     input.headPitchUp ?? HEAD_PITCH_UP,
     Math.max(-(input.headPitchDown ?? HEAD_PITCH_DOWN), input.headPitch ?? 0),
-  );
+  ) + (input.headRest ?? 0);
   const rotations = new Map<string, [number, number, number]>();
   // Travelling AND turning: a spin on the spot is locomotion. See `gaitSpeed`.
   const travel = gaitSpeed(speed, turn, rig);

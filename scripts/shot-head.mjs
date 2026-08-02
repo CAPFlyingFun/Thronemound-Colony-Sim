@@ -15,7 +15,7 @@ const errs = []; p.on('pageerror', (e) => errs.push(e.message));
 await p.goto(process.env.SMOKE_URL ?? 'http://localhost:4492/Thronemound-Colony-Sim/?scene=block', { waitUntil: 'domcontentloaded' });
 await p.waitForFunction(() => window.blockScene?.ready, null, { timeout: 60000 });
 await p.waitForTimeout(2500);
-for (const [tag, deg] of [['up15', 15], ['level', 0], ['down90', -90]]) {
+for (const [tag, deg] of [['up60', 60], ['level', 0], ['down90', -90]]) {
   const got = await p.evaluate((d) => {
     const lab = window.blockScene;
     lab.setFirstPerson(true);

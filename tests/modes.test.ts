@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MODES, cycleMode } from '../src/scenes/modes';
-import { QUEEN_RIG, gaitPose } from '../src/anim/hexapod';
+import { HEAD_PITCH_UP, QUEEN_RIG, gaitPose } from '../src/anim/hexapod';
 
 const base = { clock: 0, cycle: 0, speed: 0, turn: 0, digging: 0, carrying: 0 };
 
@@ -49,8 +49,8 @@ describe('head aim', () => {
      * reads as a rearing horse.
      */
     expect(down.headPitch).toBeLessThan(-0.6);
-    expect(up.headPitch).toBeCloseTo(0.26, 6);
-    expect(Math.abs(up.headPitch)).toBeLessThan(Math.abs(down.headPitch));
+    // Against the constant, not a literal: this is a tuning knob right now.
+    expect(up.headPitch).toBeCloseTo(HEAD_PITCH_UP, 6);
   });
 
   it('lets the caller widen the DOWN limit but never the up one', () => {
@@ -66,7 +66,7 @@ describe('head aim', () => {
     const still = gaitPose(
       { ...base, headPitch: 3, headPitchDown: Math.PI / 2 }, QUEEN_RIG,
     );
-    expect(still.headPitch).toBeCloseTo(0.26, 6);
+    expect(still.headPitch).toBeCloseTo(HEAD_PITCH_UP, 6);
   });
 
   it('passes small angles straight through', () => {
