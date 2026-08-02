@@ -120,6 +120,11 @@ const YAW_RATE = 2.2;
  */
 const STICK_EASE = 10;
 /** How fast her up eases onto a new face. Snappy, or corners read as slides. */
+/**
+ * How steep a grade the gyro will accept, up or down. Her neck stops at 75
+ * degrees down and the body has no reason to out-reach where she can look.
+ */
+const TRIM_LIMIT = (75 * Math.PI) / 180;
 const ALIGN = 12;
 const SNAP = 14;
 const GRAVITY = 9;
@@ -297,6 +302,7 @@ export class BlockScene {
   /** Instruments off by default: they cover the thing they measure. */
   private debug = false;
   private readonly debugButton = document.createElement('button');
+  private readonly trimButton = document.createElement('button');
   /** The eased stick, which is what actually drives her. See `step`. */
   private driveWalk = 0;
   private driveYaw = 0;
@@ -318,6 +324,37 @@ export class BlockScene {
   private ride = RIDE;
 
   private readonly input = { walk: 0, yaw: 0, dig: false };
+  /**
+   * THE GYRO: an attitude she flies to, rather than one the ground picks for
+   * her. `pitch` is the GRADE her nose holds against world horizontal, nose-up
+   * positive; `hold()` pitches its goal until she is on it.
+   *
+   * What it is for, measured rather than assumed. Everything about how she sits
+   * was, until this, decided entirely by the soil — `hold()` casts through her
+   * soles, finds a face, and eases her up onto its normal. Underground that
+   * means floor, wall and ceiling normals swapping about beneath her, each swap
+   * yanking her whole body: over twenty seconds of tunnelling her nose wandered
+   * with a standard deviation of 39.5 degrees and tumbled through 6952 degrees
+   * in total. Holding a grade through the same run: 11.0 degrees and 2861, for
+   * the same depth reached. Seventy per cent less wander at no cost in
+   * progress, which is "the camera going all over the place while digging"
+   * with a number attached.
+   *
+   * What it is NOT for, which corrects what I first assumed of it. It does not
+   * unlock digging downward, because nothing was blocking that. Digging while
+   * STANDING STILL sinks her 0 mm at any trim — `hold()` grabs the first solid
+   * under her and, stood on a plateau beside a pit, that is the plateau. Biting
+   * while she WALKS sinks her tens of millimetres with no gyro at all, and
+   * trimming nose-down makes entry steadily worse: 44.7 mm untrimmed, 14.1 at
+   * -40 degrees, 2.8 at -60, 1.7 at -75, because a steeply pitched body aims
+   * its grip cast into intact soil and seats on that instead of travelling.
+   * So dig in with it off and switch it on once she is under — which is where
+   * it was asked to live in the first place.
+   *
+   * Off, this is the identity: she lies on the normal exactly as before, and
+   * the six-face walk is untouched.
+   */
+  private readonly trim = { on: false, pitch: 0 };
   private digCooldown = 0;
   /** Why the last bite did nothing, for probes. Cleared on a real bite. */
   private lastBiteWhy = 'never ran';
@@ -802,7 +839,43 @@ export class BlockScene {
     this.normalAt(hit, normal);
     const seat = hit.clone().addScaledVector(normal, this.ride);
     this.at.lerp(seat, 1 - Math.exp(-SNAP * dt));
-    this.up.lerp(normal, 1 - Math.exp(-ALIGN * dt)).normalize();
+    this.up.lerp(this.trimmedUp(normal), 1 - Math.exp(-ALIGN * dt)).normalize();
+  }
+
+  /**
+   * The attitude she should be holding: the surface normal, pitched until her
+   * nose sits at the commanded GRADE.
+   *
+   * The grade is measured against world horizontal, not against the soil under
+   * her, and that distinction is the whole design. Trim taken relative to the
+   * local surface compounds: nose down forty, seat on the forty-degree floor
+   * that produces, take another forty off THAT, and within a second or two she
+   * is vertical and then inverted. A gyroscope holds an attitude in the world,
+   * which is exactly what stops the runaway — "descend at forty degrees" is a
+   * fixed point, not an increment.
+   *
+   * Only the pitch is taken. Roll — which way up she is, which face of the
+   * block she is on — still comes entirely from the normal, so she keeps
+   * walking round corners and along the underside while the gyro is holding
+   * her grade.
+   */
+  private trimmedUp(normal: THREE.Vector3): THREE.Vector3 {
+    if (!this.trim.on) return normal;
+    const right = new THREE.Vector3().crossVectors(normal, this.forward);
+    // Nose straight at the normal leaves no axis to pitch about. Rare, and
+    // holding the last attitude through it beats spinning on a degenerate one.
+    if (right.lengthSq() < 1e-8) return normal;
+    right.normalize();
+    // The forward that goes with THIS normal, rather than the stale one.
+    const nose = new THREE.Vector3().crossVectors(right, normal).normalize();
+    const grade = Math.asin(THREE.MathUtils.clamp(nose.y, -1, 1));
+    /*
+     * Positive about her right is nose DOWN — rotating the frame about +X
+     * carries +Z toward -Y. So closing the gap from where her nose is to where
+     * it is asked to be is (grade - commanded), not the other way round. This
+     * sign was checked against the model, not reasoned: see probe-gyro.
+     */
+    return normal.clone().applyAxisAngle(right, grade - this.trim.pitch).normalize();
   }
 
   /** Is this point within the block's own bounds, rather than outside it? */
@@ -1200,6 +1273,9 @@ export class BlockScene {
       Block: ${BLOCK_MM} mm cube · ${CELL_MM} mm cells · ${CELLS}³<br>
       Bite: ${(this.queen.antennaToJaw() * BITE_WIDTH_SPANS * MM).toFixed(2)} mm wide, measured (table said ${CASTE_BITE_MM.queen}) · removed ${(this.removed * MM ** 3).toFixed(0)} mm³<br>
       On the ${face} · up ${this.up.x.toFixed(2)}, ${this.up.y.toFixed(2)}, ${this.up.z.toFixed(2)}<br>
+      Gyro: ${this.trim.on
+    ? `HOLDING ${(this.trim.pitch * 180 / Math.PI).toFixed(0)}° · flying ${this.gradeDeg().toFixed(0)}°`
+    : `off · flying ${this.gradeDeg().toFixed(0)}°`}<br>
       Queen: ${CASTE_LENGTH_MM.queen} mm · ${this.gripping ? 'gripping' : 'FALLING'} · `
       + `head ${(this.follow.lookYaw * 180 / Math.PI).toFixed(0)}° off, `
       + `${mode.pitchHead
@@ -1258,6 +1334,24 @@ export class BlockScene {
     this.tuner.style.display = on && this.firstPerson ? '' : 'none';
   }
 
+  /**
+   * Engage or release the gyro, taking the grade she is CURRENTLY LOOKING AT
+   * as the one to hold.
+   *
+   * A numeric dial would need a row of buttons and a value to read before it
+   * meant anything. This is one tap: aim her head where you want to go, engage,
+   * and the body flies the line her face was on — the way a backhoe's boom is
+   * placed and then held, rather than a camera hand-held on target. Releasing
+   * hands her straight back to the soil.
+   */
+  setTrim(on: boolean, grade = this.aimPitch): void {
+    this.trim.on = on;
+    if (on) this.trim.pitch = THREE.MathUtils.clamp(grade, -TRIM_LIMIT, TRIM_LIMIT);
+    this.trimButton.textContent = on
+      ? `HOLD ${(this.trim.pitch * 180 / Math.PI).toFixed(0)}°`
+      : 'hold';
+  }
+
   private setFirstPerson(on: boolean): void {
     this.firstPerson = on;
     this.follow.mode = on ? 'first' : 'third';
@@ -1288,6 +1382,14 @@ export class BlockScene {
     if (!this.queen.headJointPosition(head) || !this.queen.jawPosition(jaw)) return 0;
     const d = jaw.sub(head).normalize();
     return (Math.asin(Math.max(-1, Math.min(1, d.dot(this.up)))) * 180) / Math.PI;
+  }
+
+  /**
+   * The grade she is actually flying: her nose against world horizontal,
+   * nose-up positive. What the gyro is trying to make equal to its command.
+   */
+  gradeDeg(): number {
+    return (Math.asin(THREE.MathUtils.clamp(this.forward.y, -1, 1)) * 180) / Math.PI;
   }
 
   /** Aim through the same clamp a drag uses. For probes. */
@@ -1353,6 +1455,14 @@ export class BlockScene {
       this.setDebug(!this.debug);
     });
     actions.appendChild(this.debugButton);
+
+    this.trimButton.className = 'density-lab-button density-lab-mode';
+    this.trimButton.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      this.setTrim(!this.trim.on);
+    });
+    actions.appendChild(this.trimButton);
+    this.setTrim(false);
 
     this.viewButton.className = 'density-lab-button density-lab-mode';
     this.viewButton.addEventListener('pointerdown', (event) => {
@@ -1542,6 +1652,7 @@ export class BlockScene {
       if (event.key === '/') { event.preventDefault(); this.setMode(cycleMode(this.mode, -1)); }
       if (event.code === 'KeyV') { event.preventDefault(); this.setFirstPerson(!this.firstPerson); }
       if (event.code === 'KeyB') { event.preventDefault(); this.setDebug(!this.debug); }
+      if (event.code === 'KeyH') { event.preventDefault(); this.setTrim(!this.trim.on); }
     });
     window.addEventListener('keyup', (event) => {
       if (event.code === 'KeyW' || event.code === 'KeyS') this.input.walk = 0;
