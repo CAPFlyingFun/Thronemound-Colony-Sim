@@ -135,6 +135,13 @@ const TRIM_LIMIT = (75 * Math.PI) / 180;
  */
 const PLAN_TURN_BAND = (25 * Math.PI) / 180;
 const ALIGN = 12;
+/**
+ * The fastest her body will turn, however hard the soil argues — degrees a
+ * second. Ordinary cornering round the block's edge peaks well inside this;
+ * what it stops is a grip that flipped to a different face taking the whole
+ * view with it in one frame.
+ */
+const MAX_TILT_RATE = (240 * Math.PI) / 180;
 const SNAP = 14;
 const GRAVITY = 9;
 
@@ -524,6 +531,11 @@ export class BlockScene {
    * blend between two faces rather than a jump — the reason she rounds a
    * corner instead of snapping to the next face.
    */
+  /** The same cast `hold()` uses, exposed so probes ask the same question. */
+  castForTest(from: THREE.Vector3, dir: THREE.Vector3, reach: number): THREE.Vector3 | null {
+    return this.cast(from, dir, reach);
+  }
+
   normalAt(p: THREE.Vector3, into: THREE.Vector3): THREE.Vector3 {
     const h = CELL;
     into.set(
@@ -948,7 +960,7 @@ export class BlockScene {
         this.normalAt(out.point, normalOut);
         this.at.lerp(out.point.clone().addScaledVector(normalOut, this.ride),
           1 - Math.exp(-SNAP * dt));
-        this.up.lerp(this.trimmedUp(normalOut), 1 - Math.exp(-ALIGN * dt)).normalize();
+        this.aimUp(this.trimmedUp(normalOut), dt);
         return;
       }
     }
@@ -975,7 +987,40 @@ export class BlockScene {
     this.normalAt(hit, normal);
     const seat = hit.clone().addScaledVector(normal, this.ride);
     this.at.lerp(seat, 1 - Math.exp(-SNAP * dt));
-    this.up.lerp(this.trimmedUp(normal), 1 - Math.exp(-ALIGN * dt)).normalize();
+    this.aimUp(this.trimmedUp(normal), dt);
+  }
+
+  /**
+   * Turn her body toward an attitude — the ONE path by which her up ever
+   * changes, eased and then rate-limited.
+   *
+   * The easing was always there and was never enough on its own, because it
+   * only smooths a goal that MOVES smoothly. Digging does not: she removes the
+   * ground from under herself, so the contact her grip finds flips between
+   * faces several times a second and the goal arrives as a step. Two of the
+   * four places that moved her up did not even ease — they wrote the raw
+   * normal straight in.
+   *
+   * So there is also a ceiling on how fast a body can turn, which is what a
+   * body actually has. Nothing about a real ant lets it roll ninety degrees in
+   * a sixtieth of a second; the limit is what makes a bad sample cost a few
+   * degrees instead of the whole view. It leaves ordinary cornering alone,
+   * which peaks well inside it.
+   */
+  private aimUp(goal: THREE.Vector3, dt: number): void {
+    const eased = this.up.clone().lerp(goal, 1 - Math.exp(-ALIGN * dt)).normalize();
+    const swing = Math.acos(THREE.MathUtils.clamp(this.up.dot(eased), -1, 1));
+    const cap = MAX_TILT_RATE * dt;
+    if (swing <= cap || swing < 1e-9) {
+      this.up.copy(eased);
+      return;
+    }
+    const axis = new THREE.Vector3().crossVectors(this.up, eased);
+    if (axis.lengthSq() < 1e-12) {
+      this.up.copy(eased);
+      return;
+    }
+    this.up.applyAxisAngle(axis.normalize(), cap).normalize();
   }
 
   /**
@@ -1089,7 +1134,19 @@ export class BlockScene {
     if (this.solidAt(probe) && this.insideBlock(probe)) {
       const near = this.nearestSurface(probe);
       if (near) {
-        this.normalAt(near.point, this.up);
+        /*
+         * Through the slew, not straight onto her.
+         *
+         * Writing the normal into `this.up` was the single-frame ninety-five
+         * degree flip: digging removes the ground from under her constantly,
+         * so she loses grip and re-grips several times a second, and each
+         * re-grip snapped her orientation with no easing at all. Measured at
+         * 3.94 degrees of body rotation PER FRAME while digging, against 0.15
+         * while walking. That is the camera being all over the place.
+         */
+        const found = new THREE.Vector3();
+        this.normalAt(near.point, found);
+        this.aimUp(found, dt);
         this.at.copy(near.point).addScaledVector(this.up, this.ride);
         this.gripping = true;
         this.fallSpeed = 0;
@@ -1106,7 +1163,11 @@ export class BlockScene {
       );
       const hit = this.cast(from, new THREE.Vector3(0, -1, 0), SPAN * 2);
       if (hit) {
-        this.normalAt(hit, this.up);
+        // Same reason as above: this is a rescue, and a rescue that spins the
+        // view ninety degrees in a frame is worse than the fall.
+        const found = new THREE.Vector3();
+        this.normalAt(hit, found);
+        this.aimUp(found, dt);
         this.at.copy(hit).addScaledVector(this.up, this.ride);
         this.gripping = true;
         this.fallSpeed = 0;

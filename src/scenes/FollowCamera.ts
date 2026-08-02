@@ -23,6 +23,22 @@ const FIRST_PERSON_SNAP = 12;
 const EYE_CLEARANCE = 0.12;
 
 /**
+ * How much MORE room than it took to drop onto her head is needed to climb
+ * back off it. Purely to stop the two answers alternating frame by frame when
+ * the clearance is sitting on the line, which digging guarantees.
+ */
+const NO_ROOM_HYSTERESIS = 1.8;
+
+/**
+ * How long a cramped reading has to LAST before the camera acts on it, and
+ * how long a roomy one has to last before it comes back. Seconds. Leaving is
+ * slower than arriving, because being briefly on her head costs a moment of
+ * an odd shot and going back too eagerly costs another hard cut.
+ */
+const NO_ROOM_DWELL = 0.25;
+const ROOM_DWELL = 0.6;
+
+/**
  * A third-person camera that follows an ant into a hole.
  *
  * This replaces `OrbitControls`, and the reason is not preference. Orbit
@@ -204,6 +220,15 @@ export class FollowCamera {
   private settled = false;
   /** True while the rig has given up on third person and is riding her head. */
   private onboard = false;
+  /** Latched, so the no-room fallback is a band and not a knife edge. */
+  private noRoom = false;
+  /** Seconds the clearance has disagreed with `noRoom`. See its use. */
+  private crampedFor = 0;
+  /** The last frame's reasoning, for probes. See where it is filled in. */
+  why: {
+    onboard: boolean; noRoom: boolean; submerged: boolean;
+    mode: CameraMode; clear: number; minDistance: number;
+  } | null = null;
   private wasOnboard = false;
 
   constructor(
@@ -465,10 +490,58 @@ export class FollowCamera {
      * had, and it stays, because "third person" cannot be honoured inside a
      * 4 mm tunnel however firmly it is requested.
      */
-    const noRoom = clear < this.options.minDistance;
+    /*
+     * And the no-room test needs HYSTERESIS, which is the whole of the "camera
+     * all over the place" report.
+     *
+     * It was a bare threshold re-read every frame. Digging changes the soil
+     * behind her several times a second, so the clearance sits right on the
+     * line and crosses it back and forth — and each crossing is not a wobble
+     * but a TELEPORT, from twenty-five millimetres behind her to her own head
+     * and back. Measured over ten seconds of digging: the eye ranged from
+     * 25.36 mm to 0, flipping twice, moving 18.6 mm in one frame and swinging
+     * the view 82 degrees, while her body moved half a millimetre.
+     *
+     * A band rather than a line. Dropping onto her head still happens the
+     * moment there is genuinely no room for a shot of her; climbing back out
+     * needs room enough that the next crumb of soil cannot undo it.
+     */
+    const enter = this.options.minDistance;
+    const leave = this.options.minDistance * NO_ROOM_HYSTERESIS;
+    const cramped = this.noRoom ? clear < leave : clear < enter;
+    /*
+     * A band alone was not enough, because the clearance is BIMODAL rather
+     * than noisy: measured while digging it reads about 5 mm or about 22 mm
+     * and nothing in between, depending on whether the boom happens to clear
+     * the rim of the crater she is standing in. One crumb of soil decides
+     * which, so a band only moves where the coin lands.
+     *
+     * So it also has to HOLD. A cramped reading lasting three frames is the
+     * soil flickering; one lasting a quarter of a second is a tunnel. The
+     * camera does not move for the first, and that is the point — a mode
+     * change here is a deliberate hard cut, never eased, because easing
+     * between a shot from behind her and a shot from her own head travels
+     * straight through her body. Rare and instant is the design. Frequent and
+     * instant was the bug.
+     */
+    this.crampedFor = cramped === this.noRoom ? 0 : this.crampedFor + step;
+    if (cramped !== this.noRoom && this.crampedFor >= (cramped ? NO_ROOM_DWELL : ROOM_DWELL)) {
+      this.noRoom = cramped;
+      this.crampedFor = 0;
+    }
     this.onboard = this.mode === 'first'
       || (this.mode === 'auto' && this.submerged)
-      || noRoom;
+      || this.noRoom;
+    // Why the rig chose what it chose, for probes. Guessing at this from the
+    // outside cost three wrong diagnoses.
+    this.why = {
+      onboard: this.onboard,
+      noRoom: this.noRoom,
+      submerged: this.submerged,
+      mode: this.mode,
+      clear,
+      minDistance: this.options.minDistance,
+    };
 
     /*
      * First person gets a LEVEL frame, not her body's.
@@ -603,12 +676,67 @@ export class FollowCamera {
        * straight down a shaft puts the way she is facing at the top of the
        * screen, which is the convention every map and every cockpit uses.
        */
-      const vertical = Math.abs(look.dot(lift));
-      this.camera.up.copy(vertical > 0.999 ? flat : lift);
+      this.camera.up.copy(steadyUp(look, lift, flat));
       this.camera.lookAt(this.smoothed.clone().add(look));
     } else {
-      this.camera.up.copy(up);
+      /*
+       * The same guard, and third person NEEDED it more than onboard did.
+       *
+       * Onboard at least had a check; over her shoulder had none at all, and
+       * over her shoulder is where the report came from. Digging pitches her
+       * steeply, the orbit arm swings toward her own up, and once the look and
+       * the camera's up are parallel `lookAt` has no way to resolve the roll —
+       * so the view spins to whatever the arithmetic lands on. Measured while
+       * digging: her body moving a capped 4 degrees in a frame while the VIEW
+       * swung 82.
+       */
+      const view = this.target.clone().sub(this.camera.position);
+      if (view.lengthSq() > 1e-12) {
+        this.camera.up.copy(steadyUp(view.normalize(), up, flat));
+      } else {
+        this.camera.up.copy(up);
+      }
       this.camera.lookAt(this.target);
     }
   }
+}
+
+/**
+ * How square to the view the preferred up has to be before it is trusted
+ * alone. A quarter is about fourteen degrees off parallel.
+ */
+const UP_BLEND = 0.25;
+
+
+/**
+ * A camera up that is never parallel to the look, and never SNAPS to avoid
+ * being.
+ *
+ * `lookAt` builds the view's roll from the cross of the look and the camera's
+ * up, so only the part of that up square to the look does any work. As the two
+ * line up, that part shrinks to nothing and the roll becomes whatever floating
+ * point produces. The usual patch is a threshold that swaps in a different up
+ * — but a swap between two references ninety degrees apart is itself a
+ * ninety-degree roll, delivered in one frame, which trades a rare spin for a
+ * reliable pop.
+ *
+ * So this blends across the last fourteen degrees instead of switching at the
+ * end of them. Away from vertical it is exactly the preferred up and costs
+ * nothing.
+ */
+function steadyUp(
+  look: THREE.Vector3, prefer: THREE.Vector3, fallback: THREE.Vector3,
+): THREE.Vector3 {
+  const square = prefer.clone().addScaledVector(look, -prefer.dot(look));
+  const strength = square.length();
+  if (strength >= UP_BLEND) return prefer.clone();
+  const alt = fallback.clone().addScaledVector(look, -fallback.dot(look));
+  if (alt.lengthSq() < 1e-12) return prefer.clone();
+  alt.normalize();
+  if (strength < 1e-6) return alt;
+  // Both are already square to the look, so blending them keeps them square.
+  const t = strength / UP_BLEND;
+  return alt.multiplyScalar(1 - t)
+    .addScaledVector(square.normalize(), t)
+    .normalize();
 }
