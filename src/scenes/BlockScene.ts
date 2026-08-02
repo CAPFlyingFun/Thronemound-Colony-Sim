@@ -1399,6 +1399,9 @@ export class BlockScene {
 
     const canvas = this.renderer.domElement;
     canvas.addEventListener('pointerdown', (event) => {
+      // Bound to the canvas for the life of the gesture, so its release comes
+      // back here even if the finger ends up over the HUD or off the edge.
+      try { canvas.setPointerCapture(event.pointerId); } catch { /* not fatal */ }
       if (event.clientX < window.innerWidth * 0.5 && this.stickPointer === null) {
         this.stickPointer = event.pointerId;
         const o = clampStickOrigin(event.clientX, event.clientY, {
@@ -1490,8 +1493,42 @@ export class BlockScene {
       }
       if (event.pointerId === this.lookPointer) this.lookPointer = null;
     };
+    /*
+     * RELEASED FROM ANYWHERE, and captured so it usually does not have to be.
+     *
+     * These used to be on the canvas alone. The HUD, the buttons and the
+     * tuner all take pointer events, and the screen edge takes them too — so
+     * a thumb that slid off the canvas mid-drag fired its `pointerup`
+     * somewhere the canvas never heard, the stick stayed latched at whatever
+     * it was last set to, and she span on the spot at full deflection until
+     * the app was killed. Reported exactly that way.
+     *
+     * Three layers, because a stuck control is unrecoverable without one:
+     *   CAPTURE  binds the pointer to the canvas on the way down, so its up
+     *            comes back here wherever the finger has wandered to.
+     *   WINDOW   catches the release anyway if capture was refused or lost,
+     *            which is the case capture alone does not cover.
+     *   BLUR     zeroes everything when the app goes away, since a pointer
+     *            that ends while backgrounded may never report at all.
+     */
     canvas.addEventListener('pointerup', release);
     canvas.addEventListener('pointercancel', release);
+    canvas.addEventListener('lostpointercapture', release);
+    window.addEventListener('pointerup', release);
+    window.addEventListener('pointercancel', release);
+    const letGo = (): void => {
+      this.stickPointer = null;
+      this.lookPointer = null;
+      this.input.walk = 0;
+      this.input.yaw = 0;
+      this.input.dig = false;
+      this.stick.classList.remove('is-live');
+      this.stickKnob.style.transform = '';
+    };
+    window.addEventListener('blur', letGo);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) letGo();
+    });
 
     window.addEventListener('keydown', (event) => {
       if (event.code === 'KeyW') this.input.walk = 1;
