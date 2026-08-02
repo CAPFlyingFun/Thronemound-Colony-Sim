@@ -49,6 +49,9 @@ import { QueenModel } from '../anim/QueenModel';
 import { FollowCamera } from './FollowCamera';
 import { STICK_DEADZONE, clampStickOrigin, stickVector } from '../voxel/locomotion';
 import { MODES, cycleMode } from './modes';
+import {
+  DigPlanRunner, PIECE_LIMITS, PLAN_SPEED_MM_S, clampPiece, type DigPiece,
+} from './digPlan';
 import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import {
   CASTE_BITE_MM, CASTE_LENGTH_MM, HEAD_PITCH_DOWN, HEAD_PITCH_UP, HEAD_YAW_LIMIT,
@@ -125,6 +128,12 @@ const STICK_EASE = 10;
  * degrees down and the body has no reason to out-reach where she can look.
  */
 const TRIM_LIMIT = (75 * Math.PI) / 180;
+/**
+ * How far off the plan's heading she has to be for the autopilot to ask for a
+ * full-lock turn. Wide enough that a constant-radius bend is steered with a
+ * gentle, mostly-constant yaw rather than bang-bang either side of the line.
+ */
+const PLAN_TURN_BAND = (25 * Math.PI) / 180;
 const ALIGN = 12;
 const SNAP = 14;
 const GRAVITY = 9;
@@ -303,6 +312,13 @@ export class BlockScene {
   private debug = false;
   private readonly debugButton = document.createElement('button');
   private readonly trimButton = document.createElement('button');
+  private readonly planButton = document.createElement('button');
+  private readonly planner = document.createElement('div');
+  private readonly planList = document.createElement('pre');
+  private readonly planRunButton = document.createElement('button');
+  private readonly planFields = new Map<keyof DigPiece, { value: HTMLElement; unit: string }>();
+  /** The piece being drafted, before it is added to the queue. */
+  private draft: DigPiece = { pitch: -15, turn: 0, roll: 0, length: 5 };
   /** The eased stick, which is what actually drives her. See `step`. */
   private driveWalk = 0;
   private driveYaw = 0;
@@ -354,7 +370,18 @@ export class BlockScene {
    * Off, this is the identity: she lies on the normal exactly as before, and
    * the six-face walk is untouched.
    */
-  private readonly trim = { on: false, pitch: 0 };
+  private readonly trim = { on: false, pitch: 0, roll: 0 };
+  /**
+   * The plan she is flying, if she is flying one. See `digPlan`.
+   *
+   * The runner is pure and knows nothing about soil; this end owns the two
+   * things it cannot: turning its heading command into steering the LEGS
+   * actually perform, and holding the bite down while a piece runs.
+   */
+  private plan: DigPlanRunner | null = null;
+  private planPieces: DigPiece[] = [];
+  /** Where the plan wants her nose, in the world. Steered toward, not snapped. */
+  private readonly planForward = new THREE.Vector3(0, 0, 1);
   private digCooldown = 0;
   /** Set by `setPausedForTest` so probes own the clock. Never set in play. */
   private paused = false;
@@ -724,15 +751,79 @@ export class BlockScene {
     },
   };
 
+  /**
+   * Fly the plan: turn a piece into the same commands a thumb would give.
+   *
+   * Deliberately written INTO `input`, upstream of the easing and of the legs,
+   * rather than moving her directly. The whole point of a plan is that it is
+   * the same ant doing the same walking — she has to dig the tunnel with her
+   * legs and her jaws, at whatever pace the soil allows, or the tunnel is a
+   * cutscene. It also means grabbing the stick blends against the autopilot
+   * instead of fighting a teleport.
+   *
+   * Distance is measured across her own up, so a piece is spent by TRAVEL and
+   * never by being re-seated up and down half a millimetre at a time. That is
+   * the same distinction the gait makes to decide whether she is walking, and
+   * it was worth a phantom 6.5 mm/s the last time it was got wrong.
+   */
+  private flyPlan(dt: number, movedMm: number): void {
+    const plan = this.plan;
+    if (!plan) return;
+    const step = plan.step(dt, movedMm);
+    if (step.finished && plan.finished) {
+      this.stopPlan();
+      return;
+    }
+    this.trim.on = true;
+    this.trim.pitch = THREE.MathUtils.clamp(step.pitch, -TRIM_LIMIT, TRIM_LIMIT);
+    this.trim.roll = step.roll;
+    // The turn is spent against her own up, so a banked or upside-down piece
+    // still turns the way the plan drew it rather than the way the world is.
+    if (Math.abs(step.turnDelta) > 1e-9) {
+      this.planForward.applyAxisAngle(this.up, step.turnDelta);
+    }
+    this.planForward.addScaledVector(this.up, -this.planForward.dot(this.up));
+    if (this.planForward.lengthSq() < 1e-8) this.planForward.copy(this.forward);
+    this.planForward.normalize();
+    /*
+     * Steered, not snapped. The signed angle from her nose to the plan's is
+     * fed in as yaw exactly as a thumb would, so the legs do the turning and
+     * the gait stays the only thing that moves her.
+     */
+    const cross = new THREE.Vector3().crossVectors(this.forward, this.planForward);
+    const err = Math.atan2(cross.dot(this.up), this.forward.dot(this.planForward));
+    this.input.yaw = THREE.MathUtils.clamp(err / PLAN_TURN_BAND, -1, 1);
+    this.input.walk = step.walk;
+    this.input.dig = MODES[this.mode]?.action?.id === 'dig';
+  }
+
+  /** Begin the queued plan, from wherever she is now. */
+  startPlan(): void {
+    if (this.planPieces.length === 0) return;
+    this.plan = new DigPlanRunner(this.planPieces.map(clampPiece));
+    this.planForward.copy(this.forward);
+    this.setTrim(true, this.planPieces[0]!.pitch * Math.PI / 180);
+    this.updatePlanHud();
+  }
+
+  /** Hand her back. Releasing the plan releases the gyro with it. */
+  stopPlan(): void {
+    this.plan = null;
+    this.input.walk = 0;
+    this.input.yaw = 0;
+    this.input.dig = false;
+    this.trim.roll = 0;
+    this.setTrim(false);
+    this.updatePlanHud();
+  }
+
   private step(dt: number): void {
     /*
-     * The sign is REPORTED, not reasoned: pushing the stick right turned her
-     * left. The lab's own steering carries the same comment for the same
-     * reason — forward is (sin h, 0, cos h), so a rising heading swings her
-     * nose from +Z toward +X, and with the camera behind her that is the
-     * LEFT of the screen. The arithmetic is consistent and is the mirror of
-     * what a thumb means.
+     * The plan writes the stick, so it must run before the stick is read. It
+     * is charged for LAST frame's travel, which is the only travel there is a
+     * number for yet — a frame of lag on a piece that takes ten seconds.
      */
+    this.flyPlan(dt, this.walkSpeed * dt * MM);
     /*
      * The stick is EASED before anything reads it.
      *
@@ -920,7 +1011,18 @@ export class BlockScene {
      * it is asked to be is (grade - commanded), not the other way round. This
      * sign was checked against the model, not reasoned: see probe-gyro.
      */
-    return normal.clone().applyAxisAngle(right, grade - this.trim.pitch).normalize();
+    const pitched = normal.clone().applyAxisAngle(right, grade - this.trim.pitch).normalize();
+    /*
+     * ROLL last, and about her NOSE, so it is a bank and nothing else.
+     *
+     * Pitch is absolute because a relative pitch compounds; roll is relative
+     * to the surface because that is what banking means — a floor tilted
+     * thirty degrees off the ground under her, not thirty degrees off the
+     * world. Rolling after pitching keeps the two independent, which is what
+     * lets a piece ask for both without one eating the other.
+     */
+    if (Math.abs(this.trim.roll) < 1e-6) return pitched;
+    return pitched.applyAxisAngle(nose, this.trim.roll).normalize();
   }
 
   /** Is this point within the block's own bounds, rather than outside it? */
@@ -1465,6 +1567,11 @@ export class BlockScene {
     return (Math.asin(Math.max(-1, Math.min(1, d.dot(this.up)))) * 180) / Math.PI;
   }
 
+  /** Is the gyro engaged? For probes, which cannot see a private. */
+  trimOnForTest(): boolean {
+    return this.trim.on;
+  }
+
   /**
    * The grade the VIEW is on, against world horizontal. What "hold this line"
    * means when you press the button while looking somewhere.
@@ -1488,6 +1595,115 @@ export class BlockScene {
   }
 
   /* ------------------------------------------------------------ the input */
+
+  /**
+   * The coaster builder: draft a piece with four steppers, queue it, fly it.
+   *
+   * Four steppers rather than a free numeric entry because this is used with a
+   * thumb, and because the steps ARE the vocabulary — fifteen degrees and one
+   * millimetre are the units a tunnel is actually described in. The draft is
+   * shown as the sentence you would say out loud ("down 15, left 45, roll 30,
+   * 6 mm") so the panel reads as the plan rather than as four spinboxes.
+   *
+   * Hidden behind PLAN, because a phone in landscape has room for the view or
+   * for a builder and not both, and the builder is the one you close.
+   */
+  private buildPlanner(hud: HTMLElement, actions: HTMLElement): void {
+    this.planButton.className = 'density-lab-button density-lab-mode';
+    this.planButton.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      this.setPlanner(this.planner.style.display === 'none');
+    });
+    actions.appendChild(this.planButton);
+
+    this.planner.className = 'density-lab-planner';
+    const rows: Array<[string, keyof DigPiece, string]> = [
+      ['PITCH', 'pitch', '°'],
+      ['TURN', 'turn', '°'],
+      ['ROLL', 'roll', '°'],
+      ['LEN', 'length', 'mm'],
+    ];
+    for (const [label, key, unit] of rows) {
+      const row = document.createElement('div');
+      row.className = 'density-lab-planner-row';
+      const name = document.createElement('span');
+      name.textContent = label;
+      row.appendChild(name);
+      const value = document.createElement('b');
+      row.appendChild(value);
+      this.planFields.set(key, { value, unit });
+      for (const dir of [-1, 1]) {
+        const button = document.createElement('button');
+        button.textContent = dir < 0 ? '−' : '+';
+        button.addEventListener('pointerdown', (event) => {
+          event.preventDefault();
+          this.draft = clampPiece({
+            ...this.draft,
+            [key]: this.draft[key] + dir * PIECE_LIMITS[key].step,
+          });
+          this.updatePlanHud();
+        });
+        row.appendChild(button);
+      }
+      this.planner.appendChild(row);
+    }
+
+    const queue = document.createElement('div');
+    queue.className = 'density-lab-planner-row';
+    for (const [label, run] of [
+      ['ADD', () => { this.planPieces.push({ ...this.draft }); }],
+      ['UNDO', () => { this.planPieces.pop(); }],
+      ['CLEAR', () => { this.planPieces = []; this.stopPlan(); }],
+    ] as Array<[string, () => void]>) {
+      const button = document.createElement('button');
+      button.textContent = label;
+      button.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        run();
+        this.updatePlanHud();
+      });
+      queue.appendChild(button);
+    }
+    this.planner.appendChild(queue);
+
+    this.planRunButton.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      if (this.plan) this.stopPlan();
+      else this.startPlan();
+    });
+    this.planner.appendChild(this.planRunButton);
+    this.planner.appendChild(this.planList);
+    this.planList.className = 'density-lab-planner-list';
+    hud.appendChild(this.planner);
+    this.setPlanner(false);
+    this.updatePlanHud();
+  }
+
+  private setPlanner(on: boolean): void {
+    this.planner.style.display = on ? '' : 'none';
+    this.planButton.textContent = on ? 'PLAN' : 'plan';
+  }
+
+  /** Redraw the draft, the queue and what the run is doing. */
+  private updatePlanHud(): void {
+    for (const [key, { value, unit }] of this.planFields) {
+      const n = this.draft[key];
+      value.textContent = `${n > 0 && key !== 'length' ? '+' : ''}${n}${unit}`;
+    }
+    const total = this.planPieces.reduce((a, p) => a + p.length, 0);
+    this.planRunButton.textContent = this.plan ? 'STOP' : 'RUN';
+    this.planList.textContent = this.planPieces.length === 0
+      ? 'no pieces — set one and ADD'
+      : this.planPieces.map((p, i) => {
+        const mark = this.plan && i === this.plan.pieceIndex ? '▶' : `${i + 1}.`;
+        return `${mark} ${p.pitch}° ${p.turn > 0 ? 'L' : p.turn < 0 ? 'R' : '—'}`
+          + `${p.turn ? Math.abs(p.turn) : ''} roll ${p.roll}° · ${p.length}mm`;
+      }).join('\n') + `\n${total} mm · ${total} s at ${PLAN_SPEED_MM_S} mm/s`;
+  }
+
+  /** Open the builder and redraw it. For probes and screenshots. */
+  setPlannerForTest(on: boolean): void { this.setPlanner(on); }
+  updatePlanHudForTest(): void { this.updatePlanHud(); }
 
   private buildControls(hud: HTMLElement): void {
     this.stick.className = 'density-lab-stick';
@@ -1524,6 +1740,7 @@ export class BlockScene {
     this.actionButton.addEventListener('pointercancel', hold(false));
     this.actionButton.addEventListener('pointerleave', hold(false));
     this.setMode(this.mode);
+    this.buildPlanner(hud, actions);
 
     /*
      * FIRST PERSON, and a tuner for where its eye goes.

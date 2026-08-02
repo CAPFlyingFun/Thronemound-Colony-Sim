@@ -687,3 +687,69 @@
   .lab-menu__button { padding: 10px 20px; min-width: 270px; font-size: 13px; }
   .lab-menu__version { margin-top: 6px; }
 }
+
+/*
+ * THE COASTER BUILDER.
+ *
+ * Top-left under the readout rather than bottom-centre with the eye tuner:
+ * the two are never both open, but the builder is TALL where the tuner is
+ * wide, and a tall panel anchored to the bottom of a landscape phone walks up
+ * over the whole view as pieces are added. Anchored at the top it grows
+ * downward into the space the readout leaves.
+ */
+.density-lab-planner {
+  position: absolute;
+  z-index: 3;
+  left: max(14px, env(safe-area-inset-left));
+  top: max(14px, env(safe-area-inset-top));
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(20, 15, 10, 0.78);
+  pointer-events: auto;
+  max-height: 78vh;
+  overflow-y: auto;
+}
+
+.density-lab-planner-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.density-lab-planner span {
+  min-width: 42px;
+  font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.06em;
+  color: #f4ecd8;
+}
+
+/* Tabular so the value does not shuffle the buttons as it changes width. */
+.density-lab-planner b {
+  min-width: 46px;
+  font: 800 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  color: #ffd9a0;
+}
+
+.density-lab-planner button {
+  min-width: 34px;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(244, 236, 216, 0.9);
+  color: #1d160e;
+  font: 800 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  touch-action: none;
+}
+
+.density-lab-planner-list {
+  margin: 2px 0 0;
+  max-width: 240px;
+  font: 600 10px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #e8ddc4;
+  white-space: pre-wrap;
+}
