@@ -50,7 +50,7 @@ import { CASTE_BITE_MM, CASTE_LENGTH_MM } from '../anim/hexapod';
 import { FollowCamera } from './FollowCamera';
 import { STICK_DEADZONE, clampStickOrigin, stickVector } from '../voxel/locomotion';
 import { MODES, cycleMode } from './modes';
-import { HEAD_PITCH_UP } from '../anim/hexapod';
+import { HEAD_PITCH_UP, HEAD_REST_PITCH_DEG } from '../anim/hexapod';
 import {
   FOOT_CLEARANCE_MM, LegDrive, type DriveReport, type LegSetup,
 } from '../anim/legDrive';
@@ -1003,7 +1003,10 @@ export class BlockScene {
       On the ${face} · up ${this.up.x.toFixed(2)}, ${this.up.y.toFixed(2)}, ${this.up.z.toFixed(2)}<br>
       Queen: ${CASTE_LENGTH_MM.queen} mm · ${this.gripping ? 'gripping' : 'FALLING'} · `
       + `head ${(this.follow.lookYaw * 180 / Math.PI).toFixed(0)}° off, `
-      + `${mode.pitchHead ? `${(this.follow.lookPitch * 180 / Math.PI).toFixed(0)}° pitch` : 'level'}<br>`
+      + `${mode.pitchHead
+        ? `cam ${(this.follow.lookPitch * 180 / Math.PI).toFixed(0)}° → BONE `
+          + `${this.headAngleDeg().toFixed(0)}° (rest ${HEAD_REST_PITCH_DEG})`
+        : `level · BONE ${this.headAngleDeg().toFixed(0)}°`}<br>`
       + `${this.firstPerson
         ? `EYE nudge fwd ${(this.eyeNudge.z * MM).toFixed(2)}, up ${(this.eyeNudge.y * MM).toFixed(2)}, `
           + `right ${(this.eyeNudge.x * MM).toFixed(2)} mm · pitch `
@@ -1054,6 +1057,29 @@ export class BlockScene {
     this.camera.updateProjectionMatrix();
     this.viewButton.textContent = on ? '1ST' : '3RD';
     this.tuner.style.display = on ? '' : 'none';
+  }
+
+  /**
+   * Her head's ABSOLUTE pitch: where her face actually points, measured from
+   * the model, not the offset the camera asked for.
+   *
+   * On screen because that is the number being read off it. Her head does not
+   * rest level — it hangs nose-down by its own construction — so a readout of
+   * the camera's offset says 0 while her face is already forty degrees into
+   * the floor, and two people looking at the same ant disagree by that much.
+   *
+   * Head joint to jaw tip, which of the several lines that could fairly be
+   * called "the head angle" is the one that looks like the head: the neck
+   * base reads -26.94 at rest, this reads -36.35, the mouth chain alone
+   * -45.00 and the antenna sockets -64.76.
+   */
+  private headAngleDeg(): number {
+    if (!this.ready) return 0;
+    const head = new THREE.Vector3();
+    const jaw = new THREE.Vector3();
+    if (!this.queen.headJointPosition(head) || !this.queen.jawPosition(jaw)) return 0;
+    const d = jaw.sub(head).normalize();
+    return (Math.asin(Math.max(-1, Math.min(1, d.dot(this.up)))) * 180) / Math.PI;
   }
 
   /** Aim through the same clamp a drag uses. For probes. */

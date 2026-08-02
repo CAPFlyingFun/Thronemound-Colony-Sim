@@ -1157,6 +1157,12 @@ export class QueenModel {
   }
 
   /** Her mouthparts, in world space. False when the rig has not loaded. */
+  /** The joint her head hangs off — the head end of the thorax chain. */
+  headJointPosition(into: THREE.Vector3): boolean {
+    const head = this.rig.thorax[this.rig.thorax.length - 1];
+    return head !== undefined && this.boneWorldPosition(head, into);
+  }
+
   jawPosition(into: THREE.Vector3): boolean {
     const jaw = this.jawBone();
     return jaw !== undefined && this.boneWorldPosition(jaw, into);

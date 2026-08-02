@@ -427,6 +427,17 @@ const HEAD_YAW_LIMIT = 1.05;
  */
 const HEAD_PITCH_DOWN = 0.7;
 export const HEAD_PITCH_UP = 0.26;
+/**
+ * Where her face points at REST, in degrees, nose-down — measured off the
+ * queen's rig by `scripts/probe-headrest.mjs`, head joint to jaw tip.
+ *
+ * Recorded because it is the number two people reading the same ant disagree
+ * over. Her head is not level when the camera is level: it hangs by its own
+ * construction, and which line you call "the head" moves the answer a long
+ * way. The neck base to the jaw is -26.94, this is -36.35, the mouth chain on
+ * its own -45.00, and the antenna sockets to the jaw -64.76.
+ */
+export const HEAD_REST_PITCH_DEG = -36.35;
 /** How much of the head's turn the gaster swings against. Her counterweight. */
 export const GASTER_COUNTER = 0.30;
 const MANDIBLE_OPEN = 0.55;
