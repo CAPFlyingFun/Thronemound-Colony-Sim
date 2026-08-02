@@ -95,9 +95,10 @@ export const TRIPOD_B = ['frontRight', 'midLeft', 'rearRight'];
  *
  * One table, so the modes are compared rather than scattered. Turning takes
  * short steps because a spin on the spot is many small placements, and long
- * ones would have her lurching round in quarters. The two are BLENDED per
- * leg by how much of that leg's travel is rotation rather than translation,
- * because there is no moment where she stops walking and starts turning.
+ * ones would have her lurching round in quarters. The two are BLENDED, at
+ * the BODY and not per leg, by how much of her motion is rotation rather
+ * than translation — there is no moment where she stops walking and starts
+ * turning, and all six legs must share one stroke. See `radius`.
  */
 export const STRIDE_MM = { walk: 2.0, turn: 0.8 } as const;
 
@@ -251,6 +252,8 @@ function spread(reach: number, spare: number): number {
 
 export class LegDrive {
   private readonly legs: Leg[] = [];
+  /** Mean distance of a foot from her turn axis. See `radius`. */
+  private stanceRadius = 1;
 
   constructor(setup: LegSetup[]) {
     for (const leg of setup) {
@@ -271,6 +274,16 @@ export class LegDrive {
         spread: spread(leg.reach || leg.home.length(), spare),
         dir: new THREE.Vector3(0, 0, 1),
       });
+    }
+    /*
+     * How far a foot sits from the axis she spins about — her own up through
+     * her centre — so a yaw rate can be compared against a walking speed in
+     * the same units. Mean rather than per leg, on purpose: see `radius`.
+     */
+    if (this.legs.length > 0) {
+      this.stanceRadius = this.legs.reduce(
+        (sum, l) => sum + Math.hypot(l.home.x, l.home.z), 0,
+      ) / this.legs.length;
     }
   }
 
@@ -300,7 +313,7 @@ export class LegDrive {
    */
   private travel(
     leg: Leg, body: BodyPose, input: DriveInput, into: THREE.Vector3,
-  ): { speed: number; turn: number } {
+  ): number {
     const right = new THREE.Vector3().crossVectors(body.up, body.forward).normalize();
     const offset = new THREE.Vector3()
       .addScaledVector(right, leg.home.x)
@@ -310,15 +323,32 @@ export class LegDrive {
     const angular = new THREE.Vector3()
       .crossVectors(body.up, offset)
       .multiplyScalar(input.yawRate * input.yaw);
-    const rotSpeed = angular.length();
     into.copy(linear).add(angular);
     const speed = into.length();
     if (speed > 1e-9) into.divideScalar(speed);
-    return { speed, turn: speed > 1e-9 ? Math.min(1, rotSpeed / speed) : 0 };
+    return speed;
   }
 
-  /** The radius of this leg's gait circle, blended between the two strides. */
-  private radiusFor(turn: number): number {
+  /**
+   * ONE gait circle, shared by all six legs.
+   *
+   * It was per leg, blended by each leg's own ratio of rotation to travel,
+   * and that is what had the back feet dancing. The rear legs sit furthest
+   * from her turn axis, so their `ω × r` is the largest, so on any yaw at
+   * all — and a thumb on a stick is never at exactly zero yaw — they scored
+   * the most "turning" and got the SHORTEST circle. Short circle, frequent
+   * steps: the back end fidgeting while the front strode.
+   *
+   * Both references size the circle once for the machine and vary only the
+   * DIRECTION per leg. So the blend is taken at the body, using the mean
+   * distance from her turn axis as the one stance radius, and every leg gets
+   * the same stroke.
+   */
+  private radius(body: BodyPose, input: DriveInput): number {
+    const linear = Math.abs(input.speed * input.walk);
+    const rotational = Math.abs(input.yawRate * input.yaw) * this.stanceRadius;
+    const total = linear + rotational;
+    const turn = total > 1e-9 ? rotational / total : 0;
     const mm = STRIDE_MM.walk + (STRIDE_MM.turn - STRIDE_MM.walk) * turn;
     return mm / 2 / MM;
   }
@@ -335,7 +365,7 @@ export class LegDrive {
    */
   plantAll(body: BodyPose, ground: Ground): void {
     const home = new THREE.Vector3();
-    const lead = this.radiusFor(0);
+    const lead = STRIDE_MM.walk / 2 / MM;
     for (const leg of this.legs) {
       this.homeWorld(leg, body, home);
       const want = TRIPOD_B.includes(leg.slot)
@@ -379,25 +409,44 @@ export class LegDrive {
     const shove = body.forward.clone().multiplyScalar(input.speed * input.walk * dt);
     const spin = input.yawRate * input.yaw * dt;
     const wanted = shove.length();
+    const radius = this.radius(body, input);
 
     /*
-     * 2. The planted feet constrain it. Every stance foot must stay inside
-     *    its own reach; the largest fraction of the twist that keeps all of
-     *    them inside is the one she gets. Bisection rather than algebra
-     *    because the yaw makes it non-linear, and ten halvings of a frame's
-     *    motion is far below anything visible.
+     * 2. A FOOT THAT IS OUT OF LEG LETS GO.
      *
-     *    A leg already outside its limit — because the ground moved, or
-     *    because she is straining with nothing to step onto — is held to
-     *    where it is rather than declared impossible. The clip can only ever
-     *    remove motion, so this cannot oscillate.
+     * Before anything is constrained, because this is what stops a
+     * constraint becoming a trap. `BlockScene.hold()` runs after this
+     * function and eases her onto whatever face she has reached, moving her
+     * position AND rotating her up — and the anchors know nothing about it.
+     * Rounding a corner therefore hands the legs six feet that are suddenly
+     * a long way from where they belong, measured across a new up.
+     *
+     * That is the glue trap. The old code fed those feet to the clip with a
+     * limit of "no worse than they already are", which froze her exactly
+     * where she stood, and the only thing that could have freed her — a
+     * tripod lifting — could not fire either. A leg stretched past what it
+     * physically has does not hold on and win. It lets go.
+     */
+    for (const leg of this.legs) {
+      if (!leg.planted) continue;
+      this.homeWorld(leg, body, home);
+      if (this.excursion(leg, home, body.up).length() <= leg.spread) continue;
+      leg.planted = false;
+      leg.t = 0;
+      leg.from.copy(leg.at);
+    }
+
+    /*
+     * 3. The planted feet constrain what is left. Every stance foot must stay
+     *    inside its own reach; the largest fraction of the twist that keeps
+     *    all of them inside is the one she gets. Bisection rather than
+     *    algebra because the yaw makes it non-linear, and ten halvings of a
+     *    frame's motion is far below anything visible.
      */
     const limits: Array<{ leg: Leg; limit: number }> = [];
     for (const leg of this.legs) {
       if (!leg.planted) continue;
-      this.homeWorld(leg, body, home);
-      const now = this.excursion(leg, home, body.up).length();
-      limits.push({ leg, limit: Math.max(leg.spread, now) });
+      limits.push({ leg, limit: leg.spread });
     }
     const probe: BodyPose = {
       at: new THREE.Vector3(), up: body.up, forward: new THREE.Vector3(),
@@ -430,11 +479,21 @@ export class LegDrive {
     const moved = from.distanceTo(body.at);
 
     /*
-     * 3. The gait is triggered by the feet, not by a timer. When nothing is
+     * 4. The gait is triggered by the feet, not by a timer. When nothing is
      *    in the air and the most-spent stance foot has been dragged to the
      *    back of its circle, the OTHER tripod lifts. That is the whole of
      *    the timing: she steps because her feet ran out of stroke, so a
      *    blocked ant takes no steps and a fast one takes them faster.
+     *
+     *    "Spent" is measured along where the foot is travelling NOW, not
+     *    along the direction it was planted for. The stored direction was
+     *    the other half of the glue trap: round a corner her up swings 90°
+     *    and her forward re-flattens against the new face, so every stored
+     *    direction pointed somewhere she was no longer going. A stroke
+     *    measured against it sat near zero however far she strained — the
+     *    HUD read "stroke -29%" with six feet down and nothing moving — so
+     *    the swap could never fire. OpenSHC recomputes the same quantity
+     *    every tick from the moving tip, and for the same reason.
      */
     let strain = 0;
     let spentest: Leg | null = null;
@@ -455,10 +514,12 @@ export class LegDrive {
         continue;
       }
       this.homeWorld(leg, body, home);
-      const { turn } = this.travel(leg, body, input, dir);
-      const radius = this.radiusFor(turn);
+      const speed = this.travel(leg, body, input, dir);
+      // Where she is going now; only when she is going nowhere, where it was
+      // planted, so a foot at rest does not read as spent by accident.
+      if (speed <= 1e-9) dir.copy(leg.dir);
       // Signed along the stroke: -1 just planted ahead, +1 fully spent.
-      const spent = this.excursion(leg, home, body.up).dot(leg.dir) / radius;
+      const spent = this.excursion(leg, home, body.up).dot(dir) / radius;
       if (!spentest || spent > strain) {
         strain = spent;
         spentest = leg;
@@ -482,8 +543,8 @@ export class LegDrive {
     }
 
     /*
-     * 4. Swing legs reach for the FRONT of their own circles, each along its
-     *    own `v + ω × r`. On a spin in place that direction is sideways and
+     * 5. Swing legs reach for the FRONT of the circle, each along its own
+     *    `v + ω × r`. On a spin in place that direction is sideways and
      *    opposite across her, which is the whole of turning — there is no
      *    turn branch anywhere in this file.
      */
@@ -496,8 +557,7 @@ export class LegDrive {
         continue;
       }
       this.homeWorld(leg, body, home);
-      const { speed, turn } = this.travel(leg, body, input, dir);
-      const radius = this.radiusFor(turn);
+      const speed = this.travel(leg, body, input, dir);
       /*
        * A leg stepping while she is NOT being driven goes home, not a full
        * radius ahead of it — that is the foot settling after she stops, and
@@ -521,9 +581,21 @@ export class LegDrive {
       leg.groping = false;
       leg.to.copy(hit);
       leg.t = Math.min(1, leg.t + dt / SWING_SECONDS);
-      const arc = Math.sin(Math.PI * Math.min(1, leg.t)) * radius * SWING_LIFT;
-      leg.at.lerpVectors(leg.from, leg.to, leg.t).addScaledVector(body.up, arc);
-      if (leg.t >= LOCK_AT) {
+      /*
+       * The swing LANDS where it lifts off, with no jump at the end.
+       *
+       * It used to run the arc and the glide on the full 0..1 of the swing
+       * but lock the foot at 0.9, which meant that at the instant of locking
+       * the foot was still a tenth of the way short of its target AND still
+       * sin(0.9π) = 0.31 of the arc off the ground — so it teleported the
+       * rest. Six feet doing that a few times a second is the dancing.
+       * Retiming both onto 0..LOCK_AT puts the foot exactly on its target
+       * with exactly zero lift at the moment it plants.
+       */
+      const u = Math.min(1, leg.t / LOCK_AT);
+      const arc = Math.sin(Math.PI * u) * radius * SWING_LIFT;
+      leg.at.lerpVectors(leg.from, leg.to, u).addScaledVector(body.up, arc);
+      if (u >= 1) {
         leg.planted = true;
         leg.anchor.copy(leg.to);
         leg.at.copy(leg.anchor);
@@ -533,7 +605,7 @@ export class LegDrive {
     }
 
     /*
-     * 5. Ride height. She keeps a little daylight under her, and when the
+     * 6. Ride height. She keeps a little daylight under her, and when the
      *    ground rises into her the stance legs push down to lift her clear —
      *    bounded by the same spare reach, so on a hard floor she bottoms out
      *    and drags instead of floating through it.
