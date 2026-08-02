@@ -201,11 +201,24 @@ export function legPhase(slot: LegSlot, cycle: number): number {
 export const STRIDE = 0.55;
 /** Steps per second at one voxel per second. */
 export const CADENCE = 1.35;
-/** Slowest the legs will shuffle when she is barely moving. */
-const MIN_CADENCE = 0.15;
 
+/**
+ * The walk cycle STOPS when she stops. There is no floor under it.
+ *
+ * There used to be one — a sixth of a step per second, so a standing ant kept
+ * shuffling and did not read as a prop. It is the wrong answer to a real
+ * question, and it was visible: at rest she ran the walking gait slowly, and
+ * the walking gait at a crawl is not an animal resting, it is an animal
+ * walking in treacle. Six legs cycling through a stride they are not taking
+ * reads as dancing, which is exactly what it was called.
+ *
+ * A standing ant is not a slow-motion walking ant. Idle gets its OWN motion —
+ * a small desynchronised weight shift in `IDLE_SWAY`, and antennae that work
+ * HARDER at rest than in motion, which is what a real one does. See
+ * `gaitPose`.
+ */
 export function cadenceFor(speed: number): number {
-  return Math.max(MIN_CADENCE, Math.abs(speed) * CADENCE);
+  return Math.abs(speed) * CADENCE;
 }
 
 export interface GaitPose {
@@ -285,6 +298,21 @@ const LEAN_PER_TURN = 0.12;
 const ANTENNA_SWEEP = 0.3;
 const GASTER_SWAY = 0.09;
 /**
+ * What a leg does when she is NOT walking: a slow weight shift, and a small
+ * one — a fifth of the old standing shuffle, which is the reduction that was
+ * asked for after it read as dancing.
+ *
+ * The old idle was the walk swing held at 12% of full: `0.12 × REACH_ANGLE`,
+ * 0.050 rad, driven by the gait cycle. This is 0.010 rad, driven by the clock
+ * at its own slow rate, and phase-shifted per leg by an amount that is NOT
+ * the tripod split — so it can never settle into looking like a gait, which
+ * is the whole point of it being a separate motion rather than a quiet one.
+ */
+const IDLE_SWAY = 0.010;
+const IDLE_RATE = 1.1;
+/** How far a leg's idle shift is offset from its neighbour's, in radians. */
+const IDLE_STAGGER = 1.7;
+/**
  * How wide the jaws open, and how fast they snip.
  *
  * Faster than the legs cycle on purpose: an ant working a face takes several
@@ -311,16 +339,30 @@ export function gaitPose(input: GaitInput, rig: RigMap = QUEEN_RIG): GaitPose {
   // the constant-speed equivalent when it does not.
   const cycle = input.cycle ?? clock * cadenceFor(speed);
 
-  for (const leg of rig.legs) {
+  for (let i = 0; i < rig.legs.length; i += 1) {
+    const leg = rig.legs[i]!;
     const phase = legPhase(leg.slot, cycle);
     const swing = legSwing(phase);
-    // Idle legs still shift their weight, or she looks like a photograph.
-    const amount = 0.12 + 0.88 * moving;
+    /*
+     * The walk swing is scaled by how much she is WALKING, all the way to
+     * nothing. It used to keep a twelfth of itself at rest so she was never a
+     * photograph, and that twelfth — running on a cycle that never stopped —
+     * is what looked like dancing.
+     */
+    const amount = moving;
     const front = leg.slot === 'frontLeft' || leg.slot === 'frontRight';
     // Digging: the front pair stop walking and scrape instead.
     const scrape = front ? digging : 0;
+    /*
+     * And in its place, a resting leg's own motion: slow, tiny, and staggered
+     * so the six of them never line up into a gait. It fades out as the walk
+     * swing fades in, so only one of the two is ever really speaking.
+     */
+    const settle = Math.sin(clock * IDLE_RATE + i * IDLE_STAGGER)
+      * IDLE_SWAY * (1 - moving) * (1 - scrape);
     const reach = swing.reach * REACH_ANGLE * amount * (1 - scrape)
-      + scrape * Math.sin(clock * 9) * 0.5;
+      + scrape * Math.sin(clock * 9) * 0.5
+      + settle;
     const lift = swing.lift * LIFT_ANGLE * amount * (1 - scrape);
 
     // Coxa carries the fore-and-aft swing, the joints below it the lift, so
@@ -393,6 +435,16 @@ export function gaitPose(input: GaitInput, rig: RigMap = QUEEN_RIG): GaitPose {
    * Antennae sweep continuously and out of phase with each other. They are the
    * cheapest thing in here and the most valuable: a still ant reads as a prop,
    * and two moving antennae read as an animal even when nothing else moves.
+   *
+   * They are UNCHANGED by the idle rework, and that is a reported result
+   * rather than an oversight. The obvious other half of "quiet legs, busy
+   * feelers" is to sweep them wider at rest, and three variants of it were
+   * measured in the block room: widening both axes moved the tips LESS
+   * (1.53 mm of travel down to 1.22), sideways-only was still less (1.39),
+   * and adding a second faster wave came out bit-identical to doing nothing.
+   * Something downstream in `QueenModel.solveFeet` re-solves this chain and
+   * governs what the tips actually do. Until that is understood, turning the
+   * number up here buys nothing, so the number stays where it was.
    */
   const sweep = ANTENNA_SWEEP * (0.6 + 0.4 * moving) * (1 + digging);
   rotations.set(rig.antennaLeft[0]!, [

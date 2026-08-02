@@ -180,13 +180,107 @@ describe('cadence', () => {
     expect(cadenceFor(4)).toBeGreaterThan(cadenceFor(2));
   });
 
-  it('still shuffles when she is standing still', () => {
-    // Zero cadence freezes the pose, and a frozen ant reads as a prop.
-    expect(cadenceFor(0)).toBeGreaterThan(0);
+  it('stops dead when she does, because a slow walk is not a rest', () => {
+    /*
+     * This assertion used to say the opposite: cadence had a floor so a
+     * standing ant kept shuffling and did not read as a prop. On device that
+     * looked like dancing, and the reason is that it WAS the walking gait,
+     * merely slowed down — six legs cycling through a stride they were not
+     * taking. Idle now has its own motion instead; see the tests below.
+     */
+    expect(cadenceFor(0)).toBe(0);
   });
 
   it('does not run backwards when she does', () => {
     expect(cadenceFor(-3)).toBe(cadenceFor(3));
+  });
+});
+
+describe('idle is its own animation, not the walk slowed down', () => {
+  /** Widest a coxa swings, over a stretch of clock, at a given speed. */
+  const coxaSwing = (speed: number, cycle: number): number => {
+    let worst = 0;
+    for (const leg of QUEEN_RIG.legs) {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let clock = 0; clock < 12; clock += 0.02) {
+        const pose = gaitPose(
+          { clock, cycle, speed, turn: 0, digging: 0, carrying: 0 }, QUEEN_RIG,
+        );
+        const a = pose.rotations.get(leg.bones[0]!)![0];
+        lo = Math.min(lo, a);
+        hi = Math.max(hi, a);
+      }
+      worst = Math.max(worst, hi - lo);
+    }
+    return worst;
+  };
+
+  it('cuts the standing leg motion by at least 80%', () => {
+    /*
+     * The old idle held the walk swing at 12% of full — 0.12 × REACH_ANGLE,
+     * 0.0504 rad of coxa — and ran it on a cycle that never stopped. What was
+     * asked for was a fifth of that. Assert against the old number so this
+     * cannot quietly drift back up.
+     */
+    const OLD_IDLE_PEAK_TO_PEAK = 2 * 0.12 * 0.42;
+    const idle = coxaSwing(0, 0);
+    expect(idle).toBeGreaterThan(0);
+    expect(idle).toBeLessThanOrEqual(OLD_IDLE_PEAK_TO_PEAK * 0.2);
+  });
+
+  it('does not move a standing leg when only the gait cycle turns', () => {
+    /*
+     * The decisive one. Sweep the CYCLE with the clock held still: at rest
+     * the legs must not care, because the walk cycle is not what is animating
+     * them any more. Under the old code every one of these was a new pose.
+     */
+    const at = (cycle: number) => QUEEN_RIG.legs.map((leg) => gaitPose(
+      { clock: 4, cycle, speed: 0, turn: 0, digging: 0, carrying: 0 }, QUEEN_RIG,
+    ).rotations.get(leg.bones[0]!)![0]);
+    const first = at(0);
+    for (const cycle of [0.17, 0.33, 0.5, 0.71, 0.9]) {
+      at(cycle).forEach((a, i) => expect(a).toBeCloseTo(first[i]!, 10));
+    }
+  });
+
+  it('staggers the six legs so the rest never looks like a gait', () => {
+    // Two legs of the SAME tripod must not share a phase, or the idle sway
+    // reads as the tripod pattern at low amplitude — the thing being removed.
+    const pose = gaitPose(
+      { clock: 1.3, cycle: 0, speed: 0, turn: 0, digging: 0, carrying: 0 }, QUEEN_RIG,
+    );
+    const sameTripod = QUEEN_RIG.legs.filter((l) => tripodOf(l.slot) === 0);
+    const angles = sameTripod.map((l) => pose.rotations.get(l.bones[0]!)![0]);
+    for (let i = 1; i < angles.length; i += 1) {
+      expect(Math.abs(angles[i]! - angles[0]!)).toBeGreaterThan(1e-4);
+    }
+  });
+
+  it('leaves the antennae as the busiest thing on a resting ant', () => {
+    /*
+     * Not an amplitude claim — the antenna sweep is deliberately unchanged,
+     * see the comment on it in `gaitPose`. This is the RATIO that matters
+     * now the legs have gone quiet: at rest a feeler must out-move a leg, or
+     * the animal reads as switched off rather than waiting.
+     */
+    const spread = (bone: string): number => {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let clock = 0; clock < 12; clock += 0.02) {
+        const a = gaitPose(
+          { clock, cycle: 0, speed: 0, turn: 0, digging: 0, carrying: 0 }, QUEEN_RIG,
+        ).rotations.get(bone)![1];
+        lo = Math.min(lo, a);
+        hi = Math.max(hi, a);
+      }
+      return hi - lo;
+    };
+    const antenna = spread(QUEEN_RIG.antennaLeft[0]!);
+    for (const leg of QUEEN_RIG.legs) {
+      expect(antenna).toBeGreaterThan(coxaSwing(0, 0));
+      expect(leg.bones[0]).toBeTruthy();
+    }
   });
 });
 
