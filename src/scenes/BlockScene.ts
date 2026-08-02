@@ -49,6 +49,8 @@ import { QueenModel } from '../anim/QueenModel';
 import { FollowCamera } from './FollowCamera';
 import { STICK_DEADZONE, clampStickOrigin, stickVector } from '../voxel/locomotion';
 import { MODES, cycleMode } from './modes';
+import { RAIL_SMOOTH_MM, TunnelRail } from './tunnelRail';
+import { senseRoom, type RoomSense } from '../voxel/room';
 import {
   DigPlanRunner, PIECE_LIMITS, PLAN_SPEED_MM_S, clampPiece, type DigPiece,
 } from './digPlan';
@@ -134,6 +136,79 @@ const TRIM_LIMIT = (75 * Math.PI) / 180;
  * gentle, mostly-constant yaw rather than bang-bang either side of the line.
  */
 const PLAN_TURN_BAND = (25 * Math.PI) / 180;
+
+/** Scratch for the room spray, so sensing allocates nothing per frame. */
+const PROBE = new THREE.Vector3();
+
+/* ------------------------------------------------------------- the railway */
+
+/**
+ * How far to look when asking what kind of space she is in, and how finely.
+ * Twelve millimetres is comfortably wider than any tunnel she digs and
+ * comfortably narrower than the block, so it separates the two cleanly.
+ */
+const ROOM_REACH_MM = 12;
+const ROOM_STEP_MM = 0.5;
+/**
+ * How often the spray is re-marched. Fourteen rays is a few hundred field
+ * lookups; the answer changes over tenths of a second, not frames.
+ */
+const ROOM_EVERY = 4;
+/**
+ * Boxed in past this and she counts as UNDERGROUND, as a band.
+ *
+ * Guessed at 0.72 first, from the fact that open ground only meets soil on the
+ * downward half of the spray. That reasoning is right and the number was still
+ * wrong: measured inside a tunnel she has just dug, enclosure runs anywhere
+ * from 0.64 to 1.00 depending on how much of the roof she has taken out, so
+ * 0.72 threw her off the rails in her own bore. A band, because a threshold on
+ * a quantity that wanders is a thing that flickers — the same lesson the
+ * camera's no-room test taught.
+ */
+/**
+ * How close a ceiling has to be, along HER OWN UP, before she counts as
+ * underground — and how far it has to go before she stops. Millimetres.
+ *
+ * Two statistical discriminators were tried first and both failed on cases the
+ * game actually contains. Enclosure cannot do it: measured, the surface reads
+ * 0.64 to 0.71 and her own bore 0.64 to 1.00, and they overlap. A count of
+ * upward WORLD rays that meet soil cannot either — it is right on the top face
+ * and wrong on the other five, where the rising corners point straight back
+ * into the block, so walking round the side of the mound read as being inside
+ * it for 336 frames out of 600.
+ *
+ * This one is not statistical. Her up is by definition the way OUT of the
+ * surface she is gripping, so soil along it means something over her head and
+ * nothing else: sky on the top face, open air off a side or the underside, and
+ * a ceiling only when she is genuinely in a hole.
+ */
+const CEILING_ENTER_MM = 6;
+const CEILING_LEAVE_MM = 10;
+/**
+ * Wider than this and it is a ROOM, not a tunnel: enclosed on all sides but
+ * with space to walk about in, so she comes off the rails and is free.
+ *
+ * MEASURED, not chosen. The first attempt guessed eight millimetres from her
+ * body size and nothing ever reached it — a bore she has just dug reads 2.0 to
+ * 2.75 and a room walked out of the soil reads 4.25, so eight was a threshold
+ * on the far side of everything that exists. These sit either side of the gap,
+ * as a band rather than a line because the two are close enough together that
+ * a single value would have her flickering on and off the rails at the mouth
+ * of a chamber.
+ */
+const CHAMBER_ENTER_MM = 3.6;
+const CHAMBER_LEAVE_MM = 3.0;
+/**
+ * How close to the track she has to be to board it, in millimetres.
+ *
+ * Paired with the smoothing window: the smoothed line runs a little inside
+ * every bend of the raw one, so the radius has to cover that gap or a
+ * well-smoothed track becomes one she cannot get onto. At a fourteen
+ * millimetre window three was already too tight.
+ */
+const RAIL_CAPTURE_MM = 4;
+/** How far she must travel while digging before another sleeper is laid. */
+const RAIL_SPACING_MM = 0.4;
 const ALIGN = 12;
 /**
  * The fastest her body will turn, however hard the soil argues — degrees a
@@ -385,6 +460,39 @@ export class BlockScene {
    * things it cannot: turning its heading command into steering the LEGS
    * actually perform, and holding the bite down while a piece runs.
    */
+  /**
+   * THE RAILWAY. See `tunnelRail` for why the tunnel is written down at all.
+   *
+   * Three states, and the rule between them is one measurement: how boxed in
+   * she is, and how wide the space is.
+   *
+   *   SURFACE   not enclosed. She walks as she always has, on any face of the
+   *             block, and none of this applies.
+   *   TUNNEL    enclosed and narrow. She rides the track she dug: the stick
+   *             moves her along it and nothing steers, because a bore four
+   *             millimetres across has no room for a decision. This is what
+   *             makes it steady — position and attitude come off a recorded
+   *             curve rather than off soil she is still chewing.
+   *   CHAMBER   enclosed but WIDE. A room underground is a place to walk
+   *             about, so she is free again.
+   *
+   * Digging always releases her. Laying track and riding it are different
+   * jobs, and holding DIG is how you say which you are doing.
+   */
+  private rail: TunnelRail | null = null;
+  private railS = 0;
+  /**
+   * How far either side the track is averaged when she rides it. A field
+   * rather than a constant because it had to be swept against the real
+   * recording to pick — see `probe-rails`.
+   */
+  railSmoothMm = RAIL_SMOOTH_MM;
+  private onRails = false;
+  private room: RoomSense = {
+    enclosed: 0, boreMm: ROOM_REACH_MM, nearestMm: ROOM_REACH_MM, roofed: 0,
+  };
+  private roomTick = 0;
+
   private plan: DigPlanRunner | null = null;
   private planPieces: DigPiece[] = [];
   /** Where the plan wants her nose, in the world. Steered toward, not snapped. */
@@ -764,6 +872,150 @@ export class BlockScene {
   };
 
   /**
+   * What kind of space is she in? The one question the railway is built on.
+   *
+   * Re-marched every few frames rather than every frame because fourteen rays
+   * is a few hundred field lookups and the answer moves over tenths of a
+   * second. It replaces `buriedDepth`, which asked the same thing along HER
+   * OWN UP and so swung with her orientation instead of her position — it
+   * reported her surfacing from nine millimetres deep while her real height
+   * fell 0.8 mm.
+   */
+  private senseTheRoom(): void {
+    this.roomTick -= 1;
+    if (this.roomTick > 0) return;
+    this.roomTick = ROOM_EVERY;
+    this.room = senseRoom(
+      (x, y, z) => this.solidAt(PROBE.set(x / MM, y / MM, z / MM)),
+      this.at.x * MM, this.at.y * MM, this.at.z * MM,
+      { reachMm: ROOM_REACH_MM, stepMm: ROOM_STEP_MM },
+    );
+  }
+
+  /** The last room reading, for probes and the readout. */
+  roomForTest(): RoomSense { return this.room; }
+
+  /**
+   * Force a room reading, so the RULE can be tested without having to carve a
+   * chamber first. Carving one takes a player minutes and a probe more
+   * excavation than a sixty-four millimetre block contains; the rule is a pure
+   * function of these three numbers and deserves testing on its own.
+   */
+  setRoomForTest(room: RoomSense): void {
+    this.room = room;
+    this.roomTick = ROOM_EVERY;
+  }
+
+  /** Enclosed enough to call it underground. Latched, so it cannot flicker. */
+  private undergroundLatch = false;
+
+  get underground(): boolean {
+    const reach = this.undergroundLatch ? CEILING_LEAVE_MM : CEILING_ENTER_MM;
+    this.undergroundLatch = this.cast(
+      this.at.clone().addScaledVector(this.up, CELL),
+      this.up.clone(), reach / MM,
+    ) !== null;
+    return this.undergroundLatch;
+  }
+
+  /**
+   * Underground, but with room to walk about — so not a tunnel. Latched, so
+   * standing in a doorway does not flicker her between free and railed.
+   */
+  private chamberLatch = false;
+
+  get inChamber(): boolean {
+    if (!this.underground) {
+      this.chamberLatch = false;
+      return false;
+    }
+    this.chamberLatch = this.chamberLatch
+      ? this.room.boreMm >= CHAMBER_LEAVE_MM
+      : this.room.boreMm >= CHAMBER_ENTER_MM;
+    return this.chamberLatch;
+  }
+
+  /** What the HUD and the probes call the current state. */
+  get travelState(): 'surface' | 'chamber' | 'digging' | 'rails' | 'tunnel' {
+    if (!this.underground) return 'surface';
+    if (this.inChamber) return 'chamber';
+    if (this.input.dig) return 'digging';
+    return this.onRails ? 'rails' : 'tunnel';
+  }
+
+  /**
+   * Lay track while she digs, and ride it when she is not.
+   *
+   * Returns whether the rail moved her this frame, in which case the ordinary
+   * drive is skipped entirely — that is the whole point. Underground her
+   * position and attitude come off a recorded curve instead of off soil she is
+   * in the middle of destroying, and a recorded curve has nothing to jitter.
+   *
+   * Digging RELEASES her, deliberately. Laying track and riding it are
+   * different jobs and holding DIG is how you say which one you are doing; it
+   * is also the way off the rails when you want one.
+   */
+  private rideRail(dt: number): boolean {
+    if (!this.underground) {
+      // Surface behaviour is untouched, and the track is left where it is so
+      // that coming back down the same hole puts her back on it.
+      this.onRails = false;
+      return false;
+    }
+    if (this.input.dig) {
+      /*
+       * Digging is where the track comes FROM. The first sleeper is laid at
+       * the point she breaks in, which is the "spline created at the dig
+       * starting point" — everything after it is just her own path recorded.
+       */
+      if (!this.rail) this.rail = new TunnelRail();
+      this.rail.record(
+        { x: this.at.x * MM, y: this.at.y * MM, z: this.at.z * MM },
+        this.up, this.forward, RAIL_SPACING_MM,
+      );
+      this.onRails = false;
+      return false;
+    }
+    if (this.inChamber || !this.rail || this.plan) {
+      this.onRails = false;
+      return false;
+    }
+    const here = { x: this.at.x * MM, y: this.at.y * MM, z: this.at.z * MM };
+    const near = this.rail.nearest(here);
+    if (!near || near.distMm > RAIL_CAPTURE_MM) {
+      this.onRails = false;
+      return false;
+    }
+    // Board where she is standing, not at the end of the line.
+    if (!this.onRails) this.railS = near.s;
+    this.onRails = true;
+
+    const before = this.at.clone();
+    this.railS = THREE.MathUtils.clamp(
+      this.railS + this.driveWalk * WALK_SPEED * MM * dt, 0, this.rail.lengthMm,
+    );
+    const frame = this.rail.sample(this.railS, this.railSmoothMm);
+    if (!frame) {
+      this.onRails = false;
+      return false;
+    }
+    this.at.set(frame.x / MM, frame.y / MM, frame.z / MM);
+    this.up.set(frame.ux, frame.uy, frame.uz).normalize();
+    this.forward.set(frame.fx, frame.fy, frame.fz).normalize();
+    /*
+     * Her speed is still MEASURED, never assumed, because the gait reads it to
+     * decide whether she is walking. A rail that told the legs how fast they
+     * were going would put the two out of step the moment the track ran out.
+     */
+    const moved = this.at.clone().sub(before);
+    this.velocity.copy(moved).divideScalar(Math.max(dt, 1e-6));
+    this.walkSpeed = moved.length() / Math.max(dt, 1e-6);
+    this.gripping = true;
+    this.fallSpeed = 0;
+    return true;
+  }
+
+  /**
    * Fly the plan: turn a piece into the same commands a thumb would give.
    *
    * Deliberately written INTO `input`, upstream of the easing and of the legs,
@@ -849,6 +1101,7 @@ export class BlockScene {
      * of a second, which is quick enough to feel direct and long enough that
      * a full lap of the stick reads as one curve.
      */
+    this.senseTheRoom();
     const ease = 1 - Math.exp(-STICK_EASE * dt);
     this.driveWalk += (this.input.walk - this.driveWalk) * ease;
     this.driveYaw += (this.input.yaw - this.driveYaw) * ease;
@@ -860,6 +1113,21 @@ export class BlockScene {
      * LEFT of the screen. The arithmetic is consistent and is the mirror of
      * what a thumb means.
      */
+    /*
+     * ON THE TRACK, the stick is a throttle and nothing else.
+     *
+     * Steering is not merely ignored, it is zeroed before the gait reads it —
+     * the legs turn her by walking, so leaving a twist in the command would
+     * have her fighting the rail every frame rather than riding it.
+     */
+    if (this.rideRail(dt)) {
+      this.driveYaw = 0;
+      this.turnRate = 0;
+      this.forward.addScaledVector(this.up, -this.forward.dot(this.up));
+      if (this.forward.lengthSq() < 1e-8) this.forward.set(this.up.z, this.up.x, this.up.y);
+      this.forward.normalize();
+      return;
+    }
     this.turnRate = this.driveYaw * YAW_RATE;
     if (!this.drive) {
       const yaw = this.driveYaw * YAW_RATE * dt;
@@ -1420,7 +1688,14 @@ export class BlockScene {
    *
    * Zero when there is nothing overhead, which is the surface and above.
    */
-  private buriedDepth(from: THREE.Vector3): number {
+  /**
+   * Soil above a point ALONG HER OWN UP — kept only because probes written
+   * against it still read it, and no longer drives anything.
+   *
+   * It swings with her orientation rather than her position, which is why the
+   * fade and the railway both ask `senseRoom` instead. See `senseWanted`.
+   */
+  buriedDepth(from: THREE.Vector3): number {
     let last = 0;
     const probe = new THREE.Vector3();
     for (let d = 0; d <= SENSE_PROBE_MM / MM; d += CELL) {
@@ -1524,7 +1799,10 @@ export class BlockScene {
           + `right ${(this.eyeNudge.x * MM).toFixed(2)} mm · pitch `
           + `${(this.eyePitch * 180 / Math.PI).toFixed(0)}° — read these off and I will bake them in`
         : '3rd person · tap 1ST for the head cam'}<br>
-      Sense: ${(this.sense.uSense.value * 100).toFixed(0)}% at ${(this.buriedDepth(this.camera.position) * MM).toFixed(2)} mm deep<br>
+      Sense: ${(this.sense.uSense.value * 100).toFixed(0)}% · ${this.travelState.toUpperCase()}`
+      + ` — ${(this.room.enclosed * 100).toFixed(0)}% enclosed, bore ${this.room.boreMm.toFixed(1)} mm`
+      + `${this.rail ? ` · track ${this.rail.lengthMm.toFixed(1)} mm` : ' · no track'}`
+      + `${this.onRails ? ` at ${this.railS.toFixed(1)} mm` : ''}<br>
       Legs: ${this.report
     ? `${this.report.planted} planted · ${this.report.groping} reaching · `
       + `${this.report.movedMm.toFixed(2)} mm moved, ${this.report.heldBackMm.toFixed(2)} held back · `
