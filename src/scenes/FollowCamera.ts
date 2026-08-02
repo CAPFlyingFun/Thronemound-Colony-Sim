@@ -35,6 +35,14 @@ const NO_ROOM_HYSTERESIS = 1.8;
  * slower than arriving, because being briefly on her head costs a moment of
  * an odd shot and going back too eagerly costs another hard cut.
  */
+/**
+ * How fast the camera rig's own up catches up with the ant's, per second.
+ * Godot's `camera_rate`. Quick enough that a real change of surface arrives
+ * within a few frames, slow enough that her per-frame footing corrections do
+ * not reach the view at all.
+ */
+const CAMERA_UP_RATE = 24;
+
 const NO_ROOM_DWELL = 0.25;
 const ROOM_DWELL = 0.6;
 
@@ -222,6 +230,9 @@ export class FollowCamera {
   private onboard = false;
   /** Latched, so the no-room fallback is a band and not a knife edge. */
   private noRoom = false;
+  /** The rig's own up, which chases the ant's. See its use in `update`. */
+  private readonly rigUp = new THREE.Vector3(0, 1, 0);
+  private rigPlaced = false;
   /** Seconds the clearance has disagreed with `noRoom`. See its use. */
   private crampedFor = 0;
   /** The last frame's reasoning, for probes. See where it is filled in. */
@@ -404,7 +415,25 @@ export class FollowCamera {
      * normal, so on a slope or in a shaft the camera banks with her instead of
      * insisting on a vertical that stopped being meaningful underground.
      */
-    const up = this.up.clone().normalize();
+    /*
+     * The rig's up CHASES hers rather than being bolted to it.
+     *
+     * Ported from the Godot lab, whose comment names the problem exactly: the
+     * body is simultaneously rolling to fit the ground under it, and a camera
+     * bolted rigidly to a rolling body reads as jitter. Every frame she
+     * adjusts her footing the whole view adjusted with her, at full amplitude
+     * and with no filter at all.
+     *
+     * Measured in a pre-cut shaft with nothing being dug and her body steady
+     * at 4 degrees a frame, the view was still swinging 64.89 degrees in one.
+     */
+    if (!this.rigPlaced) {
+      this.rigUp.copy(this.up);
+      this.rigPlaced = true;
+    }
+    this.rigUp.lerp(this.up, 1 - Math.exp(-CAMERA_UP_RATE * dt));
+    if (this.rigUp.lengthSq() < 1e-9) this.rigUp.copy(this.up);
+    const up = this.rigUp.clone().normalize();
     const forward = bodyForward
       ? bodyForward.clone().applyAxisAngle(up, this.yawOffset)
       : new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));

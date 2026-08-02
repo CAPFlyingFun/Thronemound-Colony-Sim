@@ -135,6 +135,34 @@ const GRIP_REACH = 9 / MM;
 /** Looking for the far side of an edge: behind and below, in her own frame. */
 const WRAP_ARCS = [0.6, 1.1, 1.7, 2.4];
 
+/**
+ * The five feet the grip stands on, as offsets in her own frame and a weight
+ * each — ported from the Godot lab, where the same problem was solved by
+ * asking the ground in more than one place.
+ *
+ * A single ray reads the density field's gradient at ONE point, and that
+ * gradient is a finite difference over half a millimetre of a surface she is
+ * actively chewing. Measured while digging, the normal it returns jumps 5.3
+ * degrees a FRAME. Every attempt to fix that downstream — slew limits, rate
+ * cuts, freezing the attitude outright — treats a noisy signal instead of
+ * making it quiet.
+ *
+ * Five samples spread across her own footprint and averaged is a spatial
+ * low-pass with no lag at all, which is the difference between smoothing the
+ * answer and asking a better question. The centre carries the most weight
+ * because that is where she actually stands; fore and aft and the two sides
+ * are what stop a single fresh bite under one corner from turning her.
+ */
+const GRIP_FEET: ReadonlyArray<{ fore: number; side: number; weight: number }> = [
+  { fore: 0, side: 0, weight: 1.7 },
+  { fore: 0.80, side: 0, weight: 1.0 },
+  { fore: -0.80, side: 0, weight: 0.7 },
+  { fore: 0, side: 0.62, weight: 0.7 },
+  { fore: 0, side: -0.62, weight: 0.7 },
+];
+/** How far the spread reaches, in world units — about her own body width. */
+const GRIP_SPREAD = 1.6;
+
 /** World units per second. Slower than the sim's run — this is a small room. */
 const WALK_SPEED = 1.6;
 const YAW_RATE = 2.2;
@@ -1304,6 +1332,7 @@ export class BlockScene {
         },
         this.groundForLegs,
       );
+      this.slideOffSoil(before);
       /*
        * Speed is what she TRAVELS, measured across her own up — never how far
        * she was re-seated along it. The gait takes this number and decides
@@ -1365,6 +1394,9 @@ export class BlockScene {
    * BELOW her, in her own frame, which is where the far side of an edge is.
    * Only when that is empty too has she genuinely walked off into the air.
    */
+  /** Which branch of the grip fired, counted. For probes only. */
+  readonly holdWhy = { embedded: 0, down: 0, wrap: 0, lost: 0, footed: 0, fallback: 0 };
+
   private hold(dt: number): void {
     /*
      * While actively digging underground the DensityField surface normal
@@ -1395,13 +1427,30 @@ export class BlockScene {
      * is what `nearestSurface` marches for.
      */
     if (this.solidAt(this.at)) {
-      const out = this.nearestSurface(this.at);
+      /*
+       * Digging is never climbing. Holding DIG says she is boring into this
+       * face, so being pressed into it must not be read as a decision to walk
+       * up it — see `nearestSurface`.
+       */
+      this.holdWhy.embedded += 1;
+      const out = this.nearestSurface(this.at, this.input.dig);
       if (out) {
         const normalOut = new THREE.Vector3();
         this.normalAt(out.point, normalOut);
         this.at.lerp(out.point.clone().addScaledVector(normalOut, this.ride),
           1 - Math.exp(-SNAP * dt));
-        this.aimUp(this.trimmedUp(normalOut), aimDt);
+        /*
+         * The FIVE FEET here too, and this is the branch that mattered.
+         *
+         * Averaging the ground under her footprint was added to the ordinary
+         * grip and changed almost nothing about walking into a wall, because
+         * counted over a run at the cliff this branch takes 1676 frames of
+         * 1752 and that one took 76. It was seating her attitude on a single
+         * density gradient sampled at the exit point — which in the crease
+         * where a floor meets a wall is a blend of both, and tips her onto the
+         * wall a little more every frame until she is walking up it.
+         */
+        this.aimUp(this.trimmedUp(this.footedNormal(normalOut)), aimDt);
         return;
       }
     }
@@ -1411,7 +1460,9 @@ export class BlockScene {
     let hit = this.cast(from, dir, lift + GRIP_REACH);
     let normal = new THREE.Vector3();
 
+    if (hit) this.holdWhy.down += 1;
     if (!hit) {
+      this.holdWhy.wrap += 1;
       for (const arc of WRAP_ARCS) {
         const wrapDir = this.up.clone().multiplyScalar(-Math.cos(arc))
           .addScaledVector(this.forward, -Math.sin(arc)).normalize();
@@ -1421,14 +1472,87 @@ export class BlockScene {
       }
     }
     if (!hit) {
+      this.holdWhy.lost += 1;
       this.gripping = false;
       this.fallSpeed = 0;
       return;
     }
+    /*
+     * SEAT on the contact under her, but take the ATTITUDE from all five feet.
+     *
+     * Where she sits is a single point and always was. Which way is up is a
+     * question about the ground beneath her whole body, and asking it at one
+     * point is what made it jitter.
+     */
     this.normalAt(hit, normal);
     const seat = hit.clone().addScaledVector(normal, this.ride);
     this.at.lerp(seat, 1 - Math.exp(-SNAP * dt));
-    this.aimUp(this.trimmedUp(normal), aimDt);
+    this.aimUp(this.trimmedUp(this.footedNormal(normal)), aimDt);
+  }
+
+  /**
+   * STOP AT A WALL instead of walking into it.
+   *
+   * The missing piece, and counting the grip's branches is what found it: at
+   * the cliff she is INSIDE solid for 1676 frames of 1752 while merely walking
+   * at it. The leg drive puts her there — it moves her by what her feet
+   * survived and knows nothing about what is in front of her — and the grip
+   * then rescues her onto whatever surface is nearest, which is the wall she
+   * is buried in. That is the climb, and nothing downstream can undo it:
+   * averaging the ground under her only smooths the noise on a decision that
+   * has already been made wrongly.
+   *
+   * Godot never has the problem because `move_and_slide()` stops the body at
+   * the face. This is the same idea at its simplest: take the part of the
+   * move that went INTO the soil and drop it, keeping the part along the
+   * surface, so she slides along a wall instead of entering it.
+   */
+  private slideOffSoil(before: THREE.Vector3): void {
+    if (!this.solidAt(this.at)) return;
+    const moved = this.at.clone().sub(before);
+    if (moved.lengthSq() < 1e-12) return;
+    const out = new THREE.Vector3();
+    this.normalAt(this.at, out);
+    const into = moved.dot(out);
+    // Only the part heading INTO the soil is dropped; a move along the face,
+    // or one already coming out of it, is left exactly as the legs made it.
+    if (into >= 0) return;
+    this.at.copy(before).addScaledVector(moved, 1).addScaledVector(out, -into);
+    // Still buried — a corner, or a step taller than the slide could clear.
+    // Back her out along the surface rather than leaving her in it.
+    for (let i = 0; i < 4 && this.solidAt(this.at); i += 1) {
+      this.at.addScaledVector(out, CELL);
+    }
+    if (this.solidAt(this.at)) this.at.copy(before);
+  }
+
+  /**
+   * The average ground normal under her footprint, weighted — see `GRIP_FEET`.
+   *
+   * Falls back to the single contact normal when nothing else answers, which
+   * is the old behaviour and the right one on a ledge narrower than she is.
+   */
+  private footedNormal(fallback: THREE.Vector3): THREE.Vector3 {
+    const right = new THREE.Vector3().crossVectors(this.up, this.forward);
+    if (right.lengthSq() < 1e-8) return fallback;
+    right.normalize();
+    const sum = new THREE.Vector3();
+    const found = new THREE.Vector3();
+    let total = 0;
+    for (const foot of GRIP_FEET) {
+      const from = this.at.clone()
+        .addScaledVector(this.up, GRIP_LIFT)
+        .addScaledVector(this.forward, foot.fore * GRIP_SPREAD)
+        .addScaledVector(right, foot.side * GRIP_SPREAD);
+      const hit = this.cast(from, this.up.clone().negate(), GRIP_LIFT + GRIP_REACH);
+      if (!hit) continue;
+      this.normalAt(hit, found);
+      sum.addScaledVector(found, foot.weight);
+      total += foot.weight;
+    }
+    if (total < 1e-6 || sum.lengthSq() < 1e-8) { this.holdWhy.fallback += 1; return fallback; }
+    this.holdWhy.footed += 1;
+    return sum.normalize();
   }
 
   /**
@@ -1523,7 +1647,7 @@ export class BlockScene {
    * The nearest bit of surface to a point buried in soil, searched outward
    * along her own axes. What an ant in a tunnel takes hold of.
    */
-  private nearestSurface(p: THREE.Vector3): { point: THREE.Vector3 } | null {
+  private nearestSurface(p: THREE.Vector3, keepUp = false): { point: THREE.Vector3 } | null {
     const right = new THREE.Vector3().crossVectors(this.up, this.forward).normalize();
     const dirs = [
       this.up.clone().negate(), this.up.clone(),
@@ -1545,12 +1669,30 @@ export class BlockScene {
     const step = CELL * 0.5;
     const probe = new THREE.Vector3();
     let best: THREE.Vector3 | null = null;
-    let bestDist = Infinity;
+    let bestScore = Infinity;
     for (const dir of dirs) {
       for (let d = 0; d <= GRIP_REACH; d += step) {
         probe.copy(p).addScaledVector(dir, d);
         if (this.solidAt(probe)) continue;
-        if (d < bestDist) { bestDist = d; best = probe.clone(); }
+        /*
+         * NEAREST is the wrong preference when she is being shoved into a
+         * wall, and that is how she used to climb one.
+         *
+         * Walking into a vertical face, the leg drive puts her origin inside
+         * solid; this then found the nearest way out, which is straight through
+         * the wall she is pressed against, and seated her on it with the wall's
+         * normal as her up. She mounted the cliff without anything ever
+         * deciding to. Measured on the drill rig: 179.9 degrees of tilt and
+         * 32 mm of climb, digging or not.
+         *
+         * So when she is asked to KEEP her footing, an exit is scored by how
+         * far it is AND how far it would tip her — which leaves the floor
+         * winning over the wall she happens to be touching. Mounting is then
+         * something that has to be chosen rather than something that happens.
+         */
+        const tip = keepUp ? 1 - dir.dot(this.up) : 0;
+        const score = d + tip * GRIP_REACH;
+        if (score < bestScore) { bestScore = score; best = probe.clone(); }
         break;
       }
     }
