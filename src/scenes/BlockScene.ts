@@ -49,6 +49,7 @@ import { QueenModel } from '../anim/QueenModel';
 import { FollowCamera } from './FollowCamera';
 import { STICK_DEADZONE, clampStickOrigin, stickVector } from '../voxel/locomotion';
 import { MODES, cycleMode } from './modes';
+import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import {
   CASTE_BITE_MM, CASTE_LENGTH_MM, HEAD_PITCH_DOWN, HEAD_PITCH_UP, HEAD_YAW_LIMIT,
 } from '../anim/hexapod';
@@ -169,6 +170,14 @@ const HEAD_INSET_FRACTION = 0.32;
  * a worker and a major still scale off their own heads.
  */
 const BITE_WIDTH_SPANS = 4;
+/**
+ * How deep the eye must be for the underground view to be at full strength.
+ * Five millimetres is a bit over half her body length — a burrow she has her
+ * head inside rather than a dip she is crossing.
+ */
+const SENSE_FULL_MM = 5;
+/** How far up to look for soil overhead when measuring that depth. */
+const SENSE_PROBE_MM = 14;
 const EYE_FORWARD_MM = 0.2;
 const EYE_NUDGE_MM = 0.1;
 const EYE_NUDGE_DEG = 2;
@@ -215,6 +224,22 @@ export class BlockScene {
   private readonly material = new THREE.MeshStandardMaterial({
     color: 0x7a5136, roughness: 0.95, metalness: 0, side: THREE.DoubleSide,
   });
+
+  /**
+   * The underground view, faded in by DEPTH.
+   *
+   * Digging is unreadable from inside a hole: the eye is a millimetre from a
+   * wall, the wall is one flat brown, and there is nothing in the picture to
+   * tell you which way is out. The sense shader replaces that with contours
+   * and a grid — the same one the colony sim uses — so the shape of the space
+   * around her is legible even when the lighting says nothing.
+   *
+   * Driven by how far under the surface the EYE is, not by a flag: none at
+   * the surface, full at `SENSE_FULL_MM` below it. A switch would flip on the
+   * frame her head crossed the soil, which is exactly the frame she is
+   * bobbing across it several times a second.
+   */
+  private readonly sense: SenseUniforms = makeSensed(this.material);
 
   /** Where she is, and the frame she is in. `up` is the face she is on. */
   private readonly at = new THREE.Vector3();
@@ -1074,11 +1099,47 @@ export class BlockScene {
     return hit.dot(this.up);
   }
 
+  /**
+   * How far the eye is beneath the soil overhead, in world units.
+   *
+   * Marched along her own up rather than the world's, so a tunnel in a wall
+   * counts as buried the same as one in the floor. The depth is measured to
+   * the OUTERMOST soil on that line, not the first surface met — inside a
+   * burrow the first thing above the eye is the tunnel's roof a millimetre
+   * away, and being a millimetre under a metre of soil is still buried.
+   *
+   * Zero when there is nothing overhead, which is the surface and above.
+   */
+  private buriedDepth(from: THREE.Vector3): number {
+    let last = 0;
+    const probe = new THREE.Vector3();
+    for (let d = 0; d <= SENSE_PROBE_MM / MM; d += CELL) {
+      probe.copy(from).addScaledVector(this.up, d);
+      if (this.solidAt(probe)) last = d;
+    }
+    return last;
+  }
+
+  /** Advance only the sense ramp, for probes that park the camera. */
+  senseStepForTest(dt: number): void {
+    const want = Math.min(1, this.buriedDepth(this.camera.position) / (SENSE_FULL_MM / MM));
+    this.sense.uSense.value += (want - this.sense.uSense.value)
+      * (1 - Math.exp(-SENSE_EASE * dt));
+  }
+
   private animate = (): void => {
     const now = performance.now();
     const dt = Math.min(0.05, (now - this.previous) / 1000);
     this.previous = now;
     this.simulate(dt);
+    /*
+     * Eased toward the depth's answer rather than snapped to it. The depth
+     * itself is the fade — a hard cut would flicker every time her head
+     * crossed the soil line, which while digging is several times a second.
+     */
+    const want = Math.min(1, this.buriedDepth(this.camera.position) / (SENSE_FULL_MM / MM));
+    this.sense.uSense.value += (want - this.sense.uSense.value)
+      * (1 - Math.exp(-SENSE_EASE * dt));
     this.renderer.render(this.scene, this.camera);
     this.renderHeadInset();
     this.updateStatus();
@@ -1150,6 +1211,7 @@ export class BlockScene {
           + `right ${(this.eyeNudge.x * MM).toFixed(2)} mm · pitch `
           + `${(this.eyePitch * 180 / Math.PI).toFixed(0)}° — read these off and I will bake them in`
         : '3rd person · tap 1ST for the head cam'}<br>
+      Sense: ${(this.sense.uSense.value * 100).toFixed(0)}% at ${(this.buriedDepth(this.camera.position) * MM).toFixed(2)} mm deep<br>
       Legs: ${this.report
     ? `${this.report.planted} planted · ${this.report.groping} reaching · `
       + `${this.report.movedMm.toFixed(2)} mm moved, ${this.report.heldBackMm.toFixed(2)} held back · `
