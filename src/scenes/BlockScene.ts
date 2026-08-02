@@ -545,6 +545,8 @@ export class BlockScene {
   private planS = 0;
   private lastPlanS = 0;
   private digCooldown = 0;
+  /** True while dig is latched on via tap-to-toggle. */
+  private digLatch = false;
   /** Set by `setPausedForTest` so probes own the clock. Never set in play. */
   private paused = false;
   /** Why the last bite did nothing, for probes. Cleared on a real bite. */
@@ -1374,7 +1376,17 @@ export class BlockScene {
      * rotation to about 30 °/s while still letting her gradually track the
      * tunnel direction she is actually digging toward.
      */
-    const aimDt = (this.input.dig && this.underground) ? dt * 0.125 : dt;
+    /*
+     * Freeze orientation completely during active digging underground.
+     * aimDt = 0 makes the lerp factor 1 - exp(-ALIGN * 0) = 0, so aimUp is a
+     * no-op. Without this, hold() feeds noisy DensityField surface normals into
+     * aimUp, which tilts the body, which changes the ray direction hold() casts,
+     * which finds a different (wall) surface, which tilts the body further —
+     * an outside-loop feedback that cannot be tamed by slowing the rate alone.
+     * Locking orientation during bites breaks the loop entirely. Above ground
+     * or when not actively digging, full dt is used and behaviour is unchanged.
+     */
+    const aimDt = (this.input.dig && this.underground) ? 0 : dt;
 
     /*
      * Embedded is its own case, and casting cannot answer it. Her origin being
@@ -1985,6 +1997,8 @@ export class BlockScene {
   setMode(next: number): void {
     this.mode = next;
     this.input.dig = false;
+    this.digLatch = false;
+    this.actionButton.classList.remove('is-latched');
     const mode = MODES[this.mode]!;
     this.modeButton.textContent = mode.label;
     if (mode.action) {
@@ -2232,14 +2246,14 @@ export class BlockScene {
 
     this.actionButton.className = 'density-lab-button density-lab-dig';
     actions.appendChild(this.actionButton);
-    const hold = (on: boolean) => (event: PointerEvent) => {
+    // Tap-to-toggle: one tap starts digging, another stops it.
+    // This lets the player navigate while digging without holding the button.
+    this.actionButton.addEventListener('pointerdown', (event: PointerEvent) => {
       event.preventDefault();
-      this.input.dig = on;
-    };
-    this.actionButton.addEventListener('pointerdown', hold(true));
-    this.actionButton.addEventListener('pointerup', hold(false));
-    this.actionButton.addEventListener('pointercancel', hold(false));
-    this.actionButton.addEventListener('pointerleave', hold(false));
+      this.digLatch = !this.digLatch;
+      this.input.dig = this.digLatch;
+      this.actionButton.classList.toggle('is-latched', this.digLatch);
+    });
     this.setMode(this.mode);
     this.buildPlanner(hud, actions);
 
@@ -2440,6 +2454,8 @@ export class BlockScene {
       this.input.walk = 0;
       this.input.yaw = 0;
       this.input.dig = false;
+      this.digLatch = false;
+      this.actionButton.classList.remove('is-latched');
       this.stick.classList.remove('is-live');
       this.stickKnob.style.transform = '';
     };
@@ -2453,7 +2469,12 @@ export class BlockScene {
       if (event.code === 'KeyS') this.input.walk = -1;
       if (event.code === 'KeyA') this.input.yaw = 1;
       if (event.code === 'KeyD') this.input.yaw = -1;
-      if (event.code === 'Space') { event.preventDefault(); this.input.dig = true; }
+      if (event.code === 'Space') {
+        event.preventDefault();
+        this.digLatch = !this.digLatch;
+        this.input.dig = this.digLatch;
+        this.actionButton.classList.toggle('is-latched', this.digLatch);
+      }
       // Named by key, not by code: `*` and `/` live in different places on
       // a numpad and a main row, and the player means the character.
       if (event.key === '*') { event.preventDefault(); this.setMode(cycleMode(this.mode)); }
@@ -2465,7 +2486,7 @@ export class BlockScene {
     window.addEventListener('keyup', (event) => {
       if (event.code === 'KeyW' || event.code === 'KeyS') this.input.walk = 0;
       if (event.code === 'KeyA' || event.code === 'KeyD') this.input.yaw = 0;
-      if (event.code === 'Space') this.input.dig = false;
+      // Space is now a toggle — keyup does nothing for dig.
     });
   }
 

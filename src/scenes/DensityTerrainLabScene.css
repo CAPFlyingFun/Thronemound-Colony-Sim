@@ -114,6 +114,16 @@
   background: #f0d88e;
 }
 
+/* Latched-on state: amber ring + darker fill so the player can see dig is locked. */
+.density-lab-dig.is-latched {
+  background: #d97c2b;
+  box-shadow: 0 0 0 3px #f0d88e, 0 7px 20px rgba(0, 0, 0, 0.32);
+}
+
+.density-lab-dig.is-latched:active {
+  background: #e8903a;
+}
+
 /*
  * The mode chip: deliberately NOT the size of the action button under it.
  * You change mode occasionally and act constantly, so the one you press all
