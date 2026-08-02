@@ -115,7 +115,6 @@ const run = async (digging) => {
     Object.entries(o).map(([k, v]) => [k, +v.toFixed(2)]),
   );
   return {
-    holdWhy: { ...lab.holdWhy },
     hitWallFrame: hitWall,
     alongMm: +(lab.at.z * MM - start.z).toFixed(2),
     worst: round(worst),
@@ -157,8 +156,6 @@ console.log(`heading  ${String(out.worst.headingDeg).padStart(7)}°             
   + `${String(out.worst.lookDeg).padStart(7)}°  (view yaw off the bore)`);
 console.log(`up tilt  ${String(out.worst.upDeg).padStart(7)}°`);
 console.log('');
-console.log(`grip branches — walking: ${JSON.stringify(walking.holdWhy)}`);
-console.log(`grip branches — drilling: ${JSON.stringify(out.holdWhy)}`);
 console.log(`worst single frame: body up ${out.worst.frameUpDeg}° · `
   + `view ${out.worst.frameLookDeg}° · eye ${out.worst.frameEyeMm} mm`);
 /*
