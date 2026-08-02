@@ -450,17 +450,32 @@ export class BlockScene {
       .addScaledVector(this.up, Math.sin(aim)).normalize();
 
     /*
-     * And the bite lands on the SOIL, not at arm's length in the air. Her
-     * jaws ride above the surface, so the sphere is centred on the first
-     * solid point along the aim — measured in the sim as the placement that
-     * takes fresh soil on the far side while clearing the near side.
+     * AT THE JAW, OUT BY THE BITE'S OWN WIDTH. That is the whole placement,
+     * and there is no search in it.
+     *
+     * It used to cast up to 9 mm along the aim and drop the sphere on the
+     * first solid thing it met. On a flat face with the camera near level
+     * that ray is almost a tangent, so it ran a long way before the ground
+     * rose into it, and the hole appeared far downrange — reported at 4 to
+     * 7 mm ahead of the mandible. The distance was pure trigonometry:
+     * `jawHeight / tan(aim)`, which is 6.36 mm at ten degrees off level and
+     * runs to infinity as the aim flattens. At exactly level it found
+     * nothing at all within 9 mm.
+     *
+     * The search was there because her jaws ride 1.12 mm over the soil with
+     * her head held up by the gait. But her head does not stay up when she
+     * digs: the gait pitches her thorax by `digging`, and measured, that
+     * takes the jaw from 1.121 mm down to 0.070 mm — she puts her face on
+     * the ground, which is what an ant does. A sphere of bite radius centred
+     * a bite radius ahead of a jaw that low is more than half buried, so it
+     * bites properly at any aim, including level, with no ray involved.
+     *
+     * The catch was that this ran BEFORE she was posed, so it read a jaw
+     * from the previous frame with the head still up. It is called after the
+     * pose now — see `simulate`.
      */
-    const hit = this.cast(jaw, dir, radius + 9 / MM);
-    if (!hit) {
-      this.lastBiteWhy = `no soil within reach of the jaws at ${(aim * 180 / Math.PI).toFixed(0)} deg`;
-      return;
-    }
-    const result = this.field.subtractSphere(hit, radius);
+    const at = jaw.clone().addScaledVector(dir, radius);
+    const result = this.field.subtractSphere(at, radius);
     if (result.changedSamples === 0) { this.lastBiteWhy = 'brush changed nothing'; return; }
     this.lastBiteWhy = '';
     this.removed += result.removedVolume;
@@ -686,12 +701,6 @@ export class BlockScene {
   private simulate(dt: number): void {
     this.step(dt);
 
-    this.digCooldown = Math.max(0, this.digCooldown - dt);
-    if (this.input.dig && this.digCooldown === 0) {
-      this.bite();
-      this.digCooldown = 0.25;
-    }
-
     if (this.ready) {
       this.queen.root.position.copy(this.at);
       /*
@@ -723,6 +732,24 @@ export class BlockScene {
           surface: (x, y, z) => this.surfaceUnder(x, y, z),
         },
       );
+    }
+
+    /*
+     * The bite comes AFTER she is posed, and that ordering is the fix, not
+     * housekeeping.
+     *
+     * It used to run at the top of this function, which meant it read a jaw
+     * from the previous frame — at her previous position, with her head
+     * wherever it had been. On the frame the button goes down that is the
+     * head still HELD UP by the walking gait, 1.12 mm off the soil, and the
+     * old placement then projected that height forward into 6 mm of error.
+     * Posing her first means `jawPosition` returns the jaw that is drawn on
+     * the screen, dipped into the dig at 0.07 mm.
+     */
+    this.digCooldown = Math.max(0, this.digCooldown - dt);
+    if (this.input.dig && this.digCooldown === 0) {
+      this.bite();
+      this.digCooldown = 0.25;
     }
 
     this.follow.body.copy(this.at);

@@ -628,14 +628,19 @@ export class LegDrive {
      *    bounded by the same spare reach, so on a hard floor she bottoms out
      *    and drags instead of floating through it.
      */
-    const under = (input.settle ?? true)
-      ? ground.nearest(body.at, body.up, 6 / MM, 0.6 / MM)
-      : null;
+    /*
+     * The clearance is always MEASURED, even when the legs are not allowed
+     * to act on it — a room that seats her itself still wants the number on
+     * its HUD, and reporting the not-measured sentinel there had the block
+     * room displaying a flat "-1.00 mm clear" that looked like a real depth.
+     */
+    const settle = input.settle ?? true;
+    const under = ground.nearest(body.at, body.up, 6 / MM, 0.6 / MM);
     let clearance = Infinity;
     if (under) {
       clearance = body.at.clone().sub(under).dot(body.up);
       const want = RIDE_CLEARANCE_MM / MM;
-      if (clearance < want) {
+      if (settle && clearance < want) {
         const budget = Math.min(...this.legs.filter((l) => l.planted).map((l) => l.down), 1);
         const lift = Math.min(want - clearance, Number.isFinite(budget) ? budget : want);
         body.at.addScaledVector(body.up, lift);
