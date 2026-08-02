@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TunnelRail } from '../src/scenes/tunnelRail';
+import { TunnelRail, railFromPlan } from '../src/scenes/tunnelRail';
 import { ROOM_DIRS, senseRoom } from '../src/voxel/room';
 
 const up = { x: 0, y: 1, z: 0 };
@@ -53,8 +53,12 @@ describe('tunnel rail', () => {
     }
     const mid = rail.sample(5)!;
     expect(Math.hypot(mid.ux, mid.uy, mid.uz)).toBeCloseTo(1, 6);
-    expect(mid.uy).toBeCloseTo(1, 4);
-    expect(mid.ux).toBeCloseTo(0, 4);
+    // Not exactly one: the average of a wildly rolling recording is a small
+    // residual bank rather than none, which is the honest answer.
+    expect(mid.uy).toBeCloseTo(1, 3);
+    // Within a degree or two of level: the average of a wildly rolling
+    // recording is a small residual bank, not exactly none.
+    expect(Math.abs(mid.ux)).toBeLessThan(0.05);
     // And the frame is square: up is perpendicular to the heading.
     expect(mid.ux * mid.fx + mid.uy * mid.fy + mid.uz * mid.fz).toBeCloseTo(0, 6);
   });
@@ -142,6 +146,75 @@ describe('tunnel rail', () => {
     rail.record({ x: 1, y: 2, z: 3 }, up, fwd, 0.5);
     expect(rail.sample(5)!.x).toBe(1);
     expect(rail.nearest({ x: 1, y: 2, z: 4 })!.distMm).toBeCloseTo(1, 6);
+  });
+});
+
+describe('a rail built from a plan', () => {
+  const start = { at: { x: 0, y: 0, z: 0 }, forward: { x: 0, y: 0, z: 1 } };
+
+  it('DESCENDS by the arithmetic, which is the whole point', () => {
+    /*
+     * The report. Steering her to a grade and leaving her path to the soil
+     * flew the attitude exactly — -30.4 degrees for an asked -30 — and sank
+     * her 0.01 mm over ten millimetres, because the grip re-seats her on the
+     * surface whatever angle she holds. Ten at thirty down is five down.
+     */
+    const rail = railFromPlan([{ pitch: -30, turn: 0, roll: 0, length: 10 }], start);
+    const end = rail.sample(rail.lengthMm)!;
+    expect(rail.lengthMm).toBeCloseTo(10, 1);
+    expect(end.y).toBeCloseTo(-5, 1);
+    expect(end.z).toBeCloseTo(10 * Math.cos((30 * Math.PI) / 180), 1);
+  });
+
+  it('climbs for a positive pitch, by the same arithmetic', () => {
+    const rail = railFromPlan([{ pitch: 30, turn: 0, roll: 0, length: 10 }], start);
+    expect(rail.sample(rail.lengthMm)!.y).toBeCloseTo(5, 1);
+  });
+
+  it('spends a turn across the piece and comes out on the new heading', () => {
+    const rail = railFromPlan([{ pitch: 0, turn: 90, roll: 0, length: 10 }], start);
+    const end = rail.sample(rail.lengthMm)!;
+    // Started along +Z, turned left 90, so it ends running along +X.
+    expect(Math.atan2(end.fx, end.fz) * (180 / Math.PI)).toBeCloseTo(90, 1);
+    // And it is a bend, not a corner: the far end is nowhere near straight on.
+    expect(end.z).toBeLessThan(9);
+    expect(end.x).toBeGreaterThan(2);
+  });
+
+  it('chains pieces, each starting where the last one left off', () => {
+    const rail = railFromPlan([
+      { pitch: -30, turn: 0, roll: 0, length: 6 },
+      { pitch: 0, turn: 0, roll: 0, length: 6 },
+    ], start);
+    expect(rail.lengthMm).toBeCloseTo(12, 1);
+    // Down three on the first piece, then level.
+    expect(rail.sample(6)!.y).toBeCloseTo(-3, 0);
+    expect(rail.sample(12)!.y).toBeCloseTo(-3, 0);
+  });
+
+  it('banks without changing where the track goes', () => {
+    const flat = railFromPlan([{ pitch: 0, turn: 0, roll: 0, length: 8 }], start);
+    const banked = railFromPlan([{ pitch: 0, turn: 0, roll: 45, length: 8 }], start);
+    const a = flat.sample(4)!;
+    const c = banked.sample(4)!;
+    expect(c.x).toBeCloseTo(a.x, 3);
+    expect(c.z).toBeCloseTo(a.z, 3);
+    // Same path, different up: banked leans, level does not.
+    expect(a.uy).toBeCloseTo(1, 2);
+    expect(c.uy).toBeLessThan(0.9);
+    expect(c.ux * c.fx + c.uy * c.fy + c.uz * c.fz).toBeCloseTo(0, 6);
+  });
+
+  it('starts on her heading, not on a world axis', () => {
+    const rail = railFromPlan([{ pitch: 0, turn: 0, roll: 0, length: 5 }],
+      { at: { x: 1, y: 2, z: 3 }, forward: { x: 1, y: 0, z: 0 } });
+    const end = rail.sample(rail.lengthMm)!;
+    expect(end.x).toBeCloseTo(6, 1);
+    expect(end.z).toBeCloseTo(3, 1);
+  });
+
+  it('is empty for an empty plan rather than throwing', () => {
+    expect(railFromPlan([], start).lengthMm).toBe(0);
   });
 });
 

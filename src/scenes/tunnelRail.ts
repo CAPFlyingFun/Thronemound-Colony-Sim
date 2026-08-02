@@ -32,6 +32,17 @@ export interface RailFrame {
 interface RailPoint extends RailFrame {
   /** Distance along the track from its start, in millimetres. */
   s: number;
+  /**
+   * How far this sleeper is BANKED off level, in radians — the recorded up
+   * expressed as one number.
+   *
+   * Stored as an angle because an angle averages and a direction does not.
+   * Smoothing the up VECTOR threw the bank away entirely on a planned track
+   * (a forty-five degree bank read back as level) while still not smoothing a
+   * dug one properly; a scalar does both, because averaging noisy roll gives
+   * roughly no roll, which is the right answer for a tunnel she chewed.
+   */
+  roll: number;
 }
 
 /** A three-vector, in whatever units the caller is using. */
@@ -72,8 +83,34 @@ const norm = (x: number, y: number, z: number): [number, number, number] => {
   return n < 1e-9 ? [0, 1, 0] : [x / n, y / n, z / n];
 };
 
+/** The un-banked up for a heading: world up, squared against it. */
+function levelUp(fx: number, fy: number, fz: number): [number, number, number] {
+  return norm(-fx * fy, 1 - fy * fy, -fz * fy);
+}
+
+/** How far an up is banked off level about its own heading, in radians. */
+function rollOf(
+  fx: number, fy: number, fz: number, ux: number, uy: number, uz: number,
+): number {
+  const [lx, ly, lz] = levelUp(fx, fy, fz);
+  // Positive leans her back toward her LEFT, matching the piece convention.
+  const sx = fy * lz - fz * ly;
+  const sy = fz * lx - fx * lz;
+  const sz = fx * ly - fy * lx;
+  return Math.atan2(ux * sx + uy * sy + uz * sz, ux * lx + uy * ly + uz * lz);
+}
+
 export class TunnelRail {
   private readonly points: RailPoint[] = [];
+
+  /**
+   * How much this particular track needs smoothing, in millimetres either
+   * side. A track she DUG is a recording of a shaking body and needs it; a
+   * track computed from a plan is already exact, and smoothing it only rounds
+   * the geometry off — a ninety degree bend came out at 86.4 and a two-piece
+   * descent lost two thirds of a millimetre at the join.
+   */
+  smoothMm = RAIL_SMOOTH_MM;
 
   /** How much track there is, in millimetres. */
   get lengthMm(): number {
@@ -101,6 +138,7 @@ export class TunnelRail {
     const [fx, fy, fz] = norm(forward.x, forward.y, forward.z);
     this.points.push({
       x: at.x, y: at.y, z: at.z, ux, uy, uz, fx, fy, fz,
+      roll: rollOf(fx, fy, fz, ux, uy, uz),
       s: (last?.s ?? 0) + step,
     });
     return true;
@@ -131,13 +169,16 @@ export class TunnelRail {
    * and cuts no corner she could feel.
    */
   private averageAt(s: number, window: number): { x: number; y: number; z: number;
-    ux: number; uy: number; uz: number } {
+    ux: number; uy: number; uz: number; roll: number } {
     const want = Math.min(Math.max(s, 0), this.lengthMm);
     let x = 0; let y = 0; let z = 0;
     let ux = 0; let uy = 0; let uz = 0;
+    let roll = 0;
     let total = 0;
     const lowest = want - window;
-    const from = this.indexAt(Math.max(0, lowest));
+    // A zero window has no weights to compute — the bracketing interpolation
+    // below IS the answer, and dividing by it here produced NaN at both ends.
+    const from = window > 1e-9 ? this.indexAt(Math.max(0, lowest)) : this.points.length;
     for (let i = from; i < this.points.length; i += 1) {
       const p = this.points[i]!;
       // `indexAt` lands on the sleeper at or BEFORE the window's edge, so the
@@ -159,6 +200,7 @@ export class TunnelRail {
       const w = 1 - Math.abs(p.s - want) / window;
       x += p.x * w; y += p.y * w; z += p.z * w;
       ux += p.ux * w; uy += p.uy * w; uz += p.uz * w;
+      roll += p.roll * w;
       total += w;
     }
     if (total < 1e-9) {
@@ -178,11 +220,12 @@ export class TunnelRail {
       return {
         x: mix(a.x, bb.x), y: mix(a.y, bb.y), z: mix(a.z, bb.z),
         ux: mix(a.ux, bb.ux), uy: mix(a.uy, bb.uy), uz: mix(a.uz, bb.uz),
+        roll: mix(a.roll, bb.roll),
       };
     }
     return {
       x: x / total, y: y / total, z: z / total,
-      ux: ux / total, uy: uy / total, uz: uz / total,
+      ux: ux / total, uy: uy / total, uz: uz / total, roll: roll / total,
     };
   }
 
@@ -198,28 +241,52 @@ export class TunnelRail {
    * Past either end it clamps rather than returning null: the end of the track
    * is a place she can stand, and a train at the buffers is still on the rails.
    */
-  sample(s: number, window = RAIL_SMOOTH_MM): RailFrame | null {
+  sample(s: number, window = this.smoothMm): RailFrame | null {
     if (this.points.length === 0) return null;
     if (this.points.length === 1) return { ...this.points[0]! };
     const want = Math.min(Math.max(s, 0), this.lengthMm);
     /*
-     * The window is SLID off the ends rather than being allowed to hang over
-     * them, and the remainder is walked out along the heading.
+     * NO smoothing means no smoothing — read the sleepers straight.
      *
-     * A centred average taken at the very end of the track only has sleepers
-     * on one side, so it reports a point a window's worth back up the line —
-     * which quietly shortens the tunnel at both ends by a couple of
-     * millimetres and puts the buffers somewhere she can already see track.
-     * Sampling at the nearest point the window fits and then extrapolating
-     * keeps the full length and stays smooth.
+     * Not a shortcut: a zero window divides by zero in the weights, and even
+     * guarded, deriving the heading from a chord across the nearest half
+     * millimetre is an approximation an exact track does not need. A planned
+     * ninety degree bend came out of it at 86.4.
      */
-    const half = Math.min(window, this.lengthMm / 2);
-    const inside = Math.min(Math.max(want, half), this.lengthMm - half);
-    const overrun = want - inside;
-    const here = this.averageAt(inside, window);
-    const step = Math.max(window, 0.5);
-    const ahead = this.averageAt(Math.min(this.lengthMm - half, inside + step), window);
-    const behind = this.averageAt(Math.max(half, inside - step), window);
+    if (window <= 1e-9) {
+      const i = this.indexAt(want);
+      const a = this.points[i]!;
+      const bb = this.points[Math.min(i + 1, this.points.length - 1)]!;
+      const span = bb.s - a.s;
+      const t = span > 1e-9 ? Math.min(1, Math.max(0, (want - a.s) / span)) : 0;
+      const mix = (p: number, q: number): number => p + (q - p) * t;
+      const [nfx, nfy, nfz] = norm(mix(a.fx, bb.fx), mix(a.fy, bb.fy), mix(a.fz, bb.fz));
+      const [nux, nuy, nuz] = norm(mix(a.ux, bb.ux), mix(a.uy, bb.uy), mix(a.uz, bb.uz));
+      return {
+        x: mix(a.x, bb.x), y: mix(a.y, bb.y), z: mix(a.z, bb.z),
+        ux: nux, uy: nuy, uz: nuz, fx: nfx, fy: nfy, fz: nfz,
+      };
+    }
+    /*
+     * The window TAPERS to nothing at the ends rather than sliding off them.
+     *
+     * A centred average near an end only has sleepers on one side, so it
+     * reports a point back up the line and quietly shortens the tunnel. The
+     * first fix for that sampled where the window fitted and extrapolated the
+     * rest along the heading — which keeps the length but puts the smoothed
+     * curve up to six millimetres off the raw one on a bend. That matters
+     * because `nearest` measures against the raw line: she boarded a track she
+     * was within four millimetres of and was set down six millimetres away
+     * from it, outside her own tunnel, and fell off again the next frame.
+     *
+     * Shrinking the window instead means the two agree exactly at the ends and
+     * smooth in the middle, with nothing extrapolated anywhere.
+     */
+    const fit = Math.max(0, Math.min(window, want, this.lengthMm - want));
+    const here = this.averageAt(want, fit);
+    const step = Math.max(fit, 0.5);
+    const ahead = this.averageAt(Math.min(this.lengthMm, want + step), fit);
+    const behind = this.averageAt(Math.max(0, want - step), fit);
     let [fx, fy, fz] = norm(ahead.x - behind.x, ahead.y - behind.y, ahead.z - behind.z);
     if (!Number.isFinite(fx) || (fx === 0 && fy === 1 && fz === 0)) {
       const near = this.points[this.indexAt(want)]!;
@@ -247,7 +314,23 @@ export class TunnelRail {
     const vertical = fy;
     let ux: number; let uy: number; let uz: number;
     if (Math.abs(vertical) < UP_FROM_WORLD) {
-      [ux, uy, uz] = norm(-fx * vertical, 1 - fy * vertical, -fz * vertical);
+      [ux, uy, uz] = levelUp(fx, fy, fz);
+      // ...then banked by however much the track is banked here. On a dug
+      // tunnel that average is near enough nothing, which is the floor being
+      // level; on a planned one it is the roll the piece asked for.
+      if (Math.abs(here.roll) > 1e-9) {
+        const c = Math.cos(here.roll);
+        const sn = Math.sin(here.roll);
+        const crossX = fy * uz - fz * uy;
+        const crossY = fz * ux - fx * uz;
+        const crossZ = fx * uy - fy * ux;
+        const kdot = fx * ux + fy * uy + fz * uz;
+        [ux, uy, uz] = norm(
+          ux * c + crossX * sn + fx * kdot * (1 - c),
+          uy * c + crossY * sn + fy * kdot * (1 - c),
+          uz * c + crossZ * sn + fz * kdot * (1 - c),
+        );
+      }
     } else {
       // Near vertical: keep her recorded roll, squared against the heading.
       const dot = here.ux * fx + here.uy * fy + here.uz * fz;
@@ -255,10 +338,7 @@ export class TunnelRail {
         here.ux - fx * dot, here.uy - fy * dot, here.uz - fz * dot,
       );
     }
-    return {
-      x: here.x + fx * overrun, y: here.y + fy * overrun, z: here.z + fz * overrun,
-      ux, uy, uz, fx, fy, fz,
-    };
+    return { x: here.x, y: here.y, z: here.z, ux, uy, uz, fx, fy, fz };
   }
 
   /**
@@ -301,4 +381,84 @@ export class TunnelRail {
     }
     return { s: bestS, distMm: bestDist };
   }
+}
+
+/**
+ * Build the track a PLAN describes, before a single bite is taken.
+ *
+ * The plan used to steer her and nothing more: it set the gyro to the piece's
+ * grade and pushed the stick, and left her path to `hold()`. Measured, that
+ * flew the attitude perfectly and went nowhere — a piece asking for thirty
+ * degrees down held her nose at -30.4 and dropped her 0.01 mm over ten
+ * millimetres, because `hold()` re-seats her on the surface every frame
+ * whatever angle she is holding. She scraped along the top with her face in
+ * the dirt, which is exactly what it looked like.
+ *
+ * So the geometry is worked out first and she rides it. Ten millimetres at
+ * thirty degrees down goes down five millimetres because that is what the
+ * arithmetic says, not because the soil happened to allow it.
+ *
+ * The conventions are the ones the pieces are written in — see `digPlan`:
+ * pitch absolute against world horizontal, turn relative and spread across the
+ * length, roll relative to the surface.
+ */
+export function railFromPlan(
+  pieces: readonly { pitch: number; turn: number; roll: number; length: number }[],
+  start: { at: Vec3Like; forward: Vec3Like },
+  stepMm = 0.4,
+): TunnelRail {
+  const rail = new TunnelRail();
+  // Computed geometry needs no smoothing; see `smoothMm`.
+  rail.smoothMm = 0;
+  const DEG = Math.PI / 180;
+  const at = { x: start.at.x, y: start.at.y, z: start.at.z };
+  // Her heading as a world bearing, so a turn is an addition to one number.
+  let heading = Math.atan2(start.forward.x, start.forward.z);
+  const push = (grade: number, roll: number): void => {
+    const cos = Math.cos(grade);
+    const fx = Math.sin(heading) * cos;
+    const fy = Math.sin(grade);
+    const fz = Math.cos(heading) * cos;
+    // Up is world up squared against the heading, then banked about it —
+    // the same construction `sample` uses, so a planned track and a dug one
+    // describe up the same way.
+    const dot = fy;
+    let [ux, uy, uz] = norm(-fx * dot, 1 - fy * dot, -fz * dot);
+    if (Math.abs(roll) > 1e-9) {
+      const c = Math.cos(roll);
+      const sn = Math.sin(roll);
+      // Rodrigues about the heading.
+      const kx = fx; const ky = fy; const kz = fz;
+      const crossX = ky * uz - kz * uy;
+      const crossY = kz * ux - kx * uz;
+      const crossZ = kx * uy - ky * ux;
+      const kdot = kx * ux + ky * uy + kz * uz;
+      [ux, uy, uz] = norm(
+        ux * c + crossX * sn + kx * kdot * (1 - c),
+        uy * c + crossY * sn + ky * kdot * (1 - c),
+        uz * c + crossZ * sn + kz * kdot * (1 - c),
+      );
+    }
+    rail.record(at, { x: ux, y: uy, z: uz }, { x: fx, y: fy, z: fz }, 0);
+  };
+  for (const piece of pieces) {
+    const grade = piece.pitch * DEG;
+    const roll = piece.roll * DEG;
+    const turnPerMm = piece.length > 0 ? (piece.turn * DEG) / piece.length : 0;
+    for (let travelled = 0; travelled < piece.length - 1e-9; travelled += stepMm) {
+      const ds = Math.min(stepMm, piece.length - travelled);
+      push(grade, roll);
+      heading += turnPerMm * ds;
+      const cos = Math.cos(grade);
+      at.x += Math.sin(heading) * cos * ds;
+      at.y += Math.sin(grade) * ds;
+      at.z += Math.cos(heading) * cos * ds;
+    }
+  }
+  // The far end, so the last piece reaches its full length.
+  if (pieces.length) {
+    const lastPiece = pieces[pieces.length - 1]!;
+    push(lastPiece.pitch * DEG, lastPiece.roll * DEG);
+  }
+  return rail;
 }

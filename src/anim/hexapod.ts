@@ -246,8 +246,45 @@ export function stanceRadius(rig: RigMap = QUEEN_RIG): number {
  * stopped, so the distinction could not show.
  */
 /** Symmetric clamp, so a neck limit reads as one number rather than two. */
-function clampAngle(a: number, limit: number): number {
-  return Math.min(limit, Math.max(-limit, a));
+/** Fold an angle into (-pi, pi]. */
+function wrapAngle(a: number): number {
+  const t = (a + Math.PI) % (2 * Math.PI);
+  return (t < 0 ? t + 2 * Math.PI : t) - Math.PI;
+}
+
+/**
+ * How far the camera can swing off her heading before she gives up following
+ * it with her head. About a hundred and thirty-five degrees — past that the
+ * thing you are looking at is behind her and craning after it is not what an
+ * animal does.
+ */
+export const HEAD_YAW_RELEASE = 2.35;
+
+/**
+ * Where her NECK puts her face for a given camera swing.
+ *
+ * Two things a bare clamp got wrong, both reported as her head being stuck
+ * hard over:
+ *
+ * It never WRAPPED. Orbit all the way round to 359 degrees — a camera one
+ * degree off her nose — and the clamp read 359, saw it was past 60, and
+ * pinned her face at 60 degrees to the side. Every angle past the limit did,
+ * so a camera anywhere behind her left the head cranked over until it was
+ * orbited back the way it came.
+ *
+ * And it HELD at the limit. Even wrapped, a camera 180 degrees round is
+ * something she cannot look at, and holding the neck at full deflection for
+ * everything beyond 60 degrees means she spends most of a free orbit staring
+ * sideways at nothing. Past her range she lets it go and faces front, which
+ * is what an animal does when you walk behind it.
+ */
+export function neckYaw(look: number): number {
+  const wrapped = wrapAngle(look);
+  const size = Math.abs(wrapped);
+  if (size <= HEAD_YAW_LIMIT) return wrapped;
+  if (size >= HEAD_YAW_RELEASE) return 0;
+  const gone = (size - HEAD_YAW_LIMIT) / (HEAD_YAW_RELEASE - HEAD_YAW_LIMIT);
+  return Math.sign(wrapped) * HEAD_YAW_LIMIT * (1 - gone);
 }
 
 export function gaitSpeed(speed: number, turn: number, rig: RigMap = QUEEN_RIG): number {
@@ -469,7 +506,7 @@ export function gaitPose(input: GaitInput, rig: RigMap = QUEEN_RIG): GaitPose {
    * Clamped here: the caller hands over a raw camera angle and a neck has
    * limits a camera does not. See `GaitInput.headYaw`.
    */
-  const headYaw = clampAngle(input.headYaw ?? 0, HEAD_YAW_LIMIT);
+  const headYaw = neckYaw(input.headYaw ?? 0);
   /*
    * `headPitch` is where her face should POINT, absolutely, not an offset
    * from anything. Clamped there, then converted into the rotation the bone

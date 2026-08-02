@@ -6,6 +6,7 @@ import {
   stanceRadius,
   rigLengthVoxels, rigScale, tripodOf,
   type LegSlot, type RigMap,
+  HEAD_YAW_LIMIT, neckYaw,
 } from '../src/anim/hexapod';
 
 const ALL_RIGS: RigMap[] = [QUEEN_RIG, WORKER_RIG, MAJOR_RIG];
@@ -500,5 +501,52 @@ describe('queen scale', () => {
   it('stays under two voxels, so widening is a choice and not a wall', () => {
     expect(queenScale() * MODEL_LENGTH_UNITS).toBeLessThan(2);
     expect(queenScale() * MODEL_LENGTH_UNITS).toBeGreaterThan(1);
+  });
+});
+
+describe('the neck', () => {
+  const DEG = Math.PI / 180;
+  const deg = (r: number) => (r * 180) / Math.PI;
+
+  it('follows the camera one for one inside its range', () => {
+    expect(deg(neckYaw(0))).toBeCloseTo(0, 6);
+    expect(deg(neckYaw(30 * DEG))).toBeCloseTo(30, 6);
+    expect(deg(neckYaw(-45 * DEG))).toBeCloseTo(-45, 6);
+    expect(deg(neckYaw(HEAD_YAW_LIMIT))).toBeCloseTo(deg(HEAD_YAW_LIMIT), 6);
+  });
+
+  it('WRAPS, so a camera nearly back at her nose is nearly at her nose', () => {
+    /*
+     * Reported as her head being stuck hard over. A bare clamp read a 359
+     * degree orbit as 359, saw it was past the limit, and pinned her face at
+     * 60 degrees — for a camera one degree off her heading.
+     */
+    expect(deg(neckYaw(359 * DEG))).toBeCloseTo(-1, 4);
+    expect(deg(neckYaw(-359 * DEG))).toBeCloseTo(1, 4);
+    expect(deg(neckYaw(370 * DEG))).toBeCloseTo(10, 4);
+  });
+
+  it('gives up and faces front when the camera goes behind her', () => {
+    // Holding at full deflection for everything past the limit left her
+    // staring sideways at nothing for most of a free orbit.
+    expect(neckYaw(Math.PI)).toBe(0);
+    expect(neckYaw(-Math.PI)).toBe(0);
+    expect(Math.abs(deg(neckYaw(120 * DEG)))).toBeLessThan(deg(HEAD_YAW_LIMIT));
+    expect(Math.abs(deg(neckYaw(150 * DEG)))).toBeLessThan(10);
+  });
+
+  it('never asks the neck for more than it has, at any angle at all', () => {
+    for (let a = -720; a <= 720; a += 3) {
+      expect(Math.abs(neckYaw(a * DEG))).toBeLessThanOrEqual(HEAD_YAW_LIMIT + 1e-9);
+    }
+  });
+
+  it('is continuous — no angle makes the head jump', () => {
+    let last = neckYaw(-4);
+    for (let a = -4; a <= 4; a += 0.005) {
+      const now = neckYaw(a);
+      expect(Math.abs(now - last)).toBeLessThan(0.02);
+      last = now;
+    }
   });
 });

@@ -49,7 +49,7 @@ import { QueenModel } from '../anim/QueenModel';
 import { FollowCamera } from './FollowCamera';
 import { STICK_DEADZONE, clampStickOrigin, stickVector } from '../voxel/locomotion';
 import { MODES, cycleMode } from './modes';
-import { RAIL_SMOOTH_MM, TunnelRail } from './tunnelRail';
+import { RAIL_SMOOTH_MM, TunnelRail, railFromPlan } from './tunnelRail';
 import { senseRoom, type RoomSense } from '../voxel/room';
 import {
   DigPlanRunner, PIECE_LIMITS, PLAN_SPEED_MM_S, clampPiece, type DigPiece,
@@ -130,13 +130,6 @@ const STICK_EASE = 10;
  * degrees down and the body has no reason to out-reach where she can look.
  */
 const TRIM_LIMIT = (75 * Math.PI) / 180;
-/**
- * How far off the plan's heading she has to be for the autopilot to ask for a
- * full-lock turn. Wide enough that a constant-radius bend is steered with a
- * gentle, mostly-constant yaw rather than bang-bang either side of the line.
- */
-const PLAN_TURN_BAND = (25 * Math.PI) / 180;
-
 /** Scratch for the room spray, so sensing allocates nothing per frame. */
 const PROBE = new THREE.Vector3();
 
@@ -495,8 +488,10 @@ export class BlockScene {
 
   private plan: DigPlanRunner | null = null;
   private planPieces: DigPiece[] = [];
-  /** Where the plan wants her nose, in the world. Steered toward, not snapped. */
-  private readonly planForward = new THREE.Vector3(0, 0, 1);
+  /** The track the running plan describes, and how far along it she is. */
+  private planRail: TunnelRail | null = null;
+  private planS = 0;
+  private lastPlanS = 0;
   private digCooldown = 0;
   /** Set by `setPausedForTest` so probes own the clock. Never set in play. */
   private paused = false;
@@ -906,33 +901,36 @@ export class BlockScene {
     this.roomTick = ROOM_EVERY;
   }
 
-  /** Enclosed enough to call it underground. Latched, so it cannot flicker. */
+  /**
+   * Where she is, decided ONCE a frame and then only read.
+   *
+   * These were getters that did the work — and both of them latched, so every
+   * read moved the state on. The HUD reads them every frame and so did the
+   * probes, which meant looking at the readout changed the physics: she rode
+   * the rails for six frames instead of hundreds because something else had
+   * asked what she was doing. A question should not be an action.
+   */
   private undergroundLatch = false;
+  private chamberLatch = false;
 
-  get underground(): boolean {
+  get underground(): boolean { return this.undergroundLatch; }
+
+  get inChamber(): boolean { return this.chamberLatch; }
+
+  /** Work out both, from the room reading and a cast for a ceiling. */
+  private judgeWhereSheIs(): void {
     const reach = this.undergroundLatch ? CEILING_LEAVE_MM : CEILING_ENTER_MM;
     this.undergroundLatch = this.cast(
       this.at.clone().addScaledVector(this.up, CELL),
       this.up.clone(), reach / MM,
     ) !== null;
-    return this.undergroundLatch;
-  }
-
-  /**
-   * Underground, but with room to walk about — so not a tunnel. Latched, so
-   * standing in a doorway does not flicker her between free and railed.
-   */
-  private chamberLatch = false;
-
-  get inChamber(): boolean {
-    if (!this.underground) {
+    if (!this.undergroundLatch) {
       this.chamberLatch = false;
-      return false;
+      return;
     }
     this.chamberLatch = this.chamberLatch
       ? this.room.boreMm >= CHAMBER_LEAVE_MM
       : this.room.boreMm >= CHAMBER_ENTER_MM;
-    return this.chamberLatch;
   }
 
   /** What the HUD and the probes call the current state. */
@@ -1030,49 +1028,92 @@ export class BlockScene {
    * the same distinction the gait makes to decide whether she is walking, and
    * it was worth a phantom 6.5 mm/s the last time it was got wrong.
    */
-  private flyPlan(dt: number, movedMm: number): void {
+  private flyPlan(dt: number): boolean {
     const plan = this.plan;
-    if (!plan) return;
-    const step = plan.step(dt, movedMm);
+    const track = this.planRail;
+    if (!plan || !track) return false;
+    /*
+     * The runner is charged with the TRACK's own advance, not with her
+     * measured displacement, and those being two different numbers deadlocked
+     * it. Arc length is clamped at the end of the rail, so she stops moving
+     * there; the runner's separately integrated total falls a hair short of
+     * the piece length on float alone, and with no movement left it can never
+     * make it up. A turn piece sat at progress 0.967 for ninety seconds.
+     *
+     * One number for how far along she is. `planS` is it, because `planS` is
+     * what actually moves her.
+     */
+    const advance = this.planS - this.lastPlanS;
+    this.lastPlanS = this.planS;
+    const step = plan.step(dt, advance);
     if (step.finished && plan.finished) {
       this.stopPlan();
-      return;
+      return false;
     }
-    this.trim.on = true;
-    this.trim.pitch = THREE.MathUtils.clamp(step.pitch, -TRIM_LIMIT, TRIM_LIMIT);
-    this.trim.roll = step.roll;
-    // The turn is spent against her own up, so a banked or upside-down piece
-    // still turns the way the plan drew it rather than the way the world is.
-    if (Math.abs(step.turnDelta) > 1e-9) {
-      this.planForward.applyAxisAngle(this.up, step.turnDelta);
-    }
-    this.planForward.addScaledVector(this.up, -this.planForward.dot(this.up));
-    if (this.planForward.lengthSq() < 1e-8) this.planForward.copy(this.forward);
-    this.planForward.normalize();
     /*
-     * Steered, not snapped. The signed angle from her nose to the plan's is
-     * fed in as yaw exactly as a thumb would, so the legs do the turning and
-     * the gait stays the only thing that moves her.
+     * SHE RIDES THE PLAN, she is not steered along it.
+     *
+     * Steering was the first design and it was measurably wrong. It set the
+     * gyro to the piece's grade and pushed the stick, and left her actual PATH
+     * to `hold()` — which re-seats her on the surface every frame whatever
+     * angle she is holding. Measured, a piece asking for thirty degrees down
+     * held her nose at -30.4 and sank her 0.01 mm over ten millimetres. The
+     * attitude was perfect and she went nowhere; she scraped along the top
+     * with her face in the dirt and left a crater, which is exactly what it
+     * looked like on screen.
+     *
+     * The geometry is now worked out before a bite is taken and she follows
+     * it, the same way she rides a tunnel she has already dug. Ten millimetres
+     * at thirty degrees down goes down five, because that is what the
+     * arithmetic says.
      */
-    const cross = new THREE.Vector3().crossVectors(this.forward, this.planForward);
-    const err = Math.atan2(cross.dot(this.up), this.forward.dot(this.planForward));
-    this.input.yaw = THREE.MathUtils.clamp(err / PLAN_TURN_BAND, -1, 1);
+    const before = this.at.clone();
+    this.planS = Math.min(track.lengthMm, this.planS + step.walk * PLAN_SPEED_MM_S * dt);
+    const frame = track.sample(this.planS);
+    if (!frame) {
+      this.stopPlan();
+      return false;
+    }
+    this.at.set(frame.x / MM, frame.y / MM, frame.z / MM);
+    this.up.set(frame.ux, frame.uy, frame.uz).normalize();
+    this.forward.set(frame.fx, frame.fy, frame.fz).normalize();
+    // Measured, never assumed — the gait reads this to decide she is walking.
+    const moved = this.at.clone().sub(before);
+    this.velocity.copy(moved).divideScalar(Math.max(dt, 1e-6));
+    this.walkSpeed = moved.length() / Math.max(dt, 1e-6);
+    this.gripping = true;
+    this.fallSpeed = 0;
+    this.driveWalk = step.walk;
+    this.driveYaw = 0;
+    this.turnRate = 0;
     this.input.walk = step.walk;
+    this.input.yaw = 0;
+    // The soil still has to be removed. The path is decided; the digging is not.
     this.input.dig = MODES[this.mode]?.action?.id === 'dig';
+    return true;
   }
 
   /** Begin the queued plan, from wherever she is now. */
   startPlan(): void {
     if (this.planPieces.length === 0) return;
-    this.plan = new DigPlanRunner(this.planPieces.map(clampPiece));
-    this.planForward.copy(this.forward);
-    this.setTrim(true, this.planPieces[0]!.pitch * Math.PI / 180);
+    const pieces = this.planPieces.map(clampPiece);
+    this.plan = new DigPlanRunner(pieces);
+    // The track is laid from where she stands and how she is facing, so RUN
+    // means "go from here" rather than "go from the origin".
+    this.planRail = railFromPlan(pieces, {
+      at: { x: this.at.x * MM, y: this.at.y * MM, z: this.at.z * MM },
+      forward: this.forward,
+    });
+    this.planS = 0;
+    this.lastPlanS = 0;
+    this.setTrim(false);
     this.updatePlanHud();
   }
 
   /** Hand her back. Releasing the plan releases the gyro with it. */
   stopPlan(): void {
     this.plan = null;
+    this.planRail = null;
     this.input.walk = 0;
     this.input.yaw = 0;
     this.input.dig = false;
@@ -1083,11 +1124,16 @@ export class BlockScene {
 
   private step(dt: number): void {
     /*
-     * The plan writes the stick, so it must run before the stick is read. It
-     * is charged for LAST frame's travel, which is the only travel there is a
-     * number for yet — a frame of lag on a piece that takes ten seconds.
+     * A running plan OWNS the frame, and this is the bug the last version had.
+     *
+     * It used to set her position and attitude and then fall through to the
+     * rest of `step` — which runs the leg drive and then `hold()`, and `hold()`
+     * puts her straight back on the surface. So the plan was overwritten every
+     * frame by the very thing it was meant to override, and ten millimetres at
+     * thirty degrees down sank her 0.43 mm instead of five.
+     *
      */
-    this.flyPlan(dt, this.walkSpeed * dt * MM);
+    if (this.flyPlan(dt)) return;
     /*
      * The stick is EASED before anything reads it.
      *
@@ -1102,6 +1148,7 @@ export class BlockScene {
      * a full lap of the stick reads as one curve.
      */
     this.senseTheRoom();
+    this.judgeWhereSheIs();
     const ease = 1 - Math.exp(-STICK_EASE * dt);
     this.driveWalk += (this.input.walk - this.driveWalk) * ease;
     this.driveYaw += (this.input.yaw - this.driveYaw) * ease;
