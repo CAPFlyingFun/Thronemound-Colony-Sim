@@ -524,7 +524,7 @@ export class FollowCamera {
      * straight through her body. Rare and instant is the design. Frequent and
      * instant was the bug.
      */
-    this.crampedFor = cramped === this.noRoom ? 0 : this.crampedFor + step;
+    this.crampedFor = cramped === this.noRoom ? 0 : this.crampedFor + dt;
     if (cramped !== this.noRoom && this.crampedFor >= (cramped ? NO_ROOM_DWELL : ROOM_DWELL)) {
       this.noRoom = cramped;
       this.crampedFor = 0;

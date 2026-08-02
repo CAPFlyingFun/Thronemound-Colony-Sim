@@ -1365,6 +1365,18 @@ export class BlockScene {
    */
   private hold(dt: number): void {
     /*
+     * While actively digging underground the DensityField surface normal
+     * changes with every bite — the gradient flips between the floor, the
+     * freshly-carved rim, and the surrounding walls several times per second.
+     * Running `aimUp` at full rate in that environment lets the body spin up
+     * to 240 °/s, which is the "model all over the place" report. Slowing to
+     * one-eighth rate while the mandibles are working reduces visible body
+     * rotation to about 30 °/s while still letting her gradually track the
+     * tunnel direction she is actually digging toward.
+     */
+    const aimDt = (this.input.dig && this.underground) ? dt * 0.125 : dt;
+
+    /*
      * Embedded is its own case, and casting cannot answer it. Her origin being
      * inside soil means every ray out of her starts solid and reports itself
      * at zero range, so the only honest question is which way is OUT — which
@@ -1377,7 +1389,7 @@ export class BlockScene {
         this.normalAt(out.point, normalOut);
         this.at.lerp(out.point.clone().addScaledVector(normalOut, this.ride),
           1 - Math.exp(-SNAP * dt));
-        this.aimUp(this.trimmedUp(normalOut), dt);
+        this.aimUp(this.trimmedUp(normalOut), aimDt);
         return;
       }
     }
@@ -1404,7 +1416,7 @@ export class BlockScene {
     this.normalAt(hit, normal);
     const seat = hit.clone().addScaledVector(normal, this.ride);
     this.at.lerp(seat, 1 - Math.exp(-SNAP * dt));
-    this.aimUp(this.trimmedUp(normal), dt);
+    this.aimUp(this.trimmedUp(normal), aimDt);
   }
 
   /**
