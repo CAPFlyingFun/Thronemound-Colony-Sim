@@ -17,8 +17,8 @@
  *   2. ADHESION. She walks on the top, the sides and the UNDERSIDE without
  *      falling off. Her "down" is the surface she is on, not the world's.
  *   3. DIGGING AT THE MANDIBLE. The bite is taken at the jaw bone and
- *      reaches out by the caste's own bite width — see `CASTE_BITE_MM` —
- *      rather than from a crosshair in the middle of the screen.
+ *      reaches out by a bite width measured off her own bones — see
+ *      `QueenModel.antennaToJaw` — rather than from a crosshair.
  *
  * ## What is deliberately NOT here
  *
@@ -175,6 +175,9 @@ export class BlockScene {
   private turnRate = 0;
   private ready = false;
   private removed = 0;
+  /** Where the last bite landed and how big it was. For probes. */
+  private readonly lastBiteAt = new THREE.Vector3();
+  private lastBiteRadius = 0;
 
   /**
    * Where the player is looking, as a pitch. The seam the head tracking will
@@ -434,69 +437,80 @@ export class BlockScene {
   /* ---------------------------------------------------------- the digging */
 
   /**
-   * A bite, taken AT THE MANDIBLE.
+   * A bite, taken AT THE MANDIBLE, sized and placed by her own bones.
    *
-   * The jaw bone is where an ant's dig happens, so it is where this happens:
-   * the brush is centred a bite-radius out along her head's own forward, so
-   * the sphere sits against the soil in front of her mouthparts instead of
-   * inside her face. The radius is her caste's — 1.75 mm across for a queen,
-   * 0.75 for a worker, 2.5 for a major.
+   * Both numbers come off the rig rather than out of a table, which is what
+   * makes them vary per ant instead of by a scale factor:
    *
-   * Nothing here consults a crosshair. Where the jaws point is where the
-   * hole appears, which is the whole reason this room exists.
+   *   WIDTH   twice the span from her antenna socket to her jaw. The radius
+   *           is therefore that span itself.
+   *   WHERE   the point a straight line DOWN from that jaw meets the soil,
+   *           down being hers and not the world's.
+   *
+   * There is no crosshair and no aim ray. The player steers the dig by
+   * steering her HEAD — which follows the look in DIG mode — and the hole
+   * appears under her face. Nothing in the placement grows as an angle
+   * flattens, which is what put a hole six millimetres downrange before.
    */
   private bite(): void {
     this.lastBiteWhy = 'ran';
     if (!this.ready) { this.lastBiteWhy = 'model not ready'; return; }
     const jaw = new THREE.Vector3();
     if (!this.queen.jawPosition(jaw)) { this.lastBiteWhy = 'no jaw bone'; return; }
-    const radius = CASTE_BITE_MM.queen / 2 / MM;
+    /*
+     * THE BITE IS SIZED BY HER OWN BONES.
+     *
+     * "Measure from antennas to bottom of jaw bone and double that for the
+     * digging distance" — so the width is twice the antenna-socket-to-jaw
+     * span, and the radius is that span itself. Measured rather than tabled,
+     * which means the worker and the major get their own without anyone
+     * typing a number: `QueenModel.antennaToJaw`.
+     *
+     * It reproduces the hand-picked figure almost exactly, which is the
+     * reason to trust it. `CASTE_BITE_MM.queen` was 1.75 mm; twice her
+     * measured span is 1.736 mm, inside one percent, off the rig.
+     */
+    const radius = this.queen.antennaToJaw();
+    if (radius <= 0) { this.lastBiteWhy = 'rig has no antenna-to-jaw span'; return; }
 
     /*
-     * WHICH WAY THE JAWS POINT, and this is the whole open question.
+     * WHY THERE IS NO RAY HERE ANY MORE.
      *
-     * Not `root.getWorldDirection`, which is three.js's -Z and therefore the
-     * back of a queen who faces +Z — measured as a bite taken into the air
-     * behind her. And not her forward alone either: on a flat face her
-     * forward is a TANGENT, so a bite along it never meets the soil she is
-     * standing on, which is exactly the "hard to dig down" the Godot build
-     * ran into with the head held up by the gait.
+     * The brush used to be dropped on the first solid point along a ray cast
+     * up to 9 mm from the jaw. On a flat face with the camera near level that
+     * ray is almost a tangent, so it ran a long way before the ground rose
+     * into it: the hole landed at `jawHeight / tan(aim)` downrange, which is
+     * 6.36 mm at ten degrees off level and unbounded as the aim flattens. At
+     * exactly level it found nothing within 9 mm and refused to dig.
      *
-     * So the direction is her forward pitched by the player's aim, in her
-     * own frame — down INTO the face when you drag down. When the head
-     * tracks the camera this same angle poses the head and nothing here
-     * changes: the jaws will already be pointing where this digs.
+     * Her head reaches the soil on its own — the gait's dig dip takes her jaw
+     * from 1.121 mm over it to 0.070 mm — so there was never anything to
+     * search for.
      */
-    const aim = this.aimPitch;
-    const dir = this.forward.clone().multiplyScalar(Math.cos(aim))
-      .addScaledVector(this.up, Math.sin(aim)).normalize();
-
     /*
-     * AT THE JAW, OUT BY THE BITE'S OWN WIDTH. That is the whole placement,
-     * and there is no search in it.
+     * And it lands where a straight line DOWN from the jaw meets the soil —
+     * "make it a straight line from that bone straight down and at that
+     * projected point will be that dig radius".
      *
-     * It used to cast up to 9 mm along the aim and drop the sphere on the
-     * first solid thing it met. On a flat face with the camera near level
-     * that ray is almost a tangent, so it ran a long way before the ground
-     * rose into it, and the hole appeared far downrange — reported at 4 to
-     * 7 mm ahead of the mandible. The distance was pure trigonometry:
-     * `jawHeight / tan(aim)`, which is 6.36 mm at ten degrees off level and
-     * runs to infinity as the aim flattens. At exactly level it found
-     * nothing at all within 9 mm.
+     * Down in HER frame, not the world's, so it works on a wall and on the
+     * ceiling. Note there is no aim ray here at all: the player steers the
+     * dig by steering her HEAD, which in DIG mode follows the look, and the
+     * hole appears under her face. That is why it can never end up six
+     * millimetres downrange again — the placement has no term that grows as
+     * an angle flattens.
      *
-     * The search was there because her jaws ride 1.12 mm over the soil with
-     * her head held up by the gait. But her head does not stay up when she
-     * digs: the gait pitches her thorax by `digging`, and measured, that
-     * takes the jaw from 1.121 mm down to 0.070 mm — she puts her face on
-     * the ground, which is what an ant does. A sphere of bite radius centred
-     * a bite radius ahead of a jaw that low is more than half buried, so it
-     * bites properly at any aim, including level, with no ray involved.
-     *
-     * The catch was that this ran BEFORE she was posed, so it read a jaw
-     * from the previous frame with the head still up. It is called after the
-     * pose now — see `simulate`.
+     * The cast starts above the jaw and reaches past it, so it finds the
+     * surface whether her face is just over the soil or already inside a
+     * tunnel she has dug. With nothing found she bites at the jaw itself,
+     * which is the deep-in-a-tunnel case.
      */
-    const at = jaw.clone().addScaledVector(dir, radius);
+    const from = jaw.clone().addScaledVector(this.up, radius * 2);
+    const hit = this.cast(from, this.up.clone().negate(), radius * 6);
+    const at = hit ?? jaw.clone();
+    // Recorded so a probe can measure where the bite ACTUALLY went rather
+    // than recompute a formula and agree with itself.
+    this.lastBiteAt.copy(at);
+    this.lastBiteRadius = radius;
     const result = this.field.subtractSphere(at, radius);
     if (result.changedSamples === 0) { this.lastBiteWhy = 'brush changed nothing'; return; }
     this.lastBiteWhy = '';
@@ -830,7 +844,7 @@ export class BlockScene {
     const mode = MODES[this.mode]!;
     this.status.innerHTML = `<strong>BLOCK ROOM — ${mode.label}: ${mode.hint}</strong><br>
       Block: ${BLOCK_MM} mm cube · ${CELL_MM} mm cells · ${CELLS}³<br>
-      Bite: ${CASTE_BITE_MM.queen} mm (queen) · removed ${(this.removed * MM ** 3).toFixed(0)} mm³<br>
+      Bite: ${(this.queen.antennaToJaw() * 2 * MM).toFixed(2)} mm wide, measured (table said ${CASTE_BITE_MM.queen}) · removed ${(this.removed * MM ** 3).toFixed(0)} mm³<br>
       On the ${face} · up ${this.up.x.toFixed(2)}, ${this.up.y.toFixed(2)}, ${this.up.z.toFixed(2)}<br>
       Queen: ${CASTE_LENGTH_MM.queen} mm · ${this.gripping ? 'gripping' : 'FALLING'} · `
       + `head ${(this.follow.lookYaw * 180 / Math.PI).toFixed(0)}° off, `

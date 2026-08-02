@@ -51,7 +51,8 @@ const out = await page.evaluate(() => {
    */
   const headFrame = () => {
     const rig = lab.queen.rig;
-    const head = lab.queen.bones.get(rig.thorax[rig.thorax.length - 1]);
+    // Measured from the PIVOT she turns on, which is the neck base.
+    const head = lab.queen.bones.get(rig.thorax[0]);
     const pos = new V();
     head.getWorldPosition(pos);
     const jaw = new V();
@@ -104,6 +105,25 @@ const out = await page.evaluate(() => {
     };
   };
 
+  /*
+   * DOES IT DRIFT? Hold the camera dead still and step a long time. The head
+   * angle must not move at all. Any rotation applied to a bone the gait does
+   * not rewrite each frame integrates instead of holding, and that failure
+   * looks like a working head for about a second.
+   */
+  look(30, -20, 1);
+  const settleA = look(30, -20, 1);
+  lab.stepForTest(1 / 60, 300);
+  const { fwd: f2 } = headFrame();
+  const right2 = new V().crossVectors(lab.up, lab.forward).normalize();
+  const flat2 = f2.clone().addScaledVector(lab.up, -f2.dot(lab.up));
+  const driftYaw = Math.atan2(flat2.dot(right2), flat2.dot(lab.forward)) * DEG - settleA.headYaw;
+  const driftPitch = Math.asin(Math.max(-1, Math.min(1, f2.dot(lab.up)))) * DEG - settleA.headPitch;
+
+  // Re-seat the gaster's zero: the drift test above left the head at 30
+  // degrees, and a baseline captured there puts the whole column off by 9.
+  look(0, 0, 0);
+  gasterRest.yaw = null;
   const yawRows = [];
   for (const y of [0, 15, 30, 45, 60, 90]) {
     yawRows.push({ camYaw: y, walk: look(y, 0, 0), dig: look(y, 0, 1) });
@@ -132,10 +152,11 @@ const out = await page.evaluate(() => {
   lab.setMode(0);
   lab.follow.yawOffset = 0;
   lab.aimPitch = 0;
-  return { yawRows, pitchRows, jawVsBite };
+  return { yawRows, pitchRows, jawVsBite, drift: { yaw: +driftYaw.toFixed(3), pitch: +driftPitch.toFixed(3) } };
 });
 
 console.log(JSON.stringify({ errors: errors.slice(0, 3) }));
+console.log(`\nDRIFT over 5 s with the camera held still: yaw ${out.drift.yaw}°, pitch ${out.drift.pitch}° (must be 0)`);
 console.log('\nYAW — she should turn her face in EVERY mode, gaster against it');
 console.log('  camera off    WALK head   gaster      DIG head   gaster');
 for (const r of out.yawRows) {

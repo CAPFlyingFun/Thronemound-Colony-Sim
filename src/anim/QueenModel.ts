@@ -248,6 +248,7 @@ export class QueenModel {
       this.baseY = this.bodyRoot?.position.y ?? 0;
       this.measureLimbs();
       this.measureLegPlan();
+      this.measureDigPlan();
       this.measureHead();
       this.maskHead();
       this.loaded = true;
@@ -284,7 +285,15 @@ export class QueenModel {
    * Neither bone is a limb, so `solveFeet` will not undo this.
    */
   private aimHead(pose: GaitPose): void {
-    if (Math.abs(pose.headYaw) < 1e-6 && Math.abs(pose.headPitch) < 1e-6) return;
+    /*
+     * No early return when the aim is zero, and that is not a micro-detail.
+     *
+     * Skipping the work when there is nothing to apply also skips putting the
+     * bone BACK, so it keeps the last non-zero aim it was given. In practice:
+     * look down while digging, cycle to WALK, and her face stays down —
+     * exactly the faceplant the mode gate exists to prevent. It showed up as
+     * a WALK column that tracked the camera one row late.
+     */
     this.root.updateMatrixWorld(true);
     const frame = this.root.getWorldQuaternion(new THREE.Quaternion());
     const up = new THREE.Vector3(0, 1, 0).applyQuaternion(frame);
@@ -292,7 +301,25 @@ export class QueenModel {
 
     const turn = (name: string | undefined, yaw: number, pitch: number): void => {
       const bone = name ? this.bones.get(name) : undefined;
-      if (!bone || !bone.parent) return;
+      if (!bone || !bone.parent || !name) return;
+      /*
+       * BACK TO BASE FIRST, or this integrates.
+       *
+       * The main loop rewrites every bone the gait owns from its rest pose
+       * each frame, which is why rotating one of those is safe. The neck
+       * base is NOT one of them — the gait only writes the head end of the
+       * thorax — so a rotation premultiplied onto it survives into the next
+       * frame and is multiplied again. Moving the pivot here from the head
+       * end to the neck base turned a working head into one reading 60, then
+       * -120, then 180 degrees off a steady camera, and WALK started
+       * pitching when it is supposed to be frozen.
+       *
+       * Which is the bug the update loop's own comment warns about, in the
+       * one place that comment did not cover.
+       */
+      const rest = this.rest.get(name);
+      if (rest && !pose.rotations.has(name)) bone.quaternion.copy(rest);
+      if (Math.abs(yaw) < 1e-6 && Math.abs(pitch) < 1e-6) return;
       const want = new THREE.Quaternion().setFromAxisAngle(up, yaw);
       if (Math.abs(pitch) > 1e-6) {
         want.multiply(new THREE.Quaternion().setFromAxisAngle(right, pitch));
@@ -307,7 +334,28 @@ export class QueenModel {
       bone.quaternion.premultiply(inv.multiply(want).multiply(parent));
     };
 
-    const head = this.rig.thorax[this.rig.thorax.length - 1];
+    /*
+     * She turns at the BASE of her neck, not at the top of it.
+     *
+     * The first version pivoted on `thorax[last]`, which is where the gait
+     * writes its dig dip — and on the queen that joint sits 0.64 mm from her
+     * antenna sockets, i.e. inside her face. Turning there swivelled her
+     * features on a fixed skull instead of turning her head, which is what
+     * the report said it looked like.
+     *
+     * Walking the model's REAL parent chain up from her mouth gives
+     * Bone_045 -> Bone_046 -> Bone_002 -> Bone_003 -> Bone_004, and two
+     * joints back from the old pivot lands on Bone_004, 2.26 mm behind the
+     * jaw and 2.10 mm from the sockets — the rearmost joint the rig still
+     * calls thorax, with her body root beyond it. `thorax[0]` by the table's
+     * own convention of listing body-ward first, so the worker and the major
+     * get their own neck base without a second table.
+     *
+     * The dig DIP stays where it was. It is a nod rather than a turn, and it
+     * is measured: it takes her jaw from 1.121 mm over the soil to 0.070 mm,
+     * which is the only reason a bite at the mandible reaches ground.
+     */
+    const head = this.rig.thorax[0];
     // Pitch is negated: the player's aim is negative looking down, and a
     // rotation about her right by a negative angle tips her face up.
     turn(head, pose.headYaw, -pose.headPitch);
@@ -698,6 +746,58 @@ export class QueenModel {
     this.head = [FOOT.x, FOOT.y, FOOT.z];
   }
 
+  /**
+   * The dig geometry, measured off THIS rig rather than tabled per caste.
+   *
+   * "Measure from antennas to bottom of jaw bone and double that for the
+   * digging distance" — so this returns that span, and the caller doubles it.
+   * Antenna SOCKET to the last bone of the mouth chain, both in her own units.
+   *
+   * Which is worth a note, because it is a check on the whole idea rather
+   * than an implementation detail: on the queen that span is 0.868 mm, and
+   * twice it is 1.736 mm against the 1.75 mm that had been typed into
+   * `CASTE_BITE_MM` by hand. The rule reproduces the hand-picked number to
+   * within one percent, from bones, and it will do the same for a worker and
+   * a major without anyone measuring them.
+   *
+   * "Antennas" is read as the socket and not the tip on purpose: the tip
+   * gives 2.386 mm, which doubles to 4.77 mm and is half her body. It is also
+   * the wrong thing physically — the tip waves about, and a dig reach that
+   * changed as she felt around would be a strange machine.
+   */
+  private digSpan = 0;
+
+  /** Antenna socket to jaw, in world units. Zero until the model loads. */
+  antennaToJaw(): number {
+    return this.digSpan;
+  }
+
+  /** The bone the bite is taken at: a real mandible where the rig has one. */
+  private jawBone(): string | undefined {
+    const mandible = this.rig.mandibleLeft;
+    if (mandible && mandible.length > 0) return mandible[mandible.length - 1];
+    return this.rig.mouth[this.rig.mouth.length - 1];
+  }
+
+  private measureDigPlan(): void {
+    this.digSpan = 0;
+    const socket = this.rig.antennaLeft[0];
+    /*
+     * The real mandible tip where the rigger gave us one, and the mouth chain
+     * where they did not. The queen's auto-rig left her jaws out entirely, so
+     * she has no choice; the worker and the major both have proper mandible
+     * chains and measuring to those is what makes the span — and therefore
+     * the bite — genuinely vary per ant rather than by a scale factor.
+     */
+    const jawName = this.jawBone();
+    const a = socket ? this.bones.get(socket) : undefined;
+    const j = jawName ? this.bones.get(jawName) : undefined;
+    if (!a || !j) return;
+    a.getWorldPosition(JOINT);
+    j.getWorldPosition(FOOT);
+    this.digSpan = JOINT.distanceTo(FOOT);
+  }
+
   private measureLegPlan(): void {
     this.legHome.length = 0;
     for (const leg of this.rig.legs) {
@@ -994,8 +1094,8 @@ export class QueenModel {
 
   /** Her mouthparts, in world space. False when the rig has not loaded. */
   jawPosition(into: THREE.Vector3): boolean {
-    const mouth = this.rig.mouth[this.rig.mouth.length - 1];
-    return mouth !== undefined && this.boneWorldPosition(mouth, into);
+    const jaw = this.jawBone();
+    return jaw !== undefined && this.boneWorldPosition(jaw, into);
   }
 
   dispose(): void {

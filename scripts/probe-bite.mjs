@@ -78,16 +78,15 @@ const out = await page.evaluate(() => {
     lab.input.dig = false;
     const j = new (Object.getPrototypeOf(lab.at).constructor)();
     lab.queen.jawPosition(j);
-    const dir = lab.forward.clone().multiplyScalar(Math.cos(lab.aimPitch))
-      .addScaledVector(lab.up, Math.sin(lab.aimPitch)).normalize();
-    const at = j.clone().addScaledVector(dir, 1.75 / 2 / MM);
-    const off = at.clone().sub(j);
+    // Where the bite ACTUALLY landed, recorded by the scene.
+    const off = lab.lastBiteAt.clone().sub(j);
     rows.push({
       deg,
       reachMm: +(off.length() * MM).toFixed(2),
       aheadMm: +(off.dot(lab.forward) * MM).toFixed(2),
       belowMm: +(-off.dot(lab.up) * MM).toFixed(2),
       dugMm3: +((lab.removed - before) * 125).toFixed(1),
+      radiusMm: +(lab.lastBiteRadius * MM).toFixed(3),
       why: lab.lastBiteWhy,
     });
   }
@@ -100,7 +99,7 @@ if (out.error) { console.log(out.error); }
 else {
   console.log(`jaw rides ${out.jawAboveMm} mm above the soil beneath it`);
   console.log(`  head at rest ${out.restJaw} mm | head dipped for a dig ${out.digJaw} mm\n`);
-  console.log('  aim     bite reach     ahead of jaw    below jaw     removed');
+  console.log('  aim     bite offset     ahead of jaw    below jaw     removed   radius');
   for (const r of out.rows) {
     if (r.reachMm === undefined) { console.log(`  ${String(r.deg).padStart(4)}deg   NOTHING IN REACH`); continue; }
     console.log(
@@ -108,7 +107,7 @@ else {
       `${r.reachMm.toFixed(2).padStart(11)} mm`,
       `${r.aheadMm.toFixed(2).padStart(14)} mm`,
       `${r.belowMm.toFixed(2).padStart(12)} mm`,
-      `${r.dugMm3.toFixed(1).padStart(9)} mm3`, r.why ? `  ${r.why}` : '',
+      `${r.dugMm3.toFixed(1).padStart(9)} mm3`, `${r.radiusMm.toFixed(3).padStart(7)} mm`, r.why ? `  ${r.why}` : '',
     );
   }
 }
