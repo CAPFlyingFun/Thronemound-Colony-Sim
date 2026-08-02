@@ -102,12 +102,19 @@ const SPAN = CELLS * CELL;
 const LOW = MARGIN_CELLS * CELL;
 const HIGH = LOW + BLOCK_CELLS * CELL;
 const MID = (LOW + HIGH) * 0.5;
+/**
+ * How high the lower half of the test step stands — halfway up the block, so
+ * the face she drills into is some thirty millimetres of wall, far taller than
+ * she is. The bore then goes into rock rather than over a lip.
+ */
+const STEP_TOP = MID;
 
 /** Cells per meshed chunk, so a bite rebuilds a corner and not the cube. */
 const CHUNK = 32;
 
 /** How far off the soil her body rides, and how far a foot may reach. */
 const RIDE = 1.4 / MM;
+
 /** The adhesion cast: from this far off her back, in through her soles. */
 const GRIP_LIFT = 3 / MM;
 const GRIP_REACH = 9 / MM;
@@ -277,6 +284,27 @@ const LOOK_PER_PIXEL = 0.005;
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
 export class BlockScene {
+  /**
+   * Which block to build. `cube` is the room; `cliff` is a measuring rig — see
+   * where the field is filled. Chosen with `?shape=cliff`.
+   */
+  private readonly shape: 'cube' | 'cliff' = new URLSearchParams(
+    typeof location === 'undefined' ? '' : location.search,
+  ).get('shape') === 'cliff' ? 'cliff' : 'cube';
+
+  /**
+   * Whether the coaster builder is offered at all.
+   *
+   * OFF, and hidden rather than deleted. Planned digging does not work well
+   * enough to be in the way of testing the manual kind, and everything under
+   * it — the path integrator, the pacing, the piece geometry — is tested and
+   * worth keeping for when the digging itself is solid. `?plan=1` brings it
+   * back.
+   */
+  private readonly planEnabled = new URLSearchParams(
+    typeof location === 'undefined' ? '' : location.search,
+  ).get('plan') === '1';
+
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
@@ -542,17 +570,37 @@ export class BlockScene {
      * block of soil looks like anyway — a machined corner would be the
      * surprising part.
      */
-    this.field.fill((x, y, z) => Math.min(
-      x - LOW, HIGH - x, y - LOW, HIGH - y, z - LOW, HIGH - z,
-    ));
+    if (this.shape === 'cliff') {
+      /*
+       * A STEP, for measuring rather than for playing: a flat plateau to walk
+       * in on and a face at exactly ninety degrees to drill into.
+       *
+       * The point of it is that a level approach and a vertical wall mean
+       * every correct answer is a straight line. Walking in at nought degrees
+       * and boring straight ahead, her height must not change, her heading
+       * must not change, and nothing may drift sideways — so any wobble in the
+       * body or the camera is the whole of the reading, with no slope or
+       * curvature for it to hide behind.
+       */
+      this.field.fill((x, y, z) => Math.min(
+        x - LOW, HIGH - x, y - LOW, (z < MID ? STEP_TOP : HIGH) - y,
+        z - LOW, HIGH - z,
+      ));
+    } else {
+      this.field.fill((x, y, z) => Math.min(
+        x - LOW, HIGH - x, y - LOW, HIGH - y, z - LOW, HIGH - z,
+      ));
+    }
     this.remeshAll();
 
     this.addLighting();
     this.queen = new QueenModel('queen');
     this.scene.add(this.queen.root);
 
-    // On top of the block, in the middle, facing +Z.
-    this.at.set(MID, HIGH + RIDE, MID);
+    // On top of the block, in the middle, facing +Z. On the step, back from
+    // the face with a clear run at it.
+    if (this.shape === 'cliff') this.at.set(MID, STEP_TOP + RIDE, MID - 20 / MM);
+    else this.at.set(MID, HIGH + RIDE, MID);
     this.follow.target.copy(this.at);
 
     const hud = document.createElement('div');
@@ -1995,6 +2043,7 @@ export class BlockScene {
    * for a builder and not both, and the builder is the one you close.
    */
   private buildPlanner(hud: HTMLElement, actions: HTMLElement): void {
+    if (!this.planEnabled) return;
     this.planButton.className = 'density-lab-button density-lab-mode';
     this.planButton.addEventListener('pointerdown', (event) => {
       event.preventDefault();
