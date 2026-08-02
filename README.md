@@ -1,6 +1,6 @@
 # Thronemound Colony Sim
 
-A browser-playable 2.5D ant colony simulation built with TypeScript, Phaser 3, and Vite.
+A browser-playable 3D ant colony simulation built with TypeScript, Phaser 3, and Vite.
 
 ## Current prototype
 
