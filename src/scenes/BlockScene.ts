@@ -760,7 +760,7 @@ export class BlockScene {
         digging: this.input.dig ? 1 : 0,
         carrying: 0,
         headYaw: this.follow.lookYaw,
-        headPitch: mode.pitchHead ? this.aimPitch : 0,
+        headPitch: mode.pitchHead ? this.follow.lookPitch : 0,
       });
       /*
        * Feet onto the soil, in her frame: elevation is measured along HER
@@ -848,7 +848,7 @@ export class BlockScene {
       On the ${face} · up ${this.up.x.toFixed(2)}, ${this.up.y.toFixed(2)}, ${this.up.z.toFixed(2)}<br>
       Queen: ${CASTE_LENGTH_MM.queen} mm · ${this.gripping ? 'gripping' : 'FALLING'} · `
       + `head ${(this.follow.lookYaw * 180 / Math.PI).toFixed(0)}° off, `
-      + `${mode.pitchHead ? `${(this.aimPitch * 180 / Math.PI).toFixed(0)}° pitch` : 'level'}<br>
+      + `${mode.pitchHead ? `${(this.follow.lookPitch * 180 / Math.PI).toFixed(0)}° pitch` : 'level'}<br>
       Legs: ${this.report
     ? `${this.report.planted} planted · ${this.report.groping} reaching · `
       + `${this.report.movedMm.toFixed(2)} mm moved, ${this.report.heldBackMm.toFixed(2)} held back · `

@@ -87,10 +87,18 @@ const out = await page.evaluate(() => {
   };
 
   /** Set the look, settle a frame, and report the head. */
-  const look = (yawDeg, pitchDeg, modeIndex) => {
+  const look = (yawDeg, orbitDeg, modeIndex) => {
     lab.setMode(modeIndex);
     lab.follow.yawOffset = (yawDeg * Math.PI) / 180;
-    lab.aimPitch = (pitchDeg * Math.PI) / 180;
+    /*
+     * Driven through the camera's own `orbit`, not by poking `aimPitch`.
+     * The head follows `FollowCamera.lookPitch`, and in third person that
+     * comes off the orbit arm rather than off `aimPitch` — a probe that sets
+     * the latter reports a head frozen at one angle and calls it a pass.
+     * `orbit` accumulates, so each sample winds back to the same zero.
+     */
+    lab.follow.orbit(0, lab.follow.lookPitch - (orbitDeg * Math.PI) / 180);
+    lab.aimPitch = (orbitDeg * Math.PI) / 180;
     lab.stepForTest(1 / 60, 4);
     const { fwd } = headFrame();
     // Head yaw and pitch measured in HER frame.
@@ -134,6 +142,20 @@ const out = await page.evaluate(() => {
   }
 
   /*
+   * THE CONVENTION-FREE ONE. Angles need a sign convention and mine was
+   * upside down; a height does not. In DIG mode, looking down must LOWER her
+   * jaw toward the soil, because that is what digging down means.
+   */
+  const jawHeights = [];
+  for (const p of [0, -15, -30, -45, -60]) {
+    look(0, p, 1);
+    const j = new V();
+    lab.queen.jawPosition(j);
+    const g = lab.cast(j.clone().addScaledVector(lab.up, 4 / 5), lab.up.clone().negate(), 20 / 5);
+    jawHeights.push({ camPitch: p, mm: g ? +(j.clone().sub(g).dot(lab.up) * 5).toFixed(3) : null });
+  }
+
+  /*
    * And the loop-closer: in DIG mode, the angle between where her JAWS point
    * and the direction the bite is taken along.
    */
@@ -152,7 +174,7 @@ const out = await page.evaluate(() => {
   lab.setMode(0);
   lab.follow.yawOffset = 0;
   lab.aimPitch = 0;
-  return { yawRows, pitchRows, jawVsBite, drift: { yaw: +driftYaw.toFixed(3), pitch: +driftPitch.toFixed(3) } };
+  return { yawRows, pitchRows, jawVsBite, jawHeights, drift: { yaw: +driftYaw.toFixed(3), pitch: +driftPitch.toFixed(3) } };
 });
 
 console.log(JSON.stringify({ errors: errors.slice(0, 3) }));
@@ -175,6 +197,8 @@ for (const r of out.pitchRows) {
     `${r.dig.headPitch.toFixed(1).padStart(17)}째`,
   );
 }
+console.log('\nJAW HEIGHT over the soil in DIG — looking down must LOWER it');
+for (const r of out.jawHeights) console.log(`  camera ${String(r.camPitch).padStart(4)}\u00b0   jaw ${r.mm} mm above the soil`);
 console.log('\nJAWS vs BITE in DIG mode — the angle that used to be the whole aim');
 for (const r of out.jawVsBite) {
   console.log(`  aim ${String(r.camPitch).padStart(4)}째   jaws are ${r.offDeg.toFixed(1)}째 off the bite`);

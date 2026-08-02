@@ -356,8 +356,20 @@ export class QueenModel {
      * which is the only reason a bite at the mandible reaches ground.
      */
     const head = this.rig.thorax[0];
-    // Pitch is negated: the player's aim is negative looking down, and a
-    // rotation about her right by a negative angle tips her face up.
+    /*
+     * This sign is settled by a TEST, not by an argument, after two rounds of
+     * reasoning produced two opposite answers that each looked right written
+     * down. `scripts/probe-lookdown.mjs` drives the real pointer handler,
+     * drags the screen, and reports the distance from her jaw to the soil —
+     * no angle, no convention, nothing to get upside down. Whichever drag
+     * makes the view look down must be the one that brings her jaw toward
+     * the ground.
+     *
+     * Worth knowing while reading it: dragging DOWN on this camera looks UP.
+     * The third-person rig is an orbit and dragging down lowers the arm, so
+     * the view tilts up — which is why `FollowCamera.lookPitch` exists and
+     * why reading `aimPitch` here was wrong twice over.
+     */
     turn(head, pose.headYaw, -pose.headPitch);
     // The counterweight. Yaw only — a gaster that pitched with the head
     // would see-saw her whole body every time she looked at the floor.

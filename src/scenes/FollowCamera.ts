@@ -132,6 +132,27 @@ export class FollowCamera {
   get lookYaw(): number {
     return this.yawOffset;
   }
+
+  /**
+   * The elevation the VIEW is actually looking along, negative when looking
+   * down. Exposed for the same reason as `lookYaw`: her head follows it.
+   *
+   * Two different numbers drive it and they move in opposite directions,
+   * which is the whole reason this getter exists rather than the scene
+   * reading `aimPitch` and hoping. Over her shoulder the camera is an orbit
+   * and `pitch` is how high above her it sits, so a HIGH pitch is looking
+   * DOWN at her — the negation below. Onboard there is no arm and the view
+   * runs straight down `aimPitch`, which is already an elevation.
+   *
+   * Reading `aimPitch` in third person had her head going the wrong way,
+   * because dragging down the screen lowers the camera and tilts the view
+   * UP while `aimPitch` goes negative. Reported from the device as "up and
+   * down is reversed", and the sign was only half of it: the two values are
+   * not the same quantity at all.
+   */
+  get lookPitch(): number {
+    return this.onboard ? this.aimPitch : -this.pitch;
+  }
   private pitch = 0.42;
   private distance: number;
   /** The smoothed position actually used, so the rig never jumps. */

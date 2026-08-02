@@ -70,6 +70,9 @@ const out = await page.evaluate(() => {
   lab.setMode(1);
   const rows = [];
   for (const deg of [0, -10, -20, -35, -50, -70, -90]) {
+    // Through the camera, because the head follows `lookPitch` and the bite
+    // follows the head. Setting `aimPitch` alone moves neither any more.
+    lab.follow.orbit(0, lab.follow.lookPitch - (deg * Math.PI) / 180);
     lab.aimPitch = (deg * Math.PI) / 180;
     lab.input.dig = true;
     lab.digCooldown = 0;
