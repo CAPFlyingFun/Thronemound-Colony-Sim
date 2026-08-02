@@ -249,6 +249,7 @@ export class QueenModel {
       this.measureLimbs();
       this.measureLegPlan();
       this.measureDigPlan();
+      this.measureEye();
       this.measureHead();
       this.maskHead();
       this.loaded = true;
@@ -747,6 +748,57 @@ export class QueenModel {
    */
   headOffset(): Vec3 | null {
     return this.head;
+  }
+
+  /**
+   * Where a first-person eye belongs, in her frame: the midpoint of her two
+   * ANTENNA SOCKETS.
+   *
+   * Between the sockets rather than at one of them, or the view sits off to
+   * her left. And at the sockets rather than at her mouth because that is
+   * where the request put it — high on the head, looking down the mandibles
+   * at the work, which is also roughly where an insect's eyes are.
+   *
+   * Null when the rig names no antennae. Measured off the bind pose like the
+   * leg plan, so the root's transform is not folded into it.
+   */
+  private eye: Vec3 | null = null;
+
+  eyeOffset(): Vec3 | null {
+    return this.eye;
+  }
+
+  private measureEye(): void {
+    this.eye = null;
+    const left = this.rig.antennaLeft[0];
+    const right = this.rig.antennaRight[0];
+    const a = left ? this.bones.get(left) : undefined;
+    const b = right ? this.bones.get(right) : undefined;
+    if (!a || !b) return;
+    a.getWorldPosition(JOINT);
+    b.getWorldPosition(FOOT);
+    this.eye = [
+      (JOINT.x + FOOT.x) / 2, (JOINT.y + FOOT.y) / 2, (JOINT.z + FOOT.z) / 2,
+    ];
+  }
+
+  /**
+   * The LIVE midpoint of her antenna sockets, in the world.
+   *
+   * `eyeOffset` is the same point in the bind pose and is not good enough to
+   * hang a camera on: her head is posed every frame — dipped into a dig,
+   * turned toward the look — so the sockets are not where the rest pose left
+   * them. Measured 2.05 mm behind, which on a 9 mm ant puts the eye inside
+   * her thorax rather than on her face.
+   */
+  eyePosition(into: THREE.Vector3): boolean {
+    const left = this.rig.antennaLeft[0];
+    const right = this.rig.antennaRight[0];
+    if (!left || !right) return false;
+    if (!this.boneWorldPosition(left, JOINT)) return false;
+    if (!this.boneWorldPosition(right, FOOT)) return false;
+    into.copy(JOINT).add(FOOT).multiplyScalar(0.5);
+    return true;
   }
 
   private measureHead(): void {

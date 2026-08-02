@@ -121,6 +121,23 @@ const ALIGN = 12;
 const SNAP = 14;
 const GRAVITY = 9;
 
+/**
+ * First person: 120 degrees, as asked for, against the 60 the follow rig uses.
+ *
+ * Wide on purpose. An eye at an ant's head is a centimetre from the soil, and
+ * at 60 degrees a tunnel wall fills the screen with no sense of where its
+ * edges are. A dashcam is about this wide for the same reason.
+ */
+const FIRST_PERSON_FOV = 120;
+const THIRD_PERSON_FOV = 60;
+
+/**
+ * How far one tap of a tuner button moves the eye, in mm, and its pitch, in
+ * degrees. Small enough to land on something, big enough to get there.
+ */
+const EYE_NUDGE_MM = 0.1;
+const EYE_NUDGE_DEG = 2;
+
 const STICK_RADIUS = 70;
 const LOOK_PER_PIXEL = 0.005;
 
@@ -204,6 +221,19 @@ export class BlockScene {
   private readonly modeButton = document.createElement('button');
   /** The one action button, whose meaning is the mode's. See `setMode`. */
   private readonly actionButton = document.createElement('button');
+  /**
+   * First person, and the tuning offsets for where its eye sits.
+   *
+   * The eye starts at the midpoint of her antenna sockets, measured off the
+   * rig — see `QueenModel.eyeOffset` — and these are a nudge on top of it,
+   * in HER frame, so it can be dialled in on the device and the settled
+   * numbers folded back into the code. The tuner disappears with them.
+   */
+  private firstPerson = false;
+  private readonly eyeNudge = new THREE.Vector3();
+  private eyePitch = 0;
+  private readonly tuner = document.createElement('div');
+  private readonly viewButton = document.createElement('button');
   /** The eased stick, which is what actually drives her. See `step`. */
   private driveWalk = 0;
   private driveYaw = 0;
@@ -275,7 +305,6 @@ export class BlockScene {
 
     // On top of the block, in the middle, facing +Z.
     this.at.set(MID, HIGH + RIDE, MID);
-    this.follow.body.copy(this.at);
     this.follow.target.copy(this.at);
 
     const hud = document.createElement('div');
@@ -797,10 +826,37 @@ export class BlockScene {
       this.digCooldown = 0.25;
     }
 
+    /*
+     * WHERE THE EYE SITS: on her antenna sockets, as they are RIGHT NOW.
+     *
+     * `FollowCamera.eye` is an offset in her frame, so the live socket is
+     * decomposed onto her right, up and forward every frame. It has to be the
+     * live bone and not the rig's bind pose: her head is posed continuously —
+     * dipped into a dig, turned toward the look — and the bind-pose figure
+     * put the eye 2.05 mm behind the sockets, which on a 9 mm ant is inside
+     * her thorax. Riding the live bone is also the only way "looking down the
+     * mandibles" means anything, since the mandibles move.
+     */
     this.follow.body.copy(this.at);
+    const socket = new THREE.Vector3();
+    if (this.queen.eyePosition(socket)) {
+      const eyeRight = new THREE.Vector3().crossVectors(this.up, this.forward).normalize();
+      const d = socket.sub(this.at);
+      this.follow.eye.set(
+        d.dot(eyeRight) + this.eyeNudge.x,
+        d.dot(this.up) + this.eyeNudge.y,
+        d.dot(this.forward) + this.eyeNudge.z,
+      );
+    }
     this.follow.target.copy(this.at).addScaledVector(this.up, RIDE);
     this.follow.up.copy(this.up);
-    this.follow.aimPitch = this.aimPitch;
+    /*
+     * Down the mandibles, not down her forward. Her face already points about
+     * 36 degrees below her body axis — an ant's mouthparts hang under the
+     * head joint — so a first-person eye aimed along her forward looks over
+     * the top of the work. `eyePitch` is the tuner's share of that.
+     */
+    this.follow.aimPitch = this.aimPitch + (this.firstPerson ? this.eyePitch : 0);
     this.follow.update(
       dt,
       Math.atan2(this.forward.x, this.forward.z),
@@ -820,9 +876,24 @@ export class BlockScene {
    * entirely, the answer is "far below", which parks the foot rather than
    * planting it in mid-air.
    */
+  /**
+   * The soil under a point — the NEAREST surface, not the outermost one.
+   *
+   * This used to start its cast `GRIP_LIFT` (3 mm) above the point, which is
+   * above the roof of anything she has dug. So a foot standing in a tunnel
+   * got the answer for the ORIGINAL ground overhead, read as being far below
+   * the surface, and was lifted out onto it. That is the ant in a pit with
+   * her legs splayed across the flat around it.
+   *
+   * The lift exists for a real reason — a foot a little INTO the soil needs
+   * the surface just above it, not the next one down — so it is kept and
+   * made small: one cell, which is less than the height of a single bite's
+   * tunnel and enough to cover a foot that has sunk a fraction of a
+   * millimetre.
+   */
   private surfaceUnder(x: number, y: number, z: number): number {
-    const from = new THREE.Vector3(x, y, z).addScaledVector(this.up, GRIP_LIFT);
-    const hit = this.cast(from, this.up.clone().negate(), GRIP_LIFT + GRIP_REACH);
+    const from = new THREE.Vector3(x, y, z).addScaledVector(this.up, CELL);
+    const hit = this.cast(from, this.up.clone().negate(), CELL + GRIP_REACH);
     if (!hit) return -SPAN;
     return hit.dot(this.up);
   }
@@ -848,7 +919,12 @@ export class BlockScene {
       On the ${face} · up ${this.up.x.toFixed(2)}, ${this.up.y.toFixed(2)}, ${this.up.z.toFixed(2)}<br>
       Queen: ${CASTE_LENGTH_MM.queen} mm · ${this.gripping ? 'gripping' : 'FALLING'} · `
       + `head ${(this.follow.lookYaw * 180 / Math.PI).toFixed(0)}° off, `
-      + `${mode.pitchHead ? `${(this.follow.lookPitch * 180 / Math.PI).toFixed(0)}° pitch` : 'level'}<br>
+      + `${mode.pitchHead ? `${(this.follow.lookPitch * 180 / Math.PI).toFixed(0)}° pitch` : 'level'}<br>`
+      + `${this.firstPerson
+        ? `EYE nudge fwd ${(this.eyeNudge.z * MM).toFixed(2)}, up ${(this.eyeNudge.y * MM).toFixed(2)}, `
+          + `right ${(this.eyeNudge.x * MM).toFixed(2)} mm · pitch `
+          + `${(this.eyePitch * 180 / Math.PI).toFixed(0)}° — read these off and I will bake them in`
+        : '3rd person · tap 1ST for the head cam'}<br>
       Legs: ${this.report
     ? `${this.report.planted} planted · ${this.report.groping} reaching · `
       + `${this.report.movedMm.toFixed(2)} mm moved, ${this.report.heldBackMm.toFixed(2)} held back · `
@@ -878,6 +954,22 @@ export class BlockScene {
     } else {
       this.actionButton.style.display = 'none';
     }
+  }
+
+  /**
+   * Swap cameras, and show the tuner only where it means anything.
+   *
+   * The field of view changes with it: 120 degrees onboard, because an eye a
+   * centimetre off the soil at 60 sees a wall and no context, and back to 60
+   * over her shoulder where a wide angle would just distort her.
+   */
+  private setFirstPerson(on: boolean): void {
+    this.firstPerson = on;
+    this.follow.mode = on ? 'first' : 'third';
+    this.camera.fov = on ? FIRST_PERSON_FOV : THIRD_PERSON_FOV;
+    this.camera.updateProjectionMatrix();
+    this.viewButton.textContent = on ? '1ST' : '3RD';
+    this.tuner.style.display = on ? '' : 'none';
   }
 
   /* ------------------------------------------------------------ the input */
@@ -917,6 +1009,56 @@ export class BlockScene {
     this.actionButton.addEventListener('pointercancel', hold(false));
     this.actionButton.addEventListener('pointerleave', hold(false));
     this.setMode(this.mode);
+
+    /*
+     * FIRST PERSON, and a tuner for where its eye goes.
+     *
+     * The toggle is its own button rather than a fourth entry in the mode
+     * ring, because which camera you are on is orthogonal to what you are
+     * doing — you want first person while digging AND while walking, and
+     * folding them together would double the ring every time a verb is added.
+     */
+    this.viewButton.className = 'density-lab-button density-lab-mode';
+    this.viewButton.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      this.setFirstPerson(!this.firstPerson);
+    });
+    actions.appendChild(this.viewButton);
+
+    this.tuner.className = 'density-lab-tuner';
+    const rows: Array<[string, (dir: number) => void]> = [
+      ['FWD', (d) => { this.eyeNudge.z += d * EYE_NUDGE_MM / MM; }],
+      ['UP', (d) => { this.eyeNudge.y += d * EYE_NUDGE_MM / MM; }],
+      ['RIGHT', (d) => { this.eyeNudge.x += d * EYE_NUDGE_MM / MM; }],
+      ['PITCH', (d) => { this.eyePitch += (d * EYE_NUDGE_DEG * Math.PI) / 180; }],
+    ];
+    for (const [label, apply] of rows) {
+      const row = document.createElement('div');
+      row.className = 'density-lab-tuner-row';
+      const name = document.createElement('span');
+      name.textContent = label;
+      row.appendChild(name);
+      for (const dir of [-1, 1]) {
+        const button = document.createElement('button');
+        button.textContent = dir < 0 ? '\u2212' : '+';
+        button.addEventListener('pointerdown', (event) => {
+          event.preventDefault();
+          apply(dir);
+        });
+        row.appendChild(button);
+      }
+      this.tuner.appendChild(row);
+    }
+    const reset = document.createElement('button');
+    reset.textContent = 'RESET';
+    reset.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      this.eyeNudge.set(0, 0, 0);
+      this.eyePitch = 0;
+    });
+    this.tuner.appendChild(reset);
+    hud.appendChild(this.tuner);
+    this.setFirstPerson(false);
 
     const canvas = this.renderer.domElement;
     canvas.addEventListener('pointerdown', (event) => {
@@ -1005,6 +1147,7 @@ export class BlockScene {
       // a numpad and a main row, and the player means the character.
       if (event.key === '*') { event.preventDefault(); this.setMode(cycleMode(this.mode)); }
       if (event.key === '/') { event.preventDefault(); this.setMode(cycleMode(this.mode, -1)); }
+      if (event.code === 'KeyV') { event.preventDefault(); this.setFirstPerson(!this.firstPerson); }
     });
     window.addEventListener('keyup', (event) => {
       if (event.code === 'KeyW' || event.code === 'KeyS') this.input.walk = 0;

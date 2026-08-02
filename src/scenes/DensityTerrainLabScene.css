@@ -131,6 +131,64 @@
   background: rgba(255, 250, 238, 0.96);
 }
 
+/*
+ * The eye tuner: temporary by design. It exists so the first-person camera
+ * can be dialled in on a real device and the settled numbers folded into the
+ * code, at which point this and its buttons come out again.
+ */
+.density-lab-tuner {
+  position: absolute;
+  z-index: 3;
+  /*
+   * Bottom CENTRE, which is the one part of a landscape phone screen nothing
+   * else wants: the readout is top-left, the stick spawns wherever a thumb
+   * lands on the left half, and the buttons are bottom-right. At bottom-left
+   * it sat under the readout and hid its own first row.
+   */
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: max(14px, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border-radius: 12px;
+  background: rgba(20, 15, 10, 0.72);
+  pointer-events: auto;
+}
+
+.density-lab-tuner-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.density-lab-tuner span {
+  min-width: 40px;
+  font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.06em;
+  color: #f4ecd8;
+}
+
+.density-lab-tuner button {
+  width: 34px;
+  height: 30px;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(244, 236, 216, 0.9);
+  color: #1d160e;
+  font: 800 14px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  touch-action: none;
+}
+
+.density-lab-tuner > button {
+  width: auto;
+  padding: 6px 10px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+
 .density-lab-reset {
   padding: 12px 18px;
   background: rgba(244, 236, 216, 0.88);
