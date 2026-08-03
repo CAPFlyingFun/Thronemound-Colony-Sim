@@ -300,11 +300,17 @@
  * anything when the thing on screen is a drawing — leaving them would be three
  * quarters of a phone screen of controls that do nothing.
  */
-/* Everything except the designer's own two pieces, listed the other way round
-   on purpose: naming what to hide means every control added later has to
-   remember to add itself to this list, and one that forgets shows up floating
-   over the drawing with nothing to do. */
-.density-lab-hud.is-designing > *:not(.nest-designer):not(.nest-designer-hint) {
+/* Everything except the designer's own pieces, listed the other way round on
+   purpose: naming what to HIDE means every control added later has to remember
+   to add itself to this list, and one that forgets shows up floating over the
+   drawing with nothing to do.
+   
+   It has the mirror hazard, which caught the instructions panel immediately:
+   anything the designer itself adds has to be named HERE or it is hidden by an
+   !important it cannot argue with. `.nest-help` went up, set display to '', and
+   stayed invisible. If a third piece is ever added, this is the line. */
+.density-lab-hud.is-designing >
+  *:not(.nest-designer):not(.nest-designer-hint):not(.nest-help) {
   display: none !important;
 }
 
@@ -383,6 +389,63 @@
   .nest-designer-chip { padding: 8px 10px; min-width: 36px; font-size: 10px; }
   .nest-designer { gap: 5px; }
   .nest-designer-row { gap: 5px; }
+}
+
+/*
+ * The instructions. Centred and modal-ish: it replaces the panel while it is
+ * up rather than sitting beside it, because the one thing worse than no
+ * instructions is instructions covering the buttons they are describing.
+ */
+.nest-help {
+  position: absolute;
+  z-index: 8;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(430px, 88vw);
+  max-height: 86vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 16px 18px;
+  border-radius: 14px;
+  background: rgba(18, 14, 9, 0.94);
+  box-shadow: 0 14px 44px rgba(0, 0, 0, 0.5);
+  color: #f4ecd8;
+  pointer-events: auto;
+}
+
+.nest-help-title {
+  font: 800 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.14em;
+  color: #e9c36f;
+}
+
+.nest-help-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.nest-help-row span { font-size: 17px; line-height: 1.3; }
+
+.nest-help-row p {
+  margin: 0;
+  font: 500 12px/1.45 system-ui, -apple-system, sans-serif;
+  letter-spacing: 0.01em;
+}
+
+.nest-help-row b { color: #e9c36f; font-weight: 800; }
+
+.nest-help .nest-designer-chip { align-self: flex-end; margin-top: 3px; }
+
+@media (max-height: 480px) {
+  /* Landscape on a phone: 430px tall of instructions will not fit, so the
+     rows tighten rather than the panel scrolling past the GOT IT button. */
+  .nest-help { padding: 11px 13px; gap: 6px; }
+  .nest-help-row p { font-size: 11px; line-height: 1.35; }
+  .nest-help-row span { font-size: 14px; }
 }
 
 /* Throttle, above the bore trigger — the two are held together often. */

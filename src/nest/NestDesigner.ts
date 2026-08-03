@@ -54,6 +54,16 @@ const PINCH_RATE = 0.9;
 /** How far a finger may travel and still count as a tap, in pixels. */
 const TAP_SLOP = 9;
 
+/**
+ * How far below the selected piece a new one lands, in millimetres.
+ *
+ * Twelve is a bit more than the widest default bore, so consecutive pieces
+ * make a tunnel with a visible run between them rather than two chambers
+ * overlapping into one blob — which is what a smaller drop looks like and
+ * reads as PLACE having done nothing.
+ */
+const DROP_MM = 12;
+
 export class NestDesigner {
     private plan: NestPlan;
 
@@ -109,6 +119,11 @@ export class NestDesigner {
 
     private readonly buttons = new Map<string, HTMLButtonElement>();
 
+    private readonly help = document.createElement('div');
+
+    /** Whether the instructions have been dismissed this session. */
+    private helpSeen = false;
+
     constructor(
         private readonly scene: THREE.Scene,
         private readonly camera: THREE.PerspectiveCamera,
@@ -147,6 +162,7 @@ export class NestDesigner {
         );
 
         this.buildPanel();
+        this.buildHelp();
         this.redraw();
     }
 
@@ -161,11 +177,24 @@ export class NestDesigner {
         this.group.visible = true;
         this.panel.style.display = '';
         this.hint.style.display = '';
+        /*
+         * Start on the entrance, selected. It is the only piece a new nest has
+         * and everything hangs off it, so selecting it is the difference
+         * between PLACE being the obvious first move and PLACE being a button
+         * that drops a loose node somewhere off screen.
+         */
+        const mouth = this.plan.nodes.find(n => n.kind === 'entrance') ?? this.plan.nodes[0];
+        if (mouth && !this.picked) this.picked = { kind: 'node', id: mouth.id };
+        // Instructions on the first open only. Shown every time it would be a
+        // panel to dismiss before you could do anything.
+        if (!this.helpSeen) this.showHelp(true);
         this.redraw();
+        this.refreshPanel();
     }
 
     hide(): void {
         this.open = false;
+        this.help.style.display = 'none';
         this.group.visible = false;
         this.panel.style.display = 'none';
         this.hint.style.display = 'none';
@@ -180,6 +209,7 @@ export class NestDesigner {
         this.scene.remove(this.group);
         this.panel.remove();
         this.hint.remove();
+        this.help.remove();
     }
 
     /** Drive the camera. The scene hands the frame over while this is open. */
@@ -407,20 +437,32 @@ export class NestDesigner {
 
     private place(): void {
         /*
-         * New nodes land at what the camera is looking at, not under the
-         * finger. The button is on the far side of the screen from wherever you
-         * were looking, so "under the finger" would mean "under the button".
+         * A NEW PIECE HANGS OFF THE SELECTED ONE, AND JOINS TO IT.
+         *
+         * The first version dropped a loose node at whatever the camera was
+         * looking at, and left joining it as a separate LINK press. Two things
+         * were wrong with that. A nest is a chain — you are almost always
+         * adding to the end of what you just made — so the common case cost
+         * three actions instead of one. And a loose unconnected node carves
+         * nothing, so pressing PLACE on a fresh Station appeared to do nothing
+         * at all: the reason for not knowing what to do.
+         *
+         * So it drops the new piece a short way BELOW whatever is selected,
+         * joins the two, and moves the selection onto the new one. Press it
+         * four times and you have a shaft four pieces deep. Drag any of them
+         * afterwards to put it where you actually want it.
          */
-        const mm = this.world.mmPerUnit;
-        const made = addNode(this.plan, this.placing, {
-            x: this.inBlock((this.focus.x - this.world.origin.x) * mm),
-            y: this.inBlock((this.focus.y - this.world.origin.y) * mm),
-            z: this.inBlock((this.focus.z - this.world.origin.z) * mm),
-        });
-        this.edit(made.plan);
+        const from = this.picked?.kind === 'node' ? findNode(this.plan, this.picked.id) : null;
+        const at = from
+            ? { x: from.x, y: this.inBlock(from.y - DROP_MM), z: from.z }
+            : {
+                x: this.inBlock((this.focus.x - this.world.origin.x) * this.world.mmPerUnit),
+                y: this.inBlock((this.focus.y - this.world.origin.y) * this.world.mmPerUnit),
+                z: this.inBlock((this.focus.z - this.world.origin.z) * this.world.mmPerUnit),
+            };
+        const made = addNode(this.plan, this.placing, at);
+        this.edit(from ? linkNodes(made.plan, from.id, made.id) : made.plan);
         this.picked = { kind: 'node', id: made.id };
-        // Joined to whatever was selected, if anything was — placing a node and
-        // then joining it is two presses for the thing people mean once.
         this.placeHighlight();
         this.refreshPanel();
     }
@@ -491,11 +533,65 @@ export class NestDesigner {
             this.dirty = false;
             this.refreshPanel();
         }, 'is-go'));
+        done.appendChild(this.named('help', this.chip('?', () => this.showHelp(
+            this.help.style.display === 'none',
+        ))));
         done.appendChild(this.chip('DONE', () => this.hooks.close()));
         this.panel.appendChild(done);
 
         this.hud.appendChild(this.panel);
         this.refreshPanel();
+    }
+
+    /**
+     * Short instructions, because the panel alone does not say what to do first.
+     *
+     * Five lines and no more. A designer that needs a manual has a control
+     * problem, and the fix for most of this was making PLACE chain rather than
+     * writing longer text — this is what is left over once the flow is right.
+     */
+    private buildHelp(): void {
+        this.help.className = 'nest-help';
+        this.help.style.display = 'none';
+        const lines = [
+            ['🏠', 'The <b>Station</b> is your way in. Everything hangs off it.'],
+            ['➕', '<b>PLACE</b> adds a piece below the selected one and joins it. Press it again to keep going down.'],
+            ['👆', 'Tap a piece to select it, then <b>drag</b> to move it. <b>↑ ↓</b> raise and lower, <b>− +</b> resize.'],
+            ['🔗', '<b>LINK</b> joins two pieces that are not joined. <b>FLOW</b> sets one-way arrows.'],
+            ['⛏️', '<b>DIG IT</b> cuts the soil to your plan. <b>DONE</b> goes back to walking her about.'],
+        ];
+        const title = document.createElement('div');
+        title.className = 'nest-help-title';
+        title.textContent = 'BUILD A NEST';
+        this.help.appendChild(title);
+        for (const [icon, text] of lines) {
+            const row = document.createElement('div');
+            row.className = 'nest-help-row';
+            const badge = document.createElement('span');
+            badge.textContent = icon!;
+            row.appendChild(badge);
+            const body = document.createElement('p');
+            body.innerHTML = text!;
+            row.appendChild(body);
+            this.help.appendChild(row);
+        }
+        const go = document.createElement('button');
+        go.className = 'nest-designer-chip is-go';
+        go.textContent = 'GOT IT';
+        go.addEventListener('pointerdown', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            this.showHelp(false);
+        });
+        this.help.appendChild(go);
+        this.hud.appendChild(this.help);
+    }
+
+    private showHelp(on: boolean): void {
+        this.help.style.display = on ? '' : 'none';
+        this.panel.style.display = on ? 'none' : '';
+        if (!on) this.helpSeen = true;
+        this.buttons.get('help')?.classList.toggle('is-on', on);
     }
 
     private named(key: string, button: HTMLButtonElement): HTMLButtonElement {

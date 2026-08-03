@@ -28,6 +28,27 @@ import { MIN_ENTRANCE_RADIUS_MM, type NestPlan } from './nestPlan';
  */
 const TOP_MM = 52;
 
+/**
+ * A NEW NEST: the Station, and nothing else.
+ *
+ * This is what `?shape=nest` opens with now. A worked example is a fine thing
+ * to look at and a bad thing to be handed when you wanted to build your own —
+ * reported as not knowing what to do, which is the right complaint: the screen
+ * offered a finished four-room nest and a panel of verbs, and no first move.
+ *
+ * One entrance, in the middle, already selected. The first move is then
+ * obvious because it is the only one: press PLACE and a tunnel starts.
+ */
+export function stationNest(): NestPlan {
+    return {
+        nodes: [{
+            id: 'station', kind: 'entrance',
+            x: 32, y: TOP_MM, z: 32, radiusMm: MIN_ENTRANCE_RADIUS_MM,
+        }],
+        edges: [],
+    };
+}
+
 export function demoNest(): NestPlan {
     return {
         nodes: [

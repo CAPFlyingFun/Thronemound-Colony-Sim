@@ -57,7 +57,7 @@ import {
   groundOf, sampleEdge, tallestMoundMm, validatePlan, MOUND_SPREAD,
   type NestPlan, type Vec3,
 } from '../nest/nestPlan';
-import { demoNest } from '../nest/demoNest';
+import { demoNest, stationNest } from '../nest/demoNest';
 import { buildNestView, type NestView } from '../nest/nestView';
 import { NestDesigner } from '../nest/NestDesigner';
 import { makeClod, stepClods, type Clod } from '../voxel/clodBurst';
@@ -372,6 +372,11 @@ export class BlockScene {
    * Which block to build. `cube` is the room; `cliff` is a measuring rig — see
    * where the field is filled. Chosen with `?shape=cliff`.
    */
+  /** `?shape=nest&demo=1` opens the worked example instead of a bare Station. */
+  private readonly wantsDemo = new URLSearchParams(
+    typeof location === 'undefined' ? '' : location.search,
+  ).get('demo') === '1';
+
   private readonly shape: 'cube' | 'cliff' | 'shaft' | 'nest' = (() => {
     const asked = new URLSearchParams(
       typeof location === 'undefined' ? '' : location.search,
@@ -732,7 +737,15 @@ export class BlockScene {
        * the only description. The soil is cut from it, the routing runs over
        * it, and there is nothing for either to drift away from.
        */
-      this.nest = demoNest();
+      /*
+       * A NEW nest by default: one entrance, nothing else.
+       *
+       * It used to open on a finished four-room example, which reads as
+       * something to admire rather than something to build — reported as not
+       * knowing what to do. The worked example is still one query string away
+       * for anyone who wants to look at a completed plan.
+       */
+      this.nest = this.wantsDemo ? demoNest() : stationNest();
       this.carveNest();
     } else if (this.shape === 'shaft') {
       /*
@@ -806,7 +819,7 @@ export class BlockScene {
        * HIGH would drop her a dozen millimetres through air, and the far side
        * of the heap is where she can walk at it rather than start halfway up it.
        */
-      const mouth = demoNest().nodes[0]!;
+      const mouth = this.nest?.nodes.find(n => n.kind === 'entrance') ?? demoNest().nodes[0]!;
       const clear = mouth.radiusMm * MOUND_SPREAD + 6;
       this.at.set(
         LOW + mouth.x / MM, LOW + mouth.y / MM + RIDE,

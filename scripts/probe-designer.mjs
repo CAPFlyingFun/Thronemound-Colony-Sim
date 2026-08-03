@@ -29,7 +29,9 @@ await page.waitForTimeout(600);
 const chip = (label) => page.locator('.nest-designer-chip', { hasText: new RegExp(`^${label}$`) }).first();
 const press = async (label) => { await chip(label).dispatchEvent('pointerdown'); await page.waitForTimeout(120); };
 
+// A fresh nest is exactly one piece: the Station.
 const before = await page.evaluate(() => window.blockScene.nestForTest().nodes.length);
+console.log(`\nSTARTING PLAN: ${before} piece(s)`);
 
 // DIG opens the designer.
 await page.locator('.density-lab-dig').first().dispatchEvent('pointerdown');
@@ -70,28 +72,43 @@ const drove = await page.evaluate(() => ({
 console.log(`  joystick stayed away   ${!drove.stick && drove.walk === 0 && drove.yaw === 0}`);
 
 /*
- * Place a room and join it to the deepest chamber, then dig it. Placing goes
- * through the panel, and the selection is set directly — tapping a node
- * on-screen needs it to be under a known pixel, and where that is depends on
- * the orbit, which is not what this probe is about.
+ * PRESS PLACE THREE TIMES AND SEE WHETHER A TUNNEL APPEARS.
+ *
+ * This is the whole of the rework. A fresh nest is one entrance — the Station
+ * — already selected, and PLACE hangs a new piece off whatever is selected and
+ * JOINS it. So three presses should give four nodes and three edges, in a
+ * chain, each one lower than the last.
+ *
+ * The previous version of this probe selected a node from the worked example
+ * by name and no longer had one to select, so PLACE fell back to dropping a
+ * loose node at the camera and the run reported zero edges. That was the probe
+ * being stale, but the failure it printed is exactly what a player saw before
+ * the rework: press the button, nothing joins up, nothing carves.
  */
-await page.evaluate(() => {
-  const d = window.blockScene.designerForTest();
-  d.selectForTest('node', 'royal');
-});
 await press('ROOM');
 await press('\\+ PLACE');
-await page.evaluate(() => window.blockScene.designerForTest().linkForTest('royal'));
-await page.waitForTimeout(150);
+await press('\\+ PLACE');
+await press('\\+ PLACE');
 
 const drawn = await page.evaluate(() => {
   const p = window.blockScene.designerForTest().current();
-  return { nodes: p.nodes.length, edges: p.edges.length, last: p.nodes[p.nodes.length - 1] };
+  return {
+    nodes: p.nodes.length,
+    edges: p.edges.length,
+    last: p.nodes[p.nodes.length - 1],
+    depths: p.nodes.map(n => Math.round(n.y)),
+    chained: p.edges.length === p.nodes.length - 1,
+  };
 });
-console.log('\nDRAWING');
-console.log(`  nodes ${before} → ${drawn.nodes}, edges now ${drawn.edges}`);
-console.log(`  new room at ${drawn.last.x.toFixed(0)}, ${drawn.last.y.toFixed(0)}, `
+console.log('\nBUILDING');
+console.log(`  nodes ${before} → ${drawn.nodes}, edges ${drawn.edges}`);
+console.log(`  one chain, no loose pieces  ${drawn.chained}`);
+console.log(`  depths (mm up)             ${drawn.depths.join(' → ')}`);
+console.log(`  newest piece at ${drawn.last.x.toFixed(0)}, ${drawn.last.y.toFixed(0)}, `
   + `${drawn.last.z.toFixed(0)} mm, r=${drawn.last.radiusMm}`);
+
+const descends = drawn.depths.every((d, i) => i === 0 || d < drawn.depths[i - 1]);
+console.log(`  each piece below the last  ${descends}`);
 
 const soilBefore = await page.evaluate((n) => window.blockScene.solidAtMm(n.x, n.y, n.z), drawn.last);
 await press('DIG IT');
@@ -120,7 +137,8 @@ console.log(`  back to playing        ${!closed.designing && closed.playControls
 
 const pass = opened.designing && opened.panel && !opened.playControlsVisible
   && swung > 1 && !drove.stick
-  && drawn.nodes === before + 1 && soilBefore === true && soilAfter === false
+  && before === 1 && drawn.nodes === 4 && drawn.edges === 3 && drawn.chained && descends
+  && soilBefore === true && soilAfter === false
   && undone === drawn.edges - 1
   && !closed.designing && closed.playControlsVisible;
 console.log(`\n  ${pass ? 'PASS' : 'FAIL'}\n`);
