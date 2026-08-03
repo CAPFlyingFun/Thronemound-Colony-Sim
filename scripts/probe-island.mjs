@@ -246,7 +246,12 @@ const rail = await page.evaluate(() => {
   const bound = s.statsForTest().railBound;
   // Ride the whole nest: forward to the store dead end...
   s.input.walk = 1;
-  let worstOffMm = 0;
+  // She CRAWLS the bore wall now (back to the centerline, legs on the
+  // tube): her riding depth is r - 1.3 mm, and the gap between where she
+  // is and that wall says whether she floats or clips. Joint hand-offs
+  // blend for a few frames, so the probe scores the SHARE of bad frames.
+  let gapWorst = 0;
+  let gapBad = 0;
   let railFrames = 0;
   let pitchOk = 0;
   for (let i = 0; i < 900; i += 1) {
@@ -254,7 +259,9 @@ const rail = await page.evaluate(() => {
     const st = s.railStateForTest();
     if (st.edge >= 0) {
       railFrames += 1;
-      worstOffMm = Math.max(worstOffMm, st.offMm);
+      const gap = (st.rMm - 1.3) - st.offMm;
+      gapWorst = Math.max(gapWorst, Math.abs(gap));
+      if (Math.abs(gap) > 2.5) gapBad += 1;
       // Body pitch follows the bore: quaternion forward vs the rail axis.
       // (Pose only runs once her model loads — skip the frames before.)
       if (s.queenReady) {
@@ -293,7 +300,8 @@ const rail = await page.evaluate(() => {
   return {
     bound,
     railFrames,
-    worstOffMm,
+    gapWorst,
+    gapBadShare: railFrames > 0 ? gapBad / railFrames : 1,
     pitchShare: railFrames > 0 ? pitchOk / railFrames : 0,
     atStore,
     outAt,
@@ -303,8 +311,8 @@ const rail = await page.evaluate(() => {
   };
 });
 check('the shaft handed her to the rail', rail.bound === 1);
-check('she stays ON the centerline bore', rail.worstOffMm < 4.5,
-  `worst offset ${rail.worstOffMm.toFixed(1)} mm of a 4-10 mm bore`);
+check('she crawls ON the bore wall, back to the centerline', rail.gapBadShare < 0.1,
+  `off the wall on ${(rail.gapBadShare * 100).toFixed(0)}% of ${rail.railFrames} rail frames, worst ${rail.gapWorst.toFixed(1)} mm`);
 check('her body pitch follows the tube', rail.pitchShare > 0.85,
   `${(rail.pitchShare * 100).toFixed(0)}% of ${rail.railFrames} rail frames aligned`);
 check('the rail delivered her to the store', rail.atStore < 14,

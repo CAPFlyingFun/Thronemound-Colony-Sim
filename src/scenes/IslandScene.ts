@@ -67,6 +67,20 @@ const SPRINT = 3;
 const TURN_RATE = 2.4;
 const RIDE = 1.3 / MM;
 
+/* Scratch space for the per-frame hot paths (rail, pose, camera) —
+ * allocated once and reused, so a minute of riding feeds the garbage
+ * collector nothing (the GC pauses read as hitches on the playtest PC). */
+const S_TAN = new THREE.Vector3();
+const S_PERP = new THREE.Vector3();
+const S_RAD = new THREE.Vector3();
+const S_CENTER = new THREE.Vector3();
+const S_TARGET = new THREE.Vector3();
+const S_FWD = new THREE.Vector3();
+const S_UP = new THREE.Vector3();
+const S_RIGHT = new THREE.Vector3();
+const S_MAT = new THREE.Matrix4();
+const S_QUAT = new THREE.Quaternion();
+
 /** The tallest ledge she steps up in one stride; anything higher is a WALL
  *  and blocks her — the fix for walking "through" tunnel ends. */
 const CLIMB_STEP = 2.5 / MM;
@@ -205,6 +219,14 @@ export class IslandScene {
   private readonly railForward = new THREE.Vector3(0, 0, 1);
 
   private readonly railUp = new THREE.Vector3(0, 1, 0);
+
+  /** Vertical-bore reverse latch: true while the back-pedal that already
+   *  turned her around is still held, so it only turns her ONCE. */
+  private railRev = false;
+
+  /** The remembered wall she crawls in a plumb shaft, where gravity picks
+   *  no floor — unit vector, kept perpendicular to the current bore. */
+  private readonly railWall = new THREE.Vector3(1, 0, 0);
 
   /** Earliest time (ms) the rail may grab her again after a DIG drop-off. */
   private railRegrabAt = 0;
@@ -751,14 +773,15 @@ export class IslandScene {
     }
   }
 
-  railStateForTest(): { edge: number; t: number; offMm: number } {
-    if (this.railEdge < 0) return { edge: -1, t: 0, offMm: -1 };
+  railStateForTest(): { edge: number; t: number; offMm: number; rMm: number } {
+    if (this.railEdge < 0) return { edge: -1, t: 0, offMm: -1, rMm: 0 };
     const e = this.rails[this.railEdge]!;
     const center = e.a.clone().lerp(e.b, Math.min(1, Math.max(0, this.railT)));
     return {
       edge: this.railEdge,
       t: this.railT,
       offMm: center.distanceTo(this.at) * MM,
+      rMm: e.r * MM,
     };
   }
 
@@ -808,7 +831,14 @@ export class IslandScene {
         this.railT = near.t;
         const e = this.rails[near.i]!;
         const tan = e.b.clone().sub(e.a).normalize();
-        this.railDir = (Math.sin(this.facing) * tan.x + Math.cos(this.facing) * tan.z) >= 0 ? 1 : -1;
+        /* A shaft is ENTERED downward; a level bore takes whichever way
+         * she faces. Her wall starts on the side she faced when the rail
+         * took her. */
+        this.railDir = Math.abs(tan.y) > 0.7
+          ? (tan.y > 0 ? -1 : 1)
+          : ((Math.sin(this.facing) * tan.x + Math.cos(this.facing) * tan.z) >= 0 ? 1 : -1);
+        this.railRev = false;
+        this.railWall.set(Math.sin(this.facing), 0, Math.cos(this.facing));
       }
     }
 
@@ -836,11 +866,16 @@ export class IslandScene {
         Math.min(12, Math.max(MESH_BUDGET, this.queue.length >> 4)),
       );
       let built = 0;
+      const meshStart = performance.now();
       while (built < budget && this.queue.length > 0) {
         const job = this.queue.shift()!;
         this.queued.delete(this.key(job.cx, job.cy, job.cz));
         this.meshChunk(job.cx, job.cy, job.cz);
         built += 1;
+        /* One chunk ALWAYS lands, but the frame never spends more than
+         * ~6 ms meshing — the playtest HUD's "last 74 ms" hitches were
+         * this loop eating a whole scroll's backlog in one gulp. */
+        if (performance.now() - meshStart > 6) break;
       }
       this.reveal();
     }
@@ -1045,20 +1080,27 @@ export class IslandScene {
    */
   private moveOnRail(dt: number, speed: number): void {
     const e = this.rails[this.railEdge]!;
-    const seg = e.b.clone().sub(e.a);
-    const len = seg.length();
-    const tan = seg.divideScalar(len);
+    const tan = S_TAN.copy(e.b).sub(e.a);
+    const len = tan.length();
+    tan.divideScalar(len);
     // Turning re-aims travel when her facing meaningfully agrees or
-    // disagrees with the bore. A VERTICAL bore has no facing to agree
-    // with: forward rides DOWN the shaft, pulling back rides it up —
-    // deterministic, instead of "keep the last direction", which parked
-    // her at the gate with the stick held forward once the gate stopped
-    // auto-ejecting.
+    // disagrees with the bore. A VERTICAL bore has no facing to steer
+    // with, so the HEADING is the state: forward rides the way she faces
+    // along the shaft, and pulling back TURNS HER AROUND — once. Release
+    // and push forward again and she carries on the NEW way (playtest:
+    // "as soon as I press W it doesn't continue that same direction").
     const align = Math.sin(this.facing) * tan.x + Math.cos(this.facing) * tan.z;
+    let drive = speed;
     if (Math.abs(tan.y) > 0.7) {
-      this.railDir = tan.y > 0 ? -1 : 1;
-    } else if (Math.abs(align) > 0.35) this.railDir = align >= 0 ? 1 : -1;
-    this.railT += (speed * this.railDir * dt) / len;
+      const reversing = speed < -1e-6;
+      if (reversing && !this.railRev) this.railDir = this.railDir === 1 ? -1 : 1;
+      this.railRev = reversing;
+      drive = Math.abs(speed);
+    } else {
+      this.railRev = false;
+      if (Math.abs(align) > 0.35) this.railDir = align >= 0 ? 1 : -1;
+    }
+    this.railT += (drive * this.railDir * dt) / len;
 
     if (this.railT > 1 || this.railT < 0) {
       const nodeId = this.railT > 1 ? e.to : e.from;
@@ -1097,32 +1139,50 @@ export class IslandScene {
          * parameter direction that CONTINUES the travel; when she is
          * riding backwards (walk < 0), the same continuation needs the
          * opposite mapping — without this she ping-ponged at every joint
-         * on the way out (the playtest's suspected "- for a +", found). */
-        this.railDir = speed < 0 ? (bestDir === 1 ? -1 : 1) : bestDir;
+         * on the way out (the playtest's suspected "- for a +", found).
+         * A VERTICAL next edge runs on |speed| along the heading instead,
+         * so there the continuation IS bestDir — and a held reverse was
+         * already spent turning her, so the latch must not flip again. */
+        const nt = this.rails[best]!;
+        const ny = Math.abs(nt.b.y - nt.a.y) / nt.b.distanceTo(nt.a);
+        if (ny > 0.7) {
+          this.railDir = bestDir;
+          this.railRev = speed < -1e-6;
+        } else {
+          this.railDir = speed < 0 ? (bestDir === 1 ? -1 : 1) : bestDir;
+          this.railRev = false;
+        }
       } else {
         this.railT = Math.min(1, Math.max(0, this.railT)); // dead end
       }
       return;
     }
 
-    // Down the middle of the tube, settled toward its floor: the offset is
-    // world-down projected off the axis, so a horizontal bore stands her on
-    // its floor and a vertical shaft centres her — smoothly in between.
-    const center = e.a.clone().lerp(e.b, this.railT);
-    const perp = new THREE.Vector3(0, -1, 0).addScaledVector(tan, tan.y);
-    const target = center.clone().addScaledVector(perp, Math.max(0, e.r - RIDE));
+    // She CRAWLS the bore, never floats in it: gravity settles her onto
+    // the floor of a level tube; a plumb shaft — where gravity picks no
+    // wall — keeps a REMEMBERED wall instead. Legs on the bore, back to
+    // the centerline (playtest's screenshot spec: top of the ant at the
+    // center point, legs away, crawling).
+    const center = S_CENTER.copy(e.a).lerp(e.b, Math.min(1, Math.max(0, this.railT)));
+    const perp = S_PERP.set(0, -1, 0).addScaledVector(tan, tan.y);
+    this.railWall.addScaledVector(tan, -this.railWall.dot(tan));
+    if (this.railWall.lengthSq() < 0.05) {
+      this.railWall.set(Math.sin(this.facing), 0, Math.cos(this.facing))
+        .addScaledVector(tan, -align);
+    }
+    this.railWall.normalize();
+    const level = perp.length(); // 1 in a level bore, 0 in a plumb shaft
+    const rad = S_RAD.copy(perp)
+      .addScaledVector(this.railWall, Math.max(0, 1 - level)).normalize();
+    const target = S_TARGET.copy(center).addScaledVector(rad, Math.max(0, e.r - RIDE));
     this.at.lerp(target, Math.min(1, dt * 12));
     /* She FACES the way she is travelling: pulling back rides the bore the
      * other way and the model turns WITH it, instead of moonwalking with
      * the stick held forward (playtest caught her walking backwards). */
-    if (Math.abs(speed) > 1e-6) {
-      this.railForward.copy(tan).multiplyScalar(this.railDir * (speed < 0 ? -1 : 1));
+    if (Math.abs(drive) > 1e-6) {
+      this.railForward.copy(tan).multiplyScalar(this.railDir * (drive < 0 ? -1 : 1));
     }
-    if (perp.lengthSq() > 0.1) {
-      this.railUp.copy(perp).multiplyScalar(-1).normalize();
-    } else if (Math.abs(this.railUp.dot(tan)) > 0.9) {
-      this.railUp.set(0, 1, 0).addScaledVector(tan, -tan.y).normalize();
-    }
+    this.railUp.copy(rad).multiplyScalar(-1);
     this.hasSafe = true;
     this.lastSafe.copy(this.at);
     this.embedFrames = 0;
@@ -1170,17 +1230,15 @@ export class IslandScene {
       /* On the rail her BODY follows the bore: pitch is the tube's axis,
        * up points back at the centerline, roll is nothing — playtest's
        * spec, and the end of the abdomen-through-the-shaft-wall shots. */
-      const fwd = this.railForward.clone().normalize();
-      const up0 = this.railUp.clone().addScaledVector(fwd, -this.railUp.dot(fwd));
+      const fwd = S_FWD.copy(this.railForward).normalize();
+      const up0 = S_UP.copy(this.railUp).addScaledVector(fwd, -this.railUp.dot(fwd));
       if (up0.lengthSq() < 0.05) up0.set(0, 1, 0).addScaledVector(fwd, -fwd.y);
       up0.normalize();
-      const right = new THREE.Vector3().crossVectors(up0, fwd).normalize();
+      const right = S_RIGHT.crossVectors(up0, fwd).normalize();
       this.queen.root.position.copy(this.at);
       /* Slerp instead of snap: turning to face the other way (and joint
        * hand-offs) reads as HER turning, not the model teleporting. */
-      const railPose = new THREE.Quaternion().setFromRotationMatrix(
-        new THREE.Matrix4().makeBasis(right, up0, fwd),
-      );
+      const railPose = S_QUAT.setFromRotationMatrix(S_MAT.makeBasis(right, up0, fwd));
       this.queen.root.quaternion.slerp(railPose, Math.min(1, dt * 10));
       this.queen.update(dt, {
         speed: Math.hypot(this.velocity.x, this.velocity.z),
@@ -1201,14 +1259,12 @@ export class IslandScene {
       - this.footingAt(this.at.x - probe, this.at.z)) / (probe * 2);
     const hz = (this.footingAt(this.at.x, this.at.z + probe)
       - this.footingAt(this.at.x, this.at.z - probe)) / (probe * 2);
-    const up = new THREE.Vector3(-hx, 1, -hz).normalize();
-    const forward = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
+    const up = S_UP.set(-hx, 1, -hz).normalize();
+    const forward = S_FWD.set(Math.sin(this.facing), 0, Math.cos(this.facing));
     forward.addScaledVector(up, -forward.dot(up)).normalize();
-    const right = new THREE.Vector3().crossVectors(up, forward).normalize();
+    const right = S_RIGHT.crossVectors(up, forward).normalize();
     this.queen.root.position.copy(this.at);
-    this.queen.root.quaternion.setFromRotationMatrix(
-      new THREE.Matrix4().makeBasis(right, up, forward),
-    );
+    this.queen.root.quaternion.setFromRotationMatrix(S_MAT.makeBasis(right, up, forward));
     this.queen.update(dt, {
       speed: Math.hypot(this.velocity.x, this.velocity.z),
       turn: -this.input.yaw * TURN_RATE,
@@ -1526,6 +1582,10 @@ export class IslandScene {
     this.trail.length = 0;
     this.underground = false;
     this.hasSafe = false;
+    /* A teleport leaves the rail behind like everything else it resets —
+     * stale rail state used to drag her back into the tunnel she left. */
+    this.railEdge = -1;
+    this.railRev = false;
     if (this.stream) {
       const scroll = this.stream.recentreOn(this.at.x, this.at.z);
       if (scroll) this.onScroll(scroll);
