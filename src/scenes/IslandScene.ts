@@ -92,6 +92,17 @@ const SCROLL_COOLDOWN_MS = 150;
 const BITE_RADIUS = 1.9 / MM;
 const BITE_EVERY_S = 0.16;
 
+/** Riding within this of the surface gate OFFERS the exit (playtest asked
+ *  for a yes/no at "like 2mm" instead of being thrown out to daylight). */
+const SURFACE_ASK_MM = 2.5;
+
+/** A declined offer re-arms once she rides this far from the gate again. */
+const SURFACE_RESET_MM = 6;
+
+/** DIG drops her off the rail; the snap-on waits this long so releasing
+ *  the button doesn't glue her straight back to the centerline. */
+const RAIL_REGRAB_S = 1.5;
+
 export class IslandScene {
   ready = false;
 
@@ -194,6 +205,21 @@ export class IslandScene {
   private readonly railForward = new THREE.Vector3(0, 0, 1);
 
   private readonly railUp = new THREE.Vector3(0, 1, 0);
+
+  /** Earliest time (ms) the rail may grab her again after a DIG drop-off. */
+  private railRegrabAt = 0;
+
+  private surfacePromptEl: HTMLElement | null = null;
+
+  private surfaceDeclined = false;
+
+  private surfaceGateId: string | null = null;
+
+  /** Render scale breathes with the frame rate (phones): capped at retina,
+   *  never below 1x. */
+  private readonly pixelCap = Math.min(window.devicePixelRatio, 2);
+
+  private pixelRatioNow = this.pixelCap;
 
   /** The last position whose centre provably sampled AIR — the anchor the
    *  anti-embed safety net snaps back to. */
@@ -712,6 +738,19 @@ export class IslandScene {
 
   setMeshBudgetCapForTest(cap: number): void { this.meshBudgetCapForTest = cap; }
 
+  surfaceOfferForTest(): boolean {
+    return this.surfacePromptEl !== null && this.surfacePromptEl.style.display !== 'none';
+  }
+
+  answerSurfaceForTest(yes: boolean): void {
+    if (yes && this.surfaceGateId) {
+      this.surfaceNow(this.surfaceGateId);
+    } else {
+      this.surfaceDeclined = true;
+      this.hideSurfacePrompt();
+    }
+  }
+
   railStateForTest(): { edge: number; t: number; offMm: number } {
     if (this.railEdge < 0) return { edge: -1, t: 0, offMm: -1 };
     const e = this.rails[this.railEdge]!;
@@ -733,7 +772,10 @@ export class IslandScene {
 
     // Digging hands her back to the free walker: the rail is the PLAN's
     // tunnels, and a mandible is how new ones that aren't on it get made.
-    if (this.railEdge >= 0 && this.input.dig) this.railEdge = -1;
+    if (this.railEdge >= 0 && this.input.dig) {
+      this.railEdge = -1;
+      this.railRegrabAt = performance.now() + RAIL_REGRAB_S * 1000;
+    }
 
     if (this.railEdge >= 0) {
       this.moveOnRail(dt, speed);
@@ -758,7 +800,8 @@ export class IslandScene {
      * and the noisy free-walker pose that let her abdomen swing through
      * the shaft wall never runs down there at all.
      */
-    if (this.railEdge < 0 && this.underground && !this.input.dig && this.rails.length > 0) {
+    if (this.railEdge < 0 && this.underground && !this.input.dig && this.rails.length > 0
+      && performance.now() >= this.railRegrabAt) {
       const near = this.nearestRail(this.at);
       if (near && near.d < this.rails[near.i]!.r * 1.6) {
         this.railEdge = near.i;
@@ -802,8 +845,105 @@ export class IslandScene {
       this.reveal();
     }
 
+    this.updateSurfaceOffer();
     this.pose(dt);
     this.aimCamera(dt);
+  }
+
+  /* ------------------------------------------------- the surface offer */
+
+  /**
+   * The gate ASKS instead of ejecting: near an entrance node the SURFACE?
+   * prompt appears, YES hands her back to daylight, NO parks the offer
+   * until she rides away and returns — playtest's spec, verbatim.
+   */
+  private updateSurfaceOffer(): void {
+    if (this.railEdge < 0) {
+      this.hideSurfacePrompt();
+      /* A NO survives a DIG drop-off and re-grab: only DISTANCE re-arms
+       * the offer, otherwise dropping off the rail right at the gate
+       * would ask again the moment the rail takes her back. */
+      if (this.surfaceDeclined) {
+        let dist = Infinity;
+        for (const node of this.railNodes.values()) {
+          if (node.kind !== 'entrance') continue;
+          dist = Math.min(dist, this.at.distanceTo(node.p));
+        }
+        if (dist * MM > SURFACE_RESET_MM) this.surfaceDeclined = false;
+      }
+      return;
+    }
+    /* Distance is measured along the tube — from her point ON the
+     * centerline, not her body (which rides offset toward the floor by
+     * nearly the bore radius and would never get "2 mm close"). */
+    const e = this.rails[this.railEdge]!;
+    const center = e.a.clone().lerp(e.b, Math.min(1, Math.max(0, this.railT)));
+    let gateId: string | null = null;
+    let dist = Infinity;
+    for (const [id, node] of this.railNodes) {
+      if (node.kind !== 'entrance') continue;
+      const d = center.distanceTo(node.p);
+      if (d < dist) { dist = d; gateId = id; }
+    }
+    if (gateId === null) return;
+    if (dist * MM <= SURFACE_ASK_MM) {
+      if (!this.surfaceDeclined) this.showSurfacePrompt(gateId);
+    } else {
+      this.hideSurfacePrompt();
+      if (dist * MM > SURFACE_RESET_MM) this.surfaceDeclined = false;
+    }
+  }
+
+  private surfaceNow(gateId: string): void {
+    const node = this.railNodes.get(gateId);
+    if (!node) return;
+    this.railEdge = -1;
+    this.at.set(node.p.x, this.walkGroundAt(node.p.x, node.p.z) + RIDE, node.p.z);
+    this.trail.length = 0;
+    this.surfaceDeclined = false;
+    this.hideSurfacePrompt();
+  }
+
+  private showSurfacePrompt(gateId: string): void {
+    this.surfaceGateId = gateId;
+    if (this.surfacePromptEl) {
+      this.surfacePromptEl.style.display = '';
+      return;
+    }
+    const box = document.createElement('div');
+    box.className = 'density-lab-surface-ask';
+    box.style.cssText = 'position:absolute;left:50%;bottom:20%;transform:translateX(-50%);'
+      + 'display:flex;gap:10px;align-items:center;padding:10px 14px;border-radius:14px;'
+      + 'background:rgba(20,20,20,.85);color:#f4e9c8;'
+      + 'font:600 14px/1 ui-monospace,monospace;z-index:30;';
+    const label = document.createElement('span');
+    label.textContent = 'SURFACE?';
+    box.appendChild(label);
+    const yes = document.createElement('button');
+    yes.className = 'density-lab-button density-lab-mode';
+    yes.textContent = 'YES';
+    yes.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (this.surfaceGateId) this.surfaceNow(this.surfaceGateId);
+    });
+    box.appendChild(yes);
+    const no = document.createElement('button');
+    no.className = 'density-lab-button density-lab-mode';
+    no.textContent = 'NO';
+    no.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.surfaceDeclined = true;
+      this.hideSurfacePrompt();
+    });
+    box.appendChild(no);
+    this.hud.appendChild(box);
+    this.surfacePromptEl = box;
+  }
+
+  private hideSurfacePrompt(): void {
+    if (this.surfacePromptEl) this.surfacePromptEl.style.display = 'none';
   }
 
   /**
@@ -909,9 +1049,15 @@ export class IslandScene {
     const len = seg.length();
     const tan = seg.divideScalar(len);
     // Turning re-aims travel when her facing meaningfully agrees or
-    // disagrees with the bore; near-vertical bores keep the last direction.
+    // disagrees with the bore. A VERTICAL bore has no facing to agree
+    // with: forward rides DOWN the shaft, pulling back rides it up —
+    // deterministic, instead of "keep the last direction", which parked
+    // her at the gate with the stick held forward once the gate stopped
+    // auto-ejecting.
     const align = Math.sin(this.facing) * tan.x + Math.cos(this.facing) * tan.z;
-    if (Math.abs(align) > 0.35) this.railDir = align >= 0 ? 1 : -1;
+    if (Math.abs(tan.y) > 0.7) {
+      this.railDir = tan.y > 0 ? -1 : 1;
+    } else if (Math.abs(align) > 0.35) this.railDir = align >= 0 ? 1 : -1;
     this.railT += (speed * this.railDir * dt) / len;
 
     if (this.railT > 1 || this.railT < 0) {
@@ -919,10 +1065,10 @@ export class IslandScene {
       const node = this.railNodes.get(nodeId);
       const travel = tan.clone().multiplyScalar(this.railT > 1 ? 1 : -1);
       if (node && node.kind === 'entrance') {
-        // Out the gate: back to daylight and the free walker.
-        this.railEdge = -1;
-        this.at.set(node.p.x, this.walkGroundAt(node.p.x, node.p.z) + RIDE, node.p.z);
-        this.trail.length = 0;
+        /* The gate no longer ejects her: she parks at the joint and the
+         * SURFACE? prompt (see updateSurfaceOffer) decides — playtest kept
+         * wanting to stay in and got thrown out to daylight instead. */
+        this.railT = Math.min(1, Math.max(0, this.railT));
         return;
       }
       let best = -1;
@@ -966,7 +1112,12 @@ export class IslandScene {
     const perp = new THREE.Vector3(0, -1, 0).addScaledVector(tan, tan.y);
     const target = center.clone().addScaledVector(perp, Math.max(0, e.r - RIDE));
     this.at.lerp(target, Math.min(1, dt * 12));
-    this.railForward.copy(tan).multiplyScalar(this.railDir);
+    /* She FACES the way she is travelling: pulling back rides the bore the
+     * other way and the model turns WITH it, instead of moonwalking with
+     * the stick held forward (playtest caught her walking backwards). */
+    if (Math.abs(speed) > 1e-6) {
+      this.railForward.copy(tan).multiplyScalar(this.railDir * (speed < 0 ? -1 : 1));
+    }
     if (perp.lengthSq() > 0.1) {
       this.railUp.copy(perp).multiplyScalar(-1).normalize();
     } else if (Math.abs(this.railUp.dot(tan)) > 0.9) {
@@ -1025,9 +1176,12 @@ export class IslandScene {
       up0.normalize();
       const right = new THREE.Vector3().crossVectors(up0, fwd).normalize();
       this.queen.root.position.copy(this.at);
-      this.queen.root.quaternion.setFromRotationMatrix(
+      /* Slerp instead of snap: turning to face the other way (and joint
+       * hand-offs) reads as HER turning, not the model teleporting. */
+      const railPose = new THREE.Quaternion().setFromRotationMatrix(
         new THREE.Matrix4().makeBasis(right, up0, fwd),
       );
+      this.queen.root.quaternion.slerp(railPose, Math.min(1, dt * 10));
       this.queen.update(dt, {
         speed: Math.hypot(this.velocity.x, this.velocity.z),
         turn: -this.input.yaw * TURN_RATE,
@@ -1309,6 +1463,7 @@ export class IslandScene {
       (${this.stats.rebases} rebases) · last ${this.stats.lastScrollMs.toFixed(0)} ms<br>
       at (${(this.at.x * MM / 1000).toFixed(1)}, ${(this.at.z * MM / 1000).toFixed(1)}) m ·
       ${memory ? `heap ${(memory.usedJSHeapSize / 1048576).toFixed(0)} MB · ` : ''}fps ${this.stats.fps}
+      @ ${this.pixelRatioNow.toFixed(2)}x
     `;
   }
 
@@ -1325,6 +1480,19 @@ export class IslandScene {
       this.stats.fps = Math.round(this.stats.frames * 1000 / (now - this.stats.fpsAt));
       this.stats.frames = 0;
       this.stats.fpsAt = now;
+      /* Resolution breathes with the frame rate: a phone that cannot hold
+       * ~30 fps at retina scale drops a notch (never below 1x) and earns
+       * it back above 55 — the single biggest lever on a fillrate-bound
+       * iPhone, and invisible on a desktop that never dips. */
+      if (this.stats.fps < 28 && this.pixelRatioNow > 1) {
+        this.pixelRatioNow = Math.max(1, this.pixelRatioNow - 0.25);
+        this.renderer.setPixelRatio(this.pixelRatioNow);
+        this.resize();
+      } else if (this.stats.fps > 55 && this.pixelRatioNow < this.pixelCap) {
+        this.pixelRatioNow = Math.min(this.pixelCap, this.pixelRatioNow + 0.25);
+        this.renderer.setPixelRatio(this.pixelRatioNow);
+        this.resize();
+      }
       this.updateStatus();
     }
 

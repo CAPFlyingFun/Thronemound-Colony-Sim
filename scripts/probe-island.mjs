@@ -271,12 +271,17 @@ const rail = await page.evaluate(() => {
     s.at.x * 5 - n.store.x, s.at.y * 5 - n.store.y, s.at.z * 5 - n.store.z,
   );
   // ...then back out: pulling BACK is how you ride a vertical bore upward.
-  // Stop the moment she surfaces, the way a thumb would — holding reverse
-  // blindly walks her backwards over the mound and into the vent again.
+  // The gate no longer ejects her — it ASKS. The probe's thumb presses YES
+  // the moment the SURFACE? offer appears, then expects daylight.
   s.input.walk = -1;
   let outAt = -1;
+  let offeredAt = -1;
   for (let i = 0; i < 1600; i += 1) {
     s.stepForTest(1 / 30, 1);
+    if (offeredAt < 0 && s.surfaceOfferForTest()) {
+      offeredAt = i;
+      s.answerSurfaceForTest(true);
+    }
     if (s.statsForTest().railBound === 0
       && s.at.y * 5 >= s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5) - 2) {
       outAt = i;
@@ -292,6 +297,7 @@ const rail = await page.evaluate(() => {
     pitchShare: railFrames > 0 ? pitchOk / railFrames : 0,
     atStore,
     outAt,
+    offeredAt,
     railBoundAfter: s.statsForTest().railBound,
     aboveMm: s.at.y * 5 - surface,
   };
@@ -303,6 +309,8 @@ check('her body pitch follows the tube', rail.pitchShare > 0.85,
   `${(rail.pitchShare * 100).toFixed(0)}% of ${rail.railFrames} rail frames aligned`);
 check('the rail delivered her to the store', rail.atStore < 14,
   `${rail.atStore.toFixed(1)} mm from the chamber`);
+check('the gate ASKS instead of ejecting', rail.offeredAt >= 0,
+  `SURFACE? offered after ${rail.offeredAt} steps`);
 check('riding back surfaces her at the gate',
   rail.outAt >= 0 && rail.railBoundAfter === 0 && rail.aboveMm > -6,
   `out after ${rail.outAt} steps, ${rail.aboveMm.toFixed(1)} mm vs surface`);
