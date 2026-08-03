@@ -27,8 +27,15 @@ import type { Field } from '../voxel/carve';
 /** Millimetres per world unit, project-wide. */
 export const MM = 5;
 
-/** The logical world: 4.096 m square. Streaming makes this cheap to raise. */
-export const WORLD_MM = 4096;
+/**
+ * The logical world: 57.3 m square — "a max of about 56 meters", rounded up
+ * so every tile size in play divides it exactly (57,344 = 7 × 8,192 macro
+ * far-tiles = 1,792 stream tiles). Over six thousand queen lengths across.
+ * Raising it from 4 m cost NOTHING in the soil layer — the resident window
+ * is the same 192 mm either way — the price was paid in MacroSurface, which
+ * now streams rings of tiles around her instead of building one whole sheet.
+ */
+export const WORLD_MM = 57344;
 
 /** How deep the diggable soil column is, everywhere. */
 export const SOIL_DEPTH_MM = 256;
@@ -69,12 +76,16 @@ export const WINDOW_BYTES =
   (WINDOW_CELLS + 1) ** 2 * SAMPLES_Y * Float32Array.BYTES_PER_ELEMENT;
 
 /**
- * The landscape. Nominal ground sits at 208 mm of the 256 mm column, so the
- * deepest valleys keep ~170 mm of soil under them and the tallest hills stay
- * under the column's ceiling.
+ * The landscape. All the relief has to fit inside the 256 mm soil column,
+ * so this is rolling country, not mountains: nominal ground at 185 mm,
+ * crests near 238 mm, valley floors near 132 mm — which still leaves
+ * 130 mm of diggable soil under the deepest hollow. At fire-ant scale that
+ * is plenty: a 30 mm rise IS a hill to a 9 mm animal, and it repeats every
+ * ~13 m, so the world reads as country to walk across, not corrugation.
  *
  * Octave jobs, at fire-ant scale (a 9 mm animal):
- *   ~1500 mm   the hill you are on — a landmark, not an obstacle
+ *   ~13 m      the country — ridgelines you navigate by for minutes
+ *   ~1.5 m     the hill you are on — a landmark, not an obstacle
  *   ~430 mm    rises and hollows you choose between
  *   ~140 mm    the roughness of a slope under one ant
  *   ~45 mm     grit — amplitude well above the mesher's weld limit,
@@ -84,27 +95,29 @@ export const WINDOW_BYTES =
  * that reads as a checkerboard from ant height.
  */
 export function heightMmAt(xMm: number, zMm: number): number {
-  return 208
-    + 24 * Math.sin(xMm * 0.00405) * Math.cos(zMm * 0.00437)
-    + 9 * Math.sin(xMm * 0.0146 + 1.7) * Math.cos(zMm * 0.0171 - 0.9)
-    + 3 * Math.sin(xMm * 0.0447 - 0.4) * Math.cos(zMm * 0.0409 + 2.2)
-    + 0.9 * Math.sin(xMm * 0.139 + 0.8) * Math.cos(zMm * 0.151 - 1.3);
+  return 185
+    + 30 * Math.sin(xMm * 0.00052) * Math.cos(zMm * 0.00047)
+    + 14 * Math.sin(xMm * 0.00405 + 1.0) * Math.cos(zMm * 0.00437 - 0.4)
+    + 6 * Math.sin(xMm * 0.0146 + 1.7) * Math.cos(zMm * 0.0171 - 0.9)
+    + 2 * Math.sin(xMm * 0.0447 - 0.4) * Math.cos(zMm * 0.0409 + 2.2)
+    + 0.7 * Math.sin(xMm * 0.139 + 0.8) * Math.cos(zMm * 0.151 - 1.3);
 }
 
 /** How far soil is closed in from the world's outer faces, in world units. */
 export const WORLD_MARGIN = CELL_SIZE * 1.5;
 
 /**
- * THE NEST THE WORLD IS BORN WITH — the prototype's proof piece.
+ * THE NEST THE WORLD IS BORN WITH — the prototype's proof piece, planted at
+ * the world's centre.
  *
- * Authored so the drift crosses several 32 mm tile lines (2048 → 2160 mm
- * crosses three) and the entrance opens through the surface via the same
+ * Authored so the drift crosses several 32 mm tile lines (the run from the
+ * hall spans three) and the entrance opens through the surface via the same
  * mound-and-vent carving the block room ships. Later this comes from the
  * Nest Designer; the architecture does not care where the plan came from.
  */
 export function worldPlan(): NestPlan {
-  const ex = 2048;
-  const ez = 2048;
+  const ex = WORLD_MM / 2;
+  const ez = WORLD_MM / 2;
   const ground = heightMmAt(ex, ez);
   return {
     nodes: [

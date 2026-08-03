@@ -129,7 +129,13 @@ export class WorldScene {
 
   private readonly status: HTMLElement;
 
-  private debugBoxes = true;
+  /*
+   * OFF by default, learned from a bug report: the debug tile grid draws at
+   * a fixed height, and where the land rises past it the lines slice through
+   * the hills — read from a phone as "holes in the terrain". It is a
+   * diagnostic, so it starts dark and BOXES turns it on.
+   */
+  private debugBoxes = false;
 
   private readonly windowBox: THREE.LineSegments;
 
@@ -161,14 +167,17 @@ export class WorldScene {
      * was airtight all along. Hazing the distance toward a pale dust tone
      * keeps far hills reading as land under atmosphere.
      */
-    this.scene.fog = new THREE.Fog(0xbcb29c, WINDOW_MM / MM * 1.2, WORLD_SPAN * 0.7);
-    this.camera = new THREE.PerspectiveCamera(60, 1, 0.05, WORLD_SPAN * 2);
+    /* Fog full at 18 m: in a 57 m world the far plane sits just past it, so
+     * the frustum culls what the fog has already erased — the depth buffer
+     * keeps its precision and the far tiles beyond never cost a draw. */
+    this.scene.fog = new THREE.Fog(0xbcb29c, WINDOW_MM / MM * 1.2, 3600);
+    this.camera = new THREE.PerspectiveCamera(60, 1, 0.1, 4200);
 
     const sun = new THREE.DirectionalLight(0xfff2dd, 2.1);
     sun.position.set(300, 500, 200);
     this.scene.add(sun, new THREE.AmbientLight(0xbfd4e8, 0.75));
 
-    // The landscape sheet, then the streamed soil under the spawn.
+    // The landscape rings, then the streamed soil under the spawn.
     this.macro = new MacroSurface();
     this.scene.add(this.macro.root);
 
@@ -177,6 +186,7 @@ export class WorldScene {
       spawn.x / MM, 0, (spawn.z - spawn.radiusMm * 3.2 - 8) / MM,
     );
     this.at.y = groundHeightAt(this.at.x, this.at.z) + RIDE;
+    this.macro.update(this.at.x * MM, this.at.z * MM, Infinity);
 
     this.stream = new WorldStream(this.at.x, this.at.z);
     const t0 = performance.now();
@@ -430,6 +440,7 @@ export class WorldScene {
       built += 1;
     }
     this.reveal();
+    this.macro.update(this.at.x * MM, this.at.z * MM);
 
     this.pose(dt);
     this.aimCamera(dt);
@@ -585,8 +596,8 @@ export class WorldScene {
     this.stats.meshedChunks = this.chunkMeshes.size;
     const memory = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
     this.status.innerHTML = `
-      <b>hybrid world</b> · ${WORLD_SPAN * MM / 1000} m² · window ${WINDOW_MM} mm · 1 mm cells<br>
-      surface tiles ${this.macro.tileCount} (${this.macro.vertexCount.toLocaleString()} v) ·
+      <b>hybrid world</b> · ${(WORLD_SPAN * MM / 1000).toFixed(1)} m square · window ${WINDOW_MM} mm · 1 mm cells<br>
+      surface tiles ${this.macro.tileCount}${this.macro.pendingTiles > 0 ? ` (+${this.macro.pendingTiles} queued)` : ''} (${this.macro.vertexCount.toLocaleString()} v) ·
       soil chunks ${this.stats.meshedChunks}/${CHUNKS_XZ * CHUNKS_XZ * CHUNKS_Y} · queued ${this.queue.length}<br>
       window samples ${((WINDOW_CELLS + 1) ** 2 * SAMPLES_Y / 1e6).toFixed(1)} M
       (${(WINDOW_BYTES / 1048576).toFixed(1)} MB) · dug ${this.stream.editedSamples}<br>
@@ -633,7 +644,13 @@ export class WorldScene {
   private resize(): void {
     const w = this.host.clientWidth || 1;
     const h = this.host.clientHeight || 1;
-    this.renderer.setSize(w, h, false);
+    /*
+     * updateStyle stays TRUE. Passing false here on a devicePixelRatio-2
+     * phone displays the canvas at its buffer size — twice the viewport,
+     * pinned top-left, the ant off in a corner. The density lab shipped this
+     * exact bug once; smoke-density.mjs tells the story.
+     */
+    this.renderer.setSize(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
   }
@@ -663,6 +680,7 @@ export class WorldScene {
     this.velocity.set(0, 0, 0);
     const scroll = this.stream.recentreOn(this.at.x, this.at.z);
     if (scroll) this.onScroll(scroll);
+    this.macro.update(xMm, zMm, Infinity);
   }
 
   originMm(): { x: number; z: number } {
@@ -687,6 +705,7 @@ export class WorldScene {
       this.meshChunk(job.cx, job.cy, job.cz);
     }
     this.reveal();
+    this.macro.drainForTest();
   }
 
   setFacingForTest(radians: number): void { this.facing = radians; }

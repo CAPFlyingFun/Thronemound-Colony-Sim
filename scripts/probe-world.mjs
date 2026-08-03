@@ -31,11 +31,16 @@ const OUT = process.env.SMOKE_OUT ?? '/tmp/world-probe';
 
 /* The world's height function, duplicated from worldScape.ts so the probe can
  * aim its samples. If the octaves change there, change them here. */
-const heightMmAt = (x, z) => 208
-  + 24 * Math.sin(x * 0.00405) * Math.cos(z * 0.00437)
-  + 9 * Math.sin(x * 0.0146 + 1.7) * Math.cos(z * 0.0171 - 0.9)
-  + 3 * Math.sin(x * 0.0447 - 0.4) * Math.cos(z * 0.0409 + 2.2)
-  + 0.9 * Math.sin(x * 0.139 + 0.8) * Math.cos(z * 0.151 - 1.3);
+const heightMmAt = (x, z) => 185
+  + 30 * Math.sin(x * 0.00052) * Math.cos(z * 0.00047)
+  + 14 * Math.sin(x * 0.00405 + 1.0) * Math.cos(z * 0.00437 - 0.4)
+  + 6 * Math.sin(x * 0.0146 + 1.7) * Math.cos(z * 0.0171 - 0.9)
+  + 2 * Math.sin(x * 0.0447 - 0.4) * Math.cos(z * 0.0409 + 2.2)
+  + 0.7 * Math.sin(x * 0.139 + 0.8) * Math.cos(z * 0.151 - 1.3);
+
+/* The nest sits at the centre of the 57,344 mm world. */
+const EX = 28672;
+const EZ = 28672;
 
 const browser = await chromium.launch({
   executablePath: process.env.CHROME_PATH ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
@@ -85,27 +90,27 @@ for (const p of seam.points) {
 
 /* -------------------- 3. the born nest is open, across 32 mm tile lines */
 console.log('\nNEST TUNNELS IN THE STREAMED SOIL');
-const G = heightMmAt(2048, 2048);
-/* The drift runs hall (2048, G-56) → bend (2112, G-72): the probe samples it
- * mid-tile and ON the 2080 tile line. The shaft is sampled under the gate. */
+const G = heightMmAt(EX, EZ);
+/* The drift runs hall (EX, G-56) → bend (EX+64, G-72): the probe samples it
+ * mid-tile and ON a 32 mm tile line. The shaft is sampled under the gate. */
 const tunnelPoints = [
-  ['shaft below gate', 2048, G - 20, 2048],
-  ['shaft at hall', 2048, G - 56, 2048],
-  ['drift mid-tile', 2064, G - 60, 2050.5],
-  ['drift on the 2080 tile line', 2080, G - 64, 2053],
+  ['shaft below gate', EX, G - 20, EZ],
+  ['shaft at hall', EX, G - 56, EZ],
+  ['drift mid-tile', EX + 16, G - 60, EZ + 2.5],
+  ['drift on a tile line', EX + 32, G - 64, EZ + 5],
 ];
-/* The store sits at x = 2160 mm — outside a gate-centred window, which is
- * the point: it only ever exists by being streamed in. Checked from its own
- * stance at (2130, 2050). */
+/* The store sits 112 mm east of the gate — outside a gate-centred window,
+ * which is the point: it only ever exists by being streamed in. Checked from
+ * its own stance. */
 const storePoints = [
-  ['store chamber', 2160, G - 84, 2066],
+  ['store chamber', EX + 112, G - 84, EZ + 18],
 ];
 const soilPoints = [
-  ['soil beside the shaft', 2070, G - 30, 2048],
-  ['soil above the drift', 2080, G - 40, 2053],
+  ['soil beside the shaft', EX + 22, G - 30, EZ],
+  ['soil above the drift', EX + 32, G - 40, EZ + 5],
 ];
 const storeSoilPoints = [
-  ['soil below the store', 2160, G - 110, 2066],
+  ['soil below the store', EX + 112, G - 110, EZ + 18],
 ];
 const probeSolids = async (points) => page.evaluate(
   (ps) => ps.map(([name, x, y, z]) => [name, window.worldScene.solidAtMm(x, y, z)]),
@@ -121,29 +126,29 @@ for (const [name, solid] of await probeSolids(tunnelPoints)) {
 for (const [name, solid] of await probeSolids(soilPoints)) {
   check(`${name} is soil`, solid === true, `solidAtMm=${solid}`);
 }
-await visit(2130, 2050);
+await visit(EX + 82, EZ + 2);
 for (const [name, solid] of await probeSolids(storePoints)) {
   check(`${name} is air`, solid === false, `solidAtMm=${solid}`);
 }
 for (const [name, solid] of await probeSolids(storeSoilPoints)) {
   check(`${name} is soil`, solid === true, `solidAtMm=${solid}`);
 }
-await visit(2048, 2014);
+await visit(EX, EZ - 34);
 
 /* --------------------------- 4. the entrance is open THROUGH the surface */
 console.log('\nTHE ENTRANCE');
 const gate = await page.evaluate(() => {
   const s = window.worldScene;
   return {
-    fineTopMm: s.stream.surfaceHeightAt(2048 / 5, 2048 / 5) * 5,
-    rimTopMm: s.stream.surfaceHeightAt(2072 / 5, 2048 / 5) * 5,
+    fineTopMm: s.stream.surfaceHeightAt(28672 / 5, 28672 / 5) * 5,
+    rimTopMm: s.stream.surfaceHeightAt((28672 + 24) / 5, 28672 / 5) * 5,
   };
 });
 check('live surface at the gate falls into the shaft',
   gate.fineTopMm < G - 30,
   `top ${gate.fineTopMm.toFixed(1)} mm vs ground ${G.toFixed(1)} mm`);
 check('the rim beside it is still ground height',
-  Math.abs(gate.rimTopMm - heightMmAt(2072, 2048)) < 6,
+  Math.abs(gate.rimTopMm - heightMmAt(EX + 24, EZ)) < 6,
   `rim ${gate.rimTopMm.toFixed(1)} mm (mound may raise it)`);
 
 /* ------------------------------------------- 5. leave, return, reconstruct */
@@ -152,17 +157,17 @@ await page.evaluate(() => window.worldScene.teleportMm(1000, 1000));
 await page.evaluate(() => window.worldScene.drainQueueForTest());
 const away = await page.evaluate(() => ({
   origin: window.worldScene.originMm(),
-  gateLoaded: window.worldScene.solidAtMm(2048, 180, 2048),
+  gateLoaded: window.worldScene.solidAtMm(28672, 180, 28672),
 }));
 check('window followed the teleport', Math.abs(away.origin.x - 904) < 64,
   `origin ${away.origin.x}, ${away.origin.z} mm`);
 check('gate column is unloaded while away', away.gateLoaded === null);
 
-await visit(2048, 2020);
+await visit(EX, EZ - 28);
 for (const [name, solid] of await probeSolids(tunnelPoints)) {
   check(`${name} is air AGAIN`, solid === false, `solidAtMm=${solid}`);
 }
-await visit(2130, 2050);
+await visit(EX + 82, EZ + 2);
 for (const [name, solid] of await probeSolids(storePoints)) {
   check(`${name} is air AGAIN`, solid === false, `solidAtMm=${solid}`);
 }
