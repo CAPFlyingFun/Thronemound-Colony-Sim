@@ -15,7 +15,7 @@ export default defineConfig(({ command }) => ({
     host: true,
     // Replit proxies the preview through its own domain — allow all hosts so
     // the iframe doesn't get a 403.
-    allowedHosts: 'all',
+    allowedHosts: true,
   },
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
