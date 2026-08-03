@@ -185,6 +185,114 @@ for (const [name, walk] of walks) {
     `worst clearance ${walk.minClearMm.toFixed(2)} mm`);
 }
 
+console.log('\nINTO THE HOLE (the playtest bug: "it bounced me back up")');
+const descent = await page.evaluate(() => {
+  const s = window.islandScene;
+  const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
+  // Start two body lengths west of the gate, walk east across it.
+  s.teleportMm(n.gate.x - 18, n.gate.z);
+  s.drainQueueForTest();
+  s.setFacingForTest(Math.PI / 2);
+  s.input.walk = 1;
+  let deepest = Infinity;
+  let bouncedUp = 0;
+  let wasUnder = false;
+  for (let i = 0; i < 900; i += 1) {
+    s.stepForTest(1 / 30, 1);
+    const y = s.at.y * 5;
+    const surface = s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5);
+    const under = y < surface - 6;
+    if (under) wasUnder = true;
+    // Once she is underground, popping back ABOVE the surface without
+    // climbing (no wall contact reported) is the old roof-yank bug.
+    if (wasUnder && y > surface + 3) bouncedUp += 1;
+    deepest = Math.min(deepest, y - surface);
+    if (deepest < -40) break; // she's properly down the shaft — stop there
+  }
+  s.input.walk = 0;
+  return { deepest, bouncedUp, under: s.statsForTest().underground };
+});
+check('she gets INTO the hole', descent.deepest < -30,
+  `deepest ${descent.deepest.toFixed(1)} mm below the surface`);
+check('and is never yanked back through the roof', descent.bouncedUp === 0,
+  `${descent.bouncedUp} bounce frames`);
+check('the scene knows she is underground', descent.under === 1);
+
+console.log('\nTHE UNDERGROUND CHASE CAMERA');
+const chase = await page.evaluate(() => {
+  const s = window.islandScene;
+  // Keep walking along the drift so the trail has shape, then let the
+  // camera settle.
+  s.input.walk = 1;
+  s.stepForTest(1 / 30, 120);
+  s.input.walk = 0;
+  s.stepForTest(1 / 30, 40);
+  const camY = s.camera.position.y * 5;
+  const surfaceAtCam = s.renderedHeightAtMm(s.camera.position.x * 5, s.camera.position.z * 5);
+  return {
+    dist: s.camera.position.distanceTo(s.at) * 5,
+    camBelowSurface: camY < surfaceAtCam,
+  };
+});
+check('the camera follows a few mm behind her', chase.dist > 2 && chase.dist < 12,
+  `${chase.dist.toFixed(1)} mm back`);
+check('and is itself inside the tunnel, not the hillside sky',
+  chase.camBelowSurface === true);
+
+console.log('\nCLIMBING OUT (held stick against the shaft wall)');
+const escape = await page.evaluate(() => {
+  const s = window.islandScene;
+  s.input.walk = 1;
+  s.setFacingForTest(-Math.PI / 2); // face back west, into the shaft wall
+  s.stepForTest(1 / 30, 1400);
+  s.input.walk = 0;
+  const y = s.at.y * 5;
+  const surface = s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5);
+  return { above: y > surface - 6, under: s.statsForTest().underground };
+});
+check('she climbs back to the surface', escape.above && escape.under === 0);
+
+console.log('\nKEYBOARD (WASD writes the same inputs the stick does)');
+const keys = await page.evaluate(async () => {
+  const s = window.islandScene;
+  const press = (key, type) => window.dispatchEvent(new KeyboardEvent(type, { key }));
+  press('w', 'keydown');
+  press('Shift', 'keydown');
+  const held = { walk: s.input.walk, sprint: s.input.sprint };
+  press('w', 'keyup');
+  press('Shift', 'keyup');
+  press('a', 'keydown');
+  const turning = s.input.yaw;
+  press('a', 'keyup');
+  const fpBefore = s.statsForTest().firstPerson;
+  press('v', 'keydown');
+  press('v', 'keyup');
+  const fpAfter = s.statsForTest().firstPerson;
+  press('v', 'keydown');
+  press('v', 'keyup');
+  return {
+    held, turning, released: { walk: s.input.walk, yaw: s.input.yaw }, fpBefore, fpAfter,
+  };
+});
+check('W walks, Shift sprints', keys.held.walk === 1 && keys.held.sprint === true);
+check('A turns left', keys.turning === -1);
+check('keys release cleanly', keys.released.walk === 0 && keys.released.yaw === 0);
+check('V toggles first person', keys.fpBefore === 0 && keys.fpAfter === 1);
+
+console.log('\nFIRST PERSON (her own eyes)');
+const fp = await page.evaluate(() => {
+  const s = window.islandScene;
+  s.teleportMm(27950, 27950);
+  s.drainQueueForTest();
+  s.firstPerson = true;
+  s.stepForTest(1 / 30, 10);
+  const d = s.camera.position.distanceTo(s.at) * 5;
+  s.firstPerson = false;
+  s.stepForTest(1 / 30, 10);
+  return { d };
+});
+check('the camera sits on the ant', fp.d < 4, `${fp.d.toFixed(1)} mm from her centre`);
+
 console.log('\nTHE RED-SKY TEST (fog off, red background, island panorama)');
 await page.evaluate(() => {
   const s = window.islandScene;

@@ -342,13 +342,28 @@ export class IslandStream {
    * Null when the column is outside the window.
    */
   surfaceHeightAt(worldX: number, worldZ: number): number | null {
+    return this.surfaceBelowY(worldX, worldZ, Infinity);
+  }
+
+  /**
+   * The first soil-top BELOW a given height — the underground question.
+   * Scanning from the TOP of the column is right on the surface and wrong
+   * the moment she is in a tunnel: the topmost crossing is the tunnel's
+   * ROOF-side ground, and easing toward it yanks her up through the roof
+   * (playtest: "it bounced me back up"). Scanning down from HER height
+   * finds the floor she is actually standing over — shaft bottom, drift
+   * floor, chamber floor — and the roof above her never matters.
+   */
+  surfaceBelowY(worldX: number, worldZ: number, fromWorldY: number): number | null {
     const x = (worldX - this.originWorldX) / CELL_SIZE;
     const z = (worldZ - this.originWorldZ) / CELL_SIZE;
     const xi = Math.round(x);
     const zi = Math.round(z);
     if (xi < CAP_PLANES || xi > WINDOW_CELLS - CAP_PLANES
       || zi < CAP_PLANES || zi > WINDOW_CELLS - CAP_PLANES) return null;
-    for (let y = SAMPLES_Y - 1; y > 0; y -= 1) {
+    const fromCell = Math.ceil((fromWorldY - this.bandFloorWu) / CELL_SIZE);
+    let y = Math.min(SAMPLES_Y - 1, Math.max(1, fromCell));
+    for (; y > 0; y -= 1) {
       const above = this.field.get(xi, y, zi);
       const below = this.field.get(xi, y - 1, zi);
       if (below > 0 && above <= 0) {
@@ -357,5 +372,15 @@ export class IslandStream {
       }
     }
     return null;
+  }
+
+  /** Is this ABSOLUTE world-unit position inside soil? Null out of window. */
+  solidAtWu(worldX: number, worldY: number, worldZ: number): boolean | null {
+    const xi = Math.round((worldX - this.originWorldX) / CELL_SIZE);
+    const zi = Math.round((worldZ - this.originWorldZ) / CELL_SIZE);
+    const yi = Math.round((worldY - this.bandFloorWu) / CELL_SIZE);
+    if (xi < 0 || xi > WINDOW_CELLS || zi < 0 || zi > WINDOW_CELLS
+      || yi < 0 || yi >= SAMPLES_Y) return null;
+    return this.field.get(xi, yi, zi) > 0;
   }
 }

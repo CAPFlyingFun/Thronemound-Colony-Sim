@@ -60,10 +60,23 @@ const SECTIONS = 8;
 const SEC_VERTS = (MESH_N - 1) / SECTIONS + 1;
 
 /** 15 mm/s — an unhurried queen. The first cut copied the world room's
- *  40 mm/s sprint and the island blurred past; playtest said so. */
+ *  40 mm/s sprint and the island blurred past; playtest said so. Shift (or
+ *  full stick) sprints at three times that for covering ground. */
 const WALK_SPEED = 3;
+const SPRINT = 3;
 const TURN_RATE = 2.4;
 const RIDE = 1.3 / MM;
+
+/** The tallest ledge she steps up in one stride; anything higher is a WALL
+ *  and blocks her — the fix for walking "through" tunnel ends. */
+const CLIMB_STEP = 2.5 / MM;
+
+/** Pressed against a wall with the stick held, she climbs it slowly —
+ *  enough to scale the nest's shaft and get back out of a dug hole. */
+const CLIMB_RATE = 2.4;
+
+/** How far below the drawn island counts as "underground" for the camera. */
+const UNDER_MM = 5;
 
 /** Soil mesh chunks: the slide tile IS the chunk, the world room's trick. */
 const CH = TILE_CELLS;
@@ -131,13 +144,27 @@ export class IslandScene {
 
   private readonly velocity = new THREE.Vector3();
 
-  readonly input = { walk: 0, yaw: 0, dig: false };
+  readonly input = { walk: 0, yaw: 0, dig: false, sprint: false };
+
+  private readonly keysDown = new Set<string>();
+
+  private spaceWasDown = false;
 
   private camYaw = 0;
 
   private camPitch = 0.5;
 
   private camDist = 30 / MM;
+
+  private firstPerson = false;
+
+  private fpPitch = 0;
+
+  private underground = false;
+
+  /** Her recent path — the underground chase camera follows THIS, because
+   *  the path she walked is guaranteed to be inside the tunnel. */
+  private readonly trail: THREE.Vector3[] = [];
 
   private queenReady = false;
 
@@ -353,20 +380,26 @@ export class IslandScene {
     return Math.max(this.renderedGroundAt(x, z), 0.5 / MM);
   }
 
-  /** Underfoot: the LIVE soil where it is loaded (a dug hole is a real
-   *  drop), the drawn island everywhere else. A column the depth band
-   *  cannot reach — steep country where the surface climbs past the band's
-   *  ceiling — caps flat at the ceiling, and standing there must mean the
-   *  drawn island, not the cap. */
-  private footingAt(x: number, z: number): number {
-    const ground = this.walkGroundAt(x, z);
+  /**
+   * The first floor BELOW a height at this column, or null when the soil
+   * has none to offer (out of window, or solid wall from there down). A
+   * column the depth band cannot reach — steep country where the surface
+   * climbs past the band's ceiling — caps flat at the ceiling, and standing
+   * there must mean the drawn island, not the cap.
+   */
+  private floorBelow(x: number, z: number, fromY: number): number | null {
     const stream = this.stream;
-    if (!stream) return ground;
-    const fine = stream.surfaceHeightAt(x, z);
-    if (fine === null) return ground;
+    if (!stream) return null;
+    const fine = stream.surfaceBelowY(x, z, fromY);
+    if (fine === null) return null;
     const ceiling = stream.bandFloorWu + (CELLS_Y - CAP_PLANES - 1) * CELL_SIZE;
-    if (fine >= ceiling - CELL_SIZE) return Math.max(fine, ground);
+    if (fine >= ceiling - CELL_SIZE) return Math.max(fine, this.walkGroundAt(x, z));
     return fine;
+  }
+
+  /** Underfoot at HER height: tunnel floors are real, roofs above are not. */
+  private footingAt(x: number, z: number): number {
+    return this.floorBelow(x, z, this.at.y + 0.4) ?? this.walkGroundAt(x, z);
   }
 
   /** All sixty-four sections, built once, never touched again. */
@@ -574,13 +607,64 @@ export class IslandScene {
   private simulate(dt: number): void {
     if (!this.heights) return;
     this.facing -= this.input.yaw * TURN_RATE * dt;
-    const speed = this.input.walk * WALK_SPEED;
+    const speed = this.input.walk * WALK_SPEED * (this.input.sprint ? SPRINT : 1);
     this.velocity.set(Math.sin(this.facing) * speed, 0, Math.cos(this.facing) * speed);
     const span = SPAN_MM / MM;
-    this.at.x = Math.min(span - 2, Math.max(2, this.at.x + this.velocity.x * dt));
-    this.at.z = Math.min(span - 2, Math.max(2, this.at.z + this.velocity.z * dt));
-    const want = this.footingAt(this.at.x, this.at.z) + RIDE;
+    const nx = Math.min(span - 2, Math.max(2, this.at.x + this.velocity.x * dt));
+    const nz = Math.min(span - 2, Math.max(2, this.at.z + this.velocity.z * dt));
+
+    /*
+     * Walls are walls, holes are holes. The floor at the DESTINATION is
+     * looked up from her own height downward: a tunnel floor is a real
+     * floor, the roof above it is invisible to her, and a floor more than
+     * one stride ABOVE her is a wall — the move is refused instead of
+     * easing her up through the ceiling ("it bounced me back up"). Refused
+     * with the stick still held means she is pressing against the wall, and
+     * she climbs it slowly — enough to get out of the shaft or a dug pit.
+     */
+    const there = this.floorBelow(nx, nz, this.at.y + 0.5);
+    let want: number;
+    let blocked = false;
+    if (there !== null) {
+      if (there - this.at.y > CLIMB_STEP) {
+        blocked = true;
+        want = this.at.y;
+      } else {
+        this.at.x = nx;
+        this.at.z = nz;
+        want = there + RIDE;
+      }
+    } else {
+      const ground = this.walkGroundAt(nx, nz);
+      if (ground - this.at.y <= CLIMB_STEP) {
+        this.at.x = nx;
+        this.at.z = nz;
+        want = ground + RIDE;
+      } else {
+        blocked = true;
+        want = this.at.y;
+      }
+    }
+    if (blocked && Math.abs(speed) > 0) {
+      // Climbing needs HEADROOM: open air above her. In the shaft that is
+      // true and she scales it; under a tunnel roof it is not, and she
+      // stays put — going up through a ceiling is what DIG is for. (The
+      // first cut skipped this check and she climbed through the hillside.)
+      const overhead = this.stream?.solidAtWu(this.at.x, this.at.y + 0.5, this.at.z);
+      if (overhead !== true) {
+        this.at.y += CLIMB_RATE * dt;
+        want = this.at.y;
+      }
+    }
     this.at.y += (want - this.at.y) * Math.min(1, dt * 14);
+
+    this.underground = this.at.y + RIDE
+      < this.walkGroundAt(this.at.x, this.at.z) - UNDER_MM / MM;
+    const last = this.trail[this.trail.length - 1];
+    if (!last || last.distanceTo(this.at) > 0.3) {
+      this.trail.push(this.at.clone());
+      if (this.trail.length > 240) this.trail.shift();
+    }
 
     if (this.stream) {
       if (this.input.dig) this.bite(dt);
@@ -663,6 +747,36 @@ export class IslandScene {
   }
 
   private aimCamera(dt: number): void {
+    if (this.firstPerson) {
+      /* Her own eyes: at the head, looking where she faces; the mouse (or
+       * right-half drag) turns HER, and pitch is a look, not an orbit. */
+      const fwd = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
+      const eye = this.at.clone().addScaledVector(fwd, 0.26);
+      eye.y += 0.3;
+      this.camera.position.copy(eye);
+      this.camera.up.set(0, 1, 0);
+      this.camera.lookAt(
+        eye.x + fwd.x * Math.cos(this.fpPitch),
+        eye.y + Math.sin(this.fpPitch),
+        eye.z + fwd.z * Math.cos(this.fpPitch),
+      );
+      return;
+    }
+    if (this.underground) {
+      /*
+       * The tunnel chase: the camera follows HER PATH, a few millimetres
+       * back — the path she walked is the one line guaranteed to lie inside
+       * the bore, so following it needs no pathfinding and can never end up
+       * inside a wall. Mouse-free by design (playtest asked): orbiting
+       * underground just buries the lens.
+       */
+      const behind = this.trailPointBehind(1.0);
+      behind.y += 0.32;
+      this.camera.position.lerp(behind, Math.min(1, dt * 8));
+      this.camera.up.set(0, 1, 0);
+      this.camera.lookAt(this.at.x, this.at.y + 0.15, this.at.z);
+      return;
+    }
     const wantYaw = this.facing + Math.PI;
     let d = wantYaw - this.camYaw;
     while (d > Math.PI) d -= Math.PI * 2;
@@ -678,6 +792,25 @@ export class IslandScene {
     if (this.camera.position.y < eyeGround + 0.6) this.camera.position.y = eyeGround + 0.6;
     this.camera.up.set(0, 1, 0);
     this.camera.lookAt(this.at.x, this.at.y + 0.4, this.at.z);
+  }
+
+  /** A point `distance` back along her walked path (or straight behind her
+   *  when the trail is still short). */
+  private trailPointBehind(distance: number): THREE.Vector3 {
+    let left = distance;
+    let previous = this.at;
+    for (let i = this.trail.length - 1; i >= 0; i -= 1) {
+      const point = this.trail[i]!;
+      const seg = previous.distanceTo(point);
+      if (seg >= left) {
+        return previous.clone().lerp(point, seg === 0 ? 0 : left / seg);
+      }
+      left -= seg;
+      previous = point;
+    }
+    return this.at.clone().add(new THREE.Vector3(
+      -Math.sin(this.facing) * distance, 0, -Math.cos(this.facing) * distance,
+    ));
   }
 
   /* ---------------------------------------------------------------- HUD */
@@ -705,6 +838,56 @@ export class IslandScene {
       if (this.nestView) this.nestView.root.visible = this.showPlan;
     });
     actions.appendChild(plan);
+
+    const view = document.createElement('button');
+    view.className = 'density-lab-button density-lab-mode';
+    view.textContent = 'VIEW';
+    view.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      this.firstPerson = !this.firstPerson;
+    });
+    actions.appendChild(view);
+
+    /*
+     * WASD for the PC hand (playtest: "I was having trouble moving"):
+     * W/S walk, A/D turn, Shift sprint, Space digs, V swaps the view.
+     * Arrows mirror WASD. Keys and stick write the same inputs.
+     */
+    const applyKeys = () => {
+      const k = this.keysDown;
+      const forward = (k.has('w') || k.has('arrowup') ? 1 : 0)
+        - (k.has('s') || k.has('arrowdown') ? 1 : 0);
+      const turn = (k.has('d') || k.has('arrowright') ? 1 : 0)
+        - (k.has('a') || k.has('arrowleft') ? 1 : 0);
+      if (this.stickPointer === null) {
+        this.input.walk = forward;
+        this.input.yaw = turn;
+      }
+      this.input.sprint = k.has('shift');
+      const space = k.has(' ');
+      if (space !== this.spaceWasDown) {
+        this.input.dig = space;
+        this.spaceWasDown = space;
+      }
+    };
+    window.addEventListener('keydown', (e) => {
+      const key = e.key.toLowerCase();
+      if (key === 'v' && !e.repeat) this.firstPerson = !this.firstPerson;
+      if (key === 'p' && !e.repeat) {
+        this.showPlan = !this.showPlan;
+        if (this.nestView) this.nestView.root.visible = this.showPlan;
+      }
+      this.keysDown.add(key);
+      applyKeys();
+    });
+    window.addEventListener('keyup', (e) => {
+      this.keysDown.delete(e.key.toLowerCase());
+      applyKeys();
+    });
+    window.addEventListener('blur', () => {
+      this.keysDown.clear();
+      applyKeys();
+    });
 
     this.stickEl.className = 'nest-stick';
     this.stickEl.style.display = 'none';
@@ -734,8 +917,15 @@ export class IslandScene {
         this.input.walk = Math.abs(dy / 48) < 0.12 ? 0 : -dy / 48;
         this.stickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
       } else if (e.pointerId === this.lookPointer) {
-        this.camYaw -= e.movementX * 0.005;
-        this.camPitch = Math.min(1.35, Math.max(0.06, this.camPitch + e.movementY * 0.004));
+        if (this.firstPerson) {
+          // In her eyes the drag turns HER; pitch is a glance up or down.
+          this.facing -= e.movementX * 0.004;
+          this.fpPitch = Math.min(1.1, Math.max(-1.1, this.fpPitch - e.movementY * 0.004));
+        } else if (!this.underground) {
+          // Underground the chase camera owns itself — the drag does nothing.
+          this.camYaw -= e.movementX * 0.005;
+          this.camPitch = Math.min(1.35, Math.max(0.06, this.camPitch + e.movementY * 0.004));
+        }
       }
     });
     const release = (e: PointerEvent) => {
@@ -814,6 +1004,8 @@ export class IslandScene {
     this.at.z = zMm / MM;
     this.at.y = this.walkGroundAt(this.at.x, this.at.z) + RIDE;
     this.velocity.set(0, 0, 0);
+    this.trail.length = 0;
+    this.underground = false;
     if (this.stream) {
       const scroll = this.stream.recentreOn(this.at.x, this.at.z);
       if (scroll) this.onScroll(scroll);
@@ -869,6 +1061,8 @@ export class IslandScene {
       scrolls: this.stats.scrolls,
       rebases: this.stats.rebases,
       bandFloorMm: this.stream?.bandFloorMm ?? -1,
+      underground: this.underground ? 1 : 0,
+      firstPerson: this.firstPerson ? 1 : 0,
     };
   }
 
