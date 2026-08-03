@@ -46,22 +46,53 @@ console.log(`  designer up            ${opened.designing && opened.panel}`);
 console.log(`  play controls hidden   ${!opened.playControlsVisible}`);
 
 /*
- * Orbit, and check the camera actually moved. A drag that silently does
- * nothing is the failure mode that looks like a working designer right up
- * until you try to see round the back of the nest.
+ * Fly, and check the camera actually moved.
+ *
+ * The stick is held DOWN across real frames on purpose: movement is integrated
+ * in update() per rendered frame, so a burst of synthetic pointermoves with no
+ * time between them deflects the stick and releases it before a single frame
+ * has integrated anything — the camera stays put and the probe reports a
+ * broken control that works fine under a thumb.
+ *
+ * It also starts at the bottom-left, well away from the Station. The Station
+ * spawns selected near screen centre, and a drag that begins on the selected
+ * node MOVES THE NODE — by design. A probe that grabbed it by accident would
+ * be measuring the drag feature and calling it the camera.
  */
 const eye0 = await page.evaluate(() => window.blockScene.camera.position.toArray());
 const canvas = page.locator('canvas').first();
-await canvas.dispatchEvent('pointerdown', { pointerId: 1, clientX: 400, clientY: 200 });
-for (let i = 1; i <= 8; i += 1) {
-  await canvas.dispatchEvent('pointermove', { pointerId: 1, clientX: 400 + i * 14, clientY: 200 });
+await canvas.dispatchEvent('pointerdown', { pointerId: 1, clientX: 170, clientY: 330 });
+for (let i = 1; i <= 6; i += 1) {
+  await canvas.dispatchEvent('pointermove', { pointerId: 1, clientX: 170, clientY: 330 - i * 8 });
+  await page.waitForTimeout(50);
 }
-await canvas.dispatchEvent('pointerup', { pointerId: 1, clientX: 512, clientY: 200 });
-await page.waitForTimeout(200);
+await page.waitForTimeout(250);
+await canvas.dispatchEvent('pointerup', { pointerId: 1, clientX: 170, clientY: 282 });
+await page.waitForTimeout(150);
 const eye1 = await page.evaluate(() => window.blockScene.camera.position.toArray());
 const swung = Math.hypot(eye1[0] - eye0[0], eye1[1] - eye0[1], eye1[2] - eye0[2]);
-console.log(`\nORBIT`);
+console.log(`\nFLYING`);
 console.log(`  camera moved           ${swung.toFixed(2)} world units`);
+
+// And the LOOK drag on the right half must turn the view without moving her.
+const look0 = await page.evaluate(() => {
+  const V = Object.getPrototypeOf(window.blockScene.at).constructor;
+  return window.blockScene.camera.getWorldDirection(new V()).toArray();
+});
+await canvas.dispatchEvent('pointerdown', { pointerId: 2, clientX: 700, clientY: 200 });
+for (let i = 1; i <= 6; i += 1) {
+  await canvas.dispatchEvent('pointermove', { pointerId: 2, clientX: 700 + i * 12, clientY: 200 });
+  await page.waitForTimeout(25);
+}
+await canvas.dispatchEvent('pointerup', { pointerId: 2, clientX: 772, clientY: 200 });
+await page.waitForTimeout(150);
+const look1 = await page.evaluate(() => {
+  const V = Object.getPrototypeOf(window.blockScene.at).constructor;
+  return window.blockScene.camera.getWorldDirection(new V()).toArray();
+});
+const turned = Math.acos(Math.max(-1, Math.min(1,
+  look0[0] * look1[0] + look0[1] * look1[1] + look0[2] * look1[2]))) * 180 / Math.PI;
+console.log(`  view turned            ${turned.toFixed(1)}°`);
 
 // A drag on empty space must NOT have driven her or spawned a joystick.
 const drove = await page.evaluate(() => ({
@@ -136,7 +167,7 @@ console.log('\nCLOSING');
 console.log(`  back to playing        ${!closed.designing && closed.playControlsVisible}`);
 
 const pass = opened.designing && opened.panel && !opened.playControlsVisible
-  && swung > 1 && !drove.stick
+  && swung > 1 && turned > 5 && !drove.stick
   && before === 1 && drawn.nodes === 4 && drawn.edges === 3 && drawn.chained && descends
   && soilBefore === true && soilAfter === false
   && undone === drawn.edges - 1
