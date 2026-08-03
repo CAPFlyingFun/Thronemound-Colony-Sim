@@ -164,19 +164,48 @@ export function pointOnEdge(plan: NestPlan, edge: NestEdge, t: number): Vec3 {
 }
 
 /**
+ * The fastest the curve ever moves, in millimetres per unit of its parameter.
+ *
+ * This is what sizes the sampling, and it has to be the fastest rather than the
+ * average. Samples are evenly spaced in the PARAMETER, and on a bowed edge the
+ * curve covers more ground in some of it than others — so a count sized off any
+ * kind of length only fixes the average, and the worst gap still runs over. The
+ * chord under-samples worst of all: a tunnel asked for at one-millimetre steps
+ * came back at 2.93 mm, a gap wider than a narrow bore's radius and therefore a
+ * carve with holes in it. The control polygon got that to 1.10 mm. This is the
+ * bound that actually holds.
+ *
+ * For a quadratic, B'(t) = 2[(1-t)(C-P0) + t(P1-C)] — a straight interpolation
+ * between two vectors, so its length never exceeds twice the longer of them. On
+ * a straight edge both are half the chord and this returns exactly the chord,
+ * which is why the ordinary case costs nothing.
+ */
+function fastestSpeed(plan: NestPlan, edge: NestEdge): number {
+    const a = findNode(plan, edge.from);
+    const b = findNode(plan, edge.to);
+    if (!a || !b) return 0;
+    const bow = edge.bow ?? { x: 0, y: 0, z: 0 };
+    const c = { x: (a.x + b.x) / 2 + bow.x, y: (a.y + b.y) / 2 + bow.y, z: (a.z + b.z) / 2 + bow.z };
+    return 2 * Math.max(len(sub(c, a)), len(sub(b, c)));
+}
+
+/**
  * Walk a tunnel at roughly `stepMm` intervals.
  *
- * The step is a request, not a promise: the samples are evenly spaced in the
- * curve's own parameter, which on a bowed edge is slightly uneven in distance.
- * The carver only needs them close enough together that consecutive spheres
- * overlap, and the ant reads `s` for real distance, so neither cares.
+ * The step is a ceiling, not an exact spacing: the samples are evenly spaced in
+ * the curve's own parameter, which on a bowed edge is uneven in distance, and
+ * the count is sized off the curve's fastest speed so the unevenness can only
+ * ever make them CLOSER than asked. The carver needs them close enough together
+ * that consecutive spheres overlap, and the ant reads `s` for real distance, so
+ * neither minds the surplus.
  */
 export function sampleEdge(plan: NestPlan, edge: NestEdge, stepMm = 1): EdgeSample[] {
     const a = findNode(plan, edge.from);
     const b = findNode(plan, edge.to);
     if (!a || !b) return [];
     const rough = Math.max(chordLength(plan, edge), 1e-6);
-    const steps = Math.max(2, Math.ceil(rough / Math.max(stepMm, 0.05)));
+    const bound = Math.max(fastestSpeed(plan, edge), rough);
+    const steps = Math.max(2, Math.ceil(bound / Math.max(stepMm, 0.05)));
     const out: EdgeSample[] = [];
     let travelled = 0;
     let previous = pointOnEdge(plan, edge, 0);

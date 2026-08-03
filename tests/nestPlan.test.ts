@@ -117,6 +117,33 @@ describe('a tunnel as a curve', () => {
         }
     });
 
+    it('honours the step on a BOWED edge, where the chord lies about the length', () => {
+        // Sizing the sample count off the chord under-samples a bowed edge by
+        // exactly what the bow adds: a tunnel asked for at 1 mm came back at
+        // 2.93 mm, wide enough to leave holes in a narrow bore. The straight
+        // case above cannot catch it, because on a straight edge the chord IS
+        // the length.
+        const plan = shaftPlan();
+        plan.edges[0]!.bow = { x: 40, y: 30, z: 0 };
+        const samples = sampleEdge(plan, plan.edges[0]!, 1);
+        let worst = 0;
+        for (let i = 1; i < samples.length; i += 1) {
+            worst = Math.max(worst, samples[i]!.s - samples[i - 1]!.s);
+        }
+        expect(worst).toBeLessThanOrEqual(1);
+    });
+
+    it('errs toward more samples than asked for, never fewer', () => {
+        // The bound is the control polygon, which is never shorter than the
+        // curve — so the surplus is the safe direction and is not extravagant.
+        const plan = shaftPlan();
+        plan.edges[0]!.bow = { x: 40, y: 30, z: 0 };
+        const samples = sampleEdge(plan, plan.edges[0]!, 1);
+        const arc = samples[samples.length - 1]!.s;
+        expect(samples.length).toBeGreaterThan(arc);
+        expect(samples.length).toBeLessThan(arc * 2.5);
+    });
+
     it('returns nothing for an edge whose ends do not exist', () => {
         expect(sampleEdge(shaftPlan(), edge('x', 'mouth', 'ghost'))).toEqual([]);
     });

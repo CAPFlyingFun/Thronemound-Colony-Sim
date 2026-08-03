@@ -55,6 +55,7 @@ import { anyOf, bore, box, carve } from '../voxel/carve';
 import { inWorldUnits, planHollow } from '../nest/nestCarve';
 import { sampleEdge, validatePlan, type NestPlan, type Vec3 } from '../nest/nestPlan';
 import { demoNest } from '../nest/demoNest';
+import { buildNestView, type NestView } from '../nest/nestView';
 import {
   DigPlanRunner, PIECE_LIMITS, PLAN_SPEED_MM_S, clampPiece, type DigPiece,
 } from './digPlan';
@@ -464,6 +465,20 @@ export class BlockScene {
   private debug = false;
   private readonly debugButton = document.createElement('button');
   private readonly trimButton = document.createElement('button');
+
+  /**
+   * The sonar view: the designed nest drawn through the soil.
+   *
+   * Only built when the block was carved from a plan, and on by default when it
+   * was — the first thing anyone wants to know about a nest they designed is
+   * whether the soil did what the drawing said, and that is a question you
+   * answer by looking at both at once.
+   */
+  private nestView: NestView | null = null;
+
+  private readonly nestButton = document.createElement('button');
+
+  private sonar = true;
   private readonly planButton = document.createElement('button');
   private readonly planner = document.createElement('div');
   private readonly planList = document.createElement('pre');
@@ -649,6 +664,13 @@ export class BlockScene {
         solid,
         inWorldUnits(planHollow(plan, { stepMm: 0.5 }), [LOW, LOW, LOW], MM),
       ));
+      // The plan drawn over the soil it cut. Built in millimetres, so the group
+      // carries the one conversion into world units rather than every piece of
+      // geometry inside it doing its own.
+      this.nestView = buildNestView(plan);
+      this.nestView.root.scale.setScalar(1 / MM);
+      this.nestView.root.position.set(LOW, LOW, LOW);
+      this.scene.add(this.nestView.root);
     } else if (this.shape === 'shaft') {
       /*
        * A SHAFT AND A ROOM, cut to a number before anything is bitten.
@@ -1058,6 +1080,13 @@ export class BlockScene {
 
   /** The plan this block was carved from, so a probe never needs a copy of it. */
   nestForTest(): NestPlan | null { return this.nest; }
+
+  /** Show or hide the designed nest drawn through the soil. */
+  setSonar(on: boolean): void {
+    this.sonar = on;
+    if (this.nestView) this.nestView.root.visible = on;
+    this.nestButton.textContent = on ? 'SONAR' : 'sonar';
+  }
 
   /** Is there soil here? In the plan's millimetres, for probes. */
   solidAtMm(x: number, y: number, z: number): boolean {
@@ -2413,6 +2442,21 @@ export class BlockScene {
     });
     actions.appendChild(this.trimButton);
     this.setTrim(false);
+
+    /*
+     * The sonar toggle, and only when there is a plan to draw. A button that
+     * does nothing on five of six rigs is worse than no button on a phone
+     * screen this size.
+     */
+    if (this.nestView) {
+      this.nestButton.className = 'density-lab-button density-lab-mode';
+      this.nestButton.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        this.setSonar(!this.sonar);
+      });
+      actions.appendChild(this.nestButton);
+      this.setSonar(true);
+    }
 
     this.viewButton.className = 'density-lab-button density-lab-mode';
     this.viewButton.addEventListener('pointerdown', (event) => {
