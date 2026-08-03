@@ -20,6 +20,7 @@
     "probe:nest": "node scripts/probe-nest.mjs",
     "probe:autoview": "node scripts/probe-autoview.mjs",
     "probe:designer": "node scripts/probe-designer.mjs",
+    "probe:clod": "node scripts/probe-clod.mjs",
     "smoke:pwa": "node scripts/smoke-pwa.mjs",
     "icons": "node scripts/make-icons.mjs"
   },

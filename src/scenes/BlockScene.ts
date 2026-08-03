@@ -60,6 +60,7 @@ import {
 import { demoNest } from '../nest/demoNest';
 import { buildNestView, type NestView } from '../nest/nestView';
 import { NestDesigner } from '../nest/NestDesigner';
+import { makeClod, stepClods, type Clod } from '../voxel/clodBurst';
 import {
   DigPlanRunner, PIECE_LIMITS, PLAN_SPEED_MM_S, clampPiece, type DigPiece,
 } from './digPlan';
@@ -219,6 +220,15 @@ const ROOM_EVERY = 4;
  * short enough that walking into a real tunnel is not visibly late.
  */
 const ROOF_DWELL = 0.25;
+
+/**
+ * How many loose clods may exist at once.
+ *
+ * Godot has no cap because a bite there is a click; here DIG latches and holds,
+ * which is several bites a second for as long as a finger stays down. Twelve
+ * seconds of that without a limit is hundreds of meshes.
+ */
+const MAX_CLODS = 40;
 
 const CEILING_ENTER_MM = 13;
 const CEILING_LEAVE_MM = 18;
@@ -512,6 +522,23 @@ export class BlockScene {
 
   /** Built the first time DIG is pressed on a block that came from a plan. */
   private designer: NestDesigner | null = null;
+
+  /** Loose soil in the air, and the mesh drawn for each. Same order, always. */
+  private clods: Clod[] = [];
+
+  private readonly clodMeshes: THREE.Mesh[] = [];
+
+  /*
+   * One geometry and one material for every clod. Godot builds a SphereMesh per
+   * lump because it can afford to; here a bite a frame would be a new buffer a
+   * frame. Size and squash go on the instance's scale instead.
+   */
+  private readonly clodGeometry = new THREE.SphereGeometry(1, 9, 5);
+
+  private readonly clodMaterial = new THREE.MeshStandardMaterial({
+    // Godot: albedo Color(0.48, 0.30, 0.16), roughness 1.0.
+    color: new THREE.Color(0.48, 0.30, 0.16), roughness: 1,
+  });
 
   /** The HUD root, kept so the designer can hang its own panel on it. */
   private hud!: HTMLElement;
@@ -1033,6 +1060,16 @@ export class BlockScene {
     if (result.changedSamples === 0) { this.lastBiteWhy = 'brush changed nothing'; return; }
     this.lastBiteWhy = '';
     this.removed += result.removedVolume;
+    /*
+     * The soil she just took out, thrown clear as a lump.
+     *
+     * Sized off `removedVolume`, not off the brush radius — which is the whole
+     * point of the Godot version this is ported from, whose own HUD line reads
+     * "Scoop removed %.2f voxel^3; the clod uses that same volume". A bite that
+     * clips the edge of a tunnel she has already dug removes almost nothing and
+     * should produce almost nothing.
+     */
+    this.throwClod(at, result.removedVolume);
 
     const lo = (v: number) => Math.max(0, Math.floor((v - 1) / CHUNK));
     const hi = (v: number, max: number) => Math.min(
@@ -1128,6 +1165,84 @@ export class BlockScene {
 
   /** The designer, once it exists. For probes. */
   designerForTest(): NestDesigner | null { return this.designer; }
+
+  /** The clods in the air right now. For probes. */
+  clodsForTest(): readonly Clod[] { return this.clods; }
+
+  /**
+   * Throw the soil a bite removed clear of the face it came out of.
+   *
+   * `normalAt` already points OUT of the soil — it takes the negative gradient,
+   * and density falls as you leave the soil. Negating it again on the way in
+   * here threw every clod straight down into the block, which read as bites
+   * producing no clod at all rather than as a clod going the wrong way.
+   *
+   * Taken at the bite point rather than at her mouth: on a wall those two
+   * disagree by ninety degrees, and the lump has to leave the wall, not her
+   * face.
+   */
+  private throwClod(at: THREE.Vector3, volume: number): void {
+    if (volume <= 0) return;
+    // A cap is not a nicety — holding DIG down is several bites a second, and
+    // each one is a mesh. Oldest goes first.
+    if (this.clods.length >= MAX_CLODS) this.dropClod(0);
+
+    const normal = this.normalAt(at, new THREE.Vector3());
+    const clod = makeClod(at, normal, volume);
+    this.clods.push(clod);
+
+    const mesh = new THREE.Mesh(this.clodGeometry, this.clodMaterial);
+    // Godot's own squash: Vector3(1.0, 0.76, 0.9), so a clod is a lump and not
+    // a marble.
+    mesh.scale.set(clod.radius, clod.radius * 0.76, clod.radius * 0.9);
+    /*
+     * And its random resting rotation — taken off the clod's own seed rather
+     * than re-rolled, so the lump keeps one attitude for its whole life instead
+     * of shimmering.
+     */
+    mesh.rotation.set(
+      ((clod.seed & 0xff) / 255) * Math.PI * 2,
+      (((clod.seed >> 8) & 0xff) / 255) * Math.PI * 2,
+      (((clod.seed >> 16) & 0xff) / 255) * Math.PI * 2,
+    );
+    mesh.position.set(clod.at.x, clod.at.y, clod.at.z);
+    this.scene.add(mesh);
+    this.clodMeshes.push(mesh);
+  }
+
+  private dropClod(index: number): void {
+    const mesh = this.clodMeshes[index];
+    if (mesh) this.scene.remove(mesh);
+    this.clods.splice(index, 1);
+    this.clodMeshes.splice(index, 1);
+  }
+
+  /** Fall, land and expire: the clods' whole life, once a frame. */
+  private stepTheClods(dt: number): void {
+    if (!this.clods.length) return;
+    const before = this.clods.length;
+    const kept = stepClods(this.clods, dt, (x, y, z) => this.solidAt(PROBE.set(x, y, z)));
+    if (kept.length !== before) {
+      /*
+       * `stepClods` drops by age and clods are pushed in order, so the ones it
+       * removed are always the oldest — a PREFIX of the list. Pairing the
+       * meshes back up by index only works because of that; if it ever filtered
+       * on something other than age this would quietly mismatch every lump with
+       * somebody else's mesh.
+       */
+      const gone = before - kept.length;
+      for (let i = 0; i < gone; i += 1) {
+        const mesh = this.clodMeshes[i];
+        if (mesh) this.scene.remove(mesh);
+      }
+      this.clodMeshes.splice(0, gone);
+      this.clods = kept;
+    }
+    for (let i = 0; i < this.clods.length; i += 1) {
+      const clod = this.clods[i]!;
+      this.clodMeshes[i]?.position.set(clod.at.x, clod.at.y, clod.at.z);
+    }
+  }
 
   /** The plan this block was carved from, so a probe never needs a copy of it. */
   nestForTest(): NestPlan | null { return this.nest; }
@@ -2034,6 +2149,14 @@ export class BlockScene {
   }
 
   private simulate(dt: number): void {
+    /*
+     * Inside `simulate`, not beside it. The first version stepped the clods
+     * from the render loop so they would keep falling while a probe had the
+     * world paused — but `stepForTest` calls `simulate` directly and never
+     * touches the render loop, so under every probe the clods simply hung in
+     * the air where they were thrown, frozen for three hundred frames.
+     */
+    this.stepTheClods(dt);
     this.step(dt);
 
     if (this.ready) {
