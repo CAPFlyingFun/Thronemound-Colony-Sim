@@ -63,24 +63,42 @@ check('the south-east corner is ocean', geo.cornerSE < 0,
 check('west midway is lower than the summit (island falls to the sea)',
   geo.midwayWest < geo.centre, `${geo.midwayWest.toFixed(0)} m vs ${geo.centre.toFixed(0)} m`);
 
-console.log('\nTHE WALK (600 steps west off the plateau)');
-const walk = await page.evaluate(() => {
+console.log('\nTHE WALKS (clearance is against the DRAWN triangles — below zero');
+console.log('is "she went underground", the playtest bug this pins down forever)');
+const runWalk = (xMm, zMm, facing) => page.evaluate(([x0, z0, face]) => {
   const s = window.islandScene;
-  s.setFacingForTest(-Math.PI / 2);
+  s.teleportMm(x0, z0);
+  s.setFacingForTest(face);
   s.input.walk = 1;
   let worstStepMm = 0;
+  let minClearMm = Infinity;
   let lastY = null;
-  for (let i = 0; i < 600; i += 1) {
-    s.stepForTest(1 / 60, 1);
+  for (let i = 0; i < 1500; i += 1) {
+    s.stepForTest(1 / 30, 1);
     const y = s.at.y * 5;
     if (lastY !== null) worstStepMm = Math.max(worstStepMm, Math.abs(y - lastY));
     lastY = y;
+    minClearMm = Math.min(
+      minClearMm, y - s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5),
+    );
   }
   s.input.walk = 0;
-  return { worstStepMm, travelledMm: 28000 - s.at.x * 5 };
-});
-check('no pop underfoot', walk.worstStepMm < 2.0,
-  `worst single-step height change ${walk.worstStepMm.toFixed(2)} mm over ${walk.travelledMm.toFixed(0)} mm`);
+  return {
+    worstStepMm,
+    minClearMm,
+    travelledMm: Math.hypot(s.at.x * 5 - x0, s.at.z * 5 - z0),
+  };
+}, [xMm, zMm, facing]);
+const walks = [
+  ['west off the summit plateau', await runWalk(28000, 28000, -Math.PI / 2)],
+  ['through canyon country', await runWalk(16000, 34000, Math.PI)],
+];
+for (const [name, walk] of walks) {
+  check(`${name}: no pop underfoot`, walk.worstStepMm < 2.0,
+    `worst step ${walk.worstStepMm.toFixed(2)} mm over ${walk.travelledMm.toFixed(0)} mm`);
+  check(`${name}: never below the drawn ground`, walk.minClearMm > 0,
+    `worst clearance ${walk.minClearMm.toFixed(2)} mm`);
+}
 
 console.log('\nTHE RED-SKY TEST (fog off, red background, island panorama)');
 await page.evaluate(() => {

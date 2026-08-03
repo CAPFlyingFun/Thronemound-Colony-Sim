@@ -42,7 +42,9 @@ const MESH_N = 513;
 const SECTIONS = 8;
 const SEC_VERTS = (MESH_N - 1) / SECTIONS + 1;
 
-const WALK_SPEED = 8;
+/** 15 mm/s — an unhurried queen. The first cut copied the world room's
+ *  40 mm/s sprint and the island blurred past; playtest said so. */
+const WALK_SPEED = 3;
 const TURN_RATE = 2.4;
 const RIDE = 1.3 / MM;
 
@@ -191,9 +193,38 @@ export class IslandScene {
     return h / MM;
   }
 
-  /** Where the ant may stand: the land, or wading depth at the shore. */
+  /**
+   * The surface the GPU actually draws, which is NOT the bilinear patch: the
+   * mesh renders every second data sample as flat triangles, and wherever
+   * the smooth patch dips under a facet, an ant grounded on the patch sinks
+   * visibly underground. Playtest found it; BE's terrainSampling.ts warns
+   * about exactly this ("sample the grid's TRIANGLES"). So: locate the quad
+   * on the MESH grid, pick the triangle the way the index buffer splits it
+   * (a–c–b / b–c–d, diagonal along fx+fz=1), and interpolate that plane.
+   */
+  private renderedGroundAt(x: number, z: number): number {
+    if (!this.heights) return 0;
+    const stride = (N - 1) / (MESH_N - 1);
+    const stepWu = (STEP_MM * stride) / MM;
+    const gx = Math.min(MESH_N - 1.001, Math.max(0, x / stepWu));
+    const gz = Math.min(MESH_N - 1.001, Math.max(0, z / stepWu));
+    const i = Math.floor(gx);
+    const j = Math.floor(gz);
+    const fx = gx - i;
+    const fz = gz - j;
+    const ha = this.sample(i * stride, j * stride);
+    const hb = this.sample((i + 1) * stride, j * stride);
+    const hc = this.sample(i * stride, (j + 1) * stride);
+    const hd = this.sample((i + 1) * stride, (j + 1) * stride);
+    const h = fx + fz <= 1
+      ? ha + (hb - ha) * fx + (hc - ha) * fz
+      : hd + (hc - hd) * (1 - fx) + (hb - hd) * (1 - fz);
+    return h / MM;
+  }
+
+  /** Where the ant may stand: the drawn land, or wading depth at the shore. */
   private walkGroundAt(x: number, z: number): number {
-    return Math.max(this.groundHeightAt(x, z), 0.5 / MM);
+    return Math.max(this.renderedGroundAt(x, z), 0.5 / MM);
   }
 
   /**
@@ -465,6 +496,11 @@ export class IslandScene {
   /** Elevation in real metres at a position in island millimetres. */
   heightAtMm(xMm: number, zMm: number): number {
     return this.groundHeightAt(xMm / MM, zMm / MM) * MM;
+  }
+
+  /** The DRAWN surface's elevation (real m) — what standing-on must match. */
+  renderedHeightAtMm(xMm: number, zMm: number): number {
+    return this.renderedGroundAt(xMm / MM, zMm / MM) * MM;
   }
 
   statsForTest(): Record<string, number> {
