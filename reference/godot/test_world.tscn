@@ -1,0 +1,88 @@
+[gd_scene load_steps=12 format=3]
+
+[ext_resource type="Texture2D" path="res://assets/HDRI Skies/puresky_2k.jpg" id="1_sky"]
+[ext_resource type="PackedScene" path="res://scenes/queen.tscn" id="2_queen"]
+[ext_resource type="Script" path="res://scripts/debug_hud.gd" id="3_hud"]
+
+[sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_sky"]
+panorama = ExtResource("1_sky")
+
+[sub_resource type="Sky" id="Sky_env"]
+sky_material = SubResource("PanoramaSkyMaterial_sky")
+
+[sub_resource type="Environment" id="Environment_env"]
+background_mode = 2
+sky = SubResource("Sky_env")
+ambient_light_source = 3
+ambient_light_sky_contribution = 0.85
+tonemap_mode = 3
+fog_enabled = true
+fog_light_color = Color(0.725, 0.78, 0.831, 1)
+fog_density = 0.0012
+fog_sky_affect = 0.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
+albedo_color = Color(0.42, 0.33, 0.22, 1)
+roughness = 1.0
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
+material = SubResource("StandardMaterial3D_ground")
+size = Vector2(128, 128)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ground"]
+size = Vector3(128, 1, 128)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ref"]
+albedo_color = Color(0.61, 0.52, 0.38, 1)
+roughness = 1.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_ref"]
+material = SubResource("StandardMaterial3D_ref")
+
+[node name="TestWorld" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_env")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.5546, -0.7131, 0.4286, 0, 0.515, 0.8571, -0.832, -0.4753, 0.2857, 0, 20, 0)
+light_color = Color(1, 0.949, 0.816, 1)
+light_energy = 1.5
+shadow_enabled = true
+shadow_bias = 0.03
+shadow_normal_bias = 0.2
+directional_shadow_max_distance = 60.0
+
+[node name="Ground" type="StaticBody3D" parent="."]
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Ground"]
+mesh = SubResource("PlaneMesh_ground")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Ground"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
+shape = SubResource("BoxShape3D_ground")
+
+[node name="ScaleReference" type="Node3D" parent="."]
+
+[node name="Voxel1" type="MeshInstance3D" parent="ScaleReference"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3, 0.5, -3)
+mesh = SubResource("BoxMesh_ref")
+
+[node name="Voxel2" type="MeshInstance3D" parent="ScaleReference"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4.2, 0.5, -3)
+mesh = SubResource("BoxMesh_ref")
+
+[node name="Voxel3" type="MeshInstance3D" parent="ScaleReference"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4.2, 1.5, -3)
+mesh = SubResource("BoxMesh_ref")
+
+[node name="Queen" parent="." instance=ExtResource("2_queen")]
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="Debug" type="Label" parent="HUD"]
+offset_left = 12.0
+offset_top = 10.0
+offset_right = 900.0
+offset_bottom = 80.0
+script = ExtResource("3_hud")

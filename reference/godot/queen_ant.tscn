@@ -1,0 +1,40 @@
+[gd_scene format=3 uid="uid://c05fld22dmdl"]
+
+[ext_resource type="PackedScene" uid="uid://qgn2465jq4bm" path="res://assets/ant models/Queen/fire_ant_queen.glb" id="1_jr4a7"]
+
+[sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_5ivpy"]
+
+[sub_resource type="Sky" id="Sky_nm43w"]
+resource_local_to_scene = true
+sky_material = SubResource("PanoramaSkyMaterial_5ivpy")
+radiance_size = 5
+
+[sub_resource type="Environment" id="Environment_5ivpy"]
+background_mode = 2
+sky = SubResource("Sky_nm43w")
+ambient_light_energy = 12.38
+reflected_light_source = 2
+
+[sub_resource type="CameraAttributesPractical" id="CameraAttributesPractical_5ivpy"]
+
+[sub_resource type="Compositor" id="Compositor_82fyb"]
+
+[node name="Queen Ant" type="Node3D" unique_id=267315150]
+
+[node name="fire_ant_queen" parent="." unique_id=1414036471 instance=ExtResource("1_jr4a7")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.033023357, 0, -0.1029048)
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1115757738]
+transform = Transform3D(-1, 8.881785e-16, -8.7422784e-08, -1.4209807e-08, 0.9867018, 0.16254126, 8.626021e-08, 0.16254126, -0.9867018, 0, 1.5145597, 1.192562)
+current = true
+fov = 100.0
+
+[node name="NavigationAgent3D" type="NavigationAgent3D" parent="." unique_id=811618114]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1201829341]
+environment = SubResource("Environment_5ivpy")
+camera_attributes = SubResource("CameraAttributesPractical_5ivpy")
+compositor = SubResource("Compositor_82fyb")
+
+[node name="World Camera" type="Camera3D" parent="WorldEnvironment" unique_id=1565755000]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.2132628, 5.813668)

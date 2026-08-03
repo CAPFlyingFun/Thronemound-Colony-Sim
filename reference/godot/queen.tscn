@@ -1,0 +1,34 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://scripts/queen_controller.gd" id="1_ctrl"]
+[ext_resource type="PackedScene" path="res://assets/ant models/Queen/fire_ant_queen.glb" id="2_queen"]
+[ext_resource type="Script" path="res://scripts/procedural_ant_gait.gd" id="3_gait"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_body"]
+radius = 0.3
+height = 0.7
+
+[node name="Queen" type="CharacterBody3D"]
+script = ExtResource("1_ctrl")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.35, 0)
+shape = SubResource("CapsuleShape3D_body")
+
+[node name="Model" parent="." instance=ExtResource("2_queen")]
+transform = Transform3D(-0.411765, 0, -3.6e-08, 0, 0.411765, 0, 3.6e-08, 0, -0.411765, 0, 0, 0)
+
+[node name="ProceduralGait" type="Node3D" parent="."]
+script = ExtResource("3_gait")
+
+[node name="CameraPivot" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.968912, 0.247404, 0, -0.247404, 0.968912, 0, 0.55, 0)
+
+[node name="SpringArm3D" type="SpringArm3D" parent="CameraPivot"]
+spring_length = 2.35
+margin = 0.05
+
+[node name="Camera3D" type="Camera3D" parent="CameraPivot/SpringArm3D"]
+fov = 62.0
+near = 0.05
+far = 400.0
