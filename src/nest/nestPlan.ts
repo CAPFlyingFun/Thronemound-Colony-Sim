@@ -77,6 +77,67 @@ export interface NestPlan {
  */
 export const MIN_ENTRANCE_RADIUS_MM = 8;
 
+/**
+ * THE ANTHILL: how far the spoil heap spreads, and how high it stands, as
+ * multiples of the entrance's own radius.
+ *
+ * An entrance is not a hole cut into flat ground. Everything an ant digs out
+ * has to go somewhere, and where it goes is a ring around the way in — so the
+ * mouth sits at the top of a low mound of its own spoil with a crater in the
+ * middle, which is what an anthill IS. The first version had it the other way
+ * round: the bore simply flared toward the surface, which cut a funnel INTO the
+ * ground and read as a sink rather than a hill.
+ *
+ * The heap has to be several times the hole across or the hole wins and it
+ * reads as a pit with a lip round it rather than a hill with a hole in it.
+ * Measured on the first attempt: a spread of 2.4 against a mouth of nine
+ * millimetres put an eighteen-millimetre opening in a six-millimetre rise, and
+ * the render was unmistakably a crater. Three and a bit to one is where it
+ * starts looking like a hill.
+ *
+ * Still wide and low, though. Loose soil will not stand up in a cone; it slumps
+ * to its angle of repose, which for dry sand is about thirty-four degrees, and
+ * 3.2 against 1.1 works out at nineteen. Under it, which is what a weathered
+ * heap looks like.
+ */
+export const MOUND_SPREAD = 3.2;
+export const MOUND_RISE = 1.1;
+
+/**
+ * Where the ground is, in millimetres: the lowest entrance in the plan.
+ *
+ * The plan owns this, like it owns everything else about the nest. An entrance
+ * is by definition where the nest meets the surface, so it IS the surface — and
+ * the alternative, a ground level set somewhere else, is a second description
+ * of the same fact waiting to disagree with the first.
+ *
+ * It matters because a heap needs headroom, and headroom is not free. The
+ * density field is a fixed grid with three cells of margin — one and a half
+ * millimetres — above the block, so a mound taller than that is simply not
+ * represented. Carved at the top of the block, an eight-millimetre-high anthill
+ * lost everything above 65.5 mm and rendered as the INSIDE of a bowl, which is
+ * how a hill and a crater end up looking identical. Ground below the block's
+ * top gives the heap somewhere to stand.
+ */
+export function groundOf(plan: NestPlan): number | null {
+    let ground: number | null = null;
+    for (const node of plan.nodes) {
+        if (node.kind !== 'entrance') continue;
+        ground = ground === null ? node.y : Math.min(ground, node.y);
+    }
+    return ground;
+}
+
+/** How far above the ground a plan's tallest heap stands, in millimetres. */
+export function tallestMoundMm(plan: NestPlan): number {
+    let tallest = 0;
+    for (const node of plan.nodes) {
+        if (node.kind !== 'entrance') continue;
+        tallest = Math.max(tallest, node.radiusMm * MOUND_RISE);
+    }
+    return tallest;
+}
+
 export interface Vec3 { x: number; y: number; z: number }
 
 export interface EdgeSample {
@@ -245,10 +306,17 @@ export function sampleEdge(plan: NestPlan, edge: NestEdge, stepMm = 1): EdgeSamp
 function mouthRadius(
     tunnel: number, fromR: number, toR: number, t: number, lengthMm: number,
 ): number {
-    // The flare runs over roughly the radius of the thing being joined, so a
-    // big chamber gets a long funnel and a small one barely a chamfer.
-    const flareFrom = Math.min(0.5, Math.max(fromR, tunnel) / Math.max(lengthMm, 1e-6));
-    const flareTo = Math.min(0.5, Math.max(toR, tunnel) / Math.max(lengthMm, 1e-6));
+    /*
+     * The flare runs over how much widening is NEEDED, not over how big the
+     * thing being joined is. Those are the same number only when the tunnel is
+     * infinitely thin, and the difference is what a funnel is: sized off the
+     * absolute radius, a nine-millimetre mouth on a four-millimetre bore cut a
+     * nine-millimetre-deep cone into the ground, which is most of why the
+     * entrance read as a sink. Sized off the difference it is five, and a
+     * chamfer rather than a funnel.
+     */
+    const flareFrom = Math.min(0.5, Math.max(fromR - tunnel, 0) / Math.max(lengthMm, 1e-6));
+    const flareTo = Math.min(0.5, Math.max(toR - tunnel, 0) / Math.max(lengthMm, 1e-6));
     let r = tunnel;
     if (fromR > tunnel && t < flareFrom) {
         const k = 1 - t / flareFrom;

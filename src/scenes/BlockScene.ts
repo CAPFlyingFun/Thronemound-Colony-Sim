@@ -52,8 +52,11 @@ import { MODES, cycleMode } from './modes';
 import { RAIL_SMOOTH_MM, TunnelRail, railFromPlan } from './tunnelRail';
 import { senseRoom, type RoomSense } from '../voxel/room';
 import { anyOf, bore, box, carve } from '../voxel/carve';
-import { inWorldUnits, planHollow } from '../nest/nestCarve';
-import { sampleEdge, validatePlan, type NestPlan, type Vec3 } from '../nest/nestPlan';
+import { carvePlan, inWorldUnits } from '../nest/nestCarve';
+import {
+  groundOf, sampleEdge, tallestMoundMm, validatePlan, MOUND_SPREAD,
+  type NestPlan, type Vec3,
+} from '../nest/nestPlan';
 import { demoNest } from '../nest/demoNest';
 import { buildNestView, type NestView } from '../nest/nestView';
 import {
@@ -207,6 +210,15 @@ const ROOM_EVERY = 4;
  * it the surface. Being generous costs nothing, because on any face of the
  * block the cast along her up goes to the sky and misses at any range at all.
  */
+/**
+ * How long a ceiling reading must hold before it counts, in seconds.
+ *
+ * See `judgeWhereSheIs`. A quarter of a second, the same figure the camera's
+ * no-room test settled on — long enough to throw away the flank of a hill,
+ * short enough that walking into a real tunnel is not visibly late.
+ */
+const ROOF_DWELL = 0.25;
+
 const CEILING_ENTER_MM = 13;
 const CEILING_LEAVE_MM = 18;
 /**
@@ -686,27 +698,8 @@ export class BlockScene {
        * the only description. The soil is cut from it, the routing runs over
        * it, and there is nothing for either to drift away from.
        */
-      const solid = box([LOW, LOW, LOW], [HIGH, HIGH, HIGH]);
-      const plan = demoNest();
-      this.nest = plan;
-      const faults = validatePlan(plan);
-      if (faults.length) {
-        // Loud, but not fatal. A plan with a fault in it still carves — it
-        // carves something visibly wrong, which is friendlier to look at than
-        // an empty screen and easier to diagnose than a thrown error.
-        console.warn('[nest] plan faults', faults);
-      }
-      this.field.fill(carve(
-        solid,
-        inWorldUnits(planHollow(plan, { stepMm: 0.5 }), [LOW, LOW, LOW], MM),
-      ));
-      // The plan drawn over the soil it cut. Built in millimetres, so the group
-      // carries the one conversion into world units rather than every piece of
-      // geometry inside it doing its own.
-      this.nestView = buildNestView(plan);
-      this.nestView.root.scale.setScalar(1 / MM);
-      this.nestView.root.position.set(LOW, LOW, LOW);
-      this.scene.add(this.nestView.root);
+      this.nest = demoNest();
+      this.carveNest();
     } else if (this.shape === 'shaft') {
       /*
        * A SHAFT AND A ROOM, cut to a number before anything is bitten.
@@ -771,10 +764,19 @@ export class BlockScene {
       // Back from the designed entrance, on the surface, with a clear run at
       // it — the same arrangement the shaft rig uses, so the two are
       // comparable.
+      /*
+       * On the ground the PLAN put there, clear of the heap.
+       *
+       * `HIGH` is the top of the block and is no longer where the ground is —
+       * the nest's ground sits lower so the anthill has headroom. Spawning at
+       * HIGH would drop her a dozen millimetres through air, and the far side
+       * of the heap is where she can walk at it rather than start halfway up it.
+       */
       const mouth = demoNest().nodes[0]!;
+      const clear = mouth.radiusMm * MOUND_SPREAD + 6;
       this.at.set(
-        LOW + mouth.x / MM, HIGH + RIDE,
-        LOW + (mouth.z - mouth.radiusMm - 6) / MM,
+        LOW + mouth.x / MM, LOW + mouth.y / MM + RIDE,
+        LOW + (mouth.z - clear) / MM,
       );
     } else this.at.set(MID, HIGH + RIDE, MID);
     this.follow.target.copy(this.at);
@@ -1120,6 +1122,52 @@ export class BlockScene {
   nestForTest(): NestPlan | null { return this.nest; }
 
   /**
+   * Cut the block from `this.nest`, and redraw the plan over it.
+   *
+   * All of it in the plan's MILLIMETRES, converted once at the end. The first
+   * version built the soil in world units and the nest in millimetres and
+   * converted each separately, which needed a scale and its inverse in the same
+   * expression — correct as written and the sort of thing that stops being
+   * correct the moment anyone touches it. The block's own faces are exactly
+   * 0 and BLOCK_MM in that frame, so nothing is lost by moving.
+   */
+  private carveNest(): void {
+    if (!this.nest) return;
+    const faults = validatePlan(this.nest);
+    if (faults.length) {
+      // Loud, but not fatal. A plan with a fault in it still carves — it
+      // carves something visibly wrong, which is friendlier to look at than
+      // an empty screen and easier to diagnose than a thrown error.
+      console.warn('[nest] plan faults', faults);
+    }
+    /*
+     * The ground is where the plan's entrances are, and the block is filled to
+     * THERE rather than to its own top face. Everything above it belongs to the
+     * anthill, which needs the room: the grid keeps only three cells of margin
+     * over the block, so a heap piled at the very top is mostly outside the
+     * field and renders as the inside of a bowl.
+     */
+    const ground = groundOf(this.nest) ?? BLOCK_MM;
+    const spare = BLOCK_MM + MARGIN_CELLS * CELL_MM - (ground + tallestMoundMm(this.nest));
+    if (spare < 0) {
+      console.warn(`[nest] the anthill stands ${(-spare).toFixed(1)} mm above the field and `
+        + 'will be cut off — lower the ground or shrink the entrance');
+    }
+    const soil = box([0, 0, 0], [BLOCK_MM, ground, BLOCK_MM]);
+    this.field.fill(inWorldUnits(
+      carvePlan(soil, this.nest, { stepMm: 0.5 }), [LOW, LOW, LOW], MM,
+    ));
+
+    this.nestView?.dispose();
+    if (this.nestView) this.scene.remove(this.nestView.root);
+    this.nestView = buildNestView(this.nest);
+    this.nestView.root.scale.setScalar(1 / MM);
+    this.nestView.root.position.set(LOW, LOW, LOW);
+    this.nestView.root.visible = this.sonar;
+    this.scene.add(this.nestView.root);
+  }
+
+  /**
    * The lens settings, and remembering them.
    *
    * A field of view is a comfort setting, not a game state — someone who finds
@@ -1247,6 +1295,9 @@ export class BlockScene {
    * asked what she was doing. A question should not be an action.
    */
   private undergroundLatch = false;
+
+  /** How long the ceiling reading has disagreed with the latch, in seconds. */
+  private roofedFor = 0;
   private chamberLatch = false;
 
   get underground(): boolean { return this.undergroundLatch; }
@@ -1254,12 +1305,32 @@ export class BlockScene {
   get inChamber(): boolean { return this.chamberLatch; }
 
   /** Work out both, from the room reading and a cast for a ceiling. */
-  private judgeWhereSheIs(): void {
+  private judgeWhereSheIs(dt = 1 / 60): void {
     const reach = this.undergroundLatch ? CEILING_LEAVE_MM : CEILING_ENTER_MM;
-    this.undergroundLatch = this.cast(
+    const roofed = this.cast(
       this.at.clone().addScaledVector(this.up, CELL),
       this.up.clone(), reach / MM,
     ) !== null;
+    /*
+     * A ROOF HAS TO LAST to count.
+     *
+     * The cast goes along HER OWN up, and her up lags the ground she is on —
+     * so walking up the flank of an anthill, an up still leaning back toward
+     * the hill finds thirteen millimetres of soil above her and reports her
+     * underground while she is stood in the open on a slope. Measured on the
+     * anthill: she flickered under at frame 53 and back out at 63, ten frames,
+     * and each crossing is a hard camera cut.
+     *
+     * Same shape of answer as the camera's own no-room test, and for the same
+     * reason: the reading is not noisy, it is briefly and confidently WRONG. A
+     * band would only move where it happens. Three frames of ceiling is a hill;
+     * a quarter of a second of it is a roof.
+     */
+    this.roofedFor = roofed === this.undergroundLatch ? 0 : this.roofedFor + dt;
+    if (roofed !== this.undergroundLatch && this.roofedFor >= ROOF_DWELL) {
+      this.undergroundLatch = roofed;
+      this.roofedFor = 0;
+    }
     if (!this.undergroundLatch) {
       this.chamberLatch = false;
       return;
@@ -1484,7 +1555,7 @@ export class BlockScene {
      * a full lap of the stick reads as one curve.
      */
     this.senseTheRoom();
-    this.judgeWhereSheIs();
+    this.judgeWhereSheIs(dt);
     const ease = 1 - Math.exp(-STICK_EASE * dt);
     this.driveWalk += (this.input.walk - this.driveWalk) * ease;
     this.driveYaw += (this.input.yaw - this.driveYaw) * ease;

@@ -12,8 +12,11 @@
  * `carve(solid, planHollow(plan))`.
  */
 
-import { anyOf, carve, type Field, type Point } from '../voxel/carve';
-import { sampleEdge, type NestEdge, type NestNode, type NestPlan } from './nestPlan';
+import { anyOf, bore, carve, type Field, type Point } from '../voxel/carve';
+import {
+    MOUND_RISE, MOUND_SPREAD, sampleEdge,
+    type NestEdge, type NestNode, type NestPlan,
+} from './nestPlan';
 
 export interface CarveOptions {
     /**
@@ -99,11 +102,28 @@ function union(a: Bounds, b: Bounds): Bounds {
     };
 }
 
-/** The box a chamber occupies. Junctions and entrances have no room of their own. */
+/**
+ * The box a node occupies — a chamber's room, or an entrance's heap and vent.
+ * A junction is only ever the width of the tunnels meeting at it, so it has no
+ * box of its own.
+ */
 export function nodeBounds(node: NestNode): Bounds | null {
-    if (node.kind !== 'chamber') return null;
-    const r = node.radiusMm;
-    return { min: [node.x - r, node.y - r, node.z - r], max: [node.x + r, node.y + r, node.z + r] };
+    if (node.kind === 'chamber') {
+        const r = node.radiusMm;
+        return {
+            min: [node.x - r, node.y - r, node.z - r],
+            max: [node.x + r, node.y + r, node.z + r],
+        };
+    }
+    if (node.kind === 'entrance') {
+        const spread = node.radiusMm * MOUND_SPREAD;
+        const rise = node.radiusMm * (MOUND_RISE + 1);
+        return {
+            min: [node.x - spread, node.y - node.radiusMm, node.z - spread],
+            max: [node.x + spread, node.y + rise, node.z + spread],
+        };
+    }
+    return null;
 }
 
 /** The box a tunnel occupies, bore included. */
@@ -163,6 +183,53 @@ export function edgeHollow(plan: NestPlan, edge: NestEdge, opts: CarveOptions = 
     return bounds ? within(grow(bounds, opts.marginMm ?? DEFAULT_MARGIN_MM), inner) : inner;
 }
 
+/**
+ * The spoil heap around an entrance — the anthill itself.
+ *
+ * A squashed ellipsoid centred ON the surface point, so its lower half is
+ * already inside the soil and adds nothing while its upper half stands proud.
+ * That is cheaper than trying to cap a dome at exactly the right height and,
+ * more usefully, it cannot leave a seam: there is no join to get wrong because
+ * the shape simply passes through the ground.
+ *
+ * It rises along world up. A nest can in principle have an entrance anywhere,
+ * but spoil falls downward wherever it is dug, so a heap that leaned out of a
+ * wall would be wrong in a way nobody would have to measure to see.
+ */
+export function moundOf(node: NestNode): Field | null {
+    if (node.kind !== 'entrance' || node.radiusMm <= 0) return null;
+    const spread = node.radiusMm * MOUND_SPREAD;
+    const rise = node.radiusMm * MOUND_RISE;
+    const scale = Math.min(spread, rise);
+    return (x, y, z) => {
+        const u = Math.hypot((x - node.x) / spread, (y - node.y) / rise, (z - node.z) / spread);
+        return (1 - u) * scale;
+    };
+}
+
+/**
+ * The hole through the heap, so the mound is a crater and not a blister.
+ *
+ * Runs from clear above the apex down to below the surface point. Stopping it
+ * at the apex would leave a wafer of soil across the opening — she would arrive
+ * at a lid — and the same mistake in the hand-built shaft rig is why that one
+ * pushes its bottom end INSIDE the room's ceiling.
+ *
+ * Cut at the entrance's own radius rather than the tunnel's. That is the number
+ * that makes the hole findable — measured, she strides over anything narrower —
+ * and it is the same number the bore below already flares to, so the two meet
+ * at the same width and there is no lip between them.
+ */
+export function ventOf(node: NestNode): Field | null {
+    if (node.kind !== 'entrance' || node.radiusMm <= 0) return null;
+    const rise = node.radiusMm * MOUND_RISE;
+    return bore(
+        [node.x, node.y + rise + node.radiusMm, node.z],
+        [node.x, node.y - node.radiusMm, node.z],
+        node.radiusMm,
+    );
+}
+
 /** One chamber as a void, or null for a node that is not a room. */
 export function nodeHollow(node: NestNode): Field | null {
     if (node.kind !== 'chamber' || node.radiusMm <= 0) return null;
@@ -182,16 +249,34 @@ export function planHollow(plan: NestPlan, opts: CarveOptions = {}): Field {
         if (one) parts.push(one);
     }
     for (const node of plan.nodes) {
-        const one = nodeHollow(node);
-        if (one) parts.push(one);
+        const room = nodeHollow(node);
+        if (room) parts.push(room);
+        const vent = ventOf(node);
+        if (vent) parts.push(vent);
     }
     if (!parts.length) return () => -Infinity;
     return anyOf(parts);
 }
 
-/** `solid` with the nest taken out of it. Both in the plan's millimetres. */
+/**
+ * The ground with the nest's spoil heaps piled on it.
+ *
+ * Added BEFORE anything is cut, which is the only order that works: the vent
+ * has to bore through the heap, so the heap must already be there when it does.
+ * Piling soil on afterwards would fill the hole back in.
+ */
+export function planMounded(solid: Field, plan: NestPlan): Field {
+    const heaps: Field[] = [];
+    for (const node of plan.nodes) {
+        const heap = moundOf(node);
+        if (heap) heaps.push(heap);
+    }
+    return heaps.length ? anyOf([solid, ...heaps]) : solid;
+}
+
+/** `solid` with the nest's heaps piled on and its tunnels cut out. Millimetres. */
 export function carvePlan(solid: Field, plan: NestPlan, opts: CarveOptions = {}): Field {
-    return carve(solid, planHollow(plan, opts));
+    return carve(planMounded(solid, plan), planHollow(plan, opts));
 }
 
 /**

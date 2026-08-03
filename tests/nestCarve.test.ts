@@ -1,9 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { box, type Field } from '../src/voxel/carve';
 import {
-    carvePlan, edgeBounds, edgeHollow, nodeBounds, nodeHollow, planBounds, planHollow,
+    carvePlan, edgeBounds, edgeHollow, moundOf, nodeBounds, nodeHollow,
+    planBounds, planHollow, planMounded, ventOf,
 } from '../src/nest/nestCarve';
-import { emptyPlan, type NestPlan } from '../src/nest/nestPlan';
+import {
+    emptyPlan, MOUND_RISE, MOUND_SPREAD, type NestPlan,
+} from '../src/nest/nestPlan';
 
 /** A 64 mm block of soil centred on the origin, the same one the scene builds. */
 const HALF = 32;
@@ -29,9 +32,16 @@ describe('bounding the work', () => {
         expect(b.max).toEqual([10, 15, 10]);
     });
 
-    it('gives a junction and an entrance no room of their own', () => {
-        expect(nodeBounds(shaftPlan().nodes[0]!)).toBeNull();
+    it('gives a junction no room of its own', () => {
         expect(nodeBounds({ id: 'j', kind: 'junction', x: 0, y: 0, z: 0, radiusMm: 5 })).toBeNull();
+    });
+
+    it('boxes an entrance round its heap, which stands ABOVE the ground', () => {
+        const mouth = shaftPlan().nodes[0]!;   // r = 9, sitting on the top face
+        const b = nodeBounds(mouth)!;
+        expect(b.max[1]).toBeCloseTo(HALF + 9 * (MOUND_RISE + 1), 4);
+        expect(b.max[0]).toBeCloseTo(9 * MOUND_SPREAD, 4);
+        expect(b.max[1]).toBeGreaterThan(HALF);
     });
 
     it('boxes a tunnel round its widest bore, not its narrowest', () => {
@@ -50,7 +60,8 @@ describe('bounding the work', () => {
     it('covers every part of the nest', () => {
         const b = planBounds(shaftPlan())!;
         expect(b.min[1]).toBeCloseTo(-5, 1);       // the bottom of the room
-        expect(b.max[1]).toBeCloseTo(HALF + 9, 1); // the top of the mouth
+        // The top of the heap, not the top of the ground.
+        expect(b.max[1]).toBeCloseTo(HALF + 9 * (MOUND_RISE + 1), 1);
     });
 });
 
@@ -116,7 +127,89 @@ describe('a chamber as a void', () => {
     });
 });
 
+describe('the anthill', () => {
+    const mouth = () => shaftPlan().nodes[0]!;
+
+    it('is soil that stands ABOVE the ground, not a hole cut into it', () => {
+        const heap = moundOf(mouth())!;
+        // Just above the surface, out at half the spread: inside the heap.
+        expect(heap(9, HALF + 1, 0)).toBeGreaterThan(0);
+        // Well clear of it: not.
+        expect(heap(9 * MOUND_SPREAD + 2, HALF + 1, 0)).toBeLessThan(0);
+        expect(heap(0, HALF + 9 * MOUND_RISE + 2, 0)).toBeLessThan(0);
+    });
+
+    it('rises to the height it claims, and no further', () => {
+        const heap = moundOf(mouth())!;
+        const rise = 9 * MOUND_RISE;
+        expect(heap(0, HALF + rise * 0.9, 0)).toBeGreaterThan(0);
+        expect(heap(0, HALF + rise * 1.1, 0)).toBeLessThan(0);
+    });
+
+    it('is wide and low, so the slope is one loose soil would hold', () => {
+        // Dry sand slumps at about 34 degrees. A heap steeper than that would
+        // not be there in the morning.
+        const slope = Math.atan((9 * MOUND_RISE) / (9 * MOUND_SPREAD)) * 180 / Math.PI;
+        expect(slope).toBeLessThan(34);
+    });
+
+    it('belongs to entrances only — a room does not pile spoil on the surface', () => {
+        expect(moundOf(shaftPlan().nodes[1]!)).toBeNull();
+        expect(moundOf({ id: 'j', kind: 'junction', x: 0, y: 0, z: 0, radiusMm: 5 })).toBeNull();
+        expect(ventOf(shaftPlan().nodes[1]!)).toBeNull();
+    });
+
+    it('is vented right through, from above the apex to below the ground', () => {
+        const vent = ventOf(mouth())!;
+        expect(vent(0, HALF + 9 * MOUND_RISE + 0.5, 0)).toBeGreaterThan(0);
+        expect(vent(0, HALF, 0)).toBeGreaterThan(0);
+        expect(vent(0, HALF - 5, 0)).toBeGreaterThan(0);
+        // Narrow, not a general excavation: out past its own radius it stops.
+        // (Height is the wrong axis to bound it on — `bore` is a capsule, so it
+        // reaches its own radius beyond each end, which above the apex is air
+        // anyway and costs nothing.)
+        expect(vent(9.5, HALF, 0)).toBeLessThan(0);
+        expect(vent(0, HALF, 9.5)).toBeLessThan(0);
+    });
+
+    it('piles the heap onto the ground without a seam', () => {
+        const mounded = planMounded(soil, shaftPlan());
+        // Continuous across the old surface: the heap's lower half is already
+        // inside the soil, so there is no join to get wrong.
+        for (let y = HALF - 3; y <= HALF + 9 * MOUND_RISE - 0.5; y += 0.25) {
+            expect(mounded(4, y, 0)).toBeGreaterThan(0);
+        }
+    });
+
+    it('leaves the ground alone away from the mouth', () => {
+        const mounded = planMounded(soil, shaftPlan());
+        expect(mounded(28, HALF + 1, 28)).toBeLessThan(0);
+        expect(mounded(28, HALF - 1, 28)).toBeGreaterThan(0);
+    });
+});
+
 describe('the nest cut out of the soil', () => {
+    it('makes a hill with a hole in it, not a funnel sunk into flat ground', () => {
+        const dug = carvePlan(soil, shaftPlan());
+        const rim = 9 * (MOUND_SPREAD + 1) / 2;   // out on the flank of the heap
+        // Soil ABOVE the old ground line, out on the flank — this is the whole
+        // point of the change, and the funnel version had nothing here.
+        expect(solidAt(dug, rim, HALF + 0.5, 0)).toBe(true);
+        // And open air straight down the middle, right through the apex.
+        for (let y = HALF + 9 * MOUND_RISE + 1; y >= HALF - 4; y -= 0.5) {
+            expect(solidAt(dug, 0, y, 0)).toBe(false);
+        }
+    });
+
+    it('stands the crater rim proud of the ground all the way round', () => {
+        const dug = carvePlan(soil, shaftPlan());
+        const rim = 9 * (MOUND_SPREAD + 1) / 2;
+        for (const [x, z] of [[rim, 0], [-rim, 0], [0, rim], [0, -rim]] as const) {
+            expect(solidAt(dug, x, HALF + 0.5, z)).toBe(true);
+        }
+    });
+
+
     it('leaves the block alone where the nest is not', () => {
         const dug = carvePlan(soil, shaftPlan());
         expect(solidAt(dug, 25, 0, 25)).toBe(true);

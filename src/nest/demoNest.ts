@@ -16,20 +16,34 @@
 
 import { MIN_ENTRANCE_RADIUS_MM, type NestPlan } from './nestPlan';
 
-/** The top face of the block, in millimetres. */
-const TOP_MM = 64;
+/**
+ * Where the ground sits, in millimetres.
+ *
+ * Twelve below the top of the block, not at it, because the anthill has to go
+ * SOMEWHERE and the density grid has only a millimetre and a half of margin
+ * above the block. Ground at the very top means the heap is carved outside the
+ * field entirely — it renders as the inside of a bowl, which is exactly how a
+ * hill and a crater come to look the same. An eight-millimetre mouth heaps 8.8
+ * millimetres high, so twelve is room to spare.
+ */
+const TOP_MM = 52;
 
 export function demoNest(): NestPlan {
     return {
         nodes: [
             // On the surface, and deliberately wider than the shaft below it:
             // measured, she strides straight over anything narrower.
-            { id: 'mouth', kind: 'entrance', x: 32, y: TOP_MM, z: 16, radiusMm: MIN_ENTRANCE_RADIUS_MM + 1 },
+            /*
+             * In the middle of the block, because the heap around it is three
+             * times its own width and wants room on every side. Off toward an
+             * edge, half the anthill falls off the world.
+             */
+            { id: 'mouth', kind: 'entrance', x: 32, y: TOP_MM, z: 32, radiusMm: MIN_ENTRANCE_RADIUS_MM },
             // Where the shaft bottoms out and the nest branches. A junction is
             // no wider than its tunnels — it is a place they meet, not a room.
-            { id: 'hall', kind: 'junction', x: 32, y: 42, z: 16, radiusMm: 4 },
-            { id: 'larder', kind: 'chamber', x: 14, y: 34, z: 26, radiusMm: 8 },
-            { id: 'royal', kind: 'chamber', x: 48, y: 22, z: 34, radiusMm: 10 },
+            { id: 'hall', kind: 'junction', x: 32, y: 42, z: 32, radiusMm: 4 },
+            { id: 'larder', kind: 'chamber', x: 14, y: 34, z: 20, radiusMm: 8 },
+            { id: 'royal', kind: 'chamber', x: 48, y: 22, z: 44, radiusMm: 10 },
         ],
         edges: [
             { id: 'descent', from: 'mouth', to: 'hall', radiusMm: 4, flow: 'both' },
