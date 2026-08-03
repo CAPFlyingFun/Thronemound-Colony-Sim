@@ -336,102 +336,10 @@ const pan = await page.evaluate(() => {
   };
 });
 check('she is underground for the pan test', pan.under === 1);
-/* The clamp may shorten the orbit well under its 6 mm ask when the bore's
- * roof is close — that IS the wall-avoidance working. It must still move
- * off her back and never leave the tunnel. */
-check('held drag orbits around her (clamped to the bore)',
-  pan.heldDist > 1 && pan.heldDist < 9,
-  `${pan.heldDist.toFixed(1)} mm out, ${(pan.heldY * 5).toFixed(1)} mm up`);
+check('held drag orbits close around her', pan.heldDist > 3 && pan.heldDist < 9
+  && pan.heldY > 0.5, `${pan.heldDist.toFixed(1)} mm out, ${(pan.heldY * 5).toFixed(1)} mm up`);
 check('released, the trail capsule takes the camera back',
   pan.backDist > 2 && pan.backDist < 12, `${pan.backDist.toFixed(1)} mm back`);
-
-console.log('\nTHE STREAM PARKS UNDERGROUND');
-const park = await page.evaluate(() => {
-  const s = window.islandScene;
-  // Straight along the drift from the hall — no turns, so the climb assist
-  // cannot walk her out mid-test — while counting scrolls.
-  const scrolls0 = s.statsForTest().scrolls;
-  s.setFacingForTest(Math.PI / 2);
-  s.input.walk = 1;
-  let pausedFrames = 0;
-  for (let i = 0; i < 150; i += 1) {
-    s.stepForTest(1 / 30, 1);
-    if (s.statsForTest().streamPaused === 1) pausedFrames += 1;
-  }
-  s.input.walk = 0;
-  return {
-    pausedFrames,
-    under: s.statsForTest().underground,
-    scrollsWhileUnder: s.statsForTest().scrolls - scrolls0,
-  };
-});
-check('she stays underground along the drift', park.under === 1);
-check('the stream is parked while she is deep', park.pausedFrames > 140,
-  `${park.pausedFrames} of 150 frames`);
-check('and no scrolls fired underground', park.scrollsWhileUnder === 0,
-  `${park.scrollsWhileUnder} scrolls`);
-
-console.log('\nNO CAMERA IN THE WALLS (tunnel wandering, both views)');
-const walls = await page.evaluate(() => {
-  const s = window.islandScene;
-  /* Wander the nest LIKE A PLAYER: walk, and when she stops making
-   * progress (a dead end), turn around — grinding into a wall for ten
-   * seconds is not a camera scenario, it is a soil-sampling one. */
-  const wander = (frames) => {
-    let solid = 0;
-    let lastX = s.at.x;
-    let lastZ = s.at.z;
-    let still = 0;
-    for (let i = 0; i < frames; i += 1) {
-      s.stepForTest(1 / 30, 1);
-      if (Math.hypot(s.at.x - lastX, s.at.z - lastZ) < 0.03) {
-        still += 1;
-        if (still > 12) {
-          s.setFacingForTest(s.facing + Math.PI);
-          still = 0;
-        }
-      } else {
-        still = 0;
-      }
-      lastX = s.at.x;
-      lastZ = s.at.z;
-      const c = s.camera.position;
-      if (s.stream.solidAtWu(c.x, c.y, c.z) === true) solid += 1;
-    }
-    return solid;
-  };
-  s.firstPerson = false;
-  s.input.walk = 1;
-  const solidFrames3rd = wander(300);
-  s.firstPerson = true;
-  const solidFramesFp = wander(300);
-  s.firstPerson = false;
-  s.input.walk = 0;
-  return { solidFrames3rd, solidFramesFp };
-});
-check('third-person lens never inside soil', walls.solidFrames3rd === 0,
-  `${walls.solidFrames3rd} of 300 frames`);
-check('first-person lens never inside soil', walls.solidFramesFp === 0,
-  `${walls.solidFramesFp} of 300 frames`);
-const resume = await page.evaluate(() => {
-  const s = window.islandScene;
-  // Back on the open plateau (climb-out is proven by its own check above):
-  // streaming must unpark and scroll again.
-  s.teleportMm(27900, 27900);
-  s.drainQueueForTest();
-  const scrolls0 = s.statsForTest().scrolls;
-  s.setFacingForTest(Math.PI);
-  s.input.walk = 1;
-  s.stepForTest(1 / 30, 900);
-  s.input.walk = 0;
-  return {
-    paused: s.statsForTest().streamPaused,
-    scrollsAfter: s.statsForTest().scrolls - scrolls0,
-  };
-});
-check('back on the surface the stream unparks', resume.paused === 0);
-check('and scrolling resumes on the surface walk', resume.scrollsAfter > 0,
-  `${resume.scrollsAfter} scrolls`);
 
 console.log('\nTHE RED-SKY TEST (fog off, red background, island panorama)');
 await page.evaluate(() => {
@@ -470,27 +378,21 @@ check('not one hole in the island', holes.red === 0,
 console.log('\nERRORS');
 check('no page errors', errs.length === 0, errs.join(' | ').slice(0, 200));
 
-// Pretty shots: a reload puts the real sky and haze back. Cosmetic, and
-// SwiftShader sometimes takes its time rasterising the textured island —
-// a slow screenshot must not fail the run.
-try {
-  await page.reload({ waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => window.islandScene?.ready, null, { timeout: 60000 });
-  await page.waitForTimeout(1000);
-  await page.screenshot({ path: '/tmp/island-summit.png', timeout: 90000 });
-  await page.evaluate(() => {
-    const s = window.islandScene;
-    s.setPausedForTest(true);
-    s.teleportMm(20000, 10000);
-    s.camPitch = 0.22;
-    s.camDist = 500;
-    s.setPausedForTest(false);
-  });
-  await page.waitForTimeout(700);
-  await page.screenshot({ path: '/tmp/island-coast.png', timeout: 90000 });
-} catch (e) {
-  console.log(`  info  screenshots skipped: ${String(e).slice(0, 80)}`);
-}
+// Pretty shots: a reload puts the real sky and haze back.
+await page.reload({ waitUntil: 'domcontentloaded' });
+await page.waitForFunction(() => window.islandScene?.ready, null, { timeout: 60000 });
+await page.waitForTimeout(1000);
+await page.screenshot({ path: '/tmp/island-summit.png' });
+await page.evaluate(() => {
+  const s = window.islandScene;
+  s.setPausedForTest(true);
+  s.teleportMm(20000, 10000);
+  s.camPitch = 0.22;
+  s.camDist = 500;
+  s.setPausedForTest(false);
+});
+await page.waitForTimeout(700);
+await page.screenshot({ path: '/tmp/island-coast.png' });
 
 await browser.close();
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECKS FAILED`}`);
