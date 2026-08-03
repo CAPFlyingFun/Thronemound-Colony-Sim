@@ -53,3 +53,38 @@ that invariant.
 **Head yaw does not transfer either**, by explicit instruction: Godot caps it at
 22 degrees to keep the antennae out of the soil, and this build keeps 60 because
 that is what an ant's head movement looks like.
+
+## The dig is already shared, in all three
+
+Worth writing down because it is not obvious and it was nearly ported twice.
+
+`subtract_sphere` in `density_terrain.gd`, `DensityField.subtractSphere` and the
+streamed field the colony sim digs are **the same function** — the same
+occupancy formula `clamp(0.5 + density / (2 * cellSize), 0, 1)`, the same
+per-sample volume, the same `min(old, brushDistance)`. Godot's was ported FROM
+here. There is nothing to unify.
+
+The clod is where the three differ, and only in how a removed volume becomes a
+drawn radius:
+
+| | formula | for a real bite |
+|---|---|---|
+| Godot / `?scene=block` | `cbrt(v·3/4π) · 0.72`, clamped 0.08–0.32 | 1.99–2.22 mm across |
+| `?map=densityterrainlab` | `cbrt(v/PELLET_SOLIDITY) · 0.5`, cbrt clamped 0.004–0.4 | 1.72–1.92 mm across |
+
+A constant **1.158×** apart across the whole useful range, because both are the
+cube root of the volume with a different constant in front. The difference is
+entirely that Godot treats the clod as a sphere it is not drawn as, at 72%,
+while the colony sim divides by the volume of the icosahedral solid it actually
+draws — squash included — and keeps its look adjustment in a separately named
+`CLOD_DISPLAY_SCALE` so it cannot be mistaken for geometry.
+
+So the colony sim's is the same idea done more carefully, and replacing it with
+Godot's would be a step back. The one real difference is at the top end: the
+colony sim's clamp flattens its clod at 2.0 mm across where Godot's keeps
+growing to 3.2, so a very large bite reads as smaller there.
+
+Its throw direction is also a measured fix and should not be replaced by
+Godot's. Godot throws along the surface normal; the colony sim throws over her
+shoulder, because straight back out of the hole points at her own face — the
+comment records that clods spawned inside her thorax and flew through her.
