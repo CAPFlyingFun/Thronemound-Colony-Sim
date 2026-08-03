@@ -107,6 +107,10 @@ export class WorldScene {
 
   private biteAt = 0;
 
+  /** A scroll shrank the macro discard to the retained soil; grow it back
+   *  to the full window once every queued chunk has meshed. */
+  private clipPending = false;
+
   // Diagnostics, exactly the ones the request asks for.
   private readonly stats = {
     scrolls: 0,
@@ -149,7 +153,15 @@ export class WorldScene {
     host.appendChild(this.renderer.domElement);
 
     this.scene.background = new THREE.Color(0x9cbedd);
-    this.scene.fog = new THREE.Fog(0x9cbedd, WINDOW_MM / MM * 1.2, WORLD_SPAN * 0.7);
+    /*
+     * The fog is DUST, not sky, and the distinction was learned the hard way:
+     * with fog dyed the sky's exact blue, far ridges faded to sky colour and
+     * read as slivers of sky showing THROUGH the terrain — reported as holes,
+     * and chased as holes, when a red-background probe showed the silhouette
+     * was airtight all along. Hazing the distance toward a pale dust tone
+     * keeps far hills reading as land under atmosphere.
+     */
+    this.scene.fog = new THREE.Fog(0xbcb29c, WINDOW_MM / MM * 1.2, WORLD_SPAN * 0.7);
     this.camera = new THREE.PerspectiveCamera(60, 1, 0.05, WORLD_SPAN * 2);
 
     const sun = new THREE.DirectionalLight(0xfff2dd, 2.1);
@@ -308,11 +320,43 @@ export class WorldScene {
     }
     jobs.sort((a, b) => a.d - b.d);
     for (const job of jobs) this.enqueue(job.cx, job.cy, job.cz);
-    this.macroClip();
+    /*
+     * THE CLIP MUST NEVER OUTRUN THE MESHES. Discarding the macro sheet over
+     * the whole new window while the strip's chunks are still queued opens a
+     * window-sized hole to the sky — briefly at 60 fps, glaringly in a
+     * software-rendered screenshot. So the discard rectangle shrinks to the
+     * retained chunks (rounded inward to whole chunk meshes) and only grows
+     * to the full window when the queue drains, in reveal(). Until then the
+     * macro sheet covers the regenerating strip, and since both layers
+     * sample the same ground the reveal is a material change, not a pop.
+     */
+    const cx0 = Math.ceil(keep.x0 / CH) * CH;
+    const cx1 = Math.floor(keep.x1 / CH) * CH;
+    const cz0 = Math.ceil(keep.z0 / CH) * CH;
+    const cz1 = Math.floor(keep.z1 / CH) * CH;
+    const inset = CELL_SIZE * 2;
+    if (cx1 - cx0 > 0 && cz1 - cz0 > 0) {
+      this.macro.setWindow(
+        this.stream.originWorldX + cx0 * CELL_SIZE + inset,
+        this.stream.originWorldZ + cz0 * CELL_SIZE + inset,
+        this.stream.originWorldX + cx1 * CELL_SIZE - inset,
+        this.stream.originWorldZ + cz1 * CELL_SIZE - inset,
+      );
+    } else {
+      this.macro.setWindow(0, 0, 0, 0);
+    }
+    this.clipPending = true;
     if (this.nestView) {
       // The sonar overlay is world-anchored; nothing to move. This hook is
       // where per-chunk culling of it would go if the plan grew huge.
     }
+  }
+
+  /** Hand the full window over to the fine mesh — only once it all exists. */
+  private reveal(): void {
+    if (!this.clipPending || this.queue.length > 0) return;
+    this.clipPending = false;
+    this.macroClip();
   }
 
   private macroClip(): void {
@@ -385,6 +429,7 @@ export class WorldScene {
       this.meshChunk(job.cx, job.cy, job.cz);
       built += 1;
     }
+    this.reveal();
 
     this.pose(dt);
     this.aimCamera(dt);
@@ -641,6 +686,7 @@ export class WorldScene {
       this.queued.delete(this.key(job.cx, job.cy, job.cz));
       this.meshChunk(job.cx, job.cy, job.cz);
     }
+    this.reveal();
   }
 
   setFacingForTest(radians: number): void { this.facing = radians; }

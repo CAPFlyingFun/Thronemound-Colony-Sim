@@ -39,6 +39,8 @@ export class MacroSurface {
 
   private readonly material: THREE.MeshLambertMaterial;
 
+  private readonly skirtMaterial: THREE.MeshLambertMaterial;
+
   readonly tileCount = TILES * TILES;
 
   readonly vertexCount: number;
@@ -67,6 +69,15 @@ export class MacroSurface {
         );
     };
 
+    /*
+     * The skirt shares the sheet's clip material but draws both faces: the
+     * camera lives INSIDE the world, so it sees the curtain's inner side.
+     * The clone shares `this.clip` through the copied onBeforeCompile, so
+     * one setWindow moves both.
+     */
+    this.skirtMaterial = this.material.clone();
+    this.skirtMaterial.side = THREE.DoubleSide;
+
     let vertices = 0;
     for (let tz = 0; tz < TILES; tz += 1) {
       for (let tx = 0; tx < TILES; tx += 1) {
@@ -75,7 +86,52 @@ export class MacroSurface {
         this.root.add(mesh);
       }
     }
+    const skirt = this.buildSkirt();
+    vertices += skirt.geometry.getAttribute('position').count;
+    this.root.add(skirt);
     this.vertexCount = vertices;
+  }
+
+  /**
+   * THE WORLD'S EDGE, CLOSED. A finite heightfield seen from a low camera
+   * shows sky under its own silhouette: the far slopes of the last ridge are
+   * back-face culled and nothing stands behind them, so slivers of sky open
+   * along distant ridgelines. (Beyond Extinction hit the same thing.) The
+   * cure is a curtain around the perimeter, from the ground line down to the
+   * soil column's floor — same global grid indices as the tile edges, so the
+   * top seam is bit-identical and crackless.
+   */
+  private buildSkirt(): THREE.Mesh {
+    const step = PITCH_MM / MM;
+    const count = WORLD_MM / PITCH_MM;
+    const positions: number[] = [];
+    const index: number[] = [];
+    const edge = (gx0: number, gz0: number, dx: number, dz: number) => {
+      const base = positions.length / 3;
+      for (let s = 0; s <= count; s += 1) {
+        const x = (gx0 + dx * s) * step;
+        const z = (gz0 + dz * s) * step;
+        positions.push(x, groundHeightAt(x, z), z, x, 0, z);
+      }
+      for (let s = 0; s < count; s += 1) {
+        const a = base + s * 2;
+        index.push(a, a + 1, a + 2, a + 2, a + 1, a + 3);
+      }
+    };
+    edge(0, 0, 1, 0);
+    edge(0, count, 1, 0);
+    edge(0, 0, 0, 1);
+    edge(count, 0, 0, 1);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      'position', new THREE.BufferAttribute(new Float32Array(positions), 3),
+    );
+    geometry.setIndex(index);
+    geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geometry, this.skirtMaterial);
+    mesh.matrixAutoUpdate = false;
+    return mesh;
   }
 
   /**
@@ -83,18 +139,24 @@ export class MacroSurface {
    * at the origin) so the clip test needs no per-tile bookkeeping, and
    * heights come from the shared ground function — mound included, so the
    * anthill shows from across the map.
+   *
+   * Vertices are computed from GLOBAL grid indices, never from a per-tile
+   * origin plus a local offset. `x0 + i * step` and the neighbour's
+   * `x0' + 0 * step` are the same point in exact arithmetic and different
+   * points in floats, and the difference rendered as hairline cracks of sky
+   * along every tile seam — brightest on distant ridgelines, where a
+   * fraction of a millimetre of gap is silhouetted against the sky. One
+   * multiplication of an integer makes shared-edge vertices bit-identical.
    */
   private buildTile(tx: number, tz: number): THREE.Mesh {
-    const x0 = (tx * MACRO_TILE_MM) / MM;
-    const z0 = (tz * MACRO_TILE_MM) / MM;
     const step = PITCH_MM / MM;
     const side = SEGMENTS + 1;
     const positions = new Float32Array(side * side * 3);
     let at = 0;
     for (let j = 0; j < side; j += 1) {
       for (let i = 0; i < side; i += 1) {
-        const x = x0 + i * step;
-        const z = z0 + j * step;
+        const x = (tx * SEGMENTS + i) * step;
+        const z = (tz * SEGMENTS + j) * step;
         positions[at] = x;
         positions[at + 1] = groundHeightAt(x, z);
         positions[at + 2] = z;
@@ -132,6 +194,7 @@ export class MacroSurface {
       mesh.geometry.dispose();
     }
     this.material.dispose();
+    this.skirtMaterial.dispose();
     this.root.clear();
   }
 }
