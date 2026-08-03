@@ -51,8 +51,8 @@ import { STICK_DEADZONE, clampStickOrigin, stickVector } from '../voxel/locomoti
 import { MODES, cycleMode } from './modes';
 import { RAIL_SMOOTH_MM, TunnelRail, railFromPlan } from './tunnelRail';
 import { senseRoom, type RoomSense } from '../voxel/room';
-import { anyOf, bore, box, carve } from '../voxel/carve';
-import { carvePlan, inWorldUnits } from '../nest/nestCarve';
+import { anyOf, bore, box, carve, type Field } from '../voxel/carve';
+import { carvePlan, inWorldUnits, planHollow } from '../nest/nestCarve';
 import {
   groundOf, sampleEdge, tallestMoundMm, validatePlan, MOUND_SPREAD,
   type NestPlan, type Vec3,
@@ -67,6 +67,7 @@ import {
 import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import {
   CASTE_BITE_MM, CASTE_LENGTH_MM, HEAD_PITCH_DOWN, HEAD_PITCH_UP, HEAD_YAW_LIMIT,
+  type RigMap,
 } from '../anim/hexapod';
 import {
   FOOT_CLEARANCE_MM, LegDrive, type DriveReport, type LegSetup,
@@ -289,6 +290,12 @@ const CEILING_LEAVE_MM = 18;
  * a single value would have her flickering on and off the rails at the mouth
  * of a chamber.
  */
+/** How surrounded she must be for a room to keep her "underground". */
+const ENCLOSED_KEEPS_UNDER = 0.8;
+
+/** How far outside the plan's void she may ride and still count as in it. */
+const NEST_VOID_SLACK_MM = 2.5;
+
 const CHAMBER_ENTER_MM = 3.6;
 const CHAMBER_LEAVE_MM = 3.0;
 /**
@@ -397,6 +404,13 @@ const LOOK_PER_PIXEL = 0.005;
 
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
+/** What the toast calls each caste — the player's names, not the rig's. */
+const CASTE_TITLES: Record<RigMap['caste'], string> = {
+  queen: 'QUEEN',
+  major: 'MAJOR WORKER',
+  worker: 'MINOR WORKER',
+};
+
 /**
  * Some unit vector at right angles to `v`.
  *
@@ -454,7 +468,51 @@ export class BlockScene {
    * later, so the routing has the same graph the carving used.
    */
   private nest: NestPlan | null = null;
-  private readonly queen: QueenModel;
+
+  /**
+   * The nest's own voids, queryable, in the plan's millimetres — and the
+   * plan's ground line in world units. Kept because the plan is the
+   * AUTHORITY: "is she inside the nest" is a question the plan answers
+   * exactly, where every geometric probe of the meshed soil has to guess.
+   */
+  private nestHollow: Field | null = null;
+
+  private nestGroundY = Infinity;
+  /**
+   * THE BENCH: every caste in the room, one of them driven.
+   *
+   * The pattern is the colony sim's, ported because it earned its keep there:
+   * the gait, the grip and the camera are shared code with per-caste
+   * measurements fed in, so a fault that only shows on the major — longer
+   * legs, a different rig — is invisible while only the queen is ever on
+   * screen. Only the driven ant moves; the others are statues wearing their
+   * last pose, which costs nothing per frame.
+   *
+   * Everything about locomotion keeps reading `this.queen`, which is now
+   * whichever ant is being driven. That one getter is the entire integration:
+   * three thousand lines of walking, gripping and digging did not change.
+   */
+  private readonly ants: {
+    caste: RigMap['caste'];
+    model: QueenModel;
+    at: THREE.Vector3;
+    up: THREE.Vector3;
+    forward: THREE.Vector3;
+    ready: boolean;
+    /** The underground judgement she was parked with, if she ever drove. */
+    under?: boolean;
+  }[] = [];
+
+  private driven = 0;
+
+  private get queen(): QueenModel { return this.ants[this.driven]!.model; }
+
+  /** Where a finger went down on the canvas, for the tap-to-switch test. */
+  private readonly tapStart = new Map<number, { x: number; y: number }>();
+
+  private readonly toastEl = document.createElement('div');
+
+  private toastTimer = 0;
   private readonly chunks = new Map<string, THREE.Mesh>();
   /*
    * DOUBLE SIDED, and not as a shrug — as the only honest answer until the
@@ -843,8 +901,23 @@ export class BlockScene {
     this.remeshAll();
 
     this.addLighting();
-    this.queen = new QueenModel('queen');
-    this.scene.add(this.queen.root);
+    /*
+     * One of each on the nest block — that is the room where "how does each
+     * caste handle the tunnels" is the question. The measuring rigs keep a
+     * single queen: their probes were calibrated on her, and a bench would
+     * be two more models loading for nobody.
+     */
+    const castes: RigMap['caste'][] = this.shape === 'nest'
+      ? ['queen', 'major', 'worker'] : ['queen'];
+    for (const caste of castes) {
+      const model = new QueenModel(caste);
+      this.scene.add(model.root);
+      this.ants.push({
+        caste, model,
+        at: new THREE.Vector3(), up: new THREE.Vector3(0, 1, 0),
+        forward: new THREE.Vector3(0, 0, 1), ready: false,
+      });
+    }
 
     // On top of the block, in the middle, facing +Z. On the step, back from
     // the face with a clear run at it.
@@ -872,6 +945,28 @@ export class BlockScene {
       );
     } else this.at.set(MID_X, HIGH_Y + RIDE, MID_Z);
     this.follow.target.copy(this.at);
+    /*
+     * The bench stands in a row beside the spawn, spaced by more than a
+     * queen's length so nobody overlaps. Their stored pose is the RIDE
+     * baseline the adoption in `switchTo` expects.
+     */
+    let flank = 0;
+    for (let i = 0; i < this.ants.length; i += 1) {
+      const ant = this.ants[i]!;
+      ant.at.copy(this.at);
+      /*
+       * The DRIVEN ant keeps the spawn itself — her live position is
+       * `this.at`, and a bench slot that disagrees with it teleports her the
+       * first time anyone switches away and back. The first version centred
+       * the whole row instead, which parked the major exactly inside the
+       * queen. The others alternate left and right of her.
+       */
+      if (i !== this.driven) {
+        flank += 1;
+        const side = (flank % 2 ? -1 : 1) * Math.ceil(flank / 2);
+        ant.at.x += side * (14 / MM);
+      }
+    }
 
     const hud = document.createElement('div');
     this.hud = hud;
@@ -880,16 +975,26 @@ export class BlockScene {
     this.status = document.createElement('div');
     this.status.className = 'density-lab-status';
     hud.appendChild(this.status);
+    this.toastEl.className = 'density-lab-toast';
+    hud.appendChild(this.toastEl);
     // Before the controls, so the sliders open on the lenses actually in use.
     this.loadFov();
     this.buildControls(hud);
 
-    void this.queen.load().then((ok) => {
-      this.ready = ok;
-      if (!ok) return;
-      this.queen.root.visible = true;
-      this.buildLegs();
-    });
+    for (let i = 0; i < this.ants.length; i += 1) {
+      const ant = this.ants[i]!;
+      void ant.model.load().then((ok) => {
+        ant.ready = ok;
+        if (!ok) return;
+        ant.model.root.visible = true;
+        if (i === this.driven) {
+          this.ready = true;
+          this.buildLegs();
+        } else {
+          this.parkAnt(ant);
+        }
+      });
+    }
 
     (window as unknown as { blockScene?: unknown }).blockScene = this;
 
@@ -908,7 +1013,7 @@ export class BlockScene {
     }
     this.chunks.clear();
     this.material.dispose();
-    this.queen.dispose();
+    for (const ant of this.ants) ant.model.dispose();
     this.renderer.dispose();
     this.host.replaceChildren();
   }
@@ -1224,6 +1329,135 @@ export class BlockScene {
   /** The last room reading, for probes and the readout. */
   roomForTest(): RoomSense { return this.room; }
 
+  /**
+   * Pose a bench ant where its stored frame says and settle its feet, once.
+   *
+   * Parked ants are never updated again — a statue is free, and their last
+   * pose is exactly where the player left them. Without this one settle,
+   * though, a freshly loaded model stands in its bind pose half a millimetre
+   * above the soil with every foot flat, which reads as a toy someone put
+   * down rather than an ant that walked there.
+   */
+  private parkAnt(ant: (typeof this.ants)[number]): void {
+    const right = new THREE.Vector3().crossVectors(ant.up, ant.forward).normalize();
+    const basis = new THREE.Matrix4().makeBasis(right, ant.up, ant.forward);
+    ant.model.root.position.copy(ant.at);
+    ant.model.root.quaternion.setFromRotationMatrix(basis);
+    ant.model.update(0, {
+      speed: 0, turn: 0, digging: 0, carrying: 0, headYaw: 0,
+    });
+    ant.model.solveFeet(
+      (x, z, y) => this.surfaceUnder(x, y, z),
+      FOOT_CLEARANCE_MM / 5,
+      RIDE * 2,
+      undefined,
+      {
+        up: [ant.up.x, ant.up.y, ant.up.z],
+        surface: (x, y, z) => this.surfaceUnder(x, y, z),
+      },
+    );
+  }
+
+  /**
+   * Hand the controls to another ant on the bench.
+   *
+   * The driven ant's live frame is folded back into its bench slot and the
+   * new one's is adopted — normalised to the RIDE baseline both ways, because
+   * `buildLegs` re-seats the body by (its own ride − RIDE) and a pose saved
+   * at the old ant's ride height would be shifted twice on the way back in.
+   *
+   * Everything that is a MOTION or a LATCH resets: velocity, the stick, the
+   * dig latch, the rails, the trim hold. The underground judgement is re-cast
+   * immediately rather than left to the quarter-second dwell — the dwell
+   * exists to reject flicker while WALKING, and a teleport between two ants
+   * on opposite sides of that boundary is not flicker.
+   */
+  private switchTo(index: number): void {
+    const target = this.ants[index];
+    if (!target || index === this.driven || !target.ready) return;
+    const old = this.ants[this.driven]!;
+    old.at.copy(this.at).addScaledVector(this.up, RIDE - this.ride);
+    old.up.copy(this.up);
+    old.forward.copy(this.forward);
+    old.under = this.undergroundLatch;
+
+    this.driven = index;
+    this.at.copy(target.at);
+    this.up.copy(target.up);
+    this.forward.copy(target.forward);
+    this.velocity.set(0, 0, 0);
+    this.walkSpeed = 0;
+    this.turnRate = 0;
+    this.input.walk = 0;
+    this.input.yaw = 0;
+    this.input.dig = false;
+    this.digLatch = false;
+    this.actionButton.classList.remove('is-latched');
+    this.onRails = false;
+    this.setTrim(false);
+    this.buildLegs();
+
+    this.roofedFor = 0;
+    /*
+     * The underground judgement is CARRIED with the ant, not re-derived.
+     * Re-casting on adoption used the enter threshold, and an ant parked on
+     * the floor of a chamber — ceiling sixteen millimetres up, enter reach
+     * thirteen — came back judged "surface" in a room forty millimetres
+     * down. The latch she was parked with is the truth; only an ant that has
+     * never been driven gets a fresh cast, at the LEAVE reach, since a
+     * parked ant's benefit of the doubt should match the hysteresis a
+     * walking one gets.
+     */
+    this.undergroundLatch = target.under ?? (this.cast(
+      this.at.clone().addScaledVector(this.up, CELL),
+      this.up.clone(), CEILING_LEAVE_MM / MM,
+    ) !== null);
+    this.follow.target.copy(this.at);
+    this.toast(CASTE_TITLES[target.caste]);
+  }
+
+  /** Which parked ant a tap landed on, by screen distance. -1 for none. */
+  private antUnderTap(cx: number, cy: number): number {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const v = new THREE.Vector3();
+    let best = -1;
+    let bestPx = 52;
+    for (let i = 0; i < this.ants.length; i += 1) {
+      const ant = this.ants[i]!;
+      if (i === this.driven || !ant.ready) continue;
+      v.copy(ant.model.root.position).project(this.camera);
+      if (v.z > 1) continue;
+      const sx = (v.x * 0.5 + 0.5) * rect.width + rect.left;
+      const sy = (-v.y * 0.5 + 0.5) * rect.height + rect.top;
+      const px = Math.hypot(sx - cx, sy - cy);
+      if (px < bestPx) { bestPx = px; best = i; }
+    }
+    return best;
+  }
+
+  /** A short announcement over the scene — who you are driving now. */
+  private toast(text: string): void {
+    this.toastEl.textContent = text;
+    this.toastEl.classList.add('is-live');
+    window.clearTimeout(this.toastTimer);
+    this.toastTimer = window.setTimeout(
+      () => this.toastEl.classList.remove('is-live'), 1500,
+    );
+  }
+
+  /** The bench, for probes: who exists, who is ready, who is driven. */
+  benchForTest(): { driven: number; ants: { caste: string; ready: boolean; at: number[] }[] } {
+    return {
+      driven: this.driven,
+      ants: this.ants.map(a => ({
+        caste: a.caste, ready: a.ready, at: a.model.root.position.toArray(),
+      })),
+    };
+  }
+
+  /** Switch by index without a tap. For probes. */
+  switchForTest(index: number): void { this.switchTo(index); }
+
   /** The designer, once it exists. For probes. */
   designerForTest(): NestDesigner | null { return this.designer; }
 
@@ -1344,6 +1578,11 @@ export class BlockScene {
     this.field.fill(inWorldUnits(
       carvePlan(soil, this.nest, { stepMm: 0.5 }), [LOW, LOW, LOW], MM,
     ));
+    // The queryable copy, for judging where she is. Coarser sampling than the
+    // carve because a yes/no against tunnel interiors does not need half-
+    // millimetre mouths.
+    this.nestHollow = planHollow(this.nest, { stepMm: 1 });
+    this.nestGroundY = LOW + ground / MM;
 
     this.nestView?.dispose();
     if (this.nestView) this.scene.remove(this.nestView.root);
@@ -1574,10 +1813,48 @@ export class BlockScene {
   /** Work out both, from the room reading and a cast for a ceiling. */
   private judgeWhereSheIs(dt = 1 / 60): void {
     const reach = this.undergroundLatch ? CEILING_LEAVE_MM : CEILING_ENTER_MM;
-    const roofed = this.cast(
+    /*
+     * Already underground, an ENCLOSED reading keeps her there — the ceiling
+     * cast alone cannot. It goes along HER OWN up, and an ant who descended a
+     * shaft wall stands in the chamber with her up still leaning back at the
+     * tunnel she came down: the cast escapes through her own doorway, finds
+     * no roof, and she reads as standing on the surface forty millimetres
+     * underground. Measured: the queen parked on a chamber floor came back
+     * "surface" with the whole nest above her.
+     *
+     * Enclosure only KEEPS the latch, never sets it. The surface maxes out
+     * at 0.71 enclosed (measured, crater rims included) and a chamber with
+     * one doorway reads 0.86+, so 0.8 separates them — but only once a real
+     * ceiling has said she is under at all, which open ground never does.
+     */
+    /*
+     * And on a plan-carved block there is a better witness than either: the
+     * PLAN. She is inside the nest if the nest's own field says so at her
+     * position, below the plan's ground line — exact, cheap, and immune to
+     * which way her up happens to lean. The two-millimetre setback keeps the
+     * open crater dish, which the vent carves ABOVE the ground line, from
+     * counting as underground; the ceiling cast still owns that boundary
+     * with its dwell.
+     */
+    /*
+     * WITH SLACK, and the slack is the finding. She crawls on the tunnel
+     * WALL, and the meshed wall sits outside the plan's mathematical void —
+     * surface nets rounds outward and her ride height lifts her centre off
+     * the soil — so measured down a four-millimetre bore her centre reads
+     * 0.2 to 0.5 mm OUTSIDE the void the whole way, and a bare "inside"
+     * test never fires once. Two and a half millimetres covers the measured
+     * worst (0.48) with room for coarser cells, and cannot reach the
+     * surface: the ground-line gate above it is doing that job.
+     */
+    const inNest = this.nestHollow !== null
+      && this.at.y < this.nestGroundY - 2 / MM
+      && this.nestHollow(
+        (this.at.x - LOW) * MM, (this.at.y - LOW) * MM, (this.at.z - LOW) * MM,
+      ) > -NEST_VOID_SLACK_MM;
+    const roofed = inNest || this.cast(
       this.at.clone().addScaledVector(this.up, CELL),
       this.up.clone(), reach / MM,
-    ) !== null;
+    ) !== null || (this.undergroundLatch && this.room.enclosed >= ENCLOSED_KEEPS_UNDER);
     /*
      * A ROOF HAS TO LAST to count.
      *
@@ -3106,6 +3383,7 @@ export class BlockScene {
        * the spot behind the panel.
        */
       if (this.designer?.isOpen) { this.designer.handlePointerDown(event); return; }
+      this.tapStart.set(event.pointerId, { x: event.clientX, y: event.clientY });
       if (event.clientX < window.innerWidth * 0.5 && this.stickPointer === null) {
         this.stickPointer = event.pointerId;
         const o = clampStickOrigin(event.clientX, event.clientY, {
@@ -3190,6 +3468,18 @@ export class BlockScene {
     });
     const release = (event: PointerEvent) => {
       if (this.designer?.isOpen) { this.designer.handlePointerUp(event); return; }
+      /*
+       * TAP AN ANT TO DRIVE HER. A tap is a press that travelled under ten
+       * pixels — the same rule the designer uses — and it is tested here on
+       * the way UP so a drag that merely passes over an ant does not yank
+       * the controls out of your hands mid-gesture.
+       */
+      const began = this.tapStart.get(event.pointerId);
+      this.tapStart.delete(event.pointerId);
+      if (began && Math.hypot(event.clientX - began.x, event.clientY - began.y) < 10) {
+        const hit = this.antUnderTap(event.clientX, event.clientY);
+        if (hit >= 0) this.switchTo(hit);
+      }
       if (event.pointerId === this.stickPointer) {
         this.stickPointer = null;
         this.input.walk = 0;
