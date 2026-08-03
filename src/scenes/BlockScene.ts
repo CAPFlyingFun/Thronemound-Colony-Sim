@@ -259,6 +259,27 @@ const FIRST_PERSON_FOV = 90;
 const THIRD_PERSON_FOV = 60;
 
 /**
+ * How wide a lens the player may ask for, in degrees.
+ *
+ * Fifty is a long lens — flat, calm, and it makes a tunnel feel like a
+ * corridor seen through a letterbox. A hundred and forty is a fisheye, which
+ * underground is genuinely useful (you can see a side passage you would
+ * otherwise walk past) and on the surface stretches the horizon into a bowl.
+ * Both ends are usable, which is why they are the ends.
+ */
+const FOV_MIN = 50;
+const FOV_MAX = 140;
+
+/** Where the chosen lenses are kept between visits. */
+const FOV_STORE = 'thronemound.fov';
+
+/** A field of view the projection will accept, whatever was asked for. */
+function clampFov(degrees: number): number {
+  if (!Number.isFinite(degrees)) return THIRD_PERSON_FOV;
+  return Math.min(FOV_MAX, Math.max(FOV_MIN, Math.round(degrees)));
+}
+
+/**
  * How far one tap of a tuner button moves the eye, in mm, and its pitch, in
  * degrees. Small enough to land on something, big enough to get there.
  */
@@ -479,6 +500,21 @@ export class BlockScene {
   private readonly nestButton = document.createElement('button');
 
   private sonar = true;
+
+  /**
+   * The two lenses, in degrees, and they are two rather than one on purpose.
+   *
+   * Watching her walk and being her want different glass. Third person is a
+   * shot OF something and a wide lens there just pushes her further away; first
+   * person is a shot FROM somewhere and a narrow lens there is a letterbox in a
+   * tunnel with no peripheral view of the walls going past — which is most of
+   * what tells you you are moving at all.
+   */
+  private fov = { first: FIRST_PERSON_FOV, third: THIRD_PERSON_FOV };
+
+  private readonly settings = document.createElement('div');
+
+  private readonly settingsButton = document.createElement('button');
   private readonly planButton = document.createElement('button');
   private readonly planner = document.createElement('div');
   private readonly planList = document.createElement('pre');
@@ -749,6 +785,8 @@ export class BlockScene {
     this.status = document.createElement('div');
     this.status.className = 'density-lab-status';
     hud.appendChild(this.status);
+    // Before the controls, so the sliders open on the lenses actually in use.
+    this.loadFov();
     this.buildControls(hud);
 
     void this.queen.load().then((ok) => {
@@ -1080,6 +1118,43 @@ export class BlockScene {
 
   /** The plan this block was carved from, so a probe never needs a copy of it. */
   nestForTest(): NestPlan | null { return this.nest; }
+
+  /**
+   * The lens settings, and remembering them.
+   *
+   * A field of view is a comfort setting, not a game state — someone who finds
+   * ninety degrees swimmy finds it swimmy every time they open the page, and
+   * making them say so again on every visit is the kind of thing that reads as
+   * the setting not working. Kept per-lens under one key.
+   */
+  private loadFov(): void {
+    try {
+      const raw = localStorage.getItem(FOV_STORE);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as Partial<{ first: number; third: number }>;
+      if (typeof saved.first === 'number') this.fov.first = clampFov(saved.first);
+      if (typeof saved.third === 'number') this.fov.third = clampFov(saved.third);
+    } catch {
+      // A corrupt or unavailable store is not worth a broken scene — private
+      // browsing throws on the read alone. The defaults are perfectly good.
+    }
+  }
+
+  private saveFov(): void {
+    try {
+      localStorage.setItem(FOV_STORE, JSON.stringify(this.fov));
+    } catch { /* see loadFov */ }
+  }
+
+  /** Set one lens, in degrees. Clamped, applied and remembered. */
+  setFov(which: 'first' | 'third', degrees: number): void {
+    this.fov[which] = clampFov(degrees);
+    this.saveFov();
+    this.refreshView();
+  }
+
+  /** The lenses in use, for probes and the readout. */
+  fovForTest(): { first: number; third: number } { return { ...this.fov }; }
 
   /** Show or hide the designed nest drawn through the soil. */
   setSonar(on: boolean): void {
@@ -1965,6 +2040,18 @@ export class BlockScene {
      */
     // The view IS the aim now — no posture folded in, because the bone is not
     // offset from it either. `eyePitch` is the tuner's share and nothing else.
+    /*
+     * Tell the rig where she is, so `auto` can do its job.
+     *
+     * `submerged` has existed on FollowCamera since the mode was written and
+     * nothing ever set it — so `auto` has never once fired, and third person
+     * only ever dropped to first when there was physically no room for a shot
+     * of her. That fallback is a different thing: it is the rig giving up, not
+     * the view being chosen, and it fires on a crowded surface as readily as in
+     * a tunnel. One assignment is the whole of the fix.
+     */
+    this.follow.submerged = this.underground;
+    this.refreshView();
     this.follow.aimPitch = this.aimPitch + (this.firstPerson ? this.eyePitch : 0);
     this.follow.update(
       dt,
@@ -2206,14 +2293,58 @@ export class BlockScene {
       : 'hold';
   }
 
+  /**
+   * Which view the player wants ON THE SURFACE.
+   *
+   * Underground is not a preference — it is first person, always. In a four-
+   * millimetre bore there is nothing to see of her but the back of her own
+   * gaster, and the view she has IS the information: which way the tunnel goes
+   * and what is in front of her face. The choice only means anything up top,
+   * where there is a whole animal to watch walking.
+   */
   private setFirstPerson(on: boolean): void {
     this.firstPerson = on;
-    this.follow.mode = on ? 'first' : 'third';
-    this.camera.fov = on ? FIRST_PERSON_FOV : THIRD_PERSON_FOV;
-    this.camera.updateProjectionMatrix();
-    this.viewButton.textContent = on ? '1ST' : '3RD';
-    this.tuner.style.display = on && this.debug ? '' : 'none';
+    // 'auto' is third person up top and first person the moment she is under.
+    // The switch between them is a hard cut by design, never eased: easing
+    // between a shot from behind her and a shot from her own head travels
+    // straight through her body, and the one time it was tried it turned an
+    // 82-degree swing into a 112-degree one.
+    this.follow.mode = on ? 'first' : 'auto';
+    this.refreshView();
   }
+
+  /**
+   * Bring the lens and the label in line with where she actually is.
+   *
+   * Called every frame rather than only on a press, because `auto` changes the
+   * shot without anybody pressing anything — she walks into a hole and the
+   * view is first person. A field of view left at the third-person figure
+   * while the eye sits on her head is the "driving a car in the air" feeling:
+   * a wide lens with nothing near it to give the speed a scale.
+   */
+  private refreshView(): void {
+    const onboard = this.firstPerson || this.underground;
+    const fov = onboard ? this.fov.first : this.fov.third;
+    if (this.camera.fov !== fov) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
+    // The label and the classes only move when the shot does. This runs every
+    // frame so that `auto` can change the view without anybody pressing
+    // anything, and writing unchanged text to the DOM sixty times a second is
+    // the kind of thing that shows up as jank on a phone long before it shows
+    // up in a profile.
+    if (onboard === this.viewShown) return;
+    this.viewShown = onboard;
+    this.viewButton.textContent = onboard ? '1ST' : '3RD';
+    // Underground the button is showing a fact, not an offer. Say so, rather
+    // than letting a press look like it did nothing.
+    this.viewButton.classList.toggle('is-locked', this.underground && !this.firstPerson);
+    this.tuner.style.display = onboard && this.debug ? '' : 'none';
+  }
+
+  /** What `refreshView` last drew, so it can skip a frame that changed nothing. */
+  private viewShown: boolean | null = null;
 
   /**
    * Her head's ABSOLUTE pitch: where her face actually points, measured from
@@ -2465,6 +2596,101 @@ export class BlockScene {
     });
     actions.appendChild(this.viewButton);
 
+    this.buildSettings(hud, actions);
+
+    this.buildTuner(hud);
+  }
+
+  /**
+   * The settings panel: the two lenses, on sliders.
+   *
+   * A slider rather than the tuner's plus-and-minus pair, because a field of
+   * view is something you find by sweeping until it feels right, not by
+   * stepping to a number you already knew. Ninety degrees of range at one
+   * degree a tap would be ninety taps.
+   *
+   * Closed by default and drawn over the scene when open. The thing being
+   * adjusted is the view itself, so the panel has to leave most of the view
+   * showing or there is nothing to judge the setting against — it updates live
+   * as the slider moves for the same reason.
+   */
+  private buildSettings(hud: HTMLElement, actions: HTMLElement): void {
+    this.settings.className = 'density-lab-settings';
+    this.settings.style.display = 'none';
+
+    const title = document.createElement('div');
+    title.className = 'density-lab-settings-title';
+    title.textContent = 'FIELD OF VIEW';
+    this.settings.appendChild(title);
+
+    const lenses: Array<['first' | 'third', string]> = [
+      ['first', '1ST'],
+      ['third', '3RD'],
+    ];
+    for (const [which, label] of lenses) {
+      const row = document.createElement('label');
+      row.className = 'density-lab-settings-row';
+
+      const name = document.createElement('span');
+      name.className = 'density-lab-settings-name';
+      name.textContent = label;
+      row.appendChild(name);
+
+      const slider = document.createElement('input');
+      slider.type = 'range';
+      slider.min = String(FOV_MIN);
+      slider.max = String(FOV_MAX);
+      slider.step = '1';
+      slider.value = String(this.fov[which]);
+      row.appendChild(slider);
+
+      const readout = document.createElement('span');
+      readout.className = 'density-lab-settings-value';
+      readout.textContent = `${this.fov[which]}°`;
+      row.appendChild(readout);
+
+      slider.addEventListener('input', () => {
+        this.setFov(which, Number(slider.value));
+        readout.textContent = `${this.fov[which]}°`;
+      });
+      // The joystick and the dig button both read raw pointer events off the
+      // canvas. Without this a drag on the slider also drives her.
+      for (const kind of ['pointerdown', 'pointermove', 'pointerup'] as const) {
+        slider.addEventListener(kind, (event) => event.stopPropagation());
+      }
+      this.settings.appendChild(row);
+    }
+
+    const reset = document.createElement('button');
+    reset.className = 'density-lab-settings-reset';
+    reset.textContent = 'RESET';
+    reset.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      this.setFov('first', FIRST_PERSON_FOV);
+      this.setFov('third', THIRD_PERSON_FOV);
+      for (const input of this.settings.querySelectorAll('input')) {
+        const which = input.parentElement?.firstElementChild?.textContent === '1ST'
+          ? 'first' : 'third';
+        input.value = String(this.fov[which]);
+        const readout = input.nextElementSibling;
+        if (readout) readout.textContent = `${this.fov[which]}°`;
+      }
+    });
+    this.settings.appendChild(reset);
+    hud.appendChild(this.settings);
+
+    this.settingsButton.className = 'density-lab-button density-lab-mode';
+    this.settingsButton.textContent = 'FOV';
+    this.settingsButton.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      const open = this.settings.style.display === 'none';
+      this.settings.style.display = open ? '' : 'none';
+      this.settingsButton.classList.toggle('is-latched', open);
+    });
+    actions.appendChild(this.settingsButton);
+  }
+
+  private buildTuner(hud: HTMLElement): void {
     this.tuner.className = 'density-lab-tuner';
     const rows: Array<[string, (dir: number) => void]> = [
       ['FWD', (d) => { this.eyeNudge.z += d * EYE_NUDGE_MM / MM; }],

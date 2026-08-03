@@ -204,6 +204,94 @@
   background: rgba(244, 236, 216, 0.88);
 }
 
+/*
+ * A latched mode chip, for a button that opens a panel: the same amber the dig
+ * button uses when it is held on, so "currently on" looks the same wherever it
+ * appears.
+ */
+.density-lab-mode.is-latched {
+  background: #e9c36f;
+  box-shadow: 0 0 0 2px rgba(255, 250, 238, 0.7), 0 7px 20px rgba(0, 0, 0, 0.32);
+}
+
+/*
+ * A chip showing a fact rather than offering a choice — the view button while
+ * she is underground, where first person is not a preference. Dimmed, because
+ * a control that looks pressable and does nothing reads as broken.
+ */
+.density-lab-mode.is-locked {
+  background: rgba(244, 236, 216, 0.5);
+  color: rgba(29, 22, 14, 0.55);
+}
+
+/*
+ * The settings panel. Bottom centre like the tuner, and for the same reason:
+ * it is the one strip of a landscape phone nothing else claims. Deliberately
+ * narrow — the thing being adjusted is the view, so the panel has to leave the
+ * view showing or there is nothing to judge the setting against.
+ */
+.density-lab-settings {
+  position: absolute;
+  z-index: 4;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: max(14px, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(20, 15, 10, 0.82);
+  pointer-events: auto;
+}
+
+.density-lab-settings-title {
+  font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.1em;
+  color: rgba(244, 236, 216, 0.7);
+}
+
+.density-lab-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.density-lab-settings-name {
+  min-width: 30px;
+  font: 800 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.06em;
+  color: #f4ecd8;
+}
+
+/* Wide enough that a thumb can find a degree, short enough to leave the view. */
+.density-lab-settings-row input[type="range"] {
+  width: 190px;
+  accent-color: #e9c36f;
+  touch-action: none;
+}
+
+.density-lab-settings-value {
+  /* Fixed width, or the row twitches sideways as the number crosses 100. */
+  min-width: 42px;
+  text-align: right;
+  font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #e9c36f;
+  font-variant-numeric: tabular-nums;
+}
+
+.density-lab-settings-reset {
+  align-self: flex-end;
+  border: 0;
+  border-radius: 8px;
+  padding: 6px 12px;
+  background: rgba(244, 236, 216, 0.9);
+  color: #1d160e;
+  font: 800 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.06em;
+  touch-action: none;
+}
+
 /* Throttle, above the bore trigger — the two are held together often. */
 .density-lab-walk {
   width: 74px;
