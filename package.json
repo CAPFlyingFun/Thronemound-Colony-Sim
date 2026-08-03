@@ -17,6 +17,7 @@
     "smoke:density": "node scripts/smoke-density.mjs",
     "probe:clip": "node scripts/probe-clip.mjs",
     "probe:save": "node scripts/probe-save.mjs",
+    "probe:nest": "node scripts/probe-nest.mjs",
     "smoke:pwa": "node scripts/smoke-pwa.mjs",
     "icons": "node scripts/make-icons.mjs"
   },

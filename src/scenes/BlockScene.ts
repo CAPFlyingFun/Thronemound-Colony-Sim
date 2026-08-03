@@ -52,6 +52,9 @@ import { MODES, cycleMode } from './modes';
 import { RAIL_SMOOTH_MM, TunnelRail, railFromPlan } from './tunnelRail';
 import { senseRoom, type RoomSense } from '../voxel/room';
 import { anyOf, bore, box, carve } from '../voxel/carve';
+import { inWorldUnits, planHollow } from '../nest/nestCarve';
+import { sampleEdge, validatePlan, type NestPlan, type Vec3 } from '../nest/nestPlan';
+import { demoNest } from '../nest/demoNest';
 import {
   DigPlanRunner, PIECE_LIMITS, PLAN_SPEED_MM_S, clampPiece, type DigPiece,
 } from './digPlan';
@@ -304,16 +307,31 @@ const LOOK_PER_PIXEL = 0.005;
 
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
+/**
+ * Some unit vector at right angles to `v`.
+ *
+ * Which one does not matter — the caller wants two directions across a tunnel,
+ * not a named pair. Crossing with world up would collapse to nothing on a
+ * vertical shaft, which is the one case a nest always has, so it crosses with
+ * whichever axis `v` leans on least.
+ */
+function sideways(v: Vec3): THREE.Vector3 {
+  const away = Math.abs(v.y) < 0.9 ? WORLD_UP : new THREE.Vector3(1, 0, 0);
+  return new THREE.Vector3()
+    .crossVectors(new THREE.Vector3(v.x, v.y, v.z), away)
+    .normalize();
+}
+
 export class BlockScene {
   /**
    * Which block to build. `cube` is the room; `cliff` is a measuring rig — see
    * where the field is filled. Chosen with `?shape=cliff`.
    */
-  private readonly shape: 'cube' | 'cliff' | 'shaft' = (() => {
+  private readonly shape: 'cube' | 'cliff' | 'shaft' | 'nest' = (() => {
     const asked = new URLSearchParams(
       typeof location === 'undefined' ? '' : location.search,
     ).get('shape');
-    return asked === 'cliff' || asked === 'shaft' ? asked : 'cube';
+    return asked === 'cliff' || asked === 'shaft' || asked === 'nest' ? asked : 'cube';
   })();
 
   /**
@@ -334,6 +352,13 @@ export class BlockScene {
   private readonly camera: THREE.PerspectiveCamera;
   private readonly follow: FollowCamera;
   private readonly field: DensityField;
+
+  /**
+   * The designed nest this block was carved from, or null when the block was
+   * not carved from one. Held so the soil can be checked against the plan and,
+   * later, so the routing has the same graph the carving used.
+   */
+  private nest: NestPlan | null = null;
   private readonly queen: QueenModel;
   private readonly chunks = new Map<string, THREE.Mesh>();
   /*
@@ -596,7 +621,35 @@ export class BlockScene {
      * block of soil looks like anyway — a machined corner would be the
      * surprising part.
      */
-    if (this.shape === 'shaft') {
+    if (this.shape === 'nest') {
+      /*
+       * A DESIGNED NEST, carved from the plan rather than from a list of
+       * shapes written out here.
+       *
+       * Every other rig in this file describes its geometry twice over — once
+       * as the field that gets carved and once, implicitly, in whatever walks
+       * it. That is the failure that cost the most time in this project: the
+       * dug-tunnel code kept a raw view and a smoothed view of one track, they
+       * disagreed by six millimetres on a bend, and she boarded a tunnel she
+       * was four millimetres from and was set down outside it. Here the plan is
+       * the only description. The soil is cut from it, the routing runs over
+       * it, and there is nothing for either to drift away from.
+       */
+      const solid = box([LOW, LOW, LOW], [HIGH, HIGH, HIGH]);
+      const plan = demoNest();
+      this.nest = plan;
+      const faults = validatePlan(plan);
+      if (faults.length) {
+        // Loud, but not fatal. A plan with a fault in it still carves — it
+        // carves something visibly wrong, which is friendlier to look at than
+        // an empty screen and easier to diagnose than a thrown error.
+        console.warn('[nest] plan faults', faults);
+      }
+      this.field.fill(carve(
+        solid,
+        inWorldUnits(planHollow(plan, { stepMm: 0.5 }), [LOW, LOW, LOW], MM),
+      ));
+    } else if (this.shape === 'shaft') {
       /*
        * A SHAFT AND A ROOM, cut to a number before anything is bitten.
        *
@@ -656,6 +709,15 @@ export class BlockScene {
     else if (this.shape === 'shaft') {
       // Beside the mouth, facing it, so walking forward takes her over the lip.
       this.at.set(LOW + SHAFT_AT / MM, HIGH + RIDE, LOW + (SHAFT_AT - 11) / MM);
+    } else if (this.shape === 'nest') {
+      // Back from the designed entrance, on the surface, with a clear run at
+      // it — the same arrangement the shaft rig uses, so the two are
+      // comparable.
+      const mouth = demoNest().nodes[0]!;
+      this.at.set(
+        LOW + mouth.x / MM, HIGH + RIDE,
+        LOW + (mouth.z - mouth.radiusMm - 6) / MM,
+      );
     } else this.at.set(MID, HIGH + RIDE, MID);
     this.follow.target.copy(this.at);
 
@@ -993,6 +1055,72 @@ export class BlockScene {
 
   /** The last room reading, for probes and the readout. */
   roomForTest(): RoomSense { return this.room; }
+
+  /** The plan this block was carved from, so a probe never needs a copy of it. */
+  nestForTest(): NestPlan | null { return this.nest; }
+
+  /** Is there soil here? In the plan's millimetres, for probes. */
+  solidAtMm(x: number, y: number, z: number): boolean {
+    return this.solidAt(PROBE.set(LOW + x / MM, LOW + y / MM, LOW + z / MM));
+  }
+
+  /**
+   * Walk the designed nest and ask the SOIL whether it agrees with the plan.
+   *
+   * The pure carve is already tested as arithmetic. What this checks is the
+   * thing arithmetic cannot: that after the field is sampled onto half-
+   * millimetre cells and meshed, the tunnel the plan describes is still there
+   * and still the width it claims. A bore narrower than a cell, a bend the
+   * sampling skips over, a chamber that lands between cells — none of those
+   * show up until the field is real, and all of them end with her walking into
+   * a wall the plan says is a corridor.
+   *
+   * It reads the same `sampleEdge` the carver read, deliberately. Measuring the
+   * dig with a second description of where the tunnel is would be the exact bug
+   * this whole module exists to make impossible.
+   */
+  auditNest(): {
+    samples: number; blocked: number; pinched: number;
+    worstAtMm: { x: number; y: number; z: number } | null;
+  } | null {
+    if (!this.nest) return null;
+    const world = (x: number, y: number, z: number): THREE.Vector3 =>
+      PROBE.set(LOW + x / MM, LOW + y / MM, LOW + z / MM);
+    let samples = 0;
+    let blocked = 0;
+    let pinched = 0;
+    let worstAtMm: { x: number; y: number; z: number } | null = null;
+    for (const edge of this.nest.edges) {
+      for (const s of sampleEdge(this.nest, edge, 0.5)) {
+        samples += 1;
+        if (this.solidAt(world(s.at.x, s.at.y, s.at.z))) {
+          blocked += 1;
+          if (!worstAtMm) worstAtMm = { ...s.at };
+          continue;
+        }
+        /*
+         * Open on the centreline is not enough — a hairline crack is open on
+         * the centreline. Ask at 70% of the claimed bore in the two directions
+         * across the tunnel, which is where a corridor that has been sampled
+         * down to a slit gives itself away.
+         */
+        const a = sideways(s.along);
+        const b = new THREE.Vector3().crossVectors(
+          new THREE.Vector3(s.along.x, s.along.y, s.along.z), a,
+        ).normalize();
+        const r = s.radiusMm * 0.7;
+        const tight = [a, b].some(d => (
+          this.solidAt(world(s.at.x + d.x * r, s.at.y + d.y * r, s.at.z + d.z * r))
+          || this.solidAt(world(s.at.x - d.x * r, s.at.y - d.y * r, s.at.z - d.z * r))
+        ));
+        if (tight) {
+          pinched += 1;
+          if (!worstAtMm) worstAtMm = { ...s.at };
+        }
+      }
+    }
+    return { samples, blocked, pinched, worstAtMm };
+  }
 
   /**
    * Force a room reading, so the RULE can be tested without having to carve a
