@@ -134,6 +134,20 @@ export class IslandScene {
 
   private clipPending = false;
 
+  /** Every chunk that has been MESHED since the last invalidation — the
+   *  empties included. Two jobs: scrolls skip re-meshing chunks that built
+   *  to nothing (most of the column is air or solid interior, and requeueing
+   *  them every scroll was the bulk of the phone's backlog), and the clip's
+   *  no-holes invariant is checked against THIS set, not the mesh map. */
+  private readonly builtChunks = new Set<string>();
+
+  /** The window-local cell rect (chunk-aligned) proven covered by built
+   *  chunks. The clip may only ever expose THIS; it grows to the full
+   *  window in reveal() and shrinks by intersection on every scroll. */
+  private readonly meshedRect = { x0: 0, z0: 0, x1: 0, z1: 0 };
+
+  private meshBudgetCapForTest = Infinity;
+
   private terrainVerts = 0;
 
   private terrainTris = 0;
@@ -165,6 +179,21 @@ export class IslandScene {
   /** Her recent path — the underground chase camera follows THIS, because
    *  the path she walked is guaranteed to be inside the tunnel. */
   private readonly trail: THREE.Vector3[] = [];
+
+  /** The nest plan as rails: centerline segments with bore radii (wu). */
+  private rails: { a: THREE.Vector3; b: THREE.Vector3; r: number; from: string; to: string }[] = [];
+
+  private readonly railNodes = new Map<string, { p: THREE.Vector3; kind: string }>();
+
+  private railEdge = -1;
+
+  private railT = 0;
+
+  private railDir: 1 | -1 = 1;
+
+  private readonly railForward = new THREE.Vector3(0, 0, 1);
+
+  private readonly railUp = new THREE.Vector3(0, 1, 0);
 
   /** The last position whose centre provably sampled AIR — the anchor the
    *  anti-embed safety net snaps back to. */
@@ -317,6 +346,21 @@ export class IslandScene {
     this.nestView.root.scale.setScalar(1 / MM);
     this.nestView.root.visible = this.showPlan;
     this.scene.add(this.nestView.root);
+
+    // The plan's graph doubles as the underground RAIL network.
+    for (const n of this.soil.plan.nodes) {
+      this.railNodes.set(n.id, {
+        p: new THREE.Vector3(n.x / MM, n.y / MM, n.z / MM),
+        kind: n.kind,
+      });
+    }
+    this.rails = this.soil.plan.edges.map((edge) => ({
+      a: this.railNodes.get(edge.from)!.p,
+      b: this.railNodes.get(edge.to)!.p,
+      r: edge.radiusMm / MM,
+      from: edge.from,
+      to: edge.to,
+    }));
 
     /* The WORLD is ready here; the queen's model arrives when it arrives.
      * Gating `ready` on her GLB made every probe hostage to one slow fetch. */
@@ -482,6 +526,7 @@ export class IslandScene {
       mesh.geometry.dispose();
     }
     this.chunkMeshes.clear();
+    this.builtChunks.clear();
     this.queue.length = 0;
     this.queued.clear();
     for (let cz = 0; cz < CHUNKS_XZ; cz += 1) {
@@ -506,6 +551,10 @@ export class IslandScene {
       y1: Math.min(CELLS_Y, (cy + 1) * CH),
       z1: Math.min(WINDOW_CELLS, (cz + 1) * CH),
     });
+    // Built is built, even when the region meshes to NOTHING (all air or
+    // solid interior — most of the column). Forgetting the empties meant
+    // every scroll requeued them all, which WAS the phone's backlog.
+    this.builtChunks.add(key);
     if (data.indices.length === 0) return;
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
@@ -558,13 +607,27 @@ export class IslandScene {
     }
     this.chunkMeshes.clear();
     for (const [key, mesh] of moved) this.chunkMeshes.set(key, mesh);
+    // The built set (empties included) rekeys by the same rule the meshes do.
+    const movedBuilt = new Set<string>();
+    for (const key of this.builtChunks) {
+      const [cx, cy, cz] = key.split(',').map(Number) as [number, number, number];
+      const nx = cx - scroll.tilesX;
+      const nz = cz - scroll.tilesZ;
+      const inside = !scroll.rebased
+        && nx >= 0 && nx < CHUNKS_XZ && nz >= 0 && nz < CHUNKS_XZ
+        && nx * CH >= keep.x0 && (nx + 1) * CH <= keep.x1
+        && nz * CH >= keep.z0 && (nz + 1) * CH <= keep.z1;
+      if (inside) movedBuilt.add(this.key(nx, cy, nz));
+    }
+    this.builtChunks.clear();
+    for (const key of movedBuilt) this.builtChunks.add(key);
     this.queue.length = 0;
     this.queued.clear();
     const jobs: { cx: number; cy: number; cz: number; d: number }[] = [];
     for (let cz = 0; cz < CHUNKS_XZ; cz += 1) {
       for (let cy = 0; cy < CHUNKS_Y; cy += 1) {
         for (let cx = 0; cx < CHUNKS_XZ; cx += 1) {
-          if (this.chunkMeshes.has(this.key(cx, cy, cz))) continue;
+          if (this.builtChunks.has(this.key(cx, cy, cz))) continue;
           const wx = this.stream!.originWorldX + (cx + 0.5) * CH * CELL_SIZE;
           const wz = this.stream!.originWorldZ + (cz + 0.5) * CH * CELL_SIZE;
           jobs.push({ cx, cy, cz, d: Math.hypot(wx - this.at.x, wz - this.at.z) });
@@ -578,21 +641,24 @@ export class IslandScene {
      * covering everything but the retained, still-meshed soil until the
      * queue drains (reveal). The world room's law, inherited verbatim.
      */
-    const cx0 = Math.ceil(keep.x0 / CH) * CH;
-    const cx1 = Math.floor(keep.x1 / CH) * CH;
-    const cz0 = Math.ceil(keep.z0 / CH) * CH;
-    const cz1 = Math.floor(keep.z1 / CH) * CH;
-    const inset = CELL_SIZE * 2;
-    if (cx1 - cx0 > 0 && cz1 - cz0 > 0) {
-      this.clip.value.set(
-        this.stream!.originWorldX + cx0 * CELL_SIZE + inset,
-        this.stream!.originWorldZ + cz0 * CELL_SIZE + inset,
-        this.stream!.originWorldX + cx1 * CELL_SIZE - inset,
-        this.stream!.originWorldZ + cz1 * CELL_SIZE - inset,
-      );
+    if (scroll.rebased) {
+      this.meshedRect.x1 = this.meshedRect.x0;
+      this.meshedRect.z1 = this.meshedRect.z0;
     } else {
-      this.clip.value.set(0, 0, 0, 0);
+      /* The one rectangle provably covered after this scroll: what was
+       * covered BEFORE, shifted, intersected with what was retained. The
+       * keep rect alone is NOT proof — on a backlogged phone it claims
+       * chunks still sitting in the queue from earlier scrolls, and every
+       * claimed-but-unbuilt chunk was a see-through hole to the sea plane
+       * (the playtest teal). */
+      const sx = scroll.tilesX * CH;
+      const sz = scroll.tilesZ * CH;
+      this.meshedRect.x0 = Math.max(this.meshedRect.x0 - sx, Math.ceil(keep.x0 / CH) * CH, 0);
+      this.meshedRect.x1 = Math.min(this.meshedRect.x1 - sx, Math.floor(keep.x1 / CH) * CH, WINDOW_CELLS);
+      this.meshedRect.z0 = Math.max(this.meshedRect.z0 - sz, Math.ceil(keep.z0 / CH) * CH, 0);
+      this.meshedRect.z1 = Math.min(this.meshedRect.z1 - sz, Math.floor(keep.z1 / CH) * CH, WINDOW_CELLS);
     }
+    this.applyClipFromMeshedRect();
     this.clipPending = true;
   }
 
@@ -603,13 +669,58 @@ export class IslandScene {
   }
 
   private clipToWindow(): void {
+    this.meshedRect.x0 = 0;
+    this.meshedRect.z0 = 0;
+    this.meshedRect.x1 = WINDOW_CELLS;
+    this.meshedRect.z1 = WINDOW_CELLS;
+    this.applyClipFromMeshedRect();
+  }
+
+  private applyClipFromMeshedRect(): void {
+    const r = this.meshedRect;
     const inset = CELL_SIZE * 2;
-    this.clip.value.set(
-      this.stream!.originWorldX + inset,
-      this.stream!.originWorldZ + inset,
-      this.stream!.originWorldX + WINDOW_CELLS * CELL_SIZE - inset,
-      this.stream!.originWorldZ + WINDOW_CELLS * CELL_SIZE - inset,
-    );
+    if (r.x1 - r.x0 > 0 && r.z1 - r.z0 > 0) {
+      this.clip.value.set(
+        this.stream!.originWorldX + r.x0 * CELL_SIZE + inset,
+        this.stream!.originWorldZ + r.z0 * CELL_SIZE + inset,
+        this.stream!.originWorldX + r.x1 * CELL_SIZE - inset,
+        this.stream!.originWorldZ + r.z1 * CELL_SIZE - inset,
+      );
+    } else {
+      this.clip.value.set(0, 0, 0, 0);
+    }
+  }
+
+  /** The no-holes invariant, checkable from a probe: every soil chunk the
+   *  clip rectangle exposes must have been BUILT (empties count). */
+  clipCoveredForTest(): boolean {
+    const c = this.clip.value;
+    if (!this.stream || (c.x === 0 && c.y === 0 && c.z === 0 && c.w === 0)) return true;
+    const x0 = Math.floor((c.x - this.stream.originWorldX) / CELL_SIZE / CH);
+    const z0 = Math.floor((c.y - this.stream.originWorldZ) / CELL_SIZE / CH);
+    const x1 = Math.ceil((c.z - this.stream.originWorldX) / CELL_SIZE / CH);
+    const z1 = Math.ceil((c.w - this.stream.originWorldZ) / CELL_SIZE / CH);
+    for (let cz = Math.max(0, z0); cz < Math.min(CHUNKS_XZ, z1); cz += 1) {
+      for (let cx = Math.max(0, x0); cx < Math.min(CHUNKS_XZ, x1); cx += 1) {
+        for (let cy = 0; cy < CHUNKS_Y; cy += 1) {
+          if (!this.builtChunks.has(this.key(cx, cy, cz))) return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  setMeshBudgetCapForTest(cap: number): void { this.meshBudgetCapForTest = cap; }
+
+  railStateForTest(): { edge: number; t: number; offMm: number } {
+    if (this.railEdge < 0) return { edge: -1, t: 0, offMm: -1 };
+    const e = this.rails[this.railEdge]!;
+    const center = e.a.clone().lerp(e.b, Math.min(1, Math.max(0, this.railT)));
+    return {
+      edge: this.railEdge,
+      t: this.railT,
+      offMm: center.distanceTo(this.at) * MM,
+    };
   }
 
   /* ------------------------------------------------------------ the walk */
@@ -619,19 +730,95 @@ export class IslandScene {
     this.facing -= this.input.yaw * TURN_RATE * dt;
     const speed = this.input.walk * WALK_SPEED * (this.input.sprint ? SPRINT : 1);
     this.velocity.set(Math.sin(this.facing) * speed, 0, Math.cos(this.facing) * speed);
+
+    // Digging hands her back to the free walker: the rail is the PLAN's
+    // tunnels, and a mandible is how new ones that aren't on it get made.
+    if (this.railEdge >= 0 && this.input.dig) this.railEdge = -1;
+
+    if (this.railEdge >= 0) {
+      this.moveOnRail(dt, speed);
+    } else {
+      this.moveFree(dt, speed);
+    }
+
+    this.underground = this.at.y + RIDE
+      < this.walkGroundAt(this.at.x, this.at.z) - UNDER_MM / MM;
+    const last = this.trail[this.trail.length - 1];
+    if (!last || last.distanceTo(this.at) > 0.3) {
+      this.trail.push(this.at.clone());
+      if (this.trail.length > 240) this.trail.shift();
+    }
+
+    /*
+     * THE RAIL — playtest's own architecture, verbatim: underground she
+     * follows "a path right down the middle of the tube", pitch locked to
+     * the tube's axis, roll irrelevant, the camera orbiting the line. The
+     * nest plan IS that path — a graph of centerlines with radii — so the
+     * moment she is underground and near a planned bore she snaps to it,
+     * and the noisy free-walker pose that let her abdomen swing through
+     * the shaft wall never runs down there at all.
+     */
+    if (this.railEdge < 0 && this.underground && !this.input.dig && this.rails.length > 0) {
+      const near = this.nearestRail(this.at);
+      if (near && near.d < this.rails[near.i]!.r * 1.6) {
+        this.railEdge = near.i;
+        this.railT = near.t;
+        const e = this.rails[near.i]!;
+        const tan = e.b.clone().sub(e.a).normalize();
+        this.railDir = (Math.sin(this.facing) * tan.x + Math.cos(this.facing) * tan.z) >= 0 ? 1 : -1;
+      }
+    }
+
+    if (this.stream) {
+      if (this.input.dig) this.bite(dt);
+
+      const lead = Math.min(LEAD_MAX, Math.abs(speed) * LEAD_S);
+      const now = performance.now();
+      if (now - this.lastScrollAt > SCROLL_COOLDOWN_MS) {
+        const scroll = this.stream.recentreOn(
+          this.at.x + Math.sin(this.facing) * lead,
+          this.at.z + Math.cos(this.facing) * lead,
+        );
+        if (scroll) {
+          this.lastScrollAt = now;
+          this.onScroll(scroll);
+        }
+      }
+
+      /* The budget breathes with the backlog: three per frame when caught
+       * up, up to twelve when a scroll dumped work — a 200-deep queue must
+       * drain in a second, not stay a permanent debt on a 20 fps phone. */
+      const budget = Math.min(
+        this.meshBudgetCapForTest,
+        Math.min(12, Math.max(MESH_BUDGET, this.queue.length >> 4)),
+      );
+      let built = 0;
+      while (built < budget && this.queue.length > 0) {
+        const job = this.queue.shift()!;
+        this.queued.delete(this.key(job.cx, job.cy, job.cz));
+        this.meshChunk(job.cx, job.cy, job.cz);
+        built += 1;
+      }
+      this.reveal();
+    }
+
+    this.pose(dt);
+    this.aimCamera(dt);
+  }
+
+  /**
+   * The free walker: walls are walls, holes are holes. The floor at the
+   * DESTINATION is looked up from her own height downward: a tunnel floor
+   * is a real floor, the roof above it is invisible to her, and a floor
+   * more than one stride ABOVE her is a wall — the move is refused instead
+   * of easing her up through the ceiling ("it bounced me back up").
+   * Refused with the stick still held means she is pressing against the
+   * wall, and she climbs it slowly — enough to get out of a dug pit.
+   */
+  private moveFree(dt: number, speed: number): void {
     const span = SPAN_MM / MM;
     const nx = Math.min(span - 2, Math.max(2, this.at.x + this.velocity.x * dt));
     const nz = Math.min(span - 2, Math.max(2, this.at.z + this.velocity.z * dt));
-
-    /*
-     * Walls are walls, holes are holes. The floor at the DESTINATION is
-     * looked up from her own height downward: a tunnel floor is a real
-     * floor, the roof above it is invisible to her, and a floor more than
-     * one stride ABOVE her is a wall — the move is refused instead of
-     * easing her up through the ceiling ("it bounced me back up"). Refused
-     * with the stick still held means she is pressing against the wall, and
-     * she climbs it slowly — enough to get out of the shaft or a dug pit.
-     */
     const there = this.floorBelow(nx, nz, this.at.y + 0.5);
     /*
      * SHE HAS TO FIT. Finding a floor below the destination is not enough:
@@ -706,43 +893,103 @@ export class IslandScene {
       this.lastSafe.copy(this.at);
       this.hasSafe = true;
     }
+  }
 
-    this.underground = this.at.y + RIDE
-      < this.walkGroundAt(this.at.x, this.at.z) - UNDER_MM / MM;
-    const last = this.trail[this.trail.length - 1];
-    if (!last || last.distanceTo(this.at) > 0.3) {
-      this.trail.push(this.at.clone());
-      if (this.trail.length > 240) this.trail.shift();
-    }
+  /**
+   * The rail: travel is a single parameter along the plan edge's
+   * centerline. Pitch follows the tube's axis by construction, the joints
+   * hand her from bore to bore by best tangent alignment, the gate node
+   * hands her back to the free walker on the surface — and none of the
+   * free walker's wall problems can exist here, because her position is
+   * DERIVED from the centerline instead of tested against soil.
+   */
+  private moveOnRail(dt: number, speed: number): void {
+    const e = this.rails[this.railEdge]!;
+    const seg = e.b.clone().sub(e.a);
+    const len = seg.length();
+    const tan = seg.divideScalar(len);
+    // Turning re-aims travel when her facing meaningfully agrees or
+    // disagrees with the bore; near-vertical bores keep the last direction.
+    const align = Math.sin(this.facing) * tan.x + Math.cos(this.facing) * tan.z;
+    if (Math.abs(align) > 0.35) this.railDir = align >= 0 ? 1 : -1;
+    this.railT += (speed * this.railDir * dt) / len;
 
-    if (this.stream) {
-      if (this.input.dig) this.bite(dt);
-
-      const lead = Math.min(LEAD_MAX, Math.abs(speed) * LEAD_S);
-      const now = performance.now();
-      if (now - this.lastScrollAt > SCROLL_COOLDOWN_MS) {
-        const scroll = this.stream.recentreOn(
-          this.at.x + Math.sin(this.facing) * lead,
-          this.at.z + Math.cos(this.facing) * lead,
-        );
-        if (scroll) {
-          this.lastScrollAt = now;
-          this.onScroll(scroll);
+    if (this.railT > 1 || this.railT < 0) {
+      const nodeId = this.railT > 1 ? e.to : e.from;
+      const node = this.railNodes.get(nodeId);
+      const travel = tan.clone().multiplyScalar(this.railT > 1 ? 1 : -1);
+      if (node && node.kind === 'entrance') {
+        // Out the gate: back to daylight and the free walker.
+        this.railEdge = -1;
+        this.at.set(node.p.x, this.walkGroundAt(node.p.x, node.p.z) + RIDE, node.p.z);
+        this.trail.length = 0;
+        return;
+      }
+      let best = -1;
+      let bestDot = 0.2;
+      let bestStart = 0;
+      let bestDir: 1 | -1 = 1;
+      for (let i = 0; i < this.rails.length; i += 1) {
+        if (i === this.railEdge) continue;
+        const c = this.rails[i]!;
+        let start: number;
+        let dir: 1 | -1;
+        if (c.from === nodeId) { start = 0; dir = 1; } else if (c.to === nodeId) { start = 1; dir = -1; } else continue;
+        const ct = c.b.clone().sub(c.a).normalize().multiplyScalar(dir);
+        const d = ct.dot(travel);
+        if (d > bestDot) {
+          best = i;
+          bestDot = d;
+          bestStart = start;
+          bestDir = dir;
         }
       }
-
-      let built = 0;
-      while (built < MESH_BUDGET && this.queue.length > 0) {
-        const job = this.queue.shift()!;
-        this.queued.delete(this.key(job.cx, job.cy, job.cz));
-        this.meshChunk(job.cx, job.cy, job.cz);
-        built += 1;
+      if (best >= 0) {
+        this.railEdge = best;
+        this.railT = bestStart;
+        /* railDir maps her INPUT onto the edge parameter. bestDir is the
+         * parameter direction that CONTINUES the travel; when she is
+         * riding backwards (walk < 0), the same continuation needs the
+         * opposite mapping — without this she ping-ponged at every joint
+         * on the way out (the playtest's suspected "- for a +", found). */
+        this.railDir = speed < 0 ? (bestDir === 1 ? -1 : 1) : bestDir;
+      } else {
+        this.railT = Math.min(1, Math.max(0, this.railT)); // dead end
       }
-      this.reveal();
+      return;
     }
 
-    this.pose(dt);
-    this.aimCamera(dt);
+    // Down the middle of the tube, settled toward its floor: the offset is
+    // world-down projected off the axis, so a horizontal bore stands her on
+    // its floor and a vertical shaft centres her — smoothly in between.
+    const center = e.a.clone().lerp(e.b, this.railT);
+    const perp = new THREE.Vector3(0, -1, 0).addScaledVector(tan, tan.y);
+    const target = center.clone().addScaledVector(perp, Math.max(0, e.r - RIDE));
+    this.at.lerp(target, Math.min(1, dt * 12));
+    this.railForward.copy(tan).multiplyScalar(this.railDir);
+    if (perp.lengthSq() > 0.1) {
+      this.railUp.copy(perp).multiplyScalar(-1).normalize();
+    } else if (Math.abs(this.railUp.dot(tan)) > 0.9) {
+      this.railUp.set(0, 1, 0).addScaledVector(tan, -tan.y).normalize();
+    }
+    this.hasSafe = true;
+    this.lastSafe.copy(this.at);
+    this.embedFrames = 0;
+  }
+
+  private nearestRail(p: THREE.Vector3): { i: number; t: number; d: number } | null {
+    let best: { i: number; t: number; d: number } | null = null;
+    const ap = new THREE.Vector3();
+    const ab = new THREE.Vector3();
+    for (let i = 0; i < this.rails.length; i += 1) {
+      const e = this.rails[i]!;
+      ab.copy(e.b).sub(e.a);
+      ap.copy(p).sub(e.a);
+      const t = Math.min(1, Math.max(0, ap.dot(ab) / ab.lengthSq()));
+      const d = ap.addScaledVector(ab, -t).length();
+      if (!best || d < best.d) best = { i, t, d };
+    }
+    return best;
   }
 
   private bite(dt: number): void {
@@ -768,6 +1015,33 @@ export class IslandScene {
 
   private pose(dt: number): void {
     if (!this.queenReady) return;
+    if (this.railEdge >= 0) {
+      /* On the rail her BODY follows the bore: pitch is the tube's axis,
+       * up points back at the centerline, roll is nothing — playtest's
+       * spec, and the end of the abdomen-through-the-shaft-wall shots. */
+      const fwd = this.railForward.clone().normalize();
+      const up0 = this.railUp.clone().addScaledVector(fwd, -this.railUp.dot(fwd));
+      if (up0.lengthSq() < 0.05) up0.set(0, 1, 0).addScaledVector(fwd, -fwd.y);
+      up0.normalize();
+      const right = new THREE.Vector3().crossVectors(up0, fwd).normalize();
+      this.queen.root.position.copy(this.at);
+      this.queen.root.quaternion.setFromRotationMatrix(
+        new THREE.Matrix4().makeBasis(right, up0, fwd),
+      );
+      this.queen.update(dt, {
+        speed: Math.hypot(this.velocity.x, this.velocity.z),
+        turn: -this.input.yaw * TURN_RATE,
+        digging: this.input.dig ? 1 : 0,
+        carrying: 0,
+        headYaw: 0,
+      });
+      this.queen.solveFeet(
+        (x, z) => this.footingAt(x, z),
+        FOOT_CLEARANCE_MM / MM,
+        RIDE * 2,
+      );
+      return;
+    }
     const probe = 2 / MM;
     const hx = (this.footingAt(this.at.x + probe, this.at.z)
       - this.footingAt(this.at.x - probe, this.at.z)) / (probe * 2);
@@ -802,17 +1076,22 @@ export class IslandScene {
     this.crosshair.style.display = this.firstPerson ? '' : 'none';
     if (this.firstPerson) {
       /* Her own eyes: at the head, looking where she faces; the mouse (or
-       * right-half drag) turns HER, and pitch is a look, not an orbit. */
-      const fwd = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
-      const eye = this.at.clone().addScaledVector(fwd, 0.26);
-      eye.y += 0.3;
+       * right-half drag) turns HER, and pitch is a look, not an orbit. On
+       * the rail the eyes follow the BORE's axis — looking up a vertical
+       * shaft means looking up it, not at its wall. */
+      const onRail = this.railEdge >= 0;
+      const fwd = onRail
+        ? this.railForward.clone().normalize()
+        : new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
+      const upv = onRail && this.railUp.lengthSq() > 0.1
+        ? this.railUp.clone().normalize()
+        : new THREE.Vector3(0, 1, 0);
+      const eye = this.at.clone().addScaledVector(fwd, 0.26).addScaledVector(upv, 0.3);
       this.camera.position.copy(eye);
-      this.camera.up.set(0, 1, 0);
-      this.camera.lookAt(
-        eye.x + fwd.x * Math.cos(this.fpPitch),
-        eye.y + Math.sin(this.fpPitch),
-        eye.z + fwd.z * Math.cos(this.fpPitch),
-      );
+      this.camera.up.copy(upv);
+      const dir = fwd.clone().multiplyScalar(Math.cos(this.fpPitch))
+        .addScaledVector(upv, Math.sin(this.fpPitch));
+      this.camera.lookAt(eye.x + dir.x, eye.y + dir.y, eye.z + dir.z);
       return;
     }
     if (this.underground) {
@@ -1136,6 +1415,7 @@ export class IslandScene {
       bandFloorMm: this.stream?.bandFloorMm ?? -1,
       underground: this.underground ? 1 : 0,
       firstPerson: this.firstPerson ? 1 : 0,
+      railBound: this.railEdge >= 0 ? 1 : 0,
     };
   }
 

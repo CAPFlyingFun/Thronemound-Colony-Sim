@@ -239,18 +239,97 @@ check('the camera follows a few mm behind her', chase.dist > 2 && chase.dist < 1
 check('and is itself inside the tunnel, not the hillside sky',
   chase.camBelowSurface === true);
 
-console.log('\nCLIMBING OUT (held stick against the shaft wall)');
-const escape = await page.evaluate(() => {
+console.log('\nTHE RAIL (down the middle of the tube — playtest\'s own spec)');
+const rail = await page.evaluate(() => {
   const s = window.islandScene;
+  // She fell into the shaft in the descent test — the rail should have her.
+  const bound = s.statsForTest().railBound;
+  // Ride the whole nest: forward to the store dead end...
   s.input.walk = 1;
-  s.setFacingForTest(-Math.PI / 2); // face back west, into the shaft wall
-  s.stepForTest(1 / 30, 1400);
+  let worstOffMm = 0;
+  let railFrames = 0;
+  let pitchOk = 0;
+  for (let i = 0; i < 900; i += 1) {
+    s.stepForTest(1 / 30, 1);
+    const st = s.railStateForTest();
+    if (st.edge >= 0) {
+      railFrames += 1;
+      worstOffMm = Math.max(worstOffMm, st.offMm);
+      // Body pitch follows the bore: quaternion forward vs the rail axis.
+      // (Pose only runs once her model loads — skip the frames before.)
+      if (s.queenReady) {
+        const V = Object.getPrototypeOf(s.at).constructor;
+        const fwd = new V(0, 0, 1).applyQuaternion(s.queen.root.quaternion);
+        if (Math.abs(fwd.dot(s.railForward)) > 0.9) pitchOk += 1;
+      } else {
+        pitchOk += 1; // no model, no pose — nothing to misalign
+      }
+    }
+  }
+  const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
+  const atStore = Math.hypot(
+    s.at.x * 5 - n.store.x, s.at.y * 5 - n.store.y, s.at.z * 5 - n.store.z,
+  );
+  // ...then back out: pulling BACK is how you ride a vertical bore upward.
+  // Stop the moment she surfaces, the way a thumb would — holding reverse
+  // blindly walks her backwards over the mound and into the vent again.
+  s.input.walk = -1;
+  let outAt = -1;
+  for (let i = 0; i < 1600; i += 1) {
+    s.stepForTest(1 / 30, 1);
+    if (s.statsForTest().railBound === 0
+      && s.at.y * 5 >= s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5) - 2) {
+      outAt = i;
+      break;
+    }
+  }
   s.input.walk = 0;
-  const y = s.at.y * 5;
   const surface = s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5);
-  return { above: y > surface - 6, under: s.statsForTest().underground };
+  return {
+    bound,
+    railFrames,
+    worstOffMm,
+    pitchShare: railFrames > 0 ? pitchOk / railFrames : 0,
+    atStore,
+    outAt,
+    railBoundAfter: s.statsForTest().railBound,
+    aboveMm: s.at.y * 5 - surface,
+  };
 });
-check('she climbs back to the surface', escape.above && escape.under === 0);
+check('the shaft handed her to the rail', rail.bound === 1);
+check('she stays ON the centerline bore', rail.worstOffMm < 4.5,
+  `worst offset ${rail.worstOffMm.toFixed(1)} mm of a 4-10 mm bore`);
+check('her body pitch follows the tube', rail.pitchShare > 0.85,
+  `${(rail.pitchShare * 100).toFixed(0)}% of ${rail.railFrames} rail frames aligned`);
+check('the rail delivered her to the store', rail.atStore < 14,
+  `${rail.atStore.toFixed(1)} mm from the chamber`);
+check('riding back surfaces her at the gate',
+  rail.outAt >= 0 && rail.railBoundAfter === 0 && rail.aboveMm > -6,
+  `out after ${rail.outAt} steps, ${rail.aboveMm.toFixed(1)} mm vs surface`);
+
+console.log('\nNO HOLES EVEN STARVED (budget capped at 1 chunk/frame)');
+const churn = await page.evaluate(() => {
+  const s = window.islandScene;
+  s.teleportMm(26000, 26000);
+  s.drainQueueForTest();
+  s.setMeshBudgetCapForTest(1); // a 20 fps phone's backlog, simulated
+  s.setFacingForTest(Math.PI);
+  s.input.sprint = true;
+  s.input.walk = 1;
+  let uncovered = 0;
+  for (let i = 0; i < 600; i += 1) {
+    s.stepForTest(1 / 30, 1);
+    if (i % 5 === 0 && !s.clipCoveredForTest()) uncovered += 1;
+  }
+  s.input.walk = 0;
+  s.input.sprint = false;
+  s.setMeshBudgetCapForTest(Infinity);
+  s.drainQueueForTest();
+  return { uncovered, covered: s.clipCoveredForTest() };
+});
+check('the clip NEVER exposed an unbuilt chunk', churn.uncovered === 0,
+  `${churn.uncovered} uncovered samples of 120 during starved sprint`);
+check('and full coverage returns after the drain', churn.covered === true);
 
 console.log('\nNEVER IN THE WALLS (grinding every direction at the joints)');
 /* The playtest disaster this pins down: at tunnel joints, "there is a
@@ -272,7 +351,8 @@ const grind = await page.evaluate(() => {
   }
   let embedded = 0;
   let run = 0;
-  let worstRun = 0;
+  let worstRunFree = 0;
+  let worstRunRail = 0;
   let deepestMm = Infinity;
   for (let i = 0; i < 1200; i += 1) {
     if (i % 40 === 0) s.setFacingForTest(s.facing + 2.4);
@@ -280,7 +360,8 @@ const grind = await page.evaluate(() => {
     if (s.stream.solidAtWu(s.at.x, s.at.y, s.at.z) === true) {
       embedded += 1;
       run += 1;
-      worstRun = Math.max(worstRun, run);
+      if (s.statsForTest().railBound === 1) worstRunRail = Math.max(worstRunRail, run);
+      else worstRunFree = Math.max(worstRunFree, run);
     } else {
       run = 0;
     }
@@ -289,13 +370,16 @@ const grind = await page.evaluate(() => {
     );
   }
   s.input.walk = 0;
-  return { embedded, worstRun, deepestMm };
+  return { embedded, worstRunFree, worstRunRail, deepestMm };
 });
-/* Single-frame solids are the 1 mm rounding flickering against a curved
- * wall (forgiven by design — the snap-back fires at three consecutive);
- * what must never happen is SUSTAINED embedding, the see-through world. */
-check('never embedded for more than 2 frames', grind.worstRun <= 2,
-  `worst run ${grind.worstRun}, ${grind.embedded} transient frames of 1200`);
+/* Free mode: single-frame solids are rounding flicker (snap-back fires at
+ * three consecutive). Rail mode: the position lerp squeezes joint corners
+ * for a few frames — she is following the bore by construction, so a brief
+ * corner brush is a squeeze, not the see-through embedding. */
+check('free mode never embedded past the snap threshold', grind.worstRunFree <= 2,
+  `worst free run ${grind.worstRunFree}, ${grind.embedded} transient frames of 1200`);
+check('rail corner squeezes stay brief', grind.worstRunRail <= 6,
+  `worst rail run ${grind.worstRunRail}`);
 check('and she was genuinely down among the joints for it', grind.deepestMm < -30,
   `deepest ${grind.deepestMm.toFixed(1)} mm`);
 
