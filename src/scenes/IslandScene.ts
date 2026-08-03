@@ -1,34 +1,51 @@
 /**
- * KAUAI FOR ANTS — `?scene=island`. Beyond Extinction's island, 1:1000.
+ * KAUAI FOR ANTS — `?scene=island`. Beyond Extinction's island, 1:1000,
+ * now wearing BE's real biome textures and carrying the DIGGABLE SOIL
+ * WINDOW with a pre-authored nest under the summit spawn.
  *
- * BE ships Kauai as an 8×8 chessboard of real-elevation height tiles, 56 km
- * across, streamed and cross-faded because no phone can hold the full-scale
- * island. At ant scale the arithmetic flips: 56 km becomes 56 m, one real
- * metre becomes one in-world millimetre, and the WHOLE island — all 64
- * sections, baked to one 1025² grid by scripts/bakeKauai.py — fits in a
- * single static mesh. So this room does the opposite of streaming, on
- * purpose: every section is built once and never hidden, faded, clipped or
- * swapped. Nothing loads in front of you, so nothing can hole.
+ * The island itself stays the anti-hole design the last round proved: all
+ * 64 sections built once from the baked grid, never hidden, faded or
+ * swapped; normals from central differences (no section seams); the walker
+ * grounded on the DRAWN triangles (BE's own rule). On top of that, three
+ * additions this round:
  *
- * Two deliberate choices against seams, the lesson of the last room:
- * vertex NORMALS come from central differences of the height grid, not from
- * computeVertexNormals — identical on both sides of every section border, so
- * no shading lines — and vertex POSITIONS come from global grid indices, so
- * shared edges are bit-identical.
+ *  TEXTURES — BE's seven-band biome shader, ported verbatim in
+ *  islandBiome.ts. The same material paints the soil chunks: tunnel walls
+ *  are steep so the slope term dresses them as cliff rock for free, and
+ *  their tops share the island's elevation bands, so the fine window is
+ *  not a visible patch.
  *
- * No digging yet — this room exists to prove the landscape. The soil-window
- * architecture from `?scene=world` slots under any height function,
- * including this grid, when the island earns it.
+ *  THE SOIL WINDOW — IslandStream: the streamed-world architecture with a
+ *  floating 256 mm depth band riding under the local surface. Inside the
+ *  window's rectangle the island sheet discards (the world room's hand-off)
+ *  and the density mesh is the only ground — so the nest's entrance and any
+ *  bite are simply visible. The clip NEVER outruns the meshes: it shrinks
+ *  to retained soil on every scroll and only widens back when the rebuild
+ *  queue drains. Nothing can hole.
+ *
+ *  THE PRE-TUNNEL — islandSoil folds a gate/hall/bend/store nest into the
+ *  soil function at the spawn, mound stamped into the island grid so the
+ *  anthill shows from afar, vent bored through it so the entrance is a real
+ *  hole underfoot. Streaming away and back rebuilds it from zero saved
+ *  samples, exactly as the world room proved.
  */
 
 import * as THREE from 'three';
 
 import './DensityTerrainLabScene.css';
+import { buildSurfaceNets } from '../density/SurfaceNets';
 import { QueenModel } from '../anim/QueenModel';
 import { FOOT_CLEARANCE_MM } from '../anim/legDrive';
-
-/** Millimetres per world unit, as everywhere in the project. */
-const MM = 5;
+import { buildNestView, type NestView } from '../nest/nestView';
+import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
+import { makeIslandSoil, type IslandSoil } from '../world/islandSoil';
+import {
+  loadBiomeTextures, makeBiomeMaterial, type BiomeTextureSet,
+} from '../world/islandBiome';
+import {
+  CAP_PLANES, CELLS_Y, CELL_SIZE, MM, SAMPLES_Y, TILE_CELLS, WINDOW_CELLS,
+  WINDOW_MM, WINDOW_BYTES,
+} from '../world/worldScape';
 
 /** The island: 56 km of Kauai at 1:1000. Real metres ARE in-world mm. */
 const SPAN_MM = 56000;
@@ -48,6 +65,20 @@ const WALK_SPEED = 3;
 const TURN_RATE = 2.4;
 const RIDE = 1.3 / MM;
 
+/** Soil mesh chunks: the slide tile IS the chunk, the world room's trick. */
+const CH = TILE_CELLS;
+const CHUNKS_XZ = WINDOW_CELLS / CH;
+const CHUNKS_Y = CELLS_Y / CH;
+const MESH_BUDGET = 3;
+
+/** Recentre lead and thrash guards, straight from the world room. */
+const LEAD_S = 0.45;
+const LEAD_MAX = 24 / MM;
+const SCROLL_COOLDOWN_MS = 150;
+
+const BITE_RADIUS = 1.9 / MM;
+const BITE_EVERY_S = 0.16;
+
 export class IslandScene {
   ready = false;
 
@@ -61,20 +92,46 @@ export class IslandScene {
 
   private readonly queen = new QueenModel('queen');
 
+  /** Stamped grid (mound included) — what the island mesh and walker use. */
   private heights: Int16Array | null = null;
+
+  /** Pristine grid — what the soil function calls "the natural surface". */
+  private heightsBase: Int16Array | null = null;
+
+  private soil: IslandSoil | null = null;
+
+  private stream: IslandStream | null = null;
+
+  private nestView: NestView | null = null;
+
+  private textures: BiomeTextureSet | null = null;
+
+  private islandMaterial: THREE.MeshStandardMaterial | null = null;
+
+  private soilMaterial: THREE.MeshStandardMaterial | null = null;
+
+  /** The fine window's rectangle, in world units. Island fragments inside die. */
+  private readonly clip = { value: new THREE.Vector4(0, 0, 0, 0) };
+
+  private readonly chunkMeshes = new Map<string, THREE.Mesh>();
+
+  private readonly queue: { cx: number; cy: number; cz: number }[] = [];
+
+  private readonly queued = new Set<string>();
+
+  private clipPending = false;
 
   private terrainVerts = 0;
 
   private terrainTris = 0;
 
-  // Her state — the same simple surface walker the world room proves.
   private readonly at = new THREE.Vector3();
 
   private facing = Math.PI;
 
   private readonly velocity = new THREE.Vector3();
 
-  readonly input = { walk: 0, yaw: 0 };
+  readonly input = { walk: 0, yaw: 0, dig: false };
 
   private camYaw = 0;
 
@@ -82,13 +139,28 @@ export class IslandScene {
 
   private camDist = 30 / MM;
 
+  private queenReady = false;
+
   private paused = false;
 
   private previous = performance.now();
 
   private frame = 0;
 
-  private readonly stats = { fps: 0, frames: 0, fpsAt: performance.now() };
+  private lastScrollAt = 0;
+
+  private biteAt = 0;
+
+  private showPlan = true;
+
+  private readonly stats = {
+    fps: 0,
+    frames: 0,
+    fpsAt: performance.now(),
+    scrolls: 0,
+    lastScrollMs: 0,
+    rebases: 0,
+  };
 
   private readonly hud: HTMLElement;
 
@@ -155,26 +227,80 @@ export class IslandScene {
 
   private async load(): Promise<void> {
     const url = `${import.meta.env.BASE_URL}kauai-1025.bin`;
-    const raw = await (await fetch(url)).arrayBuffer();
+    const [raw, textures] = await Promise.all([
+      (await fetch(url)).arrayBuffer(),
+      loadBiomeTextures(import.meta.env.BASE_URL),
+    ]);
     this.heights = new Int16Array(raw);
+    this.heightsBase = this.heights.slice();
+    this.textures = textures;
+    this.islandMaterial = makeBiomeMaterial(textures, this.clip);
+    this.soilMaterial = makeBiomeMaterial(textures);
+
+    /*
+     * The soil's "natural surface" is the DRAWN base island (triangle-exact
+     * over the pristine grid) so the fine soil's top meets the island mesh
+     * at the window rim with nothing to stitch.
+     */
+    this.soil = makeIslandSoil((xMm, zMm) => this.renderedOn(this.heightsBase!, xMm, zMm));
+
+    /*
+     * Stamp the nest's mound into the STAMPED grid: the island mesh and the
+     * far view get a coarse tent of a hill (the grid is 55 mm-a-sample), and
+     * the fine window redraws the real mound shape whenever you are close
+     * enough to care — the world room's macro/fine split, in data.
+     */
+    const r = this.soil.reject;
+    for (let row = Math.max(0, Math.floor(r.min[2] / STEP_MM));
+      row <= Math.min(N - 1, Math.ceil(r.max[2] / STEP_MM)); row += 1) {
+      for (let col = Math.max(0, Math.floor(r.min[0] / STEP_MM));
+        col <= Math.min(N - 1, Math.ceil(r.max[0] / STEP_MM)); col += 1) {
+        const natural = this.heights[row * N + col]! / 10;
+        const top = this.soil.moundTopMm(col * STEP_MM, row * STEP_MM, natural);
+        if (top > natural) this.heights[row * N + col] = Math.round(top * 10);
+      }
+    }
+
     this.buildIsland();
 
-    // The middle of the island: the Waiʻaleʻale plateau, ~1,300 m up.
+    // The middle of the island: the Waiʻaleʻale plateau, ~1,300 m up,
+    // with the pre-tunnel's gate 40 mm to the east.
     this.at.set(SPAN_MM / 2 / MM, 0, SPAN_MM / 2 / MM);
-    this.at.y = this.groundHeightAt(this.at.x, this.at.z) + RIDE;
+    this.at.y = this.walkGroundAt(this.at.x, this.at.z) + RIDE;
 
-    const ok = await this.queen.load();
-    this.queen.root.visible = ok;
-    this.ready = ok;
+    this.stream = new IslandStream(
+      this.soil,
+      (xMm, zMm) => this.renderedOn(this.heightsBase!, xMm, zMm),
+      this.at.x, this.at.z,
+    );
+    this.remeshEverything();
+    this.clipToWindow();
+
+    this.nestView = buildNestView(this.soil.plan);
+    this.nestView.root.scale.setScalar(1 / MM);
+    this.nestView.root.visible = this.showPlan;
+    this.scene.add(this.nestView.root);
+
+    /* The WORLD is ready here; the queen's model arrives when it arrives.
+     * Gating `ready` on her GLB made every probe hostage to one slow fetch. */
+    this.ready = true;
+    void this.queen.load().then((ok) => {
+      this.queen.root.visible = ok;
+      this.queenReady = ok;
+    });
   }
 
   /* ------------------------------------------------------------ the land */
 
   /** Height in mm (= real metres) at a data-grid index, clamped to edges. */
-  private sample(col: number, row: number): number {
+  private sampleOf(data: Int16Array, col: number, row: number): number {
     const c = Math.min(N - 1, Math.max(0, col));
-    const r = Math.min(N - 1, Math.max(0, row));
-    return this.heights![r * N + c]! / 10;
+    const rw = Math.min(N - 1, Math.max(0, row));
+    return data[rw * N + c]! / 10;
+  }
+
+  private sample(col: number, row: number): number {
+    return this.sampleOf(this.heights!, col, row);
   }
 
   /** Bilinear ground height in WORLD units at a world-unit position. */
@@ -183,43 +309,43 @@ export class IslandScene {
     const gx = Math.min(N - 1.001, Math.max(0, (x * MM) / STEP_MM));
     const gz = Math.min(N - 1.001, Math.max(0, (z * MM) / STEP_MM));
     const c = Math.floor(gx);
-    const r = Math.floor(gz);
+    const rw = Math.floor(gz);
     const fx = gx - c;
-    const fz = gz - r;
-    const h = this.sample(c, r) * (1 - fx) * (1 - fz)
-      + this.sample(c + 1, r) * fx * (1 - fz)
-      + this.sample(c, r + 1) * (1 - fx) * fz
-      + this.sample(c + 1, r + 1) * fx * fz;
+    const fz = gz - rw;
+    const h = this.sample(c, rw) * (1 - fx) * (1 - fz)
+      + this.sample(c + 1, rw) * fx * (1 - fz)
+      + this.sample(c, rw + 1) * (1 - fx) * fz
+      + this.sample(c + 1, rw + 1) * fx * fz;
     return h / MM;
   }
 
   /**
-   * The surface the GPU actually draws, which is NOT the bilinear patch: the
-   * mesh renders every second data sample as flat triangles, and wherever
-   * the smooth patch dips under a facet, an ant grounded on the patch sinks
-   * visibly underground. Playtest found it; BE's terrainSampling.ts warns
-   * about exactly this ("sample the grid's TRIANGLES"). So: locate the quad
-   * on the MESH grid, pick the triangle the way the index buffer splits it
-   * (a–c–b / b–c–d, diagonal along fx+fz=1), and interpolate that plane.
+   * The surface the GPU actually draws, in mm, over a chosen grid: locate
+   * the quad on the MESH grid, pick the triangle the way the index buffer
+   * splits it (a–c–b / b–c–d, diagonal along fx+fz=1), interpolate that
+   * plane. BE's terrainSampling rule; the walker sank without it.
    */
-  private renderedGroundAt(x: number, z: number): number {
-    if (!this.heights) return 0;
+  private renderedOn(data: Int16Array, xMm: number, zMm: number): number {
     const stride = (N - 1) / (MESH_N - 1);
-    const stepWu = (STEP_MM * stride) / MM;
-    const gx = Math.min(MESH_N - 1.001, Math.max(0, x / stepWu));
-    const gz = Math.min(MESH_N - 1.001, Math.max(0, z / stepWu));
+    const stepMm = STEP_MM * stride;
+    const gx = Math.min(MESH_N - 1.001, Math.max(0, xMm / stepMm));
+    const gz = Math.min(MESH_N - 1.001, Math.max(0, zMm / stepMm));
     const i = Math.floor(gx);
     const j = Math.floor(gz);
     const fx = gx - i;
     const fz = gz - j;
-    const ha = this.sample(i * stride, j * stride);
-    const hb = this.sample((i + 1) * stride, j * stride);
-    const hc = this.sample(i * stride, (j + 1) * stride);
-    const hd = this.sample((i + 1) * stride, (j + 1) * stride);
-    const h = fx + fz <= 1
+    const ha = this.sampleOf(data, i * stride, j * stride);
+    const hb = this.sampleOf(data, (i + 1) * stride, j * stride);
+    const hc = this.sampleOf(data, i * stride, (j + 1) * stride);
+    const hd = this.sampleOf(data, (i + 1) * stride, (j + 1) * stride);
+    return fx + fz <= 1
       ? ha + (hb - ha) * fx + (hc - ha) * fz
       : hd + (hc - hd) * (1 - fx) + (hb - hd) * (1 - fz);
-    return h / MM;
+  }
+
+  private renderedGroundAt(x: number, z: number): number {
+    if (!this.heights) return 0;
+    return this.renderedOn(this.heights, x * MM, z * MM) / MM;
   }
 
   /** Where the ant may stand: the drawn land, or wading depth at the shore. */
@@ -227,52 +353,36 @@ export class IslandScene {
     return Math.max(this.renderedGroundAt(x, z), 0.5 / MM);
   }
 
-  /**
-   * All sixty-four sections, built once, never touched again. Colours are a
-   * biome ramp by elevation and slope in the spirit of BE's texture blend:
-   * reef and deep water, sand, lowland green into jungle, canyon rock on the
-   * steeps, bare summit above the cloud line.
-   */
-  private buildIsland(): void {
-    const material = new THREE.MeshLambertMaterial({ vertexColors: true });
-    const colour = new THREE.Color();
-    const rock = new THREE.Color(0x8a6247);
-    const pick = (hM: number, slope: number): THREE.Color => {
-      if (hM < 0) {
-        const t = Math.min(1, Math.max(0, 1 + hM / 80));
-        return colour.setHex(0x0d2f47).lerp(new THREE.Color(0x3d8f7a), t);
-      }
-      if (hM < 4) return colour.setHex(0xd8c08a);
-      if (hM < 500) {
-        const t = (hM - 4) / 496;
-        colour.setHex(0x86a659).lerp(new THREE.Color(0x3f6d33), t);
-      } else if (hM < 1100) {
-        const t = (hM - 500) / 600;
-        colour.setHex(0x3f6d33).lerp(new THREE.Color(0x6b7a55), t);
-      } else {
-        colour.setHex(0x8f8578);
-      }
-      // Kauai's slopes are its face: canyon and pali walls turn to rock.
-      const s = Math.min(1, Math.max(0, (slope - 0.35) / 0.5));
-      return colour.lerp(rock, s);
-    };
+  /** Underfoot: the LIVE soil where it is loaded (a dug hole is a real
+   *  drop), the drawn island everywhere else. A column the depth band
+   *  cannot reach — steep country where the surface climbs past the band's
+   *  ceiling — caps flat at the ceiling, and standing there must mean the
+   *  drawn island, not the cap. */
+  private footingAt(x: number, z: number): number {
+    const ground = this.walkGroundAt(x, z);
+    const stream = this.stream;
+    if (!stream) return ground;
+    const fine = stream.surfaceHeightAt(x, z);
+    if (fine === null) return ground;
+    const ceiling = stream.bandFloorWu + (CELLS_Y - CAP_PLANES - 1) * CELL_SIZE;
+    if (fine >= ceiling - CELL_SIZE) return Math.max(fine, ground);
+    return fine;
+  }
 
+  /** All sixty-four sections, built once, never touched again. */
+  private buildIsland(): void {
     for (let sz = 0; sz < SECTIONS; sz += 1) {
       for (let sx = 0; sx < SECTIONS; sx += 1) {
-        this.scene.add(this.buildSection(sx, sz, material, pick));
+        this.scene.add(this.buildSection(sx, sz));
       }
     }
   }
 
-  private buildSection(
-    sx: number, sz: number,
-    material: THREE.Material,
-    pick: (hM: number, slope: number) => THREE.Color,
-  ): THREE.Mesh {
+  private buildSection(sx: number, sz: number): THREE.Mesh {
     const positions = new Float32Array(SEC_VERTS * SEC_VERTS * 3);
     const normals = new Float32Array(SEC_VERTS * SEC_VERTS * 3);
-    const colors = new Float32Array(SEC_VERTS * SEC_VERTS * 3);
-    const stride = (N - 1) / (MESH_N - 1); // data samples per mesh step
+    const elev = new Float32Array(SEC_VERTS * SEC_VERTS);
+    const stride = (N - 1) / (MESH_N - 1);
     let at = 0;
     for (let j = 0; j < SEC_VERTS; j += 1) {
       for (let i = 0; i < SEC_VERTS; i += 1) {
@@ -292,10 +402,7 @@ export class IslandScene {
         normals[at] = -dx * inv;
         normals[at + 1] = inv;
         normals[at + 2] = -dz * inv;
-        const c = pick(h, Math.hypot(dx, dz));
-        colors[at] = c.r;
-        colors[at + 1] = c.g;
-        colors[at + 2] = c.b;
+        elev[at / 3] = h; // mm IS real metres at 1:1000 — the biome bands read it raw
         at += 3;
       }
     }
@@ -312,14 +419,154 @@ export class IslandScene {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.setAttribute('aElev', new THREE.BufferAttribute(elev, 1));
     geometry.setIndex(index);
     geometry.computeBoundingSphere();
-    const mesh = new THREE.Mesh(geometry, material);
+    const mesh = new THREE.Mesh(geometry, this.islandMaterial!);
     mesh.matrixAutoUpdate = false;
     this.terrainVerts += SEC_VERTS * SEC_VERTS;
     this.terrainTris += (SEC_VERTS - 1) * (SEC_VERTS - 1) * 2;
     return mesh;
+  }
+
+  /* ------------------------------------------------------------ the soil */
+
+  private key(cx: number, cy: number, cz: number): string { return `${cx},${cy},${cz}`; }
+
+  private remeshEverything(): void {
+    for (const mesh of this.chunkMeshes.values()) {
+      this.scene.remove(mesh);
+      mesh.geometry.dispose();
+    }
+    this.chunkMeshes.clear();
+    this.queue.length = 0;
+    this.queued.clear();
+    for (let cz = 0; cz < CHUNKS_XZ; cz += 1) {
+      for (let cy = 0; cy < CHUNKS_Y; cy += 1) {
+        for (let cx = 0; cx < CHUNKS_XZ; cx += 1) this.meshChunk(cx, cy, cz);
+      }
+    }
+  }
+
+  private meshChunk(cx: number, cy: number, cz: number): void {
+    const stream = this.stream!;
+    const key = this.key(cx, cy, cz);
+    const old = this.chunkMeshes.get(key);
+    if (old) {
+      this.scene.remove(old);
+      old.geometry.dispose();
+      this.chunkMeshes.delete(key);
+    }
+    const data = buildSurfaceNets(stream.field, 0, {
+      x0: cx * CH, y0: cy * CH, z0: cz * CH,
+      x1: Math.min(WINDOW_CELLS, (cx + 1) * CH),
+      y1: Math.min(CELLS_Y, (cy + 1) * CH),
+      z1: Math.min(WINDOW_CELLS, (cz + 1) * CH),
+    });
+    if (data.indices.length === 0) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+    // The biome shader wants per-vertex elevation in real metres; a soil
+    // vertex's world Y in wu times MM is exactly that.
+    const elev = new Float32Array(data.positions.length / 3);
+    for (let v = 0; v < elev.length; v += 1) {
+      elev[v] = (data.positions[v * 3 + 1]! + stream.bandFloorWu) * MM;
+    }
+    geometry.setAttribute('aElev', new THREE.BufferAttribute(elev, 1));
+    geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
+    geometry.computeVertexNormals();
+    const mesh = new THREE.Mesh(geometry, this.soilMaterial!);
+    /* World position is fixed at BUILD time — retained chunks keep their
+     * mesh untouched across scrolls, which is what makes scrolls pop-free. */
+    mesh.position.set(stream.originWorldX, stream.bandFloorWu, stream.originWorldZ);
+    mesh.updateMatrix();
+    mesh.matrixAutoUpdate = false;
+    this.scene.add(mesh);
+    this.chunkMeshes.set(key, mesh);
+  }
+
+  private enqueue(cx: number, cy: number, cz: number): void {
+    const key = this.key(cx, cy, cz);
+    if (this.queued.has(key)) return;
+    this.queued.add(key);
+    this.queue.push({ cx, cy, cz });
+  }
+
+  private onScroll(scroll: IslandScrollReport): void {
+    this.stats.scrolls += 1;
+    this.stats.lastScrollMs = scroll.ms;
+    if (scroll.rebased) this.stats.rebases += 1;
+    const moved = new Map<string, THREE.Mesh>();
+    const keep = scroll.retained;
+    for (const [key, mesh] of this.chunkMeshes) {
+      const [cx, cy, cz] = key.split(',').map(Number) as [number, number, number];
+      const nx = cx - scroll.tilesX;
+      const nz = cz - scroll.tilesZ;
+      const inside = !scroll.rebased
+        && nx >= 0 && nx < CHUNKS_XZ && nz >= 0 && nz < CHUNKS_XZ
+        && nx * CH >= keep.x0 && (nx + 1) * CH <= keep.x1
+        && nz * CH >= keep.z0 && (nz + 1) * CH <= keep.z1;
+      if (inside) {
+        moved.set(this.key(nx, cy, nz), mesh);
+      } else {
+        this.scene.remove(mesh);
+        mesh.geometry.dispose();
+      }
+    }
+    this.chunkMeshes.clear();
+    for (const [key, mesh] of moved) this.chunkMeshes.set(key, mesh);
+    this.queue.length = 0;
+    this.queued.clear();
+    const jobs: { cx: number; cy: number; cz: number; d: number }[] = [];
+    for (let cz = 0; cz < CHUNKS_XZ; cz += 1) {
+      for (let cy = 0; cy < CHUNKS_Y; cy += 1) {
+        for (let cx = 0; cx < CHUNKS_XZ; cx += 1) {
+          if (this.chunkMeshes.has(this.key(cx, cy, cz))) continue;
+          const wx = this.stream!.originWorldX + (cx + 0.5) * CH * CELL_SIZE;
+          const wz = this.stream!.originWorldZ + (cz + 0.5) * CH * CELL_SIZE;
+          jobs.push({ cx, cy, cz, d: Math.hypot(wx - this.at.x, wz - this.at.z) });
+        }
+      }
+    }
+    jobs.sort((a, b) => a.d - b.d);
+    for (const job of jobs) this.enqueue(job.cx, job.cy, job.cz);
+    /*
+     * THE CLIP MUST NEVER OUTRUN THE MESHES — the island sheet keeps
+     * covering everything but the retained, still-meshed soil until the
+     * queue drains (reveal). The world room's law, inherited verbatim.
+     */
+    const cx0 = Math.ceil(keep.x0 / CH) * CH;
+    const cx1 = Math.floor(keep.x1 / CH) * CH;
+    const cz0 = Math.ceil(keep.z0 / CH) * CH;
+    const cz1 = Math.floor(keep.z1 / CH) * CH;
+    const inset = CELL_SIZE * 2;
+    if (cx1 - cx0 > 0 && cz1 - cz0 > 0) {
+      this.clip.value.set(
+        this.stream!.originWorldX + cx0 * CELL_SIZE + inset,
+        this.stream!.originWorldZ + cz0 * CELL_SIZE + inset,
+        this.stream!.originWorldX + cx1 * CELL_SIZE - inset,
+        this.stream!.originWorldZ + cz1 * CELL_SIZE - inset,
+      );
+    } else {
+      this.clip.value.set(0, 0, 0, 0);
+    }
+    this.clipPending = true;
+  }
+
+  private reveal(): void {
+    if (!this.clipPending || this.queue.length > 0) return;
+    this.clipPending = false;
+    this.clipToWindow();
+  }
+
+  private clipToWindow(): void {
+    const inset = CELL_SIZE * 2;
+    this.clip.value.set(
+      this.stream!.originWorldX + inset,
+      this.stream!.originWorldZ + inset,
+      this.stream!.originWorldX + WINDOW_CELLS * CELL_SIZE - inset,
+      this.stream!.originWorldZ + WINDOW_CELLS * CELL_SIZE - inset,
+    );
   }
 
   /* ------------------------------------------------------------ the walk */
@@ -332,19 +579,67 @@ export class IslandScene {
     const span = SPAN_MM / MM;
     this.at.x = Math.min(span - 2, Math.max(2, this.at.x + this.velocity.x * dt));
     this.at.z = Math.min(span - 2, Math.max(2, this.at.z + this.velocity.z * dt));
-    const want = this.walkGroundAt(this.at.x, this.at.z) + RIDE;
+    const want = this.footingAt(this.at.x, this.at.z) + RIDE;
     this.at.y += (want - this.at.y) * Math.min(1, dt * 14);
+
+    if (this.stream) {
+      if (this.input.dig) this.bite(dt);
+
+      const lead = Math.min(LEAD_MAX, Math.abs(speed) * LEAD_S);
+      const now = performance.now();
+      if (now - this.lastScrollAt > SCROLL_COOLDOWN_MS) {
+        const scroll = this.stream.recentreOn(
+          this.at.x + Math.sin(this.facing) * lead,
+          this.at.z + Math.cos(this.facing) * lead,
+        );
+        if (scroll) {
+          this.lastScrollAt = now;
+          this.onScroll(scroll);
+        }
+      }
+
+      let built = 0;
+      while (built < MESH_BUDGET && this.queue.length > 0) {
+        const job = this.queue.shift()!;
+        this.queued.delete(this.key(job.cx, job.cy, job.cz));
+        this.meshChunk(job.cx, job.cy, job.cz);
+        built += 1;
+      }
+      this.reveal();
+    }
+
     this.pose(dt);
     this.aimCamera(dt);
   }
 
+  private bite(dt: number): void {
+    this.biteAt += dt;
+    if (this.biteAt < BITE_EVERY_S) return;
+    this.biteAt = 0;
+    const mouth = this.at.clone().addScaledVector(
+      new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing)), 1.4 / MM,
+    );
+    mouth.y = this.at.y - RIDE * 0.4;
+    const result = this.stream!.subtractSphere(mouth, BITE_RADIUS);
+    if (result.changedSamples === 0) return;
+    const lo = (v: number) => Math.max(0, Math.floor((v - 1) / CH));
+    const hi = (v: number, max: number) => Math.min(max - 1, Math.floor((v + 1) / CH));
+    for (let cz = lo(result.bounds.minZ); cz <= hi(result.bounds.maxZ, CHUNKS_XZ); cz += 1) {
+      for (let cy = lo(result.bounds.minY); cy <= hi(result.bounds.maxY, CHUNKS_Y); cy += 1) {
+        for (let cx = lo(result.bounds.minX); cx <= hi(result.bounds.maxX, CHUNKS_XZ); cx += 1) {
+          this.enqueue(cx, cy, cz);
+        }
+      }
+    }
+  }
+
   private pose(dt: number): void {
-    if (!this.ready) return;
+    if (!this.queenReady) return;
     const probe = 2 / MM;
-    const hx = (this.walkGroundAt(this.at.x + probe, this.at.z)
-      - this.walkGroundAt(this.at.x - probe, this.at.z)) / (probe * 2);
-    const hz = (this.walkGroundAt(this.at.x, this.at.z + probe)
-      - this.walkGroundAt(this.at.x, this.at.z - probe)) / (probe * 2);
+    const hx = (this.footingAt(this.at.x + probe, this.at.z)
+      - this.footingAt(this.at.x - probe, this.at.z)) / (probe * 2);
+    const hz = (this.footingAt(this.at.x, this.at.z + probe)
+      - this.footingAt(this.at.x, this.at.z - probe)) / (probe * 2);
     const up = new THREE.Vector3(-hx, 1, -hz).normalize();
     const forward = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
     forward.addScaledVector(up, -forward.dot(up)).normalize();
@@ -356,12 +651,12 @@ export class IslandScene {
     this.queen.update(dt, {
       speed: Math.hypot(this.velocity.x, this.velocity.z),
       turn: -this.input.yaw * TURN_RATE,
-      digging: 0,
+      digging: this.input.dig ? 1 : 0,
       carrying: 0,
       headYaw: 0,
     });
     this.queen.solveFeet(
-      (x, z) => this.walkGroundAt(x, z),
+      (x, z) => this.footingAt(x, z),
       FOOT_CLEARANCE_MM / MM,
       RIDE * 2,
     );
@@ -379,7 +674,7 @@ export class IslandScene {
       this.at.y + Math.sin(this.camPitch) * this.camDist,
       this.at.z + Math.cos(this.camYaw) * this.camDist * cp,
     );
-    const eyeGround = this.walkGroundAt(this.camera.position.x, this.camera.position.z);
+    const eyeGround = this.footingAt(this.camera.position.x, this.camera.position.z);
     if (this.camera.position.y < eyeGround + 0.6) this.camera.position.y = eyeGround + 0.6;
     this.camera.up.set(0, 1, 0);
     this.camera.lookAt(this.at.x, this.at.y + 0.4, this.at.z);
@@ -388,6 +683,29 @@ export class IslandScene {
   /* ---------------------------------------------------------------- HUD */
 
   private buildControls(): void {
+    const actions = document.createElement('div');
+    actions.className = 'density-lab-actions';
+    this.hud.appendChild(actions);
+
+    const dig = document.createElement('button');
+    dig.className = 'density-lab-button density-lab-dig';
+    dig.textContent = 'DIG';
+    dig.addEventListener('pointerdown', (e) => { e.preventDefault(); this.input.dig = true; });
+    const stop = () => { this.input.dig = false; };
+    dig.addEventListener('pointerup', stop);
+    dig.addEventListener('pointercancel', stop);
+    actions.appendChild(dig);
+
+    const plan = document.createElement('button');
+    plan.className = 'density-lab-button density-lab-mode';
+    plan.textContent = 'PLAN';
+    plan.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      this.showPlan = !this.showPlan;
+      if (this.nestView) this.nestView.root.visible = this.showPlan;
+    });
+    actions.appendChild(plan);
+
     this.stickEl.className = 'nest-stick';
     this.stickEl.style.display = 'none';
     this.stickKnob.className = 'nest-stick-knob';
@@ -443,6 +761,11 @@ export class IslandScene {
       <b>kauai island</b> · 56 m square · 1:1000 · all 64 sections resident<br>
       terrain ${this.terrainVerts.toLocaleString()} v / ${this.terrainTris.toLocaleString()} t
       · elevation ${elevM} m<br>
+      soil window ${WINDOW_MM} mm · ${(WINDOW_BYTES / 1048576).toFixed(1)} MB ·
+      chunks ${this.chunkMeshes.size} · queued ${this.queue.length} ·
+      dug ${this.stream?.editedSamples ?? 0}<br>
+      band floor ${this.stream?.bandFloorMm ?? 0} m · scrolls ${this.stats.scrolls}
+      (${this.stats.rebases} rebases) · last ${this.stats.lastScrollMs.toFixed(0)} ms<br>
       at (${(this.at.x * MM / 1000).toFixed(1)}, ${(this.at.z * MM / 1000).toFixed(1)}) m ·
       ${memory ? `heap ${(memory.usedJSHeapSize / 1048576).toFixed(0)} MB · ` : ''}fps ${this.stats.fps}
     `;
@@ -491,6 +814,37 @@ export class IslandScene {
     this.at.z = zMm / MM;
     this.at.y = this.walkGroundAt(this.at.x, this.at.z) + RIDE;
     this.velocity.set(0, 0, 0);
+    if (this.stream) {
+      const scroll = this.stream.recentreOn(this.at.x, this.at.z);
+      if (scroll) this.onScroll(scroll);
+    }
+  }
+
+  drainQueueForTest(): void {
+    while (this.queue.length > 0) {
+      const job = this.queue.shift()!;
+      this.queued.delete(this.key(job.cx, job.cy, job.cz));
+      this.meshChunk(job.cx, job.cy, job.cz);
+    }
+    this.reveal();
+  }
+
+  /** Is there soil at this ABSOLUTE mm position? Off the LIVE field. */
+  solidAtMm(xMm: number, yMm: number, zMm: number): boolean | null {
+    const stream = this.stream;
+    if (!stream) return null;
+    const x = Math.round((xMm / MM - stream.originWorldX) / CELL_SIZE);
+    const z = Math.round((zMm / MM - stream.originWorldZ) / CELL_SIZE);
+    const y = Math.round(yMm - stream.bandFloorMm);
+    if (x < 0 || x > WINDOW_CELLS || z < 0 || z > WINDOW_CELLS
+      || y < 0 || y >= SAMPLES_Y) return null;
+    return stream.field.get(x, y, z) > 0;
+  }
+
+  planForTest(): { id: string; x: number; y: number; z: number }[] {
+    return (this.soil?.plan.nodes ?? []).map(
+      (n) => ({ id: n.id, x: n.x, y: n.y, z: n.z }),
+    );
   }
 
   /** Elevation in real metres at a position in island millimetres. */
@@ -500,7 +854,8 @@ export class IslandScene {
 
   /** The DRAWN surface's elevation (real m) — what standing-on must match. */
   renderedHeightAtMm(xMm: number, zMm: number): number {
-    return this.renderedGroundAt(xMm / MM, zMm / MM) * MM;
+    if (!this.heights) return 0;
+    return this.renderedOn(this.heights, xMm, zMm);
   }
 
   statsForTest(): Record<string, number> {
@@ -508,6 +863,12 @@ export class IslandScene {
       verts: this.terrainVerts,
       tris: this.terrainTris,
       loaded: this.heights ? 1 : 0,
+      meshed: this.chunkMeshes.size,
+      queued: this.queue.length,
+      edited: this.stream?.editedSamples ?? 0,
+      scrolls: this.stats.scrolls,
+      rebases: this.stats.rebases,
+      bandFloorMm: this.stream?.bandFloorMm ?? -1,
     };
   }
 
@@ -517,6 +878,10 @@ export class IslandScene {
       const mesh = node as THREE.Mesh;
       if (mesh.geometry) mesh.geometry.dispose();
     });
+    this.islandMaterial?.dispose();
+    this.soilMaterial?.dispose();
+    if (this.textures) for (const tex of Object.values(this.textures)) tex.dispose();
+    this.nestView?.dispose();
     this.queen.dispose();
     this.renderer.dispose();
     this.host.replaceChildren();

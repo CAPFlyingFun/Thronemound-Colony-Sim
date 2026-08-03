@@ -63,6 +63,91 @@ check('the south-east corner is ocean', geo.cornerSE < 0,
 check('west midway is lower than the summit (island falls to the sea)',
   geo.midwayWest < geo.centre, `${geo.midwayWest.toFixed(0)} m vs ${geo.centre.toFixed(0)} m`);
 
+console.log('\nTHE PRE-TUNNEL (streamed soil, nest folded into the function)');
+/* One stance at (28100, 28020) puts the whole plan in the window: gate at
+ * x=28040, store 112 mm east of it. */
+const nest = await page.evaluate(() => {
+  const s = window.islandScene;
+  s.teleportMm(28100, 28020);
+  s.drainQueueForTest();
+  const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
+  return {
+    n,
+    shaft: s.solidAtMm(n.gate.x, n.gate.y - 20, n.gate.z),
+    hall: s.solidAtMm(n.hall.x, n.hall.y, n.hall.z),
+    store: s.solidAtMm(n.store.x, n.store.y, n.store.z),
+    soilBeside: s.solidAtMm(n.gate.x + 22, n.gate.y - 30, n.gate.z),
+    soilBelowStore: s.solidAtMm(n.store.x, n.store.y - 26, n.store.z),
+    entranceTop: s.stream.surfaceHeightAt(n.gate.x / 5, n.gate.z / 5) * 5,
+    groundMm: n.gate.y,
+    edited: s.statsForTest().edited,
+  };
+});
+check('shaft below the gate is air', nest.shaft === false, `solidAtMm=${nest.shaft}`);
+check('hall is air', nest.hall === false, `solidAtMm=${nest.hall}`);
+check('store chamber is air', nest.store === false, `solidAtMm=${nest.store}`);
+check('soil beside the shaft is soil', nest.soilBeside === true, `solidAtMm=${nest.soilBeside}`);
+check('soil below the store is soil', nest.soilBelowStore === true, `solidAtMm=${nest.soilBelowStore}`);
+check('the entrance is open THROUGH the island surface',
+  nest.entranceTop < nest.groundMm - 30,
+  `soil top ${nest.entranceTop.toFixed(1)} mm vs ground ${nest.groundMm.toFixed(1)} mm`);
+check('the born nest cost zero saved samples', nest.edited === 0,
+  `${nest.edited} edits stored`);
+
+console.log('\nLEAVE AND RETURN (the tunnels rebuild from the pure function)');
+const roundtrip = await page.evaluate(() => {
+  const s = window.islandScene;
+  const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
+  s.teleportMm(20000, 20000);
+  s.drainQueueForTest();
+  const gateWhileAway = s.solidAtMm(n.gate.x, n.gate.y - 20, n.gate.z);
+  s.teleportMm(28100, 28020);
+  s.drainQueueForTest();
+  return {
+    gateWhileAway,
+    shaftAgain: s.solidAtMm(n.gate.x, n.gate.y - 20, n.gate.z),
+    storeAgain: s.solidAtMm(n.store.x, n.store.y, n.store.z),
+    edited: s.statsForTest().edited,
+  };
+});
+check('gate column unloads 8 m away', roundtrip.gateWhileAway === null);
+check('shaft is air AGAIN', roundtrip.shaftAgain === false, `solidAtMm=${roundtrip.shaftAgain}`);
+check('store is air AGAIN', roundtrip.storeAgain === false, `solidAtMm=${roundtrip.storeAgain}`);
+check('reconstruction still cost zero saved samples', roundtrip.edited === 0,
+  `${roundtrip.edited} edits stored`);
+
+console.log('\nA HAND-DIG THROUGH THE ISLAND SURFACE');
+const dig = await page.evaluate(() => {
+  const s = window.islandScene;
+  s.teleportMm(27950, 27950);
+  s.drainQueueForTest();
+  s.setFacingForTest(0); // facing +z; the mouth rides 1.4 mm ahead
+  const mouthX = 27950 / 5;
+  const mouthZ = (27950 + 1.4) / 5;
+  const before = s.stream.surfaceHeightAt(mouthX, mouthZ) * 5;
+  s.input.dig = true;
+  s.stepForTest(1 / 30, 90); // three seconds of chewing, deterministic
+  s.input.dig = false;
+  s.drainQueueForTest();
+  const after = s.stream.surfaceHeightAt(mouthX, mouthZ) * 5;
+  // Leave far enough that the hole's column unloads, then come back.
+  s.teleportMm(20000, 20000);
+  s.drainQueueForTest();
+  const goneWhileAway = s.solidAtMm(27950, 1300, 27951.4);
+  s.teleportMm(27950, 27950);
+  s.drainQueueForTest();
+  const returned = s.stream.surfaceHeightAt(mouthX, mouthZ) * 5;
+  return {
+    before, after, returned, goneWhileAway, edited: s.statsForTest().edited,
+  };
+});
+check('the surface under the mouth dropped', dig.after < dig.before - 1.5,
+  `${dig.before.toFixed(1)} → ${dig.after.toFixed(1)} mm`);
+check('the dig is in the sparse store', dig.edited > 0, `${dig.edited} samples`);
+check('hole column unloaded while away', dig.goneWhileAway === null);
+check('the hole SURVIVED the round trip', Math.abs(dig.returned - dig.after) < 0.5,
+  `${dig.after.toFixed(1)} mm before, ${dig.returned.toFixed(1)} mm after`);
+
 console.log('\nTHE WALKS (clearance is against the DRAWN triangles — below zero');
 console.log('is "she went underground", the playtest bug this pins down forever)');
 const runWalk = (xMm, zMm, facing) => page.evaluate(([x0, z0, face]) => {
@@ -104,6 +189,7 @@ console.log('\nTHE RED-SKY TEST (fog off, red background, island panorama)');
 await page.evaluate(() => {
   const s = window.islandScene;
   s.teleportMm(28000, 28000);
+  s.drainQueueForTest();
   s.scene.fog = null;
   s.scene.background.setHex(0xff0000);
   s.camPitch = 0.35;
