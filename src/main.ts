@@ -54,6 +54,13 @@ if (host) {
      * function. See docs/HYBRID_WORLD_PLAN.md.
      */
     void import('./scenes/WorldScene').then(({ WorldScene }) => new WorldScene(host));
+  } else if (scene === 'island') {
+    /*
+     * Beyond Extinction's Kauai at 1:1000 — all 64 height sections resident
+     * at once, nothing streamed or hidden, an ant in the middle of a 56 m
+     * island. The landscape test that precedes wiring digging under it.
+     */
+    void import('./scenes/IslandScene').then(({ IslandScene }) => new IslandScene(host));
   } else if (scene === 'hex') {
     // The hex-grid experiment, kept only as the reference the rounded sockets
     // were taken from. See src/voxel/HexGrid.ts for why it could never be the
