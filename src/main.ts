@@ -47,6 +47,13 @@ if (host) {
      * piece at a time. `terrainbug` is the name it was asked for by.
      */
     void import('./scenes/BlockScene').then(({ BlockScene }) => new BlockScene(host));
+  } else if (scene === 'world') {
+    /*
+     * The hybrid streamed-world prototype: a macro surface everywhere, a
+     * fine diggable window under the ant, a nest plan carved into the world
+     * function. See docs/HYBRID_WORLD_PLAN.md.
+     */
+    void import('./scenes/WorldScene').then(({ WorldScene }) => new WorldScene(host));
   } else if (scene === 'hex') {
     // The hex-grid experiment, kept only as the reference the rounded sockets
     // were taken from. See src/voxel/HexGrid.ts for why it could never be the
