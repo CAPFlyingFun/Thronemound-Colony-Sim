@@ -21,6 +21,7 @@
     "probe:autoview": "node scripts/probe-autoview.mjs",
     "probe:designer": "node scripts/probe-designer.mjs",
     "probe:clod": "node scripts/probe-clod.mjs",
+    "probe:blocksize": "node scripts/probe-blocksize.mjs",
     "smoke:pwa": "node scripts/smoke-pwa.mjs",
     "icons": "node scripts/make-icons.mjs"
   },

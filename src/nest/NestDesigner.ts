@@ -43,8 +43,8 @@ export interface DesignerWorld {
     mmPerUnit: number;
     /** Where the plan's origin sits in world space. */
     origin: THREE.Vector3;
-    /** How big the block is, in millimetres — the box a node may live in. */
-    blockMm: number;
+    /** How big the block is, in millimetres per axis — the box a node may live in. */
+    blockMm: { x: number; y: number; z: number };
 }
 
 export interface DesignerHooks {
@@ -54,8 +54,14 @@ export interface DesignerHooks {
     close(): void;
 }
 
-/** How fast the camera flies at full stick, in world units per second. */
-const FLY_SPEED = 9;
+/**
+ * How fast the camera flies at full stick, in world units per second, per unit
+ * of the block's longest span. Crossing the block takes about 1.4 seconds
+ * whatever size it is — a fixed speed tuned on the 64 mm cube would feel like
+ * wading through a 256 mm one.
+ */
+const FLY_SPAN_RATE = 0.7;
+const FLY_SPEED_MIN = 9;
 
 /** Radians of view turn per pixel of look drag. */
 const LOOK_RATE = 0.005;
@@ -65,9 +71,6 @@ const STICK_PX = 48;
 
 /** How much of the stick's centre is dead, as a fraction of its radius. */
 const STICK_DEAD = 0.12;
-
-/** World units of dolly per pixel of pinch. */
-const PINCH_DOLLY = 0.03;
 
 /** How far a finger may travel and still count as a tap, in pixels. */
 const TAP_SLOP = 9;
@@ -151,8 +154,6 @@ export class NestDesigner {
 
     private readonly pointers = new Map<number, Finger>();
 
-    private pinchGap = 0;
-
     private readonly raycaster = new THREE.Raycaster();
 
     private readonly panel = document.createElement('div');
@@ -206,14 +207,18 @@ export class NestDesigner {
          * looking down at the block — so the first frame of the fly camera is
          * the framing people already know, not a new one to orient in.
          */
-        const span = world.blockMm / world.mmPerUnit;
+        const mmU = world.mmPerUnit;
         const centre = new THREE.Vector3(
-            world.origin.x + span / 2, world.origin.y + span / 2, world.origin.z + span / 2,
+            world.origin.x + world.blockMm.x / 2 / mmU,
+            world.origin.y + world.blockMm.y / 2 / mmU,
+            world.origin.z + world.blockMm.z / 2 / mmU,
         );
         const out = new THREE.Vector3(
             Math.cos(0.75) * Math.sin(0.6), Math.sin(0.75), Math.cos(0.75) * Math.cos(0.6),
         );
-        this.eye.copy(centre).addScaledVector(out, 20);
+        // 1.56 spans back is the framing the 64 cube was tuned to (20 units on
+        // a 12.8-unit block); keeping the RATIO keeps it on every size.
+        this.eye.copy(centre).addScaledVector(out, 1.56 * this.longestSpan());
         this.lookYaw = Math.atan2(-out.x, -out.z);
         this.lookPitch = Math.asin(-out.y);
 
@@ -271,6 +276,15 @@ export class NestDesigner {
         this.help.remove();
     }
 
+    private longestSpan(): number {
+        const b = this.world.blockMm;
+        return Math.max(b.x, b.y, b.z) / this.world.mmPerUnit;
+    }
+
+    private flySpeed(): number {
+        return Math.max(FLY_SPEED_MIN, FLY_SPAN_RATE * this.longestSpan());
+    }
+
     /** The direction the camera looks, unit length. */
     private lookVector(): THREE.Vector3 {
         const cp = Math.cos(this.lookPitch);
@@ -286,6 +300,19 @@ export class NestDesigner {
         const dt = this.lastTick ? Math.min(0.05, (now - this.lastTick) / 1000) : 1 / 60;
         this.lastTick = now;
 
+        /*
+         * The horizon is LEVEL in here, always.
+         *
+         * `lookAt` does not choose an up — it keeps whatever `camera.up`
+         * already holds, and while playing her the follow rig eases that
+         * vector onto the SURFACE SHE IS STANDING ON, which on the flank of
+         * the anthill is nowhere near vertical. Opening the designer after
+         * she has been on a slope therefore inherited a tilted up, and every
+         * turn of the view read as the camera ROLLING. Reported as exactly
+         * that. One assignment, every frame, because the rig will tilt it
+         * again the moment the designer closes and reopens.
+         */
+        this.camera.up.set(0, 1, 0);
         const look = this.lookVector();
         if (this.fly.x !== 0 || this.fly.y !== 0) {
             /*
@@ -296,8 +323,9 @@ export class NestDesigner {
              * changes height by an amount nobody asked for.
              */
             const right = new THREE.Vector3().crossVectors(look, UP).normalize();
-            this.eye.addScaledVector(look, this.fly.y * FLY_SPEED * dt);
-            this.eye.addScaledVector(right, this.fly.x * FLY_SPEED * dt);
+            const speed = this.flySpeed();
+            this.eye.addScaledVector(look, this.fly.y * speed * dt);
+            this.eye.addScaledVector(right, this.fly.x * speed * dt);
             this.boundEye();
         }
         this.camera.position.copy(this.eye);
@@ -315,11 +343,12 @@ export class NestDesigner {
      * has shrunk to a speck.
      */
     private boundEye(): void {
-        const span = this.world.blockMm / this.world.mmPerUnit;
+        const mmU = this.world.mmPerUnit;
         const o = this.world.origin;
-        this.eye.x = THREE.MathUtils.clamp(this.eye.x, o.x - 8, o.x + span + 8);
-        this.eye.y = THREE.MathUtils.clamp(this.eye.y, o.y - 3, o.y + span + 14);
-        this.eye.z = THREE.MathUtils.clamp(this.eye.z, o.z - 8, o.z + span + 8);
+        const b = this.world.blockMm;
+        this.eye.x = THREE.MathUtils.clamp(this.eye.x, o.x - 8, o.x + b.x / mmU + 8);
+        this.eye.y = THREE.MathUtils.clamp(this.eye.y, o.y - 3, o.y + b.y / mmU + 14);
+        this.eye.z = THREE.MathUtils.clamp(this.eye.z, o.z - 3, o.z + b.z / mmU + 8);
     }
 
     // ---------------------------------------------------------------- gestures
@@ -355,7 +384,6 @@ export class NestDesigner {
             x: event.clientX, y: event.clientY,
             travelled: 0, role,
         });
-        if (this.lookCount() === 2) this.pinchGap = this.lookSpread();
     }
 
     handlePointerMove(event: PointerEvent): void {
@@ -381,14 +409,31 @@ export class NestDesigner {
             this.stickKnob.style.transform = `translate(${ox}px, ${oy}px)`;
             return;
         }
-        // Look, or pinch when two look fingers are down.
+        /*
+         * TWO fingers SLIDE the view — up, down, left, right in the screen's
+         * own plane, never forward or back. Forward already belongs to the
+         * joystick, and an offset that cannot creep toward or away from the
+         * work is what makes it an offset rather than a second fly control.
+         *
+         * The world follows the fingers, map-style: drag both right and the
+         * block goes right, which means the camera goes left. Scaled so the
+         * soil under the fingers tracks them 1:1 — pixels are converted to
+         * world units at the block's distance, not by a magic rate that would
+         * feel dead up close and wild far away.
+         *
+         * Each finger carries half the motion, so two fingers moving together
+         * add up to exactly one pan and a single finger twitching adds half.
+         */
         if (this.lookCount() === 2) {
-            const gap = this.lookSpread();
-            if (this.pinchGap > 1 && gap > 1) {
-                this.eye.addScaledVector(this.lookVector(), (gap - this.pinchGap) * PINCH_DOLLY);
-                this.boundEye();
-            }
-            this.pinchGap = gap;
+            const look = this.lookVector();
+            const right = new THREE.Vector3().crossVectors(look, UP).normalize();
+            const screenUp = new THREE.Vector3().crossVectors(right, look).normalize();
+            const rect = this.canvas.getBoundingClientRect();
+            const dist = Math.max(4, this.eye.distanceTo(this.blockCentre()));
+            const perPx = (2 * dist * Math.tan((this.camera.fov * Math.PI) / 360)) / rect.height;
+            this.eye.addScaledVector(right, -dx * 0.5 * perPx);
+            this.eye.addScaledVector(screenUp, dy * 0.5 * perPx);
+            this.boundEye();
             return;
         }
         this.lookYaw -= dx * LOOK_RATE;
@@ -426,10 +471,13 @@ export class NestDesigner {
         return n;
     }
 
-    private lookSpread(): number {
-        const looks = [...this.pointers.values()].filter(f => f.role === 'look');
-        const [a, b] = looks;
-        return a && b ? Math.hypot(a.x - b.x, a.y - b.y) : 0;
+    private blockCentre(): THREE.Vector3 {
+        const mmU = this.world.mmPerUnit;
+        return new THREE.Vector3(
+            this.world.origin.x + this.world.blockMm.x / 2 / mmU,
+            this.world.origin.y + this.world.blockMm.y / 2 / mmU,
+            this.world.origin.z + this.world.blockMm.z / 2 / mmU,
+        );
     }
 
     private showStick(x: number, y: number): void {
@@ -466,14 +514,14 @@ export class NestDesigner {
         if (!this.raycaster.ray.intersectPlane(plane, at)) return;
         const mm = this.world.mmPerUnit;
         this.edit(moveNode(this.plan, node.id, {
-            x: this.inBlock((at.x - this.world.origin.x) * mm),
+            x: this.inBlock((at.x - this.world.origin.x) * mm, 'x'),
             y: node.y,
-            z: this.inBlock((at.z - this.world.origin.z) * mm),
+            z: this.inBlock((at.z - this.world.origin.z) * mm, 'z'),
         }), { coalesce: true });
     }
 
-    private inBlock(v: number): number {
-        return THREE.MathUtils.clamp(v, 0, this.world.blockMm);
+    private inBlock(v: number, axis: 'x' | 'y' | 'z'): number {
+        return THREE.MathUtils.clamp(v, 0, this.world.blockMm[axis]);
     }
 
     private ndc(event: PointerEvent): THREE.Vector2 {
@@ -623,9 +671,9 @@ export class NestDesigner {
         // camera itself uses: right = look x up.
         const right = { x: -forward.z, z: forward.x };
         this.edit(moveNode(this.plan, node.id, {
-            x: this.inBlock(node.x + (forward.x * sz + right.x * sx) * STEP_MM),
-            y: this.inBlock(node.y + sy * STEP_MM),
-            z: this.inBlock(node.z + (forward.z * sz + right.z * sx) * STEP_MM),
+            x: this.inBlock(node.x + (forward.x * sz + right.x * sx) * STEP_MM, 'x'),
+            y: this.inBlock(node.y + sy * STEP_MM, 'y'),
+            z: this.inBlock(node.z + (forward.z * sz + right.z * sx) * STEP_MM, 'z'),
         }));
     }
 
@@ -636,9 +684,9 @@ export class NestDesigner {
         if (!node) return;
         const grid = (v: number): number => Math.round(v / SNAP_MM) * SNAP_MM;
         this.edit(moveNode(this.plan, node.id, {
-            x: this.inBlock(grid(node.x)),
-            y: this.inBlock(grid(node.y)),
-            z: this.inBlock(grid(node.z)),
+            x: this.inBlock(grid(node.x), 'x'),
+            y: this.inBlock(grid(node.y), 'y'),
+            z: this.inBlock(grid(node.z), 'z'),
         }));
     }
 
@@ -663,16 +711,16 @@ export class NestDesigner {
             ?? null;
         let at: { x: number; y: number; z: number };
         if (from) {
-            at = { x: from.x, y: this.inBlock(from.y - DROP_MM), z: from.z };
+            at = { x: from.x, y: this.inBlock(from.y - DROP_MM, 'y'), z: from.z };
         } else {
             // No selection and no entrance: drop it a little way ahead of the
             // camera, which is at least somewhere the player is looking.
             const mm = this.world.mmPerUnit;
             const ahead = this.eye.clone().addScaledVector(this.lookVector(), 10);
             at = {
-                x: this.inBlock((ahead.x - this.world.origin.x) * mm),
-                y: this.inBlock((ahead.y - this.world.origin.y) * mm),
-                z: this.inBlock((ahead.z - this.world.origin.z) * mm),
+                x: this.inBlock((ahead.x - this.world.origin.x) * mm, 'x'),
+                y: this.inBlock((ahead.y - this.world.origin.y) * mm, 'y'),
+                z: this.inBlock((ahead.z - this.world.origin.z) * mm, 'z'),
             };
         }
         const made = addNode(this.plan, this.placing, at);
@@ -796,7 +844,7 @@ export class NestDesigner {
         const lines = [
             ['🕹️', 'Fly with the <b>joystick</b> (left side). You move where you look — '
                 + 'aim down and push forward to descend.'],
-            ['👀', '<b>Drag the right side</b> to look around. Pinch to move in close or back out.'],
+            ['👀', '<b>Drag the right side</b> to look around. <b>Two fingers</b> slide the view up, down and sideways.'],
             ['➕', '<b>PLACE</b> hangs a new piece under the selected one and joins it. '
                 + 'Start from the <b>Station</b> and press it a few times.'],
             ['👆', '<b>Tap</b> a piece to select it. <b>Drag</b> moves it; <b>▲▼◀▶ UP DN</b> '
@@ -867,7 +915,7 @@ export class NestDesigner {
             return;
         }
         if (!this.picked) {
-            this.hint.textContent = 'joystick flies · drag right side to look · tap a piece to select';
+            this.hint.textContent = 'joystick flies · one finger looks · two fingers slide · tap to select';
             return;
         }
         if (this.picked.kind === 'node') {

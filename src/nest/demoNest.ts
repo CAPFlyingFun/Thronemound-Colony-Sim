@@ -16,17 +16,22 @@
 
 import { MIN_ENTRANCE_RADIUS_MM, type NestPlan } from './nestPlan';
 
+export interface BlockDims { x: number; y: number; z: number }
+
+/** The 64 mm cube every layout here was originally drawn in. */
+const CUBE: BlockDims = { x: 64, y: 64, z: 64 };
+
 /**
- * Where the ground sits, in millimetres.
+ * How far below the top of the block the ground sits, in millimetres.
  *
- * Twelve below the top of the block, not at it, because the anthill has to go
- * SOMEWHERE and the density grid has only a millimetre and a half of margin
- * above the block. Ground at the very top means the heap is carved outside the
- * field entirely — it renders as the inside of a bowl, which is exactly how a
- * hill and a crater come to look the same. An eight-millimetre mouth heaps 8.8
- * millimetres high, so twelve is room to spare.
+ * Below it and not at it, because the anthill has to go SOMEWHERE and the
+ * density grid has only a few millimetres of margin above the block. Ground at
+ * the very top means the heap is carved outside the field entirely — it
+ * renders as the inside of a bowl, which is exactly how a hill and a crater
+ * come to look the same. An eight-millimetre mouth heaps 8.8 millimetres
+ * high, so twelve is room to spare.
  */
-const TOP_MM = 52;
+const GROUND_DROP_MM = 12;
 
 /**
  * A NEW NEST: the Station, and nothing else.
@@ -39,18 +44,34 @@ const TOP_MM = 52;
  * One entrance, in the middle, already selected. The first move is then
  * obvious because it is the only one: press PLACE and a tunnel starts.
  */
-export function stationNest(): NestPlan {
+export function stationNest(dims: BlockDims = CUBE): NestPlan {
     return {
         nodes: [{
             id: 'station', kind: 'entrance',
-            x: 32, y: TOP_MM, z: 32, radiusMm: MIN_ENTRANCE_RADIUS_MM,
+            x: dims.x / 2, y: dims.y - GROUND_DROP_MM, z: dims.z / 2,
+            radiusMm: MIN_ENTRANCE_RADIUS_MM,
         }],
         edges: [],
     };
 }
 
-export function demoNest(): NestPlan {
-    return {
+export function demoNest(dims: BlockDims = CUBE): NestPlan {
+    /*
+     * The layout below was drawn in the 64 mm cube and is kept in those
+     * coordinates — a worked example is a fixed drawing, not a thing that
+     * stretches. On a bigger block it is translated whole: centred on the
+     * footprint, and held at the same depths below the surface, because
+     * "22 mm under the ground" is what makes the royal chamber deep and that
+     * is a fact about her, not about the block.
+     */
+    const sx = (dims.x - CUBE.x) / 2;
+    const sy = dims.y - CUBE.y;
+    const sz = (dims.z - CUBE.z) / 2;
+    const at = (plan: NestPlan): NestPlan => ({
+        nodes: plan.nodes.map(n => ({ ...n, x: n.x + sx, y: n.y + sy, z: n.z + sz })),
+        edges: plan.edges,
+    });
+    return at({
         nodes: [
             // On the surface, and deliberately wider than the shaft below it:
             // measured, she strides straight over anything narrower.
@@ -59,7 +80,7 @@ export function demoNest(): NestPlan {
              * times its own width and wants room on every side. Off toward an
              * edge, half the anthill falls off the world.
              */
-            { id: 'mouth', kind: 'entrance', x: 32, y: TOP_MM, z: 32, radiusMm: MIN_ENTRANCE_RADIUS_MM },
+            { id: 'mouth', kind: 'entrance', x: 32, y: CUBE.y - GROUND_DROP_MM, z: 32, radiusMm: MIN_ENTRANCE_RADIUS_MM },
             // Where the shaft bottoms out and the nest branches. A junction is
             // no wider than its tunnels — it is a place they meet, not a room.
             { id: 'hall', kind: 'junction', x: 32, y: 42, z: 32, radiusMm: 4 },
@@ -81,5 +102,5 @@ export function demoNest(): NestPlan {
             // larder for the royal chamber and comes back the way it came in.
             { id: 'haul', from: 'larder', to: 'royal', radiusMm: 3.5, flow: 'forward' },
         ],
-    };
+    });
 }

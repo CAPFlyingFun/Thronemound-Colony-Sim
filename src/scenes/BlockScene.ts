@@ -76,23 +76,61 @@ import {
 const MM = 5;
 
 /**
- * The block: 64 mm on a side, sampled every half millimetre.
- *
- * Both halves are chosen against the same constraint — the bite. A queen's
- * mandible is 1.75 mm across, so at half-millimetre cells a bite spans three
- * and a half of them, which is enough for the brush to read as a bite rather
- * than a stairstep. Finer would be prettier and cost four times the memory
- * for a room whose whole point is to be small: 129³ samples is 8.6 MB, and
- * the quarter-millimetre version of the same cube would be 69 MB.
- *
- * Sixty-four millimetres is about seven queens end to end — big enough that
- * walking round it is a journey and the faces are not all in shot at once,
- * small enough to see the whole experiment.
+ * The block's size, in millimetres per axis. `?block=AxBxC` is footprint A
+ * wide by B deep with C of soil under the surface — so 128x128x256 is a
+ * 128 mm square you can dig a quarter of a metre down into. One number is a
+ * cube; nothing asked-for is the 64 mm cube everything was tuned on.
  */
-const BLOCK_MM = 64;
-const CELL_MM = 0.5;
+const BLOCK = (() => {
+  const asked = new URLSearchParams(
+    typeof location === 'undefined' ? '' : location.search,
+  ).get('block');
+  const fit = (v: number): number => Math.min(256, Math.max(32, Math.round(v)));
+  /*
+   * Zero is filtered as well as NaN, and it is load-bearing: with no ?block=
+   * at all, ''.split gives [''] and Number('') is 0 — WHICH IS FINITE — so
+   * the "empty" case parsed as one number and every default block came out
+   * clamped to the 32 mm minimum. Found by the probe reporting the Station
+   * twenty millimetres up a sixty-four millimetre block.
+   */
+  const parts = (asked ?? '').split(/[x×,]/i).map(Number)
+    .filter(v => Number.isFinite(v) && v > 0);
+  if (parts.length === 1) {
+    const v = fit(parts[0]!);
+    return { x: v, y: v, z: v };
+  }
+  if (parts.length === 3) return { x: fit(parts[0]!), y: fit(parts[2]!), z: fit(parts[1]!) };
+  return { x: 64, y: 64, z: 64 };
+})();
+
+/**
+ * How finely the block is sampled, in millimetres — and it SCALES with the
+ * block, because the field is volume. The 64 mm cube at half-millimetre cells
+ * is 2.4 million samples; 128×128×256 at the same resolution would be 36
+ * million, which is 140 MB of Float32 and a build measured in tens of
+ * seconds. The rule holds the sample count roughly constant instead: cells
+ * sized so the volume divides into about four million of them, rounded to the
+ * quarter millimetre, never finer than the half millimetre the cube was tuned
+ * at. The 64 cube lands on 0.5 exactly, 128×128×256 on 1.0, 256³ on 1.5.
+ *
+ * What coarser cells cost is bite fidelity: a queen's 1.75 mm mandible spans
+ * 3.5 half-millimetre cells and reads as a bite, but under two 1 mm ones it
+ * reads as a dent. On a plan-carved block that matters little — the designer's
+ * bores are 4-10 mm and DIG replaces biting — which is why the big sizes are
+ * offered there and not on the biting rigs. `?cell=` overrides for testing.
+ */
+const CELL_MM = (() => {
+  const asked = Number(new URLSearchParams(
+    typeof location === 'undefined' ? '' : location.search,
+  ).get('cell'));
+  if (Number.isFinite(asked) && asked >= 0.5 && asked <= 3) return asked;
+  const auto = Math.cbrt((BLOCK.x * BLOCK.y * BLOCK.z) / 4e6);
+  return Math.min(2, Math.max(0.5, Math.round(auto * 4) / 4));
+})();
 const CELL = CELL_MM / MM;
-const BLOCK_CELLS = Math.round(BLOCK_MM / CELL_MM);
+const BLOCK_CELLS_X = Math.round(BLOCK.x / CELL_MM);
+const BLOCK_CELLS_Y = Math.round(BLOCK.y / CELL_MM);
+const BLOCK_CELLS_Z = Math.round(BLOCK.z / CELL_MM);
 /**
  * Air around the block, and it is not padding — it is the only reason the
  * outside of the cube gets a surface at all.
@@ -106,23 +144,30 @@ const BLOCK_CELLS = Math.round(BLOCK_MM / CELL_MM);
  * mesher the sign change it needs, and the faces close.
  */
 const MARGIN_CELLS = 3;
-const CELLS = BLOCK_CELLS + MARGIN_CELLS * 2;
-const SPAN = CELLS * CELL;
+const CELLS_X = BLOCK_CELLS_X + MARGIN_CELLS * 2;
+const CELLS_Y = BLOCK_CELLS_Y + MARGIN_CELLS * 2;
+const CELLS_Z = BLOCK_CELLS_Z + MARGIN_CELLS * 2;
+const SPAN_X = CELLS_X * CELL;
+const SPAN_Y = CELLS_Y * CELL;
+const SPAN_Z = CELLS_Z * CELL;
 /** The block's own bounds inside that field, and its middle. */
 const LOW = MARGIN_CELLS * CELL;
-const HIGH = LOW + BLOCK_CELLS * CELL;
-const MID = (LOW + HIGH) * 0.5;
+const HIGH_X = LOW + BLOCK_CELLS_X * CELL;
+const HIGH_Y = LOW + BLOCK_CELLS_Y * CELL;
+const HIGH_Z = LOW + BLOCK_CELLS_Z * CELL;
+const MID_X = (LOW + HIGH_X) * 0.5;
+const MID_Z = (LOW + HIGH_Z) * 0.5;
 /**
  * How high the lower half of the test step stands — halfway up the block, so
  * the face she drills into is some thirty millimetres of wall, far taller than
  * she is. The bore then goes into rock rather than over a lip.
  */
-const STEP_TOP = MID;
+const STEP_TOP = (LOW + HIGH_Y) * 0.5;
 
 /* ------------------------------------------------- the pre-cut test warren */
 
 /** Where the shaft drops, in millimetres from the block's low corner. */
-const SHAFT_AT = BLOCK_MM / 2;
+const SHAFT_AT = BLOCK.x / 2;
 /** Across the bore. Ten millimetres total, so five of radius. */
 const SHAFT_WIDE = 10;
 /** The room at the bottom: ten across, ten tall, twenty long. */
@@ -715,7 +760,7 @@ export class BlockScene {
     this.follow.mode = 'third';
 
     this.field = new DensityField({
-      cellsX: CELLS, cellsY: CELLS, cellsZ: CELLS, cellSize: CELL,
+      cellsX: CELLS_X, cellsY: CELLS_Y, cellsZ: CELLS_Z, cellSize: CELL,
     });
     /*
      * A cube as a signed field: the distance to the nearest face, positive
@@ -745,7 +790,7 @@ export class BlockScene {
        * knowing what to do. The worked example is still one query string away
        * for anyone who wants to look at a completed plan.
        */
-      this.nest = this.wantsDemo ? demoNest() : stationNest();
+      this.nest = this.wantsDemo ? demoNest(BLOCK) : stationNest(BLOCK);
       this.carveNest();
     } else if (this.shape === 'shaft') {
       /*
@@ -768,11 +813,11 @@ export class BlockScene {
         [mm(SHAFT_AT + ROOM_W / 2), mm(ROOM_FLOOR + ROOM_H), mm(SHAFT_AT + ROOM_LONG / 2)],
       );
       const shaft = bore(
-        [mm(SHAFT_AT), mm(BLOCK_MM + 4), mm(SHAFT_AT)],
+        [mm(SHAFT_AT), mm(BLOCK.y + 4), mm(SHAFT_AT)],
         [mm(SHAFT_AT), mm(ROOM_FLOOR + ROOM_H - 2), mm(SHAFT_AT)],
         SHAFT_WIDE / 2 / MM,
       );
-      const solid = box([LOW, LOW, LOW], [HIGH, HIGH, HIGH]);
+      const solid = box([LOW, LOW, LOW], [HIGH_X, HIGH_Y, HIGH_Z]);
       this.field.fill(carve(solid, anyOf([room, shaft])));
     } else if (this.shape === 'cliff') {
       /*
@@ -787,12 +832,12 @@ export class BlockScene {
        * curvature for it to hide behind.
        */
       this.field.fill((x, y, z) => Math.min(
-        x - LOW, HIGH - x, y - LOW, (z < MID ? STEP_TOP : HIGH) - y,
-        z - LOW, HIGH - z,
+        x - LOW, HIGH_X - x, y - LOW, (z < MID_Z ? STEP_TOP : HIGH_Y) - y,
+        z - LOW, HIGH_Z - z,
       ));
     } else {
       this.field.fill((x, y, z) => Math.min(
-        x - LOW, HIGH - x, y - LOW, HIGH - y, z - LOW, HIGH - z,
+        x - LOW, HIGH_X - x, y - LOW, HIGH_Y - y, z - LOW, HIGH_Z - z,
       ));
     }
     this.remeshAll();
@@ -803,10 +848,10 @@ export class BlockScene {
 
     // On top of the block, in the middle, facing +Z. On the step, back from
     // the face with a clear run at it.
-    if (this.shape === 'cliff') this.at.set(MID, STEP_TOP + RIDE, MID - 20 / MM);
+    if (this.shape === 'cliff') this.at.set(MID_X, STEP_TOP + RIDE, MID_Z - 20 / MM);
     else if (this.shape === 'shaft') {
       // Beside the mouth, facing it, so walking forward takes her over the lip.
-      this.at.set(LOW + SHAFT_AT / MM, HIGH + RIDE, LOW + (SHAFT_AT - 11) / MM);
+      this.at.set(LOW + SHAFT_AT / MM, HIGH_Y + RIDE, LOW + (SHAFT_AT - 11) / MM);
     } else if (this.shape === 'nest') {
       // Back from the designed entrance, on the surface, with a clear run at
       // it — the same arrangement the shaft rig uses, so the two are
@@ -819,13 +864,13 @@ export class BlockScene {
        * HIGH would drop her a dozen millimetres through air, and the far side
        * of the heap is where she can walk at it rather than start halfway up it.
        */
-      const mouth = this.nest?.nodes.find(n => n.kind === 'entrance') ?? demoNest().nodes[0]!;
+      const mouth = this.nest?.nodes.find(n => n.kind === 'entrance') ?? demoNest(BLOCK).nodes[0]!;
       const clear = mouth.radiusMm * MOUND_SPREAD + 6;
       this.at.set(
         LOW + mouth.x / MM, LOW + mouth.y / MM + RIDE,
         LOW + (mouth.z - clear) / MM,
       );
-    } else this.at.set(MID, HIGH + RIDE, MID);
+    } else this.at.set(MID_X, HIGH_Y + RIDE, MID_Z);
     this.follow.target.copy(this.at);
 
     const hud = document.createElement('div');
@@ -871,6 +916,7 @@ export class BlockScene {
   private addLighting(): void {
     this.scene.add(new THREE.HemisphereLight(0xc9e6ff, 0x4a2f1f, 1.8));
     const sun = new THREE.DirectionalLight(0xfff1ce, 2.6);
+    const SPAN = Math.max(SPAN_X, SPAN_Y, SPAN_Z);
     sun.position.set(SPAN * 1.4, SPAN * 2, SPAN * 0.9);
     sun.castShadow = true;
     sun.shadow.mapSize.set(1024, 1024);
@@ -895,7 +941,7 @@ export class BlockScene {
 
   /** Signed density at a world point: positive inside the soil. */
   densityAt(x: number, y: number, z: number): number {
-    if (x < 0 || y < 0 || z < 0 || x > SPAN || y > SPAN || z > SPAN) return -1;
+    if (x < 0 || y < 0 || z < 0 || x > SPAN_X || y > SPAN_Y || z > SPAN_Z) return -1;
     return this.field.sample(x, y, z);
   }
 
@@ -958,10 +1004,12 @@ export class BlockScene {
   }
 
   private remeshAll(): void {
-    const n = Math.ceil(CELLS / CHUNK);
-    for (let cz = 0; cz < n; cz += 1) {
-      for (let cy = 0; cy < n; cy += 1) {
-        for (let cx = 0; cx < n; cx += 1) this.remeshChunk(cx, cy, cz);
+    const nx = Math.ceil(CELLS_X / CHUNK);
+    const ny = Math.ceil(CELLS_Y / CHUNK);
+    const nz = Math.ceil(CELLS_Z / CHUNK);
+    for (let cz = 0; cz < nz; cz += 1) {
+      for (let cy = 0; cy < ny; cy += 1) {
+        for (let cx = 0; cx < nx; cx += 1) this.remeshChunk(cx, cy, cz);
       }
     }
   }
@@ -976,9 +1024,9 @@ export class BlockScene {
     }
     const data = buildSurfaceNets(this.field, 0, {
       x0: cx * CHUNK, y0: cy * CHUNK, z0: cz * CHUNK,
-      x1: Math.min(CELLS, (cx + 1) * CHUNK),
-      y1: Math.min(CELLS, (cy + 1) * CHUNK),
-      z1: Math.min(CELLS, (cz + 1) * CHUNK),
+      x1: Math.min(CELLS_X, (cx + 1) * CHUNK),
+      y1: Math.min(CELLS_Y, (cy + 1) * CHUNK),
+      z1: Math.min(CELLS_Z, (cz + 1) * CHUNK),
     });
     if (data.indices.length === 0) return;
     const geometry = new THREE.BufferGeometry();
@@ -1088,9 +1136,9 @@ export class BlockScene {
     const hi = (v: number, max: number) => Math.min(
       Math.ceil(max / CHUNK) - 1, Math.floor((v + 1) / CHUNK),
     );
-    for (let cz = lo(result.bounds.minZ); cz <= hi(result.bounds.maxZ, CELLS); cz += 1) {
-      for (let cy = lo(result.bounds.minY); cy <= hi(result.bounds.maxY, CELLS); cy += 1) {
-        for (let cx = lo(result.bounds.minX); cx <= hi(result.bounds.maxX, CELLS); cx += 1) {
+    for (let cz = lo(result.bounds.minZ); cz <= hi(result.bounds.maxZ, CELLS_Z); cz += 1) {
+      for (let cy = lo(result.bounds.minY); cy <= hi(result.bounds.maxY, CELLS_Y); cy += 1) {
+        for (let cx = lo(result.bounds.minX); cx <= hi(result.bounds.maxX, CELLS_X); cx += 1) {
           this.remeshChunk(cx, cy, cz);
         }
       }
@@ -1286,13 +1334,13 @@ export class BlockScene {
      * over the block, so a heap piled at the very top is mostly outside the
      * field and renders as the inside of a bowl.
      */
-    const ground = groundOf(this.nest) ?? BLOCK_MM;
-    const spare = BLOCK_MM + MARGIN_CELLS * CELL_MM - (ground + tallestMoundMm(this.nest));
+    const ground = groundOf(this.nest) ?? BLOCK.y;
+    const spare = BLOCK.y + MARGIN_CELLS * CELL_MM - (ground + tallestMoundMm(this.nest));
     if (spare < 0) {
       console.warn(`[nest] the anthill stands ${(-spare).toFixed(1)} mm above the field and `
         + 'will be cut off — lower the ground or shrink the entrance');
     }
-    const soil = box([0, 0, 0], [BLOCK_MM, ground, BLOCK_MM]);
+    const soil = box([0, 0, 0], [BLOCK.x, ground, BLOCK.z]);
     this.field.fill(inWorldUnits(
       carvePlan(soil, this.nest, { stepMm: 0.5 }), [LOW, LOW, LOW], MM,
     ));
@@ -1354,7 +1402,7 @@ export class BlockScene {
     if (!this.nest) return;
     this.designer ??= new NestDesigner(
       this.scene, this.camera, this.renderer.domElement, this.hud,
-      { mmPerUnit: MM, origin: new THREE.Vector3(LOW, LOW, LOW), blockMm: BLOCK_MM },
+      { mmPerUnit: MM, origin: new THREE.Vector3(LOW, LOW, LOW), blockMm: { ...BLOCK } },
       {
         build: (plan) => {
           this.nest = plan;
@@ -2036,9 +2084,9 @@ export class BlockScene {
   /** Is this point within the block's own bounds, rather than outside it? */
   private insideBlock(p: THREE.Vector3): boolean {
     const m = CELL * 2;
-    return p.x > LOW + m && p.x < HIGH - m
-      && p.y > LOW + m && p.y < HIGH - m
-      && p.z > LOW + m && p.z < HIGH - m;
+    return p.x > LOW + m && p.x < HIGH_X - m
+      && p.y > LOW + m && p.y < HIGH_Y - m
+      && p.z > LOW + m && p.z < HIGH_Z - m;
   }
 
   /**
@@ -2117,14 +2165,14 @@ export class BlockScene {
         return;
       }
     }
-    if (this.solidAt(probe) || this.at.y < LOW - SPAN) {
+    if (this.solidAt(probe) || this.at.y < LOW - SPAN_Y) {
       // Landed on the outside, or lost entirely: back onto the top and re-grip.
       const from = new THREE.Vector3(
-        THREE.MathUtils.clamp(this.at.x, LOW + CELL * 4, HIGH - CELL * 4),
-        HIGH + GRIP_LIFT * 2,
-        THREE.MathUtils.clamp(this.at.z, LOW + CELL * 4, HIGH - CELL * 4),
+        THREE.MathUtils.clamp(this.at.x, LOW + CELL * 4, HIGH_X - CELL * 4),
+        HIGH_Y + GRIP_LIFT * 2,
+        THREE.MathUtils.clamp(this.at.z, LOW + CELL * 4, HIGH_Z - CELL * 4),
       );
-      const hit = this.cast(from, new THREE.Vector3(0, -1, 0), SPAN * 2);
+      const hit = this.cast(from, new THREE.Vector3(0, -1, 0), SPAN_Y * 2);
       if (hit) {
         // Same reason as above: this is a rescue, and a rescue that spins the
         // view ninety degrees in a frame is worse than the fall.
@@ -2388,7 +2436,7 @@ export class BlockScene {
   private surfaceUnder(x: number, y: number, z: number): number {
     const from = new THREE.Vector3(x, y, z).addScaledVector(this.up, CELL);
     const hit = this.cast(from, this.up.clone().negate(), CELL + GRIP_REACH);
-    if (!hit) return -SPAN;
+    if (!hit) return -SPAN_Y;
     return hit.dot(this.up);
   }
 
@@ -2509,7 +2557,7 @@ export class BlockScene {
         : 'side';
     const mode = MODES[this.mode]!;
     this.status.innerHTML = `<strong>BLOCK ROOM — ${mode.label}: ${mode.hint}</strong><br>
-      Block: ${BLOCK_MM} mm cube · ${CELL_MM} mm cells · ${CELLS}³<br>
+      Block: ${BLOCK.x}×${BLOCK.z}×${BLOCK.y} mm · ${CELL_MM} mm cells<br>
       Bite: ${(this.queen.antennaToJaw() * BITE_WIDTH_SPANS * MM).toFixed(2)} mm wide, measured (table said ${CASTE_BITE_MM.queen}) · removed ${(this.removed * MM ** 3).toFixed(0)} mm³<br>
       On the ${face} · up ${this.up.x.toFixed(2)}, ${this.up.y.toFixed(2)}, ${this.up.z.toFixed(2)}<br>
       Gyro: ${this.trim.on

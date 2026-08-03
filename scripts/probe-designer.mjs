@@ -94,6 +94,45 @@ const turned = Math.acos(Math.max(-1, Math.min(1,
   look0[0] * look1[0] + look0[1] * look1[1] + look0[2] * look1[2]))) * 180 / Math.PI;
 console.log(`  view turned            ${turned.toFixed(1)}°`);
 
+/*
+ * The horizon must be LEVEL — camera.up pinned to world up. The follow rig
+ * tilts camera.up onto whatever surface she is standing on, and a designer
+ * that inherits that up rolls the view on every turn.
+ */
+const upNow = await page.evaluate(() => window.blockScene.camera.up.toArray());
+const level = Math.abs(upNow[0]) < 1e-6 && Math.abs(upNow[1] - 1) < 1e-6 && Math.abs(upNow[2]) < 1e-6;
+console.log(`  horizon level          ${level} (up = ${upNow.map(v => v.toFixed(2)).join(', ')})`);
+
+// Two fingers slide the view: the camera TRANSLATES and does not turn.
+const pan0 = await page.evaluate(() => {
+  const V = Object.getPrototypeOf(window.blockScene.at).constructor;
+  return {
+    at: window.blockScene.camera.position.toArray(),
+    look: window.blockScene.camera.getWorldDirection(new V()).toArray(),
+  };
+});
+await canvas.dispatchEvent('pointerdown', { pointerId: 3, clientX: 640, clientY: 180 });
+await canvas.dispatchEvent('pointerdown', { pointerId: 4, clientX: 760, clientY: 200 });
+for (let i = 1; i <= 6; i += 1) {
+  await canvas.dispatchEvent('pointermove', { pointerId: 3, clientX: 640 + i * 10, clientY: 180 + i * 6 });
+  await canvas.dispatchEvent('pointermove', { pointerId: 4, clientX: 760 + i * 10, clientY: 200 + i * 6 });
+  await page.waitForTimeout(20);
+}
+await canvas.dispatchEvent('pointerup', { pointerId: 3, clientX: 700, clientY: 216 });
+await canvas.dispatchEvent('pointerup', { pointerId: 4, clientX: 820, clientY: 236 });
+await page.waitForTimeout(150);
+const pan1 = await page.evaluate(() => {
+  const V = Object.getPrototypeOf(window.blockScene.at).constructor;
+  return {
+    at: window.blockScene.camera.position.toArray(),
+    look: window.blockScene.camera.getWorldDirection(new V()).toArray(),
+  };
+});
+const slid = Math.hypot(pan1.at[0] - pan0.at[0], pan1.at[1] - pan0.at[1], pan1.at[2] - pan0.at[2]);
+const panTurn = Math.acos(Math.max(-1, Math.min(1,
+  pan0.look[0] * pan1.look[0] + pan0.look[1] * pan1.look[1] + pan0.look[2] * pan1.look[2]))) * 180 / Math.PI;
+console.log(`  two-finger slide       ${slid.toFixed(2)} units, view turned ${panTurn.toFixed(2)}°`);
+
 // A drag on empty space must NOT have driven her or spawned a joystick.
 const drove = await page.evaluate(() => ({
   walk: window.blockScene.input.walk,
@@ -167,7 +206,7 @@ console.log('\nCLOSING');
 console.log(`  back to playing        ${!closed.designing && closed.playControlsVisible}`);
 
 const pass = opened.designing && opened.panel && !opened.playControlsVisible
-  && swung > 1 && turned > 5 && !drove.stick
+  && swung > 1 && turned > 5 && level && slid > 0.5 && panTurn < 1 && !drove.stick
   && before === 1 && drawn.nodes === 4 && drawn.edges === 3 && drawn.chained && descends
   && soilBefore === true && soilAfter === false
   && undone === drawn.edges - 1
