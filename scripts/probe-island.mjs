@@ -252,6 +252,53 @@ const escape = await page.evaluate(() => {
 });
 check('she climbs back to the surface', escape.above && escape.under === 0);
 
+console.log('\nNEVER IN THE WALLS (grinding every direction at the joints)');
+/* The playtest disaster this pins down: at tunnel joints, "there is a
+ * floor below the destination" used to walk her centre into thin soil
+ * ribs. Embedded, the camera sits inside soil and the world renders
+ * see-through — reported as "holes all over" and "forced into the
+ * terrain". Grind into the joint region from every direction and assert
+ * her body centre NEVER samples solid. */
+const grind = await page.evaluate(() => {
+  const s = window.islandScene;
+  const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
+  s.teleportMm(n.gate.x - 18, n.gate.z);
+  s.drainQueueForTest();
+  s.setFacingForTest(Math.PI / 2);
+  s.input.walk = 1;
+  for (let i = 0; i < 500; i += 1) {
+    s.stepForTest(1 / 30, 1);
+    if (s.at.y * 5 < s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5) - 40) break;
+  }
+  let embedded = 0;
+  let run = 0;
+  let worstRun = 0;
+  let deepestMm = Infinity;
+  for (let i = 0; i < 1200; i += 1) {
+    if (i % 40 === 0) s.setFacingForTest(s.facing + 2.4);
+    s.stepForTest(1 / 30, 1);
+    if (s.stream.solidAtWu(s.at.x, s.at.y, s.at.z) === true) {
+      embedded += 1;
+      run += 1;
+      worstRun = Math.max(worstRun, run);
+    } else {
+      run = 0;
+    }
+    deepestMm = Math.min(
+      deepestMm, s.at.y * 5 - s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5),
+    );
+  }
+  s.input.walk = 0;
+  return { embedded, worstRun, deepestMm };
+});
+/* Single-frame solids are the 1 mm rounding flickering against a curved
+ * wall (forgiven by design — the snap-back fires at three consecutive);
+ * what must never happen is SUSTAINED embedding, the see-through world. */
+check('never embedded for more than 2 frames', grind.worstRun <= 2,
+  `worst run ${grind.worstRun}, ${grind.embedded} transient frames of 1200`);
+check('and she was genuinely down among the joints for it', grind.deepestMm < -30,
+  `deepest ${grind.deepestMm.toFixed(1)} mm`);
+
 console.log('\nKEYBOARD (WASD writes the same inputs the stick does)');
 const keys = await page.evaluate(async () => {
   const s = window.islandScene;
@@ -378,11 +425,13 @@ check('not one hole in the island', holes.red === 0,
 console.log('\nERRORS');
 check('no page errors', errs.length === 0, errs.join(' | ').slice(0, 200));
 
-// Pretty shots: a reload puts the real sky and haze back.
+// Pretty shots: a reload puts the real sky and haze back. Cosmetic — a
+// slow SwiftShader raster must not fail the run.
+try {
 await page.reload({ waitUntil: 'domcontentloaded' });
 await page.waitForFunction(() => window.islandScene?.ready, null, { timeout: 60000 });
 await page.waitForTimeout(1000);
-await page.screenshot({ path: '/tmp/island-summit.png' });
+await page.screenshot({ path: '/tmp/island-summit.png', timeout: 90000 });
 await page.evaluate(() => {
   const s = window.islandScene;
   s.setPausedForTest(true);
@@ -392,7 +441,10 @@ await page.evaluate(() => {
   s.setPausedForTest(false);
 });
 await page.waitForTimeout(700);
-await page.screenshot({ path: '/tmp/island-coast.png' });
+await page.screenshot({ path: '/tmp/island-coast.png', timeout: 90000 });
+} catch (e) {
+  console.log(`  info  screenshots skipped: ${String(e).slice(0, 80)}`);
+}
 
 await browser.close();
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECKS FAILED`}`);

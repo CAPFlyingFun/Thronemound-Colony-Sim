@@ -166,6 +166,14 @@ export class IslandScene {
    *  the path she walked is guaranteed to be inside the tunnel. */
   private readonly trail: THREE.Vector3[] = [];
 
+  /** The last position whose centre provably sampled AIR — the anchor the
+   *  anti-embed safety net snaps back to. */
+  private readonly lastSafe = new THREE.Vector3();
+
+  private hasSafe = false;
+
+  private embedFrames = 0;
+
   private queenReady = false;
 
   private paused = false;
@@ -625,10 +633,28 @@ export class IslandScene {
      * she climbs it slowly — enough to get out of the shaft or a dug pit.
      */
     const there = this.floorBelow(nx, nz, this.at.y + 0.5);
+    /*
+     * SHE HAS TO FIT. Finding a floor below the destination is not enough:
+     * at tunnel joints the bores leave thin ribs of soil at body height
+     * with an air pocket underneath, and "there's a floor down there" would
+     * happily walk her centre INTO the rib. Embedded, the camera is inside
+     * soil and the whole world renders see-through — playtest saw it as
+     * "holes all over" and being "forced into the terrain". So a move
+     * commits only when the air at her NEW centre (destination floor plus
+     * ride height) is actually air.
+     */
+    /* Stepping UP means her new centre (floor + ride) must be air; moving
+     * flat or DOWN means the destination must be air at her CURRENT height
+     * — a floor far below with soil at body height is the rib trap, and
+     * also exactly how she used to ghost sideways through walls. */
+    const clearAt = (yy: number) => this.stream?.solidAtWu(nx, yy, nz) !== true;
+    const fits = (floorY: number) => (floorY > this.at.y
+      ? clearAt(floorY + RIDE)
+      : clearAt(this.at.y + 0.1));
     let want: number;
     let blocked = false;
     if (there !== null) {
-      if (there - this.at.y > CLIMB_STEP) {
+      if (there - this.at.y > CLIMB_STEP || !fits(there)) {
         blocked = true;
         want = this.at.y;
       } else {
@@ -638,7 +664,7 @@ export class IslandScene {
       }
     } else {
       const ground = this.walkGroundAt(nx, nz);
-      if (ground - this.at.y <= CLIMB_STEP) {
+      if (ground - this.at.y <= CLIMB_STEP && fits(ground)) {
         this.at.x = nx;
         this.at.z = nz;
         want = ground + RIDE;
@@ -659,6 +685,27 @@ export class IslandScene {
       }
     }
     this.at.y += (want - this.at.y) * Math.min(1, dt * 14);
+    /*
+     * The safety net under all of it: if anything above still managed to
+     * put her centre inside soil (rounding at a curved wall, an edit under
+     * her feet), snap back to the last position that was provably in air
+     * rather than let an embedded frame escape — one embedded frame is a
+     * see-through world.
+     */
+    if (this.stream?.solidAtWu(this.at.x, this.at.y, this.at.z) === true) {
+      // Three CONSECUTIVE solid frames means truly embedded. One frame is
+      // usually the 1 mm rounding flickering while she hugs a curved wall —
+      // snapping on it yanked her off the shaft wall mid-climb, every climb.
+      this.embedFrames += 1;
+      if (this.embedFrames >= 3 && this.hasSafe) {
+        this.at.copy(this.lastSafe);
+        this.embedFrames = 0;
+      }
+    } else {
+      this.embedFrames = 0;
+      this.lastSafe.copy(this.at);
+      this.hasSafe = true;
+    }
 
     this.underground = this.at.y + RIDE
       < this.walkGroundAt(this.at.x, this.at.z) - UNDER_MM / MM;
@@ -1031,6 +1078,7 @@ export class IslandScene {
     this.velocity.set(0, 0, 0);
     this.trail.length = 0;
     this.underground = false;
+    this.hasSafe = false;
     if (this.stream) {
       const scroll = this.stream.recentreOn(this.at.x, this.at.z);
       if (scroll) this.onScroll(scroll);
