@@ -287,11 +287,59 @@ const fp = await page.evaluate(() => {
   s.firstPerson = true;
   s.stepForTest(1 / 30, 10);
   const d = s.camera.position.distanceTo(s.at) * 5;
+  const bodyHidden = s.queen.root.visible === false;
+  const crosshairOn = s.crosshair.style.display !== 'none';
   s.firstPerson = false;
   s.stepForTest(1 / 30, 10);
-  return { d };
+  // Restore means "visible again IF her model has loaded" — headless runs
+  // sometimes outpace the GLB fetch, and that must not fail this check.
+  const bodyBack = s.queen.root.visible === s.queenReady;
+  const crosshairOff = s.crosshair.style.display === 'none';
+  return { d, bodyHidden, crosshairOn, bodyBack, crosshairOff };
 });
 check('the camera sits on the ant', fp.d < 4, `${fp.d.toFixed(1)} mm from her centre`);
+check('her body is hidden in her own eyes, crosshair on',
+  fp.bodyHidden && fp.crosshairOn);
+check('body and crosshair restore in third person',
+  fp.bodyBack && fp.crosshairOff);
+
+console.log('\nUNDERGROUND PAN OVERRIDE (drag orbits, capsule keeps following)');
+const pan = await page.evaluate(() => {
+  const s = window.islandScene;
+  const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
+  // Back into the nest: over the gate and down.
+  s.teleportMm(n.gate.x - 18, n.gate.z);
+  s.drainQueueForTest();
+  s.setFacingForTest(Math.PI / 2);
+  s.input.walk = 1;
+  for (let i = 0; i < 900; i += 1) {
+    s.stepForTest(1 / 30, 1);
+    if (s.statsForTest().underground === 1
+      && s.at.y * 5 < s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5) - 40) break;
+  }
+  s.input.walk = 0;
+  s.stepForTest(1 / 30, 40);
+  const trailDist = s.camera.position.distanceTo(s.at) * 5;
+  // Hold a drag: the orbit override takes the camera, still centred on her.
+  s.lookPointer = 99;
+  s.camYaw = s.facing + Math.PI / 2;
+  s.camPitch = 0.9;
+  s.stepForTest(1 / 30, 60);
+  const heldDist = s.camera.position.distanceTo(s.at) * 5;
+  const heldY = s.camera.position.y - s.at.y;
+  // Let go: the trail cam takes it back.
+  s.lookPointer = null;
+  s.stepForTest(1 / 30, 80);
+  const backDist = s.camera.position.distanceTo(s.at) * 5;
+  return {
+    under: s.statsForTest().underground, trailDist, heldDist, heldY, backDist,
+  };
+});
+check('she is underground for the pan test', pan.under === 1);
+check('held drag orbits close around her', pan.heldDist > 3 && pan.heldDist < 9
+  && pan.heldY > 0.5, `${pan.heldDist.toFixed(1)} mm out, ${(pan.heldY * 5).toFixed(1)} mm up`);
+check('released, the trail capsule takes the camera back',
+  pan.backDist > 2 && pan.backDist < 12, `${pan.backDist.toFixed(1)} mm back`);
 
 console.log('\nTHE RED-SKY TEST (fog off, red background, island panorama)');
 await page.evaluate(() => {

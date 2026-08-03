@@ -203,6 +203,8 @@ export class IslandScene {
 
   private readonly stickKnob = document.createElement('div');
 
+  private readonly crosshair = document.createElement('div');
+
   constructor(host: HTMLElement) {
     this.host = host;
     host.classList.add('density-lab-host');
@@ -747,6 +749,10 @@ export class IslandScene {
   }
 
   private aimCamera(dt: number): void {
+    /* In her eyes her own body would fill the frame — hidden there, shown
+     * everywhere else (and only once her model has actually loaded). */
+    this.queen.root.visible = this.queenReady && !this.firstPerson;
+    this.crosshair.style.display = this.firstPerson ? '' : 'none';
     if (this.firstPerson) {
       /* Her own eyes: at the head, looking where she faces; the mouse (or
        * right-half drag) turns HER, and pitch is a look, not an orbit. */
@@ -767,12 +773,23 @@ export class IslandScene {
        * The tunnel chase: the camera follows HER PATH, a few millimetres
        * back — the path she walked is the one line guaranteed to lie inside
        * the bore, so following it needs no pathfinding and can never end up
-       * inside a wall. Mouse-free by design (playtest asked): orbiting
-       * underground just buries the lens.
+       * inside a wall. A held drag OVERRIDES the view with a tight orbit —
+       * the capsule keeps following her, the player just turns it — and
+       * letting go hands it back to the trail.
        */
-      const behind = this.trailPointBehind(1.0);
-      behind.y += 0.32;
-      this.camera.position.lerp(behind, Math.min(1, dt * 8));
+      if (this.lookPointer !== null) {
+        const cp = Math.cos(this.camPitch);
+        const dist = 1.2;
+        this.camera.position.lerp(new THREE.Vector3(
+          this.at.x + Math.sin(this.camYaw) * dist * cp,
+          this.at.y + Math.sin(this.camPitch) * dist,
+          this.at.z + Math.cos(this.camYaw) * dist * cp,
+        ), Math.min(1, dt * 10));
+      } else {
+        const behind = this.trailPointBehind(1.0);
+        behind.y += 0.32;
+        this.camera.position.lerp(behind, Math.min(1, dt * 8));
+      }
       this.camera.up.set(0, 1, 0);
       this.camera.lookAt(this.at.x, this.at.y + 0.15, this.at.z);
       return;
@@ -895,6 +912,12 @@ export class IslandScene {
     this.stickEl.appendChild(this.stickKnob);
     this.hud.appendChild(this.stickEl);
 
+    // Her aim, in her own eyes: shown only in first person.
+    this.crosshair.className = 'density-lab-crosshair';
+    this.crosshair.style.display = 'none';
+    this.crosshair.style.pointerEvents = 'none';
+    this.hud.appendChild(this.crosshair);
+
     const canvas = this.renderer.domElement;
     canvas.addEventListener('pointerdown', (e) => {
       try { canvas.setPointerCapture(e.pointerId); } catch { /* fine */ }
@@ -921,8 +944,10 @@ export class IslandScene {
           // In her eyes the drag turns HER; pitch is a glance up or down.
           this.facing -= e.movementX * 0.004;
           this.fpPitch = Math.min(1.1, Math.max(-1.1, this.fpPitch - e.movementY * 0.004));
-        } else if (!this.underground) {
-          // Underground the chase camera owns itself — the drag does nothing.
+        } else {
+          // Third person: the drag pans the view — above ground a full
+          // orbit, underground a tight override the trail cam resumes from
+          // the moment the finger lifts.
           this.camYaw -= e.movementX * 0.005;
           this.camPitch = Math.min(1.35, Math.max(0.06, this.camPitch + e.movementY * 0.004));
         }
