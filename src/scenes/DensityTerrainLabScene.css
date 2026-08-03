@@ -292,6 +292,99 @@
   touch-action: none;
 }
 
+/*
+ * THE NEST DESIGNER.
+ *
+ * While it is up, the playing controls go. The stick, the dig button, the mode
+ * ring and the readout are all about driving her about, and none of them mean
+ * anything when the thing on screen is a drawing — leaving them would be three
+ * quarters of a phone screen of controls that do nothing.
+ */
+/* Everything except the designer's own two pieces, listed the other way round
+   on purpose: naming what to hide means every control added later has to
+   remember to add itself to this list, and one that forgets shows up floating
+   over the drawing with nothing to do. */
+.density-lab-hud.is-designing > *:not(.nest-designer):not(.nest-designer-hint) {
+  display: none !important;
+}
+
+.nest-designer {
+  position: absolute;
+  z-index: 6;
+  right: max(10px, env(safe-area-inset-right));
+  bottom: max(10px, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  pointer-events: auto;
+}
+
+.nest-designer-row {
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+}
+
+.nest-designer-chip {
+  border: 0;
+  border-radius: 999px;
+  padding: 10px 13px;
+  min-width: 42px;
+  background: rgba(244, 236, 216, 0.92);
+  color: #1d160e;
+  font: 800 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.06em;
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.3);
+  touch-action: none;
+}
+
+.nest-designer-chip:active { transform: scale(0.95); }
+
+/* Armed or chosen — the same amber "currently on" the rest of the HUD uses. */
+.nest-designer-chip.is-on {
+  background: #e9c36f;
+  box-shadow: 0 0 0 2px rgba(255, 250, 238, 0.75), 0 5px 14px rgba(0, 0, 0, 0.3);
+}
+
+/* The two that commit something. */
+.nest-designer-chip.is-go { background: #a5d6a7; }
+
+/* The one that destroys something, and says so before you press it. */
+.nest-designer-chip.is-warn { background: #ef9a9a; }
+
+.nest-designer-chip[disabled] {
+  background: rgba(244, 236, 216, 0.4);
+  color: rgba(29, 22, 14, 0.4);
+}
+
+/*
+ * The hint line: what is selected and what a drag will do. Top-left, where the
+ * readout normally lives — it is the same job, and the readout is hidden.
+ */
+.nest-designer-hint {
+  position: absolute;
+  z-index: 6;
+  left: max(10px, env(safe-area-inset-left));
+  top: max(10px, env(safe-area-inset-top));
+  max-width: 60vw;
+  padding: 7px 11px;
+  border-radius: 10px;
+  background: rgba(20, 15, 10, 0.72);
+  color: #f4ecd8;
+  font: 700 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.04em;
+  pointer-events: none;
+}
+
+@media (max-height: 480px) {
+  /* Landscape on a phone: the panel is three rows and has to stay off the
+     bottom edge without eating the view it exists to let you judge. */
+  .nest-designer-chip { padding: 8px 10px; min-width: 36px; font-size: 10px; }
+  .nest-designer { gap: 5px; }
+  .nest-designer-row { gap: 5px; }
+}
+
 /* Throttle, above the bore trigger — the two are held together often. */
 .density-lab-walk {
   width: 74px;

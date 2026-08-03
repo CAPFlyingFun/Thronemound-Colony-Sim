@@ -59,6 +59,7 @@ import {
 } from '../nest/nestPlan';
 import { demoNest } from '../nest/demoNest';
 import { buildNestView, type NestView } from '../nest/nestView';
+import { NestDesigner } from '../nest/NestDesigner';
 import {
   DigPlanRunner, PIECE_LIMITS, PLAN_SPEED_MM_S, clampPiece, type DigPiece,
 } from './digPlan';
@@ -509,6 +510,12 @@ export class BlockScene {
    */
   private nestView: NestView | null = null;
 
+  /** Built the first time DIG is pressed on a block that came from a plan. */
+  private designer: NestDesigner | null = null;
+
+  /** The HUD root, kept so the designer can hang its own panel on it. */
+  private hud!: HTMLElement;
+
   private readonly nestButton = document.createElement('button');
 
   private sonar = true;
@@ -782,6 +789,7 @@ export class BlockScene {
     this.follow.target.copy(this.at);
 
     const hud = document.createElement('div');
+    this.hud = hud;
     hud.className = 'density-lab-hud';
     host.appendChild(hud);
     this.status = document.createElement('div');
@@ -1118,6 +1126,9 @@ export class BlockScene {
   /** The last room reading, for probes and the readout. */
   roomForTest(): RoomSense { return this.room; }
 
+  /** The designer, once it exists. For probes. */
+  designerForTest(): NestDesigner | null { return this.designer; }
+
   /** The plan this block was carved from, so a probe never needs a copy of it. */
   nestForTest(): NestPlan | null { return this.nest; }
 
@@ -1203,6 +1214,86 @@ export class BlockScene {
 
   /** The lenses in use, for probes and the readout. */
   fovForTest(): { first: number; third: number } { return { ...this.fov }; }
+
+  /**
+   * Put the designer up, building it the first time it is asked for.
+   *
+   * Built lazily because most blocks never have one — and it holds a camera
+   * rig, a raycaster and a panel of its own, none of which should exist on a
+   * measuring rig that will never open it.
+   */
+  private openDesigner(): void {
+    if (!this.nest) return;
+    this.designer ??= new NestDesigner(
+      this.scene, this.camera, this.renderer.domElement, this.hud,
+      { mmPerUnit: MM, origin: new THREE.Vector3(LOW, LOW, LOW), blockMm: BLOCK_MM },
+      {
+        build: (plan) => {
+          this.nest = plan;
+          this.carveNest();
+          this.remeshAll();
+        },
+        close: () => this.closeDesigner(),
+      },
+      this.nest,
+    );
+    // Everything stops: the joystick is released, the jaws are off, and the
+    // camera is the designer's until DONE. A latched dig left running would
+    // still be running when the block came back a different shape.
+    this.input.walk = 0;
+    this.input.yaw = 0;
+    this.input.dig = false;
+    this.digLatch = false;
+    this.actionButton.classList.remove('is-latched');
+    this.stickPointer = null;
+    this.stick.classList.remove('is-live');
+    // The sonar overlay is the designer's own drawing while it is up, so the
+    // scene's copy would double every tunnel.
+    if (this.nestView) this.nestView.root.visible = false;
+    this.hud.classList.add('is-designing');
+    this.designer.show(this.nest);
+  }
+
+  private closeDesigner(): void {
+    if (!this.designer) return;
+    /*
+     * DONE with unbuilt changes carves them. The alternative is throwing away
+     * work somebody just did because they pressed the wrong one of two buttons,
+     * and a designer that can lose your nest is worse than one that occasionally
+     * digs when you only meant to look.
+     */
+    if (this.designer.hasUnbuilt) {
+      this.nest = this.designer.current();
+      this.carveNest();
+      this.remeshAll();
+    }
+    this.designer.hide();
+    this.hud.classList.remove('is-designing');
+    if (this.nestView) this.nestView.root.visible = this.sonar;
+    // Set her back down on the ground the new plan defines — the old footing
+    // may be soil that no longer exists, or air where the ground used to be.
+    this.standHerOnTheGround();
+  }
+
+  /**
+   * Put her on the surface beside the first entrance, upright and still.
+   *
+   * After a re-carve her old footing may be a tunnel that was filled in or a
+   * hill that was flattened, and `hold()` re-seats her on the NEAREST surface —
+   * which from inside fresh soil is whichever wall is closest, not the ground.
+   */
+  private standHerOnTheGround(): void {
+    const mouth = this.nest?.nodes.find(n => n.kind === 'entrance');
+    if (!mouth) return;
+    const clear = mouth.radiusMm * MOUND_SPREAD + 6;
+    this.at.set(
+      LOW + mouth.x / MM, LOW + mouth.y / MM + RIDE,
+      LOW + Math.max(mouth.z - clear, 2) / MM,
+    );
+    this.up.set(0, 1, 0);
+    this.forward.set(0, 0, 1);
+    this.follow.target.copy(this.at);
+  }
 
   /** Show or hide the designed nest drawn through the soil. */
   setSonar(on: boolean): void {
@@ -2204,6 +2295,18 @@ export class BlockScene {
     const now = performance.now();
     const dt = Math.min(0.05, (now - this.previous) / 1000);
     this.previous = now;
+    /*
+     * The designer owns the camera and the world stands still while it is up.
+     * Simulating underneath it would have her walking off on her own behind the
+     * panel — and worse, `hold()` would keep re-seating her against soil that
+     * is about to be re-cut, so she would come back somewhere nobody put her.
+     */
+    if (this.designer?.isOpen) {
+      this.designer.update();
+      this.renderer.render(this.scene, this.camera);
+      this.frame = requestAnimationFrame(this.animate);
+      return;
+    }
     if (!this.paused) this.simulate(dt);
     /*
      * Eased toward the depth's answer rather than snapped to it. The depth
@@ -2609,6 +2712,16 @@ export class BlockScene {
     // This lets the player navigate while digging without holding the button.
     this.actionButton.addEventListener('pointerdown', (event: PointerEvent) => {
       event.preventDefault();
+      /*
+       * On a block that came from a plan, DIG means DESIGN.
+       *
+       * Chewing a tunnel one bite at a time is how the nest used to get made,
+       * and it records every wobble she had while making it. Drawing it and
+       * cutting it to the drawing is the same verb done properly — so the big
+       * button opens the designer, and manual digging stays on the rigs that
+       * have no plan to draw.
+       */
+      if (this.nest) { this.openDesigner(); return; }
       this.digLatch = !this.digLatch;
       this.input.dig = this.digLatch;
       this.actionButton.classList.toggle('is-latched', this.digLatch);
@@ -2803,6 +2916,12 @@ export class BlockScene {
       // Bound to the canvas for the life of the gesture, so its release comes
       // back here even if the finger ends up over the HUD or off the edge.
       try { canvas.setPointerCapture(event.pointerId); } catch { /* not fatal */ }
+      /*
+       * While the designer is up the canvas is ITS canvas. Handing the same
+       * events to both would spawn a joystick under every orbit and turn her on
+       * the spot behind the panel.
+       */
+      if (this.designer?.isOpen) { this.designer.handlePointerDown(event); return; }
       if (event.clientX < window.innerWidth * 0.5 && this.stickPointer === null) {
         this.stickPointer = event.pointerId;
         const o = clampStickOrigin(event.clientX, event.clientY, {
@@ -2820,6 +2939,7 @@ export class BlockScene {
       this.lookAt = { x: event.clientX, y: event.clientY };
     });
     canvas.addEventListener('pointermove', (event) => {
+      if (this.designer?.isOpen) { this.designer.handlePointerMove(event); return; }
       if (event.pointerId === this.stickPointer) {
         const v = stickVector(
           event.clientX - this.stickOrigin.x, event.clientY - this.stickOrigin.y, STICK_RADIUS,
@@ -2885,6 +3005,7 @@ export class BlockScene {
       }
     });
     const release = (event: PointerEvent) => {
+      if (this.designer?.isOpen) { this.designer.handlePointerUp(event); return; }
       if (event.pointerId === this.stickPointer) {
         this.stickPointer = null;
         this.input.walk = 0;
