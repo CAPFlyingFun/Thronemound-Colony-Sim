@@ -92,6 +92,17 @@ const SCROLL_COOLDOWN_MS = 150;
 const BITE_RADIUS = 1.9 / MM;
 const BITE_EVERY_S = 0.16;
 
+/**
+ * Once she is this deep, the window STOPS FOLLOWING her. Underground the
+ * landscape overhead is irrelevant and the nest is local by definition —
+ * and every scroll (worst of all a depth-band rebase, a full 9.6 M-sample
+ * regeneration) was landing as a one-second freeze mid-tunnel on the
+ * phone. Streaming resumes the moment she surfaces. The one honest limit:
+ * a very long tunnel can reach the parked window's rim and hit its cut
+ * face — surfacing re-centres everything.
+ */
+const STREAM_FREEZE_DEPTH = 10 / MM;
+
 export class IslandScene {
   ready = false;
 
@@ -161,6 +172,8 @@ export class IslandScene {
   private fpPitch = 0;
 
   private underground = false;
+
+  private streamPaused = false;
 
   /** Her recent path — the underground chase camera follows THIS, because
    *  the path she walked is guaranteed to be inside the tunnel. */
@@ -671,9 +684,11 @@ export class IslandScene {
     if (this.stream) {
       if (this.input.dig) this.bite(dt);
 
+      this.streamPaused = this.walkGroundAt(this.at.x, this.at.z) - this.at.y
+        > STREAM_FREEZE_DEPTH;
       const lead = Math.min(LEAD_MAX, Math.abs(speed) * LEAD_S);
       const now = performance.now();
-      if (now - this.lastScrollAt > SCROLL_COOLDOWN_MS) {
+      if (!this.streamPaused && now - this.lastScrollAt > SCROLL_COOLDOWN_MS) {
         const scroll = this.stream.recentreOn(
           this.at.x + Math.sin(this.facing) * lead,
           this.at.z + Math.cos(this.facing) * lead,
@@ -748,18 +763,43 @@ export class IslandScene {
     );
   }
 
+  /**
+   * The last breathable point on the way from `from` to `to`: march the
+   * live soil in 0.15-unit steps and stop one step short of the first
+   * solid sample. This is what keeps every camera OUT OF THE WALLS —
+   * lerps and eye offsets cut corners in a 4 mm bore, and a camera is not
+   * excused from collision just because it isn't a body. Out-of-window
+   * samples read as air, so above ground this costs almost nothing.
+   */
+  private clampToAir(from: THREE.Vector3, to: THREE.Vector3): THREE.Vector3 {
+    const stream = this.stream;
+    if (!stream) return to;
+    const steps = Math.max(1, Math.ceil(from.distanceTo(to) / 0.15));
+    let clear = from.clone();
+    const p = new THREE.Vector3();
+    for (let i = 1; i <= steps; i += 1) {
+      p.copy(from).lerp(to, i / steps);
+      if (stream.solidAtWu(p.x, p.y, p.z) === true) return clear;
+      clear.copy(p);
+    }
+    return to;
+  }
+
   private aimCamera(dt: number): void {
     /* In her eyes her own body would fill the frame — hidden there, shown
      * everywhere else (and only once her model has actually loaded). */
     this.queen.root.visible = this.queenReady && !this.firstPerson;
     this.crosshair.style.display = this.firstPerson ? '' : 'none';
+    /* Every camera path is clamped from her thorax outward. */
+    const anchor = this.at.clone();
+    anchor.y += 0.15;
     if (this.firstPerson) {
       /* Her own eyes: at the head, looking where she faces; the mouse (or
        * right-half drag) turns HER, and pitch is a look, not an orbit. */
       const fwd = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
       const eye = this.at.clone().addScaledVector(fwd, 0.26);
       eye.y += 0.3;
-      this.camera.position.copy(eye);
+      this.camera.position.copy(this.clampToAir(anchor, eye));
       this.camera.up.set(0, 1, 0);
       this.camera.lookAt(
         eye.x + fwd.x * Math.cos(this.fpPitch),
@@ -775,21 +815,25 @@ export class IslandScene {
        * the bore, so following it needs no pathfinding and can never end up
        * inside a wall. A held drag OVERRIDES the view with a tight orbit —
        * the capsule keeps following her, the player just turns it — and
-       * letting go hands it back to the trail.
+       * letting go hands it back to the trail. Both the target AND the
+       * lerped result are clamped to air: the lerp itself cuts corners.
        */
+      let target: THREE.Vector3;
       if (this.lookPointer !== null) {
         const cp = Math.cos(this.camPitch);
         const dist = 1.2;
-        this.camera.position.lerp(new THREE.Vector3(
+        target = new THREE.Vector3(
           this.at.x + Math.sin(this.camYaw) * dist * cp,
           this.at.y + Math.sin(this.camPitch) * dist,
           this.at.z + Math.cos(this.camYaw) * dist * cp,
-        ), Math.min(1, dt * 10));
+        );
       } else {
-        const behind = this.trailPointBehind(1.0);
-        behind.y += 0.32;
-        this.camera.position.lerp(behind, Math.min(1, dt * 8));
+        target = this.trailPointBehind(1.0);
+        target.y += 0.32;
       }
+      const lerped = this.camera.position.clone()
+        .lerp(this.clampToAir(anchor, target), Math.min(1, dt * (this.lookPointer !== null ? 10 : 8)));
+      this.camera.position.copy(this.clampToAir(anchor, lerped));
       this.camera.up.set(0, 1, 0);
       this.camera.lookAt(this.at.x, this.at.y + 0.15, this.at.z);
       return;
@@ -980,7 +1024,7 @@ export class IslandScene {
       chunks ${this.chunkMeshes.size} · queued ${this.queue.length} ·
       dug ${this.stream?.editedSamples ?? 0}<br>
       band floor ${this.stream?.bandFloorMm ?? 0} m · scrolls ${this.stats.scrolls}
-      (${this.stats.rebases} rebases) · last ${this.stats.lastScrollMs.toFixed(0)} ms<br>
+      (${this.stats.rebases} rebases) · last ${this.stats.lastScrollMs.toFixed(0)} ms${this.streamPaused ? ' · stream parked (underground)' : ''}<br>
       at (${(this.at.x * MM / 1000).toFixed(1)}, ${(this.at.z * MM / 1000).toFixed(1)}) m ·
       ${memory ? `heap ${(memory.usedJSHeapSize / 1048576).toFixed(0)} MB · ` : ''}fps ${this.stats.fps}
     `;
@@ -1088,6 +1132,7 @@ export class IslandScene {
       bandFloorMm: this.stream?.bandFloorMm ?? -1,
       underground: this.underground ? 1 : 0,
       firstPerson: this.firstPerson ? 1 : 0,
+      streamPaused: this.streamPaused ? 1 : 0,
     };
   }
 
