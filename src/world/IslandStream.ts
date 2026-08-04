@@ -275,6 +275,27 @@ export class IslandStream {
     }
   }
 
+  /**
+   * Re-run the soil function over a WORLD-unit box — the designer's DIG IT
+   * after the plan changed. `generate` already replays stored digs on top.
+   * Returns the LOCAL sample bounds touched (for remeshing), or null when
+   * the box misses the window entirely.
+   */
+  regenerateBox(min: Vec3Like, max: Vec3Like): BrushResult['bounds'] | null {
+    const span = WINDOW_CELLS + 1;
+    const x0 = Math.max(0, Math.floor((min.x - this.originWorldX) / CELL_SIZE) - 1);
+    const x1 = Math.min(span, Math.ceil((max.x - this.originWorldX) / CELL_SIZE) + 2);
+    const z0 = Math.max(0, Math.floor((min.z - this.originWorldZ) / CELL_SIZE) - 1);
+    const z1 = Math.min(span, Math.ceil((max.z - this.originWorldZ) / CELL_SIZE) + 2);
+    const y0 = Math.max(0, Math.floor((min.y - this.bandFloorWu) / CELL_SIZE) - 1);
+    const y1 = Math.min(SAMPLES_Y, Math.ceil((max.y - this.bandFloorWu) / CELL_SIZE) + 2);
+    if (x1 <= x0 || y1 <= y0 || z1 <= z0) return null;
+    this.generate(x0, x1, y0, y1, z0, z1);
+    return {
+      minX: x0, maxX: x1 - 1, minY: y0, maxY: y1 - 1, minZ: z0, maxZ: z1 - 1,
+    };
+  }
+
   /** Carve at an absolute WORLD position, and remember what now differs. */
   subtractSphere(worldCenter: Vec3Like, radius: number): BrushResult {
     const result = this.field.subtractSphere(

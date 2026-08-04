@@ -24,6 +24,13 @@ export interface IslandSoil {
   reject: Bounds;
   /** The nest's natural ground line, mm. */
   planGroundMm: number;
+  /**
+   * Swap in a NEW plan — the designer's DIG IT. The carve fields and the
+   * reject box are rebuilt so the very next density sample reads the new
+   * nest; the CALLER owns regenerating the streamed window over the union
+   * of the old and new reject boxes (a deleted tunnel must refill too).
+   */
+  setPlan(next: NestPlan): void;
   /** Mound-aware top of a column, mm — for stamping the island grid. */
   moundTopMm(xMm: number, zMm: number, naturalMm: number): number;
   /**
@@ -60,22 +67,36 @@ export function makeIslandSoil(
     ],
   };
 
-  const HOLLOW: Field = planHollow(plan, { stepMm: 1 });
-  const MOUNDS: Field[] = plan.nodes.map(moundOf).filter((f): f is Field => f !== null);
-  const VENTS: Field[] = plan.nodes.map(ventOf).filter((f): f is Field => f !== null);
-  const reject: Bounds = (() => {
-    const b = planBounds(plan) ?? { min: [0, 0, 0], max: [0, 0, 0] };
+  const rejectOf = (of: NestPlan): Bounds => {
+    const b = planBounds(of) ?? { min: [0, 0, 0], max: [0, 0, 0] };
     const spread = 8 * 3.2 + 4;
     return {
       min: [b.min[0] - spread, b.min[1] - 4, b.min[2] - spread],
       max: [b.max[0] + spread, b.max[1] + 8 * 1.1 + 4, b.max[2] + spread],
     };
-  })();
+  };
 
-  return {
+  /* Mutable so setPlan can swap the whole carve in one move — everything
+   * below reads these through the closure, so a new plan is live for the
+   * very next densityUnder call. */
+  let HOLLOW: Field = planHollow(plan, { stepMm: 1 });
+  let MOUNDS: Field[] = plan.nodes.map(moundOf).filter((f): f is Field => f !== null);
+  let VENTS: Field[] = plan.nodes.map(ventOf).filter((f): f is Field => f !== null);
+  let reject: Bounds = rejectOf(plan);
+
+  const soil: IslandSoil = {
     plan,
     reject,
     planGroundMm: ground,
+
+    setPlan(next: NestPlan): void {
+      HOLLOW = planHollow(next, { stepMm: 1 });
+      MOUNDS = next.nodes.map(moundOf).filter((f): f is Field => f !== null);
+      VENTS = next.nodes.map(ventOf).filter((f): f is Field => f !== null);
+      reject = rejectOf(next);
+      soil.plan = next;
+      soil.reject = reject;
+    },
 
     moundTopMm(xMm: number, zMm: number, naturalMm: number): number {
       if (xMm < reject.min[0] || xMm > reject.max[0]
@@ -114,4 +135,5 @@ export function makeIslandSoil(
       return out;
     },
   };
+  return soil;
 }

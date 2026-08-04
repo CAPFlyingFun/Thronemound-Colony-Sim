@@ -488,6 +488,107 @@ check('held drag orbits close around her', pan.heldDist > 3 && pan.heldDist < 9
 check('released, the trail capsule takes the camera back',
   pan.backDist > 2 && pan.backDist < 12, `${pan.backDist.toFixed(1)} mm back`);
 
+console.log('\nFREE MODE (the rail never takes her)');
+const freeMode = await page.evaluate(() => {
+  const s = window.islandScene;
+  const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
+  s.setFreeMode(true);
+  s.teleportMm(n.gate.x - 18, n.gate.z);
+  s.drainQueueForTest();
+  s.setFacingForTest(Math.PI / 2);
+  s.input.walk = 1;
+  let boundFrames = 0;
+  let wentUnder = 0;
+  for (let i = 0; i < 900; i += 1) {
+    s.stepForTest(1 / 30, 1);
+    const st = s.statsForTest();
+    if (st.railBound === 1) boundFrames += 1;
+    if (st.underground === 1) wentUnder = 1;
+    if (st.underground === 1
+      && s.at.y * 5 < s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5) - 40) break;
+  }
+  s.input.walk = 0;
+  s.stepForTest(1 / 30, 30);
+  const stillFree = s.statsForTest().railBound;
+  const underNow = s.statsForTest().underground;
+  // Flip FREE off right where she stands: the rail may take her again.
+  s.setFreeMode(false);
+  s.stepForTest(1 / 30, 60);
+  const rebound = s.statsForTest().railBound;
+  return { boundFrames, wentUnder, stillFree, underNow, rebound };
+});
+check('she went underground on her own six feet', freeMode.wentUnder === 1);
+check('the rail NEVER took her in free mode',
+  freeMode.boundFrames === 0 && freeMode.stillFree === 0,
+  `${freeMode.boundFrames} bound frames`);
+check('free off, underground: the rail takes her again',
+  freeMode.underNow !== 1 || freeMode.rebound === 1,
+  `under=${freeMode.underNow} rebound=${freeMode.rebound}`);
+
+console.log("\nTHE DESIGNER'S DIG IT (a planned tunnel becomes soil and rail)");
+const digIt = await page.evaluate(() => {
+  const s = window.islandScene;
+  const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
+  s.teleportMm(n.store.x, n.store.z);
+  s.drainQueueForTest();
+  // The designer opens and closes without touching the world.
+  s.openDesigner();
+  const opened = s.statsForTest().designing;
+  const panelUp = document.querySelector('.nest-designer') !== null;
+  s.closeDesignerForTest();
+  const closed = s.statsForTest().designing;
+  // Space opens it too — and a release WHILE it is open must not swallow
+  // the next press (the sticky-edge bug).
+  const press = (key, type) => window.dispatchEvent(new KeyboardEvent(type, { key }));
+  press(' ', 'keydown');
+  const spaceOpened = s.statsForTest().designing;
+  press(' ', 'keyup');
+  s.closeDesignerForTest();
+  press(' ', 'keydown');
+  const spaceReopened = s.statsForTest().designing;
+  press(' ', 'keyup');
+  s.closeDesignerForTest();
+  // Extend the plan the way DIG IT does: a new run east off the store.
+  const plan = s.currentPlanForTest();
+  const store = plan.nodes.find((p) => p.id === 'store');
+  plan.nodes.push({
+    id: 'probe-room', kind: 'chamber',
+    x: store.x + 48, y: store.y - 10, z: store.z, radiusMm: 8,
+  });
+  plan.edges.push({
+    id: 'probe-run', from: 'store', to: 'probe-room', radiusMm: 4, flow: 'both',
+  });
+  const railsBefore = s.statsForTest().rails;
+  s.applyPlanForTest(plan);
+  s.drainQueueForTest();
+  const mid = { x: store.x + 24, y: store.y - 5, z: store.z };
+  return {
+    opened,
+    panelUp,
+    closed,
+    spaceOpened,
+    spaceReopened,
+    railsBefore,
+    railsAfter: s.statsForTest().rails,
+    midAir: s.solidAtMm(mid.x, mid.y, mid.z),
+    roomAir: s.solidAtMm(store.x + 48, store.y - 10, store.z),
+    soilAbove: s.solidAtMm(mid.x, mid.y + 14, mid.z),
+  };
+});
+check('DIG opens the designer, DONE closes it',
+  digIt.opened === 1 && digIt.panelUp && digIt.closed === 0);
+check('Space opens it, and reopens after a release while open',
+  digIt.spaceOpened === 1 && digIt.spaceReopened === 1,
+  `first=${digIt.spaceOpened} again=${digIt.spaceReopened}`);
+check('DIG IT bored the planned run open', digIt.midAir === false,
+  `solidAtMm=${digIt.midAir}`);
+check('and hollowed the new chamber', digIt.roomAir === false,
+  `solidAtMm=${digIt.roomAir}`);
+check('the soil above the new run is still soil', digIt.soilAbove === true,
+  `solidAtMm=${digIt.soilAbove}`);
+check('the new run joined the rail network', digIt.railsAfter === digIt.railsBefore + 1,
+  `${digIt.railsBefore} -> ${digIt.railsAfter}`);
+
 console.log('\nTHE RED-SKY TEST (fog off, red background, island panorama)');
 await page.evaluate(() => {
   const s = window.islandScene;

@@ -37,6 +37,9 @@ import { buildSurfaceNets } from '../density/SurfaceNets';
 import { QueenModel } from '../anim/QueenModel';
 import { FOOT_CLEARANCE_MM } from '../anim/legDrive';
 import { buildNestView, type NestView } from '../nest/nestView';
+import { NestDesigner } from '../nest/NestDesigner';
+import { planBounds } from '../nest/nestCarve';
+import { type NestPlan } from '../nest/nestPlan';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
 import { makeIslandSoil, type IslandSoil } from '../world/islandSoil';
 import {
@@ -231,6 +234,19 @@ export class IslandScene {
   /** Earliest time (ms) the rail may grab her again after a DIG drop-off. */
   private railRegrabAt = 0;
 
+  /** FREE mode: she walks the soil herself and the rail never takes her. */
+  private freeMode = false;
+
+  private freeBtn: HTMLButtonElement | null = null;
+
+  /** The tunnel designer — built fresh each time DIG opens it, because its
+   *  working box is fitted around wherever the plan has grown to. */
+  private designer: NestDesigner | null = null;
+
+  /** The designer's plan-local origin in island mm, for translating the
+   *  plan into its working box and back. */
+  private readonly designOriginMm = new THREE.Vector3();
+
   private surfacePromptEl: HTMLElement | null = null;
 
   private surfaceDeclined = false;
@@ -396,19 +412,7 @@ export class IslandScene {
     this.scene.add(this.nestView.root);
 
     // The plan's graph doubles as the underground RAIL network.
-    for (const n of this.soil.plan.nodes) {
-      this.railNodes.set(n.id, {
-        p: new THREE.Vector3(n.x / MM, n.y / MM, n.z / MM),
-        kind: n.kind,
-      });
-    }
-    this.rails = this.soil.plan.edges.map((edge) => ({
-      a: this.railNodes.get(edge.from)!.p,
-      b: this.railNodes.get(edge.to)!.p,
-      r: edge.radiusMm / MM,
-      from: edge.from,
-      to: edge.to,
-    }));
+    this.rebuildRails();
 
     /* The WORLD is ready here; the queen's model arrives when it arrives.
      * Gating `ready` on her GLB made every probe hostage to one slow fetch. */
@@ -823,7 +827,8 @@ export class IslandScene {
      * and the noisy free-walker pose that let her abdomen swing through
      * the shaft wall never runs down there at all.
      */
-    if (this.railEdge < 0 && this.underground && !this.input.dig && this.rails.length > 0
+    if (this.railEdge < 0 && this.underground && !this.input.dig && !this.freeMode
+      && this.rails.length > 0
       && performance.now() >= this.railRegrabAt) {
       const near = this.nearestRail(this.at);
       if (near && near.d < this.rails[near.i]!.r * 1.6) {
@@ -882,7 +887,8 @@ export class IslandScene {
 
     this.updateSurfaceOffer();
     this.pose(dt);
-    this.aimCamera(dt);
+    // While the designer is up the camera is ITS fly rig, not the follow cam.
+    if (!this.designer?.isOpen) this.aimCamera(dt);
   }
 
   /* ------------------------------------------------- the surface offer */
@@ -1224,6 +1230,154 @@ export class IslandScene {
     }
   }
 
+  /* ------------------------------------------------- the tunnel designer */
+
+  /** The plan's graph IS the rail network — rebuilt whenever the plan is. */
+  private rebuildRails(): void {
+    if (!this.soil) return;
+    this.railNodes.clear();
+    for (const n of this.soil.plan.nodes) {
+      this.railNodes.set(n.id, {
+        p: new THREE.Vector3(n.x / MM, n.y / MM, n.z / MM),
+        kind: n.kind,
+      });
+    }
+    this.rails = this.soil.plan.edges.map((edge) => ({
+      a: this.railNodes.get(edge.from)!.p,
+      b: this.railNodes.get(edge.to)!.p,
+      r: edge.radiusMm / MM,
+      from: edge.from,
+      to: edge.to,
+    }));
+  }
+
+  /**
+   * DIG opens the DESIGNER — the tunnel system is how new tunnels get made.
+   * Built fresh each open: its working box is fitted around wherever the
+   * plan has grown to, with room to grow on every side.
+   */
+  openDesigner(): void {
+    if (!this.soil || !this.ready || this.designer?.isOpen) return;
+    const b = planBounds(this.soil.plan) ?? { min: [0, 0, 0], max: [0, 0, 0] };
+    const PAD = 160;
+    this.designOriginMm.set(b.min[0] - PAD, b.min[1] - PAD, b.min[2] - PAD);
+    const blockMm = {
+      x: (b.max[0] + PAD) - this.designOriginMm.x,
+      y: (b.max[1] + 48) - this.designOriginMm.y,
+      z: (b.max[2] + PAD) - this.designOriginMm.z,
+    };
+    const local = this.shiftPlan(this.soil.plan, -1);
+    this.designer?.dispose();
+    this.designer = new NestDesigner(
+      this.scene, this.camera, this.renderer.domElement, this.hud,
+      {
+        mmPerUnit: MM,
+        origin: new THREE.Vector3(
+          this.designOriginMm.x / MM, this.designOriginMm.y / MM, this.designOriginMm.z / MM,
+        ),
+        blockMm,
+      },
+      {
+        build: (plan) => this.applyPlan(this.shiftPlan(plan, 1)),
+        close: () => this.closeDesigner(),
+      },
+      local,
+    );
+    /* Everything stops (the block scene's rule): the stick is released, the
+     * jaws are off, and the camera is the designer's until DONE. */
+    this.input.walk = 0;
+    this.input.yaw = 0;
+    this.input.dig = false;
+    this.stickPointer = null;
+    this.lookPointer = null;
+    this.stickEl.style.display = 'none';
+    if (this.nestView) this.nestView.root.visible = false;
+    this.designer.show(local);
+  }
+
+  private closeDesigner(): void {
+    if (!this.designer) return;
+    /* DONE with unbuilt changes carves them — a designer that can lose the
+     * nest you just drew is worse than one that occasionally digs. */
+    if (this.designer.hasUnbuilt) this.applyPlan(this.shiftPlan(this.designer.current(), 1));
+    this.designer.hide();
+    this.designer.dispose();
+    this.designer = null;
+    if (this.nestView) this.nestView.root.visible = this.showPlan;
+  }
+
+  /** The plan, translated into (+1) or out of (-1) the island's absolute mm. */
+  private shiftPlan(plan: NestPlan, sign: 1 | -1): NestPlan {
+    const o = this.designOriginMm;
+    return {
+      nodes: plan.nodes.map((n) => ({
+        ...n, x: n.x + sign * o.x, y: n.y + sign * o.y, z: n.z + sign * o.z,
+      })),
+      edges: plan.edges.map((e) => ({ ...e })),
+    };
+  }
+
+  /**
+   * DIG IT: the plan becomes the world. One representation — the soil is
+   * carved FROM it, the rails ARE it, the sonar view DRAWS it — so the
+   * regenerate covers the union of the old and new reject boxes (a deleted
+   * tunnel must refill) and everything else is rebuilt from the plan.
+   */
+  private applyPlan(plan: NestPlan): void {
+    if (!this.soil || !this.stream) return;
+    const before = this.soil.reject;
+    this.soil.setPlan(plan);
+    const after = this.soil.reject;
+    const box = this.stream.regenerateBox(
+      {
+        x: Math.min(before.min[0], after.min[0]) / MM,
+        y: Math.min(before.min[1], after.min[1]) / MM,
+        z: Math.min(before.min[2], after.min[2]) / MM,
+      },
+      {
+        x: Math.max(before.max[0], after.max[0]) / MM,
+        y: Math.max(before.max[1], after.max[1]) / MM,
+        z: Math.max(before.max[2], after.max[2]) / MM,
+      },
+    );
+    if (box) {
+      const lo = (v: number) => Math.max(0, Math.floor((v - 1) / CH));
+      const hi = (v: number, max: number) => Math.min(max - 1, Math.floor((v + 1) / CH));
+      for (let cz = lo(box.minZ); cz <= hi(box.maxZ, CHUNKS_XZ); cz += 1) {
+        for (let cy = lo(box.minY); cy <= hi(box.maxY, CHUNKS_Y); cy += 1) {
+          for (let cx = lo(box.minX); cx <= hi(box.maxX, CHUNKS_XZ); cx += 1) {
+            this.enqueue(cx, cy, cz);
+          }
+        }
+      }
+    }
+    this.rebuildRails();
+    /* Her rail may have been resized, moved or deleted: let go and let the
+     * regrab find whatever bore is under her now. */
+    this.railEdge = -1;
+    this.railRev = false;
+    this.railRegrabAt = 0;
+    if (this.nestView) {
+      this.nestView.dispose();
+      this.scene.remove(this.nestView.root);
+    }
+    this.nestView = buildNestView(plan);
+    this.nestView.root.scale.setScalar(1 / MM);
+    this.nestView.root.visible = this.showPlan && !this.designer?.isOpen;
+    this.scene.add(this.nestView.root);
+  }
+
+  /** FREE walking: the rail never takes her, and DIG is her own mandibles. */
+  setFreeMode(on: boolean): void {
+    this.freeMode = on;
+    if (this.freeBtn) this.freeBtn.textContent = on ? 'FREE' : 'free';
+    if (on && this.railEdge >= 0) {
+      this.railEdge = -1;
+      this.railRegrabAt = performance.now() + RAIL_REGRAB_S * 1000;
+    }
+    if (!on) this.input.dig = false;
+  }
+
   private pose(dt: number): void {
     if (!this.queenReady) return;
     if (this.railEdge >= 0) {
@@ -1373,14 +1527,30 @@ export class IslandScene {
     actions.className = 'density-lab-actions';
     this.hud.appendChild(actions);
 
+    /* DIG opens the tunnel designer — planning bores is how tunnels get
+     * made. Only in FREE mode is it the old hold-to-bite mandible. */
     const dig = document.createElement('button');
     dig.className = 'density-lab-button density-lab-dig';
     dig.textContent = 'DIG';
-    dig.addEventListener('pointerdown', (e) => { e.preventDefault(); this.input.dig = true; });
+    dig.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      if (this.freeMode) this.input.dig = true;
+      else this.openDesigner();
+    });
     const stop = () => { this.input.dig = false; };
     dig.addEventListener('pointerup', stop);
     dig.addEventListener('pointercancel', stop);
     actions.appendChild(dig);
+
+    const free = document.createElement('button');
+    free.className = 'density-lab-button density-lab-mode';
+    free.textContent = 'free';
+    free.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      this.setFreeMode(!this.freeMode);
+    });
+    this.freeBtn = free;
+    actions.appendChild(free);
 
     const plan = document.createElement('button');
     plan.className = 'density-lab-button density-lab-mode';
@@ -1408,6 +1578,13 @@ export class IslandScene {
      */
     const applyKeys = () => {
       const k = this.keysDown;
+      if (this.designer?.isOpen) {
+        /* The designer owns the keys, but the Space EDGE must keep tracking
+         * or a release while designing leaves it stuck "down" — and the
+         * next press after DONE would be swallowed. */
+        this.spaceWasDown = k.has(' ');
+        return;
+      }
       const forward = (k.has('w') || k.has('arrowup') ? 1 : 0)
         - (k.has('s') || k.has('arrowdown') ? 1 : 0);
       const turn = (k.has('d') || k.has('arrowright') ? 1 : 0)
@@ -1419,7 +1596,8 @@ export class IslandScene {
       this.input.sprint = k.has('shift');
       const space = k.has(' ');
       if (space !== this.spaceWasDown) {
-        this.input.dig = space;
+        if (this.freeMode) this.input.dig = space;
+        else if (space) this.openDesigner();
         this.spaceWasDown = space;
       }
     };
@@ -1457,6 +1635,7 @@ export class IslandScene {
     const canvas = this.renderer.domElement;
     canvas.addEventListener('pointerdown', (e) => {
       try { canvas.setPointerCapture(e.pointerId); } catch { /* fine */ }
+      if (this.designer?.isOpen) { this.designer.handlePointerDown(e); return; }
       if (e.clientX < window.innerWidth * 0.5 && this.stickPointer === null) {
         this.stickPointer = e.pointerId;
         this.stickOrigin.x = e.clientX;
@@ -1469,6 +1648,7 @@ export class IslandScene {
       }
     });
     canvas.addEventListener('pointermove', (e) => {
+      if (this.designer?.isOpen) { this.designer.handlePointerMove(e); return; }
       if (e.pointerId === this.stickPointer) {
         const dx = Math.max(-48, Math.min(48, e.clientX - this.stickOrigin.x));
         const dy = Math.max(-48, Math.min(48, e.clientY - this.stickOrigin.y));
@@ -1490,6 +1670,7 @@ export class IslandScene {
       }
     });
     const release = (e: PointerEvent) => {
+      if (this.designer?.isOpen) { this.designer.handlePointerUp(e); return; }
       if (e.pointerId === this.stickPointer) {
         this.stickPointer = null;
         this.input.walk = 0;
@@ -1530,6 +1711,7 @@ export class IslandScene {
     const dt = Math.min(0.05, (now - this.previous) / 1000);
     this.previous = now;
     if (!this.paused) this.simulate(dt);
+    if (this.designer?.isOpen) this.designer.update();
 
     this.stats.frames += 1;
     if (now - this.stats.fpsAt > 1000) {
@@ -1644,11 +1826,29 @@ export class IslandScene {
       underground: this.underground ? 1 : 0,
       firstPerson: this.firstPerson ? 1 : 0,
       railBound: this.railEdge >= 0 ? 1 : 0,
+      free: this.freeMode ? 1 : 0,
+      designing: this.designer?.isOpen ? 1 : 0,
+      rails: this.rails.length,
     };
+  }
+
+  /** The whole plan, deep-copied, in island mm — for probes to extend. */
+  currentPlanForTest(): NestPlan {
+    return JSON.parse(JSON.stringify(this.soil!.plan)) as NestPlan;
+  }
+
+  /** Run the designer's DIG IT pipeline on a plan in island mm. */
+  applyPlanForTest(plan: NestPlan): void {
+    this.applyPlan(plan);
+  }
+
+  closeDesignerForTest(): void {
+    this.closeDesigner();
   }
 
   dispose(): void {
     cancelAnimationFrame(this.frame);
+    this.designer?.dispose();
     this.scene.traverse((node) => {
       const mesh = node as THREE.Mesh;
       if (mesh.geometry) mesh.geometry.dispose();
