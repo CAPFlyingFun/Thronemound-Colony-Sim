@@ -37,6 +37,9 @@ export interface CarveOptions {
 const DEFAULT_STEP_MM = 1;
 const DEFAULT_MARGIN_MM = 2;
 
+/** Standard ant-room proportions: long, broad and vertically compressed. */
+export const CHAMBER_SCALE = { x: 1.4, y: 0.7, z: 1.1 } as const;
+
 export interface Bounds { min: Point; max: Point }
 
 /**
@@ -63,9 +66,21 @@ function taper(from: Point, to: Point, r0: number, r1: number): Field {
     };
 }
 
-/** A round room. */
+/** A round tunnel sample. */
 function ball(at: Point, radius: number): Field {
     return (x, y, z) => radius - Math.hypot(x - at[0], y - at[1], z - at[2]);
+}
+
+/** A standardized oval room, wider/longer than it is tall. */
+function chamberEllipsoid(at: Point, radius: number): Field {
+    const rx = radius * CHAMBER_SCALE.x;
+    const ry = radius * CHAMBER_SCALE.y;
+    const rz = radius * CHAMBER_SCALE.z;
+    const scale = Math.min(rx, ry, rz);
+    return (x, y, z) => {
+        const u = Math.hypot((x - at[0]) / rx, (y - at[1]) / ry, (z - at[2]) / rz);
+        return (1 - u) * scale;
+    };
 }
 
 /**
@@ -109,10 +124,12 @@ function union(a: Bounds, b: Bounds): Bounds {
  */
 export function nodeBounds(node: NestNode): Bounds | null {
     if (node.kind === 'chamber') {
-        const r = node.radiusMm;
+        const rx = node.radiusMm * CHAMBER_SCALE.x;
+        const ry = node.radiusMm * CHAMBER_SCALE.y;
+        const rz = node.radiusMm * CHAMBER_SCALE.z;
         return {
-            min: [node.x - r, node.y - r, node.z - r],
-            max: [node.x + r, node.y + r, node.z + r],
+            min: [node.x - rx, node.y - ry, node.z - rz],
+            max: [node.x + rx, node.y + ry, node.z + rz],
         };
     }
     if (node.kind === 'entrance') {
@@ -185,16 +202,6 @@ export function edgeHollow(plan: NestPlan, edge: NestEdge, opts: CarveOptions = 
 
 /**
  * The spoil heap around an entrance — the anthill itself.
- *
- * A squashed ellipsoid centred ON the surface point, so its lower half is
- * already inside the soil and adds nothing while its upper half stands proud.
- * That is cheaper than trying to cap a dome at exactly the right height and,
- * more usefully, it cannot leave a seam: there is no join to get wrong because
- * the shape simply passes through the ground.
- *
- * It rises along world up. A nest can in principle have an entrance anywhere,
- * but spoil falls downward wherever it is dug, so a heap that leaned out of a
- * wall would be wrong in a way nobody would have to measure to see.
  */
 export function moundOf(node: NestNode): Field | null {
     if (node.kind !== 'entrance' || node.radiusMm <= 0) return null;
@@ -207,19 +214,7 @@ export function moundOf(node: NestNode): Field | null {
     };
 }
 
-/**
- * The hole through the heap, so the mound is a crater and not a blister.
- *
- * Runs from clear above the apex down to below the surface point. Stopping it
- * at the apex would leave a wafer of soil across the opening — she would arrive
- * at a lid — and the same mistake in the hand-built shaft rig is why that one
- * pushes its bottom end INSIDE the room's ceiling.
- *
- * Cut at the entrance's own radius rather than the tunnel's. That is the number
- * that makes the hole findable — measured, she strides over anything narrower —
- * and it is the same number the bore below already flares to, so the two meet
- * at the same width and there is no lip between them.
- */
+/** The hole through the entrance mound. */
 export function ventOf(node: NestNode): Field | null {
     if (node.kind !== 'entrance' || node.radiusMm <= 0) return null;
     const rise = node.radiusMm * MOUND_RISE;
@@ -230,18 +225,13 @@ export function ventOf(node: NestNode): Field | null {
     );
 }
 
-/** One chamber as a void, or null for a node that is not a room. */
+/** One oval chamber as a void, or null for a node that is not a room. */
 export function nodeHollow(node: NestNode): Field | null {
     if (node.kind !== 'chamber' || node.radiusMm <= 0) return null;
-    return ball([node.x, node.y, node.z], node.radiusMm);
+    return chamberEllipsoid([node.x, node.y, node.z], node.radiusMm);
 }
 
-/**
- * The whole nest as one void.
- *
- * Returns a field that is negative everywhere when the plan is empty, so a
- * plan with nothing in it carves nothing rather than needing a caller to check.
- */
+/** The whole nest as one void. */
 export function planHollow(plan: NestPlan, opts: CarveOptions = {}): Field {
     const parts: Field[] = [];
     for (const edge of plan.edges) {
@@ -258,13 +248,7 @@ export function planHollow(plan: NestPlan, opts: CarveOptions = {}): Field {
     return anyOf(parts);
 }
 
-/**
- * The ground with the nest's spoil heaps piled on it.
- *
- * Added BEFORE anything is cut, which is the only order that works: the vent
- * has to bore through the heap, so the heap must already be there when it does.
- * Piling soil on afterwards would fill the hole back in.
- */
+/** The ground with the nest's spoil heaps piled on it. */
 export function planMounded(solid: Field, plan: NestPlan): Field {
     const heaps: Field[] = [];
     for (const node of plan.nodes) {
@@ -279,20 +263,7 @@ export function carvePlan(solid: Field, plan: NestPlan, opts: CarveOptions = {})
     return carve(planMounded(solid, plan), planHollow(plan, opts));
 }
 
-/**
- * A millimetre field, read in the scene's world units.
- *
- * The plan is in millimetres because that is what the design is in — a
- * ten-millimetre bore, a ten-by-twenty room — and the density field is in world
- * units because that is what the renderer is in. Converting between them is a
- * multiply, and the only dangerous thing about it is doing it in two places, so
- * it is done here and nowhere else.
- *
- * The RESULT is scaled as well as the arguments. A field is a distance, not
- * just a sign, and `carve` blends it against soil measured in world units — so
- * a hollow returned in millimetres would round the cut five times too hard
- * while still, misleadingly, carving the right shape.
- */
+/** A millimetre field, read in the scene's world units. */
 export function inWorldUnits(field: Field, origin: Point, mmPerUnit: number): Field {
     return (x, y, z) => field(
         (x - origin[0]) * mmPerUnit,

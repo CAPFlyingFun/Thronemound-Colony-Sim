@@ -14,6 +14,7 @@
 
 import * as THREE from 'three';
 
+import { CHAMBER_SCALE } from './nestCarve';
 import { sampleEdge, type EdgeSample, type NestEdge, type NestNode, type NestPlan } from './nestPlan';
 
 export interface NestViewStyle {
@@ -164,6 +165,7 @@ export function nodeMarker(node: NestNode): THREE.Object3D {
                 transparent: true, opacity: 0.5, depthTest: false,
             }),
         );
+        mesh.scale.set(CHAMBER_SCALE.x, CHAMBER_SCALE.y, CHAMBER_SCALE.z);
         mesh.position.set(node.x, node.y, node.z);
         mesh.renderOrder = 2;
         return mesh;
