@@ -27,7 +27,8 @@ export function makeIslandSoil(
   const spawnX = 28000;
   const spawnZ = 28000;
   const ground = heightMmAt(spawnX, spawnZ);
-  const plan: NestPlan = { nodes: [], edges: [] };
+  const initialPlan: NestPlan = { nodes: [], edges: [] };
+  let currentPlan = initialPlan;
 
   const rejectOf = (of: NestPlan): Bounds => {
     const b = planBounds(of);
@@ -48,17 +49,18 @@ export function makeIslandSoil(
     };
   };
 
-  let HOLLOW: Field = planHollow(plan, { stepMm: 1 });
+  let HOLLOW: Field = planHollow(initialPlan, { stepMm: 1 });
   let MOUNDS: Field[] = [];
   let VENTS: Field[] = [];
-  let reject: Bounds = rejectOf(plan);
+  let reject: Bounds = rejectOf(initialPlan);
 
   const soil: IslandSoil = {
-    plan,
+    plan: initialPlan,
     reject,
     planGroundMm: ground,
 
     setPlan(next: NestPlan): void {
+      currentPlan = next;
       HOLLOW = planHollow(next, { stepMm: 1 });
       MOUNDS = next.nodes.map(moundOf).filter((f): f is Field => f !== null);
       VENTS = next.nodes.map(ventOf).filter((f): f is Field => f !== null);
@@ -85,7 +87,7 @@ export function makeIslandSoil(
       height: number, floorY: number, x: number, y: number, z: number,
     ): number {
       let earth = Math.min(height - y, y - floorY - CELL_SIZE * 1.5);
-      if (soil.plan.nodes.length === 0 && soil.plan.edges.length === 0) return earth;
+      if (currentPlan.nodes.length === 0 && currentPlan.edges.length === 0) return earth;
 
       const xMm = x * MM;
       const yMm = y * MM;
