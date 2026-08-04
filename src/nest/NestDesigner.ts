@@ -45,6 +45,13 @@ export interface DesignerWorld {
     origin: THREE.Vector3;
     /** How big the block is, in millimetres per axis — the box a node may live in. */
     blockMm: { x: number; y: number; z: number };
+    /**
+     * The terrain's surface height (plan-local mm) under a plan-local XZ.
+     * When provided, entrance nodes SNAP to it: placed above or below the
+     * ground, a mouth finds the surface either way — a nest entrance
+     * anywhere else is either floating or buried. The GRND chip toggles it.
+     */
+    groundMm?: (xMm: number, zMm: number) => number;
 }
 
 export interface DesignerHooks {
@@ -139,6 +146,9 @@ export class NestDesigner {
     private open = false;
 
     private dirty = false;
+
+    /** Entrances follow the terrain while this is on (the GRND chip). */
+    private groundSnap = true;
 
     // The camera: a free point in space and a direction it looks.
     private readonly eye = new THREE.Vector3();
@@ -248,6 +258,9 @@ export class NestDesigner {
          */
         const mouth = this.plan.nodes.find(n => n.kind === 'entrance') ?? this.plan.nodes[0];
         if (mouth && !this.picked) this.picked = { kind: 'node', id: mouth.id };
+        /* A nest with no entrance yet (the founding dig) presets PLACE to
+         * the MOUTH — the piece every nest must start with. */
+        if (!this.plan.nodes.some(n => n.kind === 'entrance')) this.placing = 'entrance';
         // Instructions on the first open only. Shown every time it would be a
         // panel to dismiss before you could do anything.
         if (!this.helpSeen) this.showHelp(true);
@@ -513,15 +526,26 @@ export class NestDesigner {
         this.raycaster.setFromCamera(this.ndc(event), this.camera);
         if (!this.raycaster.ray.intersectPlane(plane, at)) return;
         const mm = this.world.mmPerUnit;
+        const nx = this.inBlock((at.x - this.world.origin.x) * mm, 'x');
+        const nz = this.inBlock((at.z - this.world.origin.z) * mm, 'z');
         this.edit(moveNode(this.plan, node.id, {
-            x: this.inBlock((at.x - this.world.origin.x) * mm, 'x'),
-            y: node.y,
-            z: this.inBlock((at.z - this.world.origin.z) * mm, 'z'),
+            x: nx,
+            // A dragged MOUTH rides the terrain under the finger.
+            y: this.groundedY(node.kind, nx, nz, node.y),
+            z: nz,
         }), { coalesce: true });
     }
 
     private inBlock(v: number, axis: 'x' | 'y' | 'z'): number {
         return THREE.MathUtils.clamp(v, 0, this.world.blockMm[axis]);
+    }
+
+    /** An entrance's Y is the ground under its XZ — above or below, it
+     *  finds the surface — unless the toggle is off or there is no terrain
+     *  to ask (the block room's designer has none). */
+    private groundedY(kind: string, x: number, z: number, fallbackY: number): number {
+        if (kind !== 'entrance' || !this.groundSnap || !this.world.groundMm) return fallbackY;
+        return this.inBlock(this.world.groundMm(x, z), 'y');
     }
 
     private ndc(event: PointerEvent): THREE.Vector2 {
@@ -670,10 +694,18 @@ export class NestDesigner {
         // Screen-right for that forward, from the same cross product the
         // camera itself uses: right = look x up.
         const right = { x: -forward.z, z: forward.x };
+        const grounded = node.kind === 'entrance' && this.groundSnap && !!this.world.groundMm;
+        if (grounded && sy !== 0) {
+            // Height is not yours while the mouth follows the ground.
+            this.hint.textContent = 'GRND is on — the mouth follows the terrain. Tap GRND to place its height by hand.';
+            return;
+        }
+        const nx = this.inBlock(node.x + (forward.x * sz + right.x * sx) * STEP_MM, 'x');
+        const nz = this.inBlock(node.z + (forward.z * sz + right.z * sx) * STEP_MM, 'z');
         this.edit(moveNode(this.plan, node.id, {
-            x: this.inBlock(node.x + (forward.x * sz + right.x * sx) * STEP_MM, 'x'),
-            y: this.inBlock(node.y + sy * STEP_MM, 'y'),
-            z: this.inBlock(node.z + (forward.z * sz + right.z * sx) * STEP_MM, 'z'),
+            x: nx,
+            y: this.groundedY(node.kind, nx, nz, this.inBlock(node.y + sy * STEP_MM, 'y')),
+            z: nz,
         }));
     }
 
@@ -683,10 +715,12 @@ export class NestDesigner {
         const node = findNode(this.plan, this.picked.id);
         if (!node) return;
         const grid = (v: number): number => Math.round(v / SNAP_MM) * SNAP_MM;
+        const gx = this.inBlock(grid(node.x), 'x');
+        const gz = this.inBlock(grid(node.z), 'z');
         this.edit(moveNode(this.plan, node.id, {
-            x: this.inBlock(grid(node.x), 'x'),
-            y: this.inBlock(grid(node.y), 'y'),
-            z: this.inBlock(grid(node.z), 'z'),
+            x: gx,
+            y: this.groundedY(node.kind, gx, gz, this.inBlock(grid(node.y), 'y')),
+            z: gz,
         }));
     }
 
@@ -723,6 +757,7 @@ export class NestDesigner {
                 z: this.inBlock((ahead.z - this.world.origin.z) * mm, 'z'),
             };
         }
+        at.y = this.groundedY(this.placing, at.x, at.z, at.y);
         const made = addNode(this.plan, this.placing, at);
         this.edit(from ? linkNodes(made.plan, from.id, made.id) : made.plan);
         this.picked = { kind: 'node', id: made.id };
@@ -794,6 +829,12 @@ export class NestDesigner {
         pad.appendChild(this.chip('UP', () => this.step(0, 1, 0)));
         pad.appendChild(this.chip('DN', () => this.step(0, -1, 0)));
         pad.appendChild(this.chip('SNAP', () => this.snap()));
+        if (this.world.groundMm) {
+            pad.appendChild(this.named('grnd', this.chip('GRND', () => {
+                this.groundSnap = !this.groundSnap;
+                this.refreshPanel();
+            })));
+        }
         this.panel.appendChild(pad);
 
         const done = document.createElement('div');
@@ -908,6 +949,7 @@ export class NestDesigner {
             this.buttons.get(`kind:${kind}`)?.classList.toggle('is-on', this.placing === kind);
         }
         this.buttons.get('link')?.classList.toggle('is-on', this.linkingFrom !== null);
+        this.buttons.get('grnd')?.classList.toggle('is-on', this.groundSnap);
         this.buttons.get('undo')?.toggleAttribute('disabled', !this.history.canUndo);
 
         if (this.linkingFrom) {

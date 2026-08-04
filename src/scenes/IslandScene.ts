@@ -1269,11 +1269,36 @@ export class IslandScene {
     })();
     const b = planBounds(this.soil.plan) ?? here;
     const PAD = 160;
-    this.designOriginMm.set(b.min[0] - PAD, b.min[1] - PAD, b.min[2] - PAD);
+    /*
+     * The box must be TALL enough that an entrance dragged anywhere in its
+     * footprint can reach the terrain there — on the summit the ground
+     * rises and falls tens of millimetres across one box, and a mouth
+     * clamped short of the surface is floating or buried, the exact thing
+     * ground-snap exists to prevent. Sample the drawn surface across the
+     * footprint and take the box to it.
+     */
+    const bx0 = b.min[0] - PAD;
+    const bx1 = b.max[0] + PAD;
+    const bz0 = b.min[2] - PAD;
+    const bz1 = b.max[2] + PAD;
+    let terrainMin = Infinity;
+    let terrainMax = -Infinity;
+    for (let j = 0; j <= 8; j += 1) {
+      for (let i = 0; i <= 8; i += 1) {
+        const h = this.renderedHeightAtMm(
+          bx0 + ((bx1 - bx0) * i) / 8, bz0 + ((bz1 - bz0) * j) / 8,
+        );
+        terrainMin = Math.min(terrainMin, h);
+        terrainMax = Math.max(terrainMax, h);
+      }
+    }
+    this.designOriginMm.set(
+      bx0, Math.min(b.min[1] - PAD, terrainMin - 48), bz0,
+    );
     const blockMm = {
-      x: (b.max[0] + PAD) - this.designOriginMm.x,
-      y: (b.max[1] + 48) - this.designOriginMm.y,
-      z: (b.max[2] + PAD) - this.designOriginMm.z,
+      x: bx1 - this.designOriginMm.x,
+      y: Math.max(b.max[1] + 48, terrainMax + 48) - this.designOriginMm.y,
+      z: bz1 - this.designOriginMm.z,
     };
     const local = this.shiftPlan(this.soil.plan, -1);
     this.designer?.dispose();
@@ -1285,6 +1310,12 @@ export class IslandScene {
           this.designOriginMm.x / MM, this.designOriginMm.y / MM, this.designOriginMm.z / MM,
         ),
         blockMm,
+        /* The drawn island surface, in plan-local mm — what entrance nodes
+         * snap to. Drawn, not bilinear: a mouth must sit on the ground the
+         * player SEES (the walker's own hard-won rule). */
+        groundMm: (xMm, zMm) => this.renderedHeightAtMm(
+          this.designOriginMm.x + xMm, this.designOriginMm.z + zMm,
+        ) - this.designOriginMm.y,
       },
       {
         build: (plan) => this.applyPlan(this.shiftPlan(plan, 1)),
@@ -1840,6 +1871,7 @@ export class IslandScene {
       rails: this.rails.length,
       planNodes: this.soil?.plan.nodes.length ?? 0,
       designX: this.designOriginMm.x,
+      designY: this.designOriginMm.y,
       designZ: this.designOriginMm.z,
     };
   }

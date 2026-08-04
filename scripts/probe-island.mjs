@@ -74,6 +74,8 @@ const founding = await page.evaluate(() => {
   const boxNearHer = Math.abs(st.designX - (s.at.x * 5 - 160)) < 1
     && Math.abs(st.designZ - (s.at.z * 5 - 160)) < 1;
   const openedEmpty = st.designing;
+  // A nestless plan presets PLACE to the MOUTH — the piece it must start with.
+  const presetMouth = s.designer.placing === 'entrance';
   s.closeDesignerForTest();
   // Found the colony: the classic four-node nest, dug through the pipeline
   // the DIG IT button uses. Everything downstream probes THIS nest.
@@ -96,13 +98,15 @@ const founding = await page.evaluate(() => {
   s.drainQueueForTest();
   const after = s.statsForTest();
   return {
-    bornNestless, openedEmpty, boxNearHer, nodes: after.planNodes, rails: after.rails,
+    bornNestless, openedEmpty, boxNearHer, presetMouth,
+    nodes: after.planNodes, rails: after.rails,
   };
 });
 check('the island is born nestless', founding.bornNestless === 0,
   `${founding.bornNestless} plan nodes at spawn`);
 check('nestless DIG opens the designer around the queen',
   founding.openedEmpty === 1 && founding.boxNearHer);
+check('and PLACE is preset to the MOUTH', founding.presetMouth === true);
 check('the founding dig took', founding.nodes === 4 && founding.rails === 3,
   `${founding.nodes} nodes, ${founding.rails} rails`);
 
@@ -633,6 +637,43 @@ check('the soil below the new chamber is still soil', digIt.soilBelow === true,
   `solidAtMm=${digIt.soilBelow}`);
 check('the new run joined the rail network', digIt.railsAfter === digIt.railsBefore + 1,
   `${digIt.railsBefore} -> ${digIt.railsAfter}`);
+
+console.log('\nTHE GROUNDED ENTRANCE (mouths snap to the terrain, GRND toggles it)');
+const grounded = await page.evaluate(() => {
+  const s = window.islandScene;
+  s.teleportMm(27800, 28200); // a summit slope, away from the nest
+  s.drainQueueForTest();
+  s.openDesigner();
+  const d = s.designer;
+  const st = s.statsForTest();
+  const terrain = (x, z) => s.renderedHeightAtMm(st.designX + x, st.designZ + z) - st.designY;
+  // Place a mouth: wherever the drop lands, its height must be the ground.
+  d.placing = 'entrance';
+  d.place();
+  const mouth = d.current().nodes.slice(-1)[0];
+  const placedOff = Math.abs(mouth.y - terrain(mouth.x, mouth.z));
+  // Drag it about (a step is the drag's deterministic cousin): it re-finds
+  // the ground under its new spot.
+  d.step(3, 0, 0);
+  const stepped = d.current().nodes.slice(-1)[0];
+  const steppedOff = Math.abs(stepped.y - terrain(stepped.x, stepped.z));
+  const movedXZ = Math.hypot(stepped.x - mouth.x, stepped.z - mouth.z);
+  // The toggle frees the height for by-hand placement.
+  d.groundSnap = false;
+  d.step(0, 1, 0);
+  d.step(0, 1, 0);
+  const freed = d.current().nodes.slice(-1)[0];
+  const rose = freed.y - stepped.y;
+  s.closeDesignerForTest();
+  s.drainQueueForTest();
+  return { placedOff, steppedOff, movedXZ, rose };
+});
+check('a placed mouth sits ON the ground', grounded.placedOff < 1.5,
+  `${grounded.placedOff.toFixed(2)} mm off the surface`);
+check('dragging it re-finds the ground', grounded.movedXZ > 3 && grounded.steppedOff < 1.5,
+  `moved ${grounded.movedXZ.toFixed(1)} mm, ${grounded.steppedOff.toFixed(2)} mm off`);
+check('GRND off frees the height', grounded.rose > 3,
+  `rose ${grounded.rose.toFixed(1)} mm with the toggle off`);
 
 console.log('\nTHE RED-SKY TEST (fog off, red background, island panorama)');
 await page.evaluate(() => {
