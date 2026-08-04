@@ -1258,7 +1258,16 @@ export class IslandScene {
    */
   openDesigner(): void {
     if (!this.soil || !this.ready || this.designer?.isOpen) return;
-    const b = planBounds(this.soil.plan) ?? { min: [0, 0, 0], max: [0, 0, 0] };
+    /* A nestless island (the founding dig) has no plan to bound — the
+     * working box grows around HER instead, sitting on the ground she
+     * stands on, so the first nest is dug where the queen is. */
+    const here: { min: number[]; max: number[] } = (() => {
+      const xMm = this.at.x * MM;
+      const zMm = this.at.z * MM;
+      const gMm = this.groundHeightAt(this.at.x, this.at.z) * MM;
+      return { min: [xMm, gMm, zMm], max: [xMm, gMm, zMm] };
+    })();
+    const b = planBounds(this.soil.plan) ?? here;
     const PAD = 160;
     this.designOriginMm.set(b.min[0] - PAD, b.min[1] - PAD, b.min[2] - PAD);
     const blockMm = {
@@ -1829,6 +1838,9 @@ export class IslandScene {
       free: this.freeMode ? 1 : 0,
       designing: this.designer?.isOpen ? 1 : 0,
       rails: this.rails.length,
+      planNodes: this.soil?.plan.nodes.length ?? 0,
+      designX: this.designOriginMm.x,
+      designZ: this.designOriginMm.z,
     };
   }
 

@@ -63,6 +63,49 @@ check('the south-east corner is ocean', geo.cornerSE < 0,
 check('west midway is lower than the summit (island falls to the sea)',
   geo.midwayWest < geo.centre, `${geo.midwayWest.toFixed(0)} m vs ${geo.centre.toFixed(0)} m`);
 
+console.log('\nTHE FOUNDING DIG (the island is born nestless; the queen digs the first one)');
+const founding = await page.evaluate(() => {
+  const s = window.islandScene;
+  const bornNestless = s.statsForTest().planNodes;
+  // With no nest at all, DIG must open the designer's box around HER —
+  // not around some phantom plan at the island's origin.
+  s.openDesigner();
+  const st = s.statsForTest();
+  const boxNearHer = Math.abs(st.designX - (s.at.x * 5 - 160)) < 1
+    && Math.abs(st.designZ - (s.at.z * 5 - 160)) < 1;
+  const openedEmpty = st.designing;
+  s.closeDesignerForTest();
+  // Found the colony: the classic four-node nest, dug through the pipeline
+  // the DIG IT button uses. Everything downstream probes THIS nest.
+  const ex = 28040;
+  const ez = 28000;
+  const ground = s.heightAtMm(ex, ez);
+  s.applyPlanForTest({
+    nodes: [
+      { id: 'gate', kind: 'entrance', x: ex, y: ground, z: ez, radiusMm: 8 },
+      { id: 'hall', kind: 'junction', x: ex, y: ground - 56, z: ez, radiusMm: 4 },
+      { id: 'bend', kind: 'junction', x: ex + 64, y: ground - 72, z: ez + 10, radiusMm: 4 },
+      { id: 'store', kind: 'chamber', x: ex + 112, y: ground - 84, z: ez + 18, radiusMm: 10 },
+    ],
+    edges: [
+      { id: 'shaft', from: 'gate', to: 'hall', radiusMm: 4, flow: 'both' },
+      { id: 'drift', from: 'hall', to: 'bend', radiusMm: 4, flow: 'both' },
+      { id: 'run', from: 'bend', to: 'store', radiusMm: 4, flow: 'both' },
+    ],
+  });
+  s.drainQueueForTest();
+  const after = s.statsForTest();
+  return {
+    bornNestless, openedEmpty, boxNearHer, nodes: after.planNodes, rails: after.rails,
+  };
+});
+check('the island is born nestless', founding.bornNestless === 0,
+  `${founding.bornNestless} plan nodes at spawn`);
+check('nestless DIG opens the designer around the queen',
+  founding.openedEmpty === 1 && founding.boxNearHer);
+check('the founding dig took', founding.nodes === 4 && founding.rails === 3,
+  `${founding.nodes} nodes, ${founding.rails} rails`);
+
 console.log('\nTHE PRE-TUNNEL (streamed soil, nest folded into the function)');
 /* One stance at (28100, 28020) puts the whole plan in the window: gate at
  * x=28040, store 112 mm east of it. */
@@ -553,7 +596,7 @@ const digIt = await page.evaluate(() => {
   const store = plan.nodes.find((p) => p.id === 'store');
   plan.nodes.push({
     id: 'probe-room', kind: 'chamber',
-    x: store.x + 48, y: store.y - 10, z: store.z, radiusMm: 8,
+    x: store.x + 48, y: store.y - 30, z: store.z, radiusMm: 8,
   });
   plan.edges.push({
     id: 'probe-run', from: 'store', to: 'probe-room', radiusMm: 4, flow: 'both',
@@ -561,7 +604,7 @@ const digIt = await page.evaluate(() => {
   const railsBefore = s.statsForTest().rails;
   s.applyPlanForTest(plan);
   s.drainQueueForTest();
-  const mid = { x: store.x + 24, y: store.y - 5, z: store.z };
+  const mid = { x: store.x + 24, y: store.y - 15, z: store.z };
   return {
     opened,
     panelUp,
@@ -571,8 +614,10 @@ const digIt = await page.evaluate(() => {
     railsBefore,
     railsAfter: s.statsForTest().rails,
     midAir: s.solidAtMm(mid.x, mid.y, mid.z),
-    roomAir: s.solidAtMm(store.x + 48, store.y - 10, store.z),
-    soilAbove: s.solidAtMm(mid.x, mid.y + 14, mid.z),
+    roomAir: s.solidAtMm(store.x + 48, store.y - 30, store.z),
+    // The hillside SLOPES here — above the run is soon open sky, so the
+    // over-carve guard samples the deep soil below the new room instead.
+    soilBelow: s.solidAtMm(store.x + 48, store.y - 60, store.z),
   };
 });
 check('DIG opens the designer, DONE closes it',
@@ -584,8 +629,8 @@ check('DIG IT bored the planned run open', digIt.midAir === false,
   `solidAtMm=${digIt.midAir}`);
 check('and hollowed the new chamber', digIt.roomAir === false,
   `solidAtMm=${digIt.roomAir}`);
-check('the soil above the new run is still soil', digIt.soilAbove === true,
-  `solidAtMm=${digIt.soilAbove}`);
+check('the soil below the new chamber is still soil', digIt.soilBelow === true,
+  `solidAtMm=${digIt.soilBelow}`);
 check('the new run joined the rail network', digIt.railsAfter === digIt.railsBefore + 1,
   `${digIt.railsBefore} -> ${digIt.railsAfter}`);
 

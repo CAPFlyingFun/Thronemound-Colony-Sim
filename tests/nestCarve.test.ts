@@ -59,7 +59,10 @@ describe('bounding the work', () => {
 
     it('covers every part of the nest', () => {
         const b = planBounds(shaftPlan())!;
-        expect(b.min[1]).toBeCloseTo(-2, 1);       // the bottom of the oval room
+        // Not the oval room's floor (-2): the tunnel FLARES to bore 10 at the
+        // room end, and that flare dips below the flattened oval. The bounds
+        // must cover the carve, and the carve reaches -5.
+        expect(b.min[1]).toBeCloseTo(-5, 1);
         // The top of the heap, not the top of the ground.
         expect(b.max[1]).toBeCloseTo(HALF + 9 * (MOUND_RISE + 1), 1);
     });
