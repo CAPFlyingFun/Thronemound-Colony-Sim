@@ -380,21 +380,23 @@ const fit = await page.evaluate(() => {
   const st = s.statsForTest();
   return {
     worst,
-    stance: st.tunnelRadiusMm,
-    bite: st.biteRadiusMm,
+    wide: st.bodyWideMm,
+    biteW: st.biteWidthMm,
+    biteD: st.biteDepthMm,
     depth: s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5) - s.at.y * 5,
     camSolid: s.stream.solidAtWu(
       s.camera.position.x, s.camera.position.y, s.camera.position.z,
     ) === true,
   };
 });
-check('the bite stays her mandible', Math.abs(fit.bite - 1.75) < 0.01,
-  `${fit.bite.toFixed(2)} mm`);
+check('the bite stays her mandible — 1.75 mm wide, half a mm deep',
+  Math.abs(fit.biteW - 1.75) < 0.01 && Math.abs(fit.biteD - 0.5) < 0.01,
+  `${fit.biteW.toFixed(2)} mm wide x ${fit.biteD.toFixed(2)} mm deep`);
 check('she is well underground for the measurement', fit.depth > 40,
   `${fit.depth.toFixed(1)} mm down`);
-check('and her tunnel clears her stance all the way round',
-  fit.worst >= fit.stance - 0.75,
-  `worst clearance ${fit.worst.toFixed(1)} mm against a ${fit.stance.toFixed(2)} mm stance`);
+check('and her tunnel clears the oval she occupies, all the way round',
+  fit.worst >= fit.wide - 0.75,
+  `worst clearance ${fit.worst.toFixed(1)} mm against a ${fit.wide.toFixed(2)} mm half-width`);
 check('the camera is never buried in the tunnel wall', fit.camSolid === false);
 
 console.log('\nTHE WALKS (clearance is against the DRAWN triangles — below zero');

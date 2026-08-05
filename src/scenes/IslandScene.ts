@@ -36,7 +36,7 @@ import './DensityTerrainLabScene.css';
 import { buildSurfaceNets } from '../density/SurfaceNets';
 import { QueenModel } from '../anim/QueenModel';
 import { FOOT_CLEARANCE_MM } from '../anim/legDrive';
-import { stanceRadius } from '../anim/hexapod';
+import { CASTE_LENGTH_MM, stanceRadius } from '../anim/hexapod';
 import { buildNestView, type NestView } from '../nest/nestView';
 import { NestDesigner } from '../nest/NestDesigner';
 import { planBounds } from '../nest/nestCarve';
@@ -121,29 +121,72 @@ const SCROLL_COOLDOWN_MS = 150;
  * models. A worker's is 0.75 and a major's 2.5, and a major out-digging a
  * queen is most of the point of a major.
  */
-const BITE_RADIUS = 1.75 / MM;
+const BITE_WIDTH_MM = 1.75;
+const BITE_DEPTH_MM = 0.5;
 
 /**
- * How wide the tunnel has to END UP, which is a different question — and
- * the one that was got wrong.
+ * A mouthful is a SCOOP, not a ball.
  *
- * A mandible-sized bite means a bore is no longer one stroke wide: a tunnel
- * she can walk down has to be CUT wide, several bites across, instead of
- * arriving free with the first one. Cutting a single 1.75 mm sphere per
- * stroke left a 3.5 mm bore for a NINE millimetre ant, and she spent the
- * whole time wearing it — reported as trying to fit down tunnels too small
- * for her, which is exactly what it was.
+ * 1.75 mm across and half a millimetre deep — her mandibles closing on a
+ * face, not a sphere the width of her head vanishing out of the hillside.
+ * Cutting a 1.75 mm RADIUS sphere took three and a half millimetres of soil
+ * per bite, seven times the depth of the real thing, which is why tunnels
+ * appeared out of nowhere.
  *
- * The width is her stance radius, read off the rig by
- * `scripts/probe-stanceradius.mjs` rather than picked: 4.03 mm on a 9 mm
- * queen. That is the number that matters because it is where her FEET land
- * — cut narrower and every ground sample hits the rim, which is how she
- * once became unable to get back into her own shaft.
+ * A sphere still does the cutting, because that is what the field
+ * subtracts; it is simply set BACK so only the front of it breaks the
+ * surface. Radius from the chord: a sphere of radius r cutting depth d
+ * leaves a mouth of width w where r = (w²/4 + d²) / 2d.
  */
-const TUNNEL_RADIUS = stanceRadius();
+const BITE_RADIUS = ((BITE_WIDTH_MM * BITE_WIDTH_MM) / 4 + BITE_DEPTH_MM * BITE_DEPTH_MM)
+  / (2 * BITE_DEPTH_MM) / MM;
+
+/** How far behind the face its centre sits, so it only cuts BITE_DEPTH. */
+const BITE_SETBACK = BITE_RADIUS - BITE_DEPTH_MM / MM;
 
 /** How far ahead of her centre the jaws bite, in world units. */
 const JAW_REACH = 1.4 / MM;
+
+/**
+ * HER BODY, as the space she needs rather than as a point.
+ *
+ * A centre-point test is what let her wear her tunnels: the point fits
+ * anywhere, so she squeezed through holes half her width and the model
+ * clipped the walls. These are the oval she actually occupies — as long as
+ * her body, as wide as her legs, as tall as her tallest point — and if that
+ * oval does not fit, she does not go there.
+ *
+ * Fallbacks only. The real numbers are measured off the loaded model in
+ * `measureBody`, because a rig is the honest source for how big she is.
+ */
+const BODY_HALF_LEN = (CASTE_LENGTH_MM.queen / 2) / MM;
+const BODY_HALF_WIDE = stanceRadius();
+const BODY_HALF_TALL = 1.6 / MM;
+
+/**
+ * Where the oval is tested, as fractions of its half-extents: nose, tail,
+ * both shoulders, back and belly, and the four diagonals of her waist. Her
+ * outline, in eleven questions.
+ */
+/** How far clear of her own feet the oval's belly rides. */
+const BODY_FLOOR_MARGIN = 0.3 / MM;
+
+/**
+ * How much wider than herself she cuts.
+ *
+ * The hole has to CONTAIN the oval, not merely touch it. Cutting to exactly
+ * her own width put every fit probe precisely on the surface of what had
+ * just been cleared, where a sample can read either way — and it read
+ * solid, so she cleared her shoulders and was still told her shoulders were
+ * in the wall. She stopped dead with the jaws running.
+ */
+const CLEAR_MARGIN = 1.2 / MM;
+
+const BODY_SHELL: number[][] = [
+  [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+  [0.6, 0.6, 0], [0.6, -0.6, 0], [-0.6, 0.6, 0], [-0.6, -0.6, 0],
+  [0, 0, 0],
+];
 
 /** Riding TOWARD a gate this close ASKS whether to surface. Riding away
  *  never asks, however close she passes — the heading is what makes the
@@ -252,6 +295,12 @@ export class IslandScene {
   private readonly clearedTo = new THREE.Vector3();
 
   private hasCleared = false;
+
+  /** Half-extents of the oval she occupies: along her body, across her
+   *  legs, and up to her tallest point. Measured from the model on load. */
+  private readonly body = {
+    len: BODY_HALF_LEN, wide: BODY_HALF_WIDE, tall: BODY_HALF_TALL,
+  };
 
   /** True from the first stroke until she is back out in the open — while
    *  it holds, travel follows the bore's line, so letting go of the button
@@ -410,8 +459,6 @@ export class IslandScene {
 
   private readonly crosshair = document.createElement('div');
 
-  private aimReadout: HTMLElement | null = null;
-
   constructor(host: HTMLElement) {
     this.host = host;
     host.classList.add('density-lab-host');
@@ -539,6 +586,7 @@ export class IslandScene {
     void this.queen.load().then((ok) => {
       this.queen.root.visible = ok;
       this.queenReady = ok;
+      if (ok) this.measureBody();
     }).finally(() => {
       this.queenSettled = true;
       this.playerReady = true;
@@ -992,6 +1040,35 @@ export class IslandScene {
 
   setMeshBudgetCapForTest(cap: number): void { this.meshBudgetCapForTest = cap; }
 
+  /** Which part of her oval is in the soil one step ahead — the wedge,
+   *  named. -1 means she fits. For diagnosing a stuck dig. */
+  blockedShellForTest(): { idx: number; aimY: number; stepMm: number } {
+    const aim = this.boreAim();
+    const next = this.at.clone().addScaledVector(aim, (3 * (1 / 30)));
+    const fwd = S_FWD.set(Math.sin(this.facing), 0, Math.cos(this.facing));
+    const right = S_RIGHT.set(fwd.z, 0, -fwd.x);
+    const lift = Math.max(0, this.body.tall - RIDE) + BODY_FLOOR_MARGIN;
+    let idx = -1;
+    for (let i = 0; i < BODY_SHELL.length; i += 1) {
+      const o = BODY_SHELL[i]!;
+      const p = next.clone()
+        .addScaledVector(fwd, o[0]! * this.body.len)
+        .addScaledVector(right, o[1]! * this.body.wide);
+      p.y += lift + o[2]! * this.body.tall;
+      if (this.stream?.solidAtWu(p.x, p.y, p.z) === true) { idx = i; break; }
+    }
+    return { idx, aimY: aim.y, stepMm: (this.at.distanceTo(next)) * MM };
+  }
+
+  /** Does her oval fit where she stands? For probing the wedge directly. */
+  bodyFitsForTest(): { fits: number; engaged: number; under: number } {
+    return {
+      fits: this.bodyFits(this.at) ? 1 : 0,
+      engaged: this.boreEngaged ? 1 : 0,
+      under: this.underground ? 1 : 0,
+    };
+  }
+
   loadingStateForTest(): {
     world: number; queenSettled: number; player: number; overlayGone: number;
   } {
@@ -1316,13 +1393,6 @@ export class IslandScene {
 
   private hideGateAsk(): void { this.showGateAsk(null); }
 
-  /** The dial, in degrees, where the thumb can see it. */
-  private refreshAim(): void {
-    if (!this.aimReadout) return;
-    const deg = Math.round((this.bore.pitch * 180) / Math.PI);
-    this.aimReadout.textContent = `${deg >= 0 ? '+' : ''}${deg}°`;
-  }
-
   /** The GRIP/FREE chip is an INDICATOR — the states switch themselves, so
    *  the chip's whole job is to make the current one obvious. */
   private refreshModeChip(): void {
@@ -1595,13 +1665,94 @@ export class IslandScene {
     this.embedFrames = 0;
   }
 
+  /**
+   * How big she actually is, off the rig rather than out of the air.
+   *
+   * Taken in her rest pose with her legs where they sit, so the width is a
+   * real leg span and the height reaches her tallest point. The stance
+   * radius is kept as a floor on the width: a bounding box drawn at one
+   * instant can catch her mid-stride with her legs gathered, and a tunnel
+   * cut to that would pinch her the moment she spread them again.
+   */
+  private measureBody(): void {
+    const box = new THREE.Box3().setFromObject(this.queen.root);
+    if (box.isEmpty()) return;
+    const size = box.getSize(new THREE.Vector3());
+    if (!Number.isFinite(size.x) || size.x <= 0) return;
+    this.body.len = Math.max(size.z / 2, BODY_HALF_LEN);
+    this.body.wide = Math.max(size.x / 2, BODY_HALF_WIDE);
+    this.body.tall = Math.max(size.y / 2, BODY_HALF_TALL);
+  }
+
+  /**
+   * DOES SHE FIT HERE? The oval, not the point.
+   *
+   * Sampled on the shell of the oval rather than through its volume: what
+   * traps her is soil at her edges — a roof on her back, a wall at her
+   * shoulder — and the middle of her body is wherever the middle of the
+   * tunnel is. Cheap enough to ask every frame, which is what it takes to
+   * stop a body entering somewhere its own model cannot go.
+   */
+  private bodyFits(at: THREE.Vector3): boolean {
+    const stream = this.stream;
+    if (!stream) return true;
+    const fwd = S_FWD.set(Math.sin(this.facing), 0, Math.cos(this.facing));
+    const right = S_RIGHT.set(fwd.z, 0, -fwd.x);
+    /*
+     * Her oval is centred on her BODY, not on `at`, which is a point a ride
+     * height above whatever she is standing on. Without the lift its belly
+     * sits below her own feet, so the floor she is standing on counts as
+     * soil in the way and she can never move anywhere at all.
+     */
+    /* Strictly ABOVE her feet, not level with them: a belly probe sitting
+     * exactly on the floor samples the floor as soil in the way, and she
+     * could never move anywhere at all. */
+    const lift = Math.max(0, this.body.tall - RIDE) + BODY_FLOOR_MARGIN;
+    const probe = S_TARGET;
+    for (let i = 0; i < BODY_SHELL.length; i += 1) {
+      const o = BODY_SHELL[i]!;
+      probe.copy(at)
+        .addScaledVector(fwd, o[0]! * this.body.len)
+        .addScaledVector(right, o[1]! * this.body.wide);
+      probe.y += lift + o[2]! * this.body.tall;
+      if (stream.solidAtWu(probe.x, probe.y, probe.z) === true) return false;
+    }
+    return true;
+  }
+
+  /**
+   * How far her oval reaches along an arbitrary direction.
+   *
+   * Exact for an axis-aligned ellipsoid, and the reason the face has to ask
+   * at all: her body lies flat whatever the aim does, so a shaft driven
+   * straight DOWN has to be cut as wide as she is LONG, while a level run
+   * only has to clear her cross-section. Sizing the face off a fixed radius
+   * cut a 3.4 mm slot for a 9 mm ant and left her nose and tail buried in
+   * the floor, which read as digging that did nothing at all.
+   */
+  private bodyReach(dir: THREE.Vector3): number {
+    const fwd = Math.sin(this.facing) * dir.x + Math.cos(this.facing) * dir.z;
+    const right = dir.x * Math.cos(this.facing) - dir.z * Math.sin(this.facing);
+    return Math.hypot(
+      fwd * this.body.len, right * this.body.wide, dir.y * this.body.tall,
+    );
+  }
+
   /** The way she is pointed AND pitched — the line the bore cuts and, while
    *  she is engaged in one, the line she travels. */
   private boreAim(): THREE.Vector3 {
-    const cp = Math.cos(this.bore.pitch);
-    return new THREE.Vector3(
-      Math.sin(this.facing) * cp, Math.sin(this.bore.pitch), Math.cos(this.facing) * cp,
-    );
+    /*
+     * SHE DIGS WHERE YOU ARE LOOKING, in either view, which is what let the
+     * ± dial go. In her own eyes that is her gaze; over her shoulder it is
+     * the way the camera faces her, so tilting the view down at the ground
+     * aims her into it and levelling it out tunnels her along. One rule,
+     * no gauge to read, and nothing that can disagree with the picture.
+     */
+    const aim = this.camera.getWorldDirection(new THREE.Vector3());
+    if (aim.lengthSq() < 1e-6) {
+      return new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
+    }
+    return aim.normalize();
   }
 
   /**
@@ -1619,7 +1770,10 @@ export class IslandScene {
     const next = this.at.clone().addScaledVector(this.boreAim(), speed * dt);
     next.x = Math.min(span - 2, Math.max(2, next.x));
     next.z = Math.min(span - 2, Math.max(2, next.z));
-    if (this.stream?.solidAtWu(next.x, next.y, next.z) === true) return;
+    /* THE OVAL DECIDES. She goes where her body goes and nowhere else, so
+     * a tunnel that has not been opened to her size simply stops her —
+     * which is what makes the jaws, and not the stick, the thing that digs. */
+    if (!this.bodyFits(next)) return;
     this.at.copy(next);
     this.clearBodyRoom();
     this.lastSafe.copy(this.at);
@@ -1642,30 +1796,54 @@ export class IslandScene {
    * carve a tunnel simply by walking underground, and the jaws would stop
    * being what makes a nest.
    */
-  private clearBodyRoom(): void {
-    if (!this.stream || !this.input.dig || !this.underground) {
+  private clearBodyRoom(here = false, aim?: THREE.Vector3): void {
+    if (!this.stream || !this.input.dig) {
       this.hasCleared = false;
       return;
     }
+
+    const to = aim
+      ? this.at.clone().addScaledVector(aim, BITE_DEPTH_MM / MM)
+      : this.at.clone();
     const from = this.hasCleared ? this.clearedTo : this.at;
-    const stride = TUNNEL_RADIUS * 0.6;
-    const span = from.distanceTo(this.at);
-    if (this.hasCleared && span < stride * 0.5) return;
-    const steps = Math.min(24, Math.max(1, Math.ceil(span / stride)));
+    const stride = this.body.tall * 0.8;
+    const span = from.distanceTo(to);
+    /* A stroke always cuts where she stands, however little she has moved;
+     * only the follow-along carve waits for real travel. */
+    if (!here && this.hasCleared && span < stride * 0.5) return;
+    const steps = Math.min(32, Math.max(1, Math.ceil(span / stride)));
     let minX = Infinity; let minY = Infinity; let minZ = Infinity;
     let maxX = -Infinity; let maxY = -Infinity; let maxZ = -Infinity;
     let touched = 0;
     for (let i = 1; i <= steps; i += 1) {
-      const at = from.clone().lerp(this.at, i / steps);
-      const result = this.stream.subtractSphere(at, TUNNEL_RADIUS);
-      if (result.changedSamples === 0) continue;
-      touched += result.changedSamples;
-      const b = result.bounds;
-      minX = Math.min(minX, b.minX); maxX = Math.max(maxX, b.maxX);
-      minY = Math.min(minY, b.minY); maxY = Math.max(maxY, b.maxY);
-      minZ = Math.min(minZ, b.minZ); maxZ = Math.max(maxZ, b.maxZ);
+      const at = from.clone().lerp(to, i / steps);
+      /* Her OVAL, not a ball: wide enough for her legs and tall enough for
+       * her back, swept along the line she took. A round tube big enough
+       * for her width would take out far more roof than an ant ever does. */
+      const fwd = S_FWD.set(Math.sin(this.facing), 0, Math.cos(this.facing));
+      const right = S_RIGHT.set(fwd.z, 0, -fwd.x);
+      const r = this.body.tall + CLEAR_MARGIN;
+      const lift = Math.max(0, this.body.tall - RIDE) + BODY_FLOOR_MARGIN;
+      /* Her WHOLE oval — nose to tail as well as flank to flank. Clearing
+       * only a cross-section left her ends in the soil, and the fit test
+       * then refused to let her move into the hole she had just cut. */
+      for (let j = -1; j <= 1; j += 1) {
+        for (let k = -1; k <= 1; k += 1) {
+          const spot = at.clone()
+            .addScaledVector(fwd, j * Math.max(0, this.body.len + CLEAR_MARGIN - r))
+            .addScaledVector(right, k * Math.max(0, this.body.wide + CLEAR_MARGIN - r));
+          spot.y += lift;
+          const result = this.stream.subtractSphere(spot, r);
+          if (result.changedSamples === 0) continue;
+          touched += result.changedSamples;
+          const b = result.bounds;
+          minX = Math.min(minX, b.minX); maxX = Math.max(maxX, b.maxX);
+          minY = Math.min(minY, b.minY); maxY = Math.max(maxY, b.maxY);
+          minZ = Math.min(minZ, b.minZ); maxZ = Math.max(maxZ, b.maxZ);
+        }
+      }
     }
-    this.clearedTo.copy(this.at);
+    this.clearedTo.copy(to);
     this.hasCleared = true;
     if (touched === 0) return;
     const lo = (v: number) => Math.max(0, Math.floor((v - 1) / CH));
@@ -1697,18 +1875,18 @@ export class IslandScene {
   /**
    * One stroke of the head, cut ACROSS the working face.
    *
-   * Her jaws take a 1.75 mm mouthful, but the hole has to end up wide
-   * enough to walk down, so a stroke is several of those side by side: one
-   * on the axis and a ring of them around it, spaced so consecutive
-   * spheres overlap and the union clears a bore of TUNNEL_RADIUS with no
-   * scallops left between. The ring sits at exactly (tunnel − bite) from
-   * the axis, which puts the outer edge of the outer bites on the tunnel
-   * wall and not a millimetre beyond it: she cuts what she needs and no
-   * more, so the anatomy stays honest and the spoil stays truthful.
+   * Her jaws take a mouthful 1.75 mm across and half a millimetre deep, and
+   * the hole has to end up big enough to live in, so a stroke is a whole
+   * face of those: rings of scoops out to her own width and height, spaced
+   * so consecutive ones overlap and the union leaves no scallops between.
+   * The face is her OVAL — her legs across, her back up and down — so she
+   * opens exactly what she has to fit through and not a millimetre more,
+   * and the spoil stays truthful.
    */
   private bite(): void {
     const aim = this.boreAim();
-    const centre = this.at.clone().addScaledVector(aim, JAW_REACH);
+    // Set back so the sphere's leading cap cuts BITE_DEPTH and no more.
+    const centre = this.at.clone().addScaledVector(aim, JAW_REACH + BITE_SETBACK);
     // A frame across the face. Any perpendicular will do; this one just
     // has to not collapse when she is boring straight up or down.
     const seed = Math.abs(aim.y) > 0.9
@@ -1716,8 +1894,16 @@ export class IslandScene {
       : new THREE.Vector3(0, 1, 0);
     const across = new THREE.Vector3().crossVectors(aim, seed).normalize();
     const up = new THREE.Vector3().crossVectors(across, aim).normalize();
-    const ring = Math.max(0, TUNNEL_RADIUS - BITE_RADIUS);
-    const RING_BITES = 6;
+    /* The face is as wide as SHE is, cut in mouthfuls. A scoop is 1.75 mm
+     * across against a body eight millimetres wide, so that is two rings of
+     * them, not one — the outer at her flank and an inner one to take the
+     * scallops out between. */
+    /* The face is her SILHOUETTE looking down the aim, cut in mouthfuls. */
+    const halfAcross = this.bodyReach(across) + CLEAR_MARGIN;
+    const halfUp = this.bodyReach(up) + CLEAR_MARGIN;
+    const reach = Math.max(halfAcross, halfUp);
+    const step = (BITE_WIDTH_MM * 0.8) / MM;
+    const RING_BITES = 8;
 
     let touched = 0;
     let minX = Infinity; let minY = Infinity; let minZ = Infinity;
@@ -1733,12 +1919,14 @@ export class IslandScene {
     };
 
     cut(centre);
-    if (ring > 1e-6) {
-      for (let i = 0; i < RING_BITES; i += 1) {
-        const a = (i / RING_BITES) * Math.PI * 2;
-        cut(centre.clone()
-          .addScaledVector(across, Math.cos(a) * ring)
-          .addScaledVector(up, Math.sin(a) * ring));
+    for (let r = step; r <= reach + 1e-6; r += step) {
+      const bites = Math.max(RING_BITES, Math.ceil((2 * Math.PI * r) / step));
+      for (let i = 0; i < bites; i += 1) {
+        const a = (i / bites) * Math.PI * 2;
+        // An OVAL face: her width across, her height up and down.
+        const wx = Math.cos(a) * Math.min(r, halfAcross);
+        const wy = Math.sin(a) * Math.min(r, halfUp);
+        cut(centre.clone().addScaledVector(across, wx).addScaledVector(up, wy));
       }
     }
     /*
@@ -1749,8 +1937,8 @@ export class IslandScene {
      * measured at 2.5 mm of clearance against a 4.03 mm stance, which is
      * still an ant wearing her own tunnel. Rather than add more bites and
      * hope the geometry adds up, the stroke also clears her own body's
-     * room as she passes: whatever is left inside TUNNEL_RADIUS of her
-     * centre comes out.
+     * room as she passes: whatever is left inside the oval she occupies
+     * comes out.
      *
      * It cannot be used to cheat forward, because digging never moves her
      * and she can only advance into space already cleared — so her jaws
@@ -1758,6 +1946,25 @@ export class IslandScene {
      * it does not run at all, or standing on a hillside chewing would
      * scoop a crater around her instead of scraping at the face.
      */
+    /*
+     * And her own room, every stroke. Clearing only ever on a successful
+     * MOVE was a deadlock: her oval cannot fit until the tunnel is opened,
+     * and the tunnel was only opened once she had moved. Cutting where she
+     * stands breaks that — the hole grows around her, and the fit test
+     * then lets her walk on into it.
+     */
+    /*
+     * ONE BITE FURTHER ON, which is what actually lets her advance.
+     *
+     * Clearing only where she STANDS cannot move her: the oval there is
+     * already open, and a 0.5 mm face is a slab far too thin to reach a
+     * nose four and a half millimetres out in front — she cleared her own
+     * room, was told her nose was in the wall, and stopped dead with the
+     * jaws running. So a stroke opens her room one mouthful along the aim
+     * and she creeps into it. The jaws still set the pace exactly: half a
+     * millimetre a stroke, and nowhere to go that has not been cut.
+     */
+    this.clearBodyRoom(true, aim);
     if (touched === 0) return;
 
     // One remesh for the whole face, not seven.
@@ -2192,36 +2399,6 @@ export class IslandScene {
     dig.addEventListener('lostpointercapture', stopDig);
     actions.appendChild(dig);
 
-    /*
-     * THE PITCH DIAL. Aiming is the whole difference between a tunnel and a
-     * trench: pitch steers her TRAVEL, not just the bite, so a shaft is dug
-     * by aiming down and holding. Ten degrees a tap, straight down to
-     * straight up — symmetric, because an ant that digs down has to be able
-     * to dig back out. In her own eyes the look IS the aim and these are
-     * not needed; over her shoulder there is no gaze to read, so they are.
-     */
-    const aimRow = document.createElement('div');
-    aimRow.className = 'density-lab-aim';
-    const aimChip = (label: string, steps: number) => {
-      const b = document.createElement('button');
-      b.className = 'density-lab-button density-lab-mode';
-      b.textContent = label;
-      b.addEventListener('pointerdown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.bore.aim(steps);
-        this.refreshAim();
-      });
-      return b;
-    };
-    aimRow.appendChild(aimChip('AIM ▲', 1));
-    this.aimReadout = document.createElement('span');
-    this.aimReadout.className = 'density-lab-aim-readout';
-    aimRow.appendChild(this.aimReadout);
-    aimRow.appendChild(aimChip('▼', -1));
-    actions.appendChild(aimRow);
-    this.refreshAim();
-
     /* The nest tools are still here; they are just no longer what DIG means. */
     const tools = document.createElement('button');
     tools.className = 'density-lab-button density-lab-mode';
@@ -2297,8 +2474,9 @@ export class IslandScene {
 
     /*
      * WASD for the PC hand (playtest: "I was having trouble moving"):
-     * W/S walk, A/D turn, Shift sprint, Space DIGS (hold), R/F aim up and
-     * down, B opens the nest tools, V swaps the view.
+     * W/S walk, A/D turn, Shift sprint, Space DIGS (hold), B opens the nest
+     * tools, V swaps the view. There is no aim key: she digs where the view
+     * looks.
      * Arrows mirror WASD. Keys and stick write the same inputs.
      */
     const applyKeys = () => {
@@ -2335,8 +2513,6 @@ export class IslandScene {
         if (key === 'e' || key === 'enter') { this.answerGate(true); return; }
         if (key === 'escape') { this.answerGate(false); return; }
       }
-      if (key === 'r' && !e.repeat) { this.bore.aim(1); this.refreshAim(); }
-      if (key === 'f' && !e.repeat) { this.bore.aim(-1); this.refreshAim(); }
       if (key === 'b' && !e.repeat) this.openDesigner();
       if (key === 'v' && !e.repeat) this.firstPerson = !this.firstPerson;
       if (key === 'p' && !e.repeat) {
@@ -2398,8 +2574,6 @@ export class IslandScene {
           this.bore.turn(-e.movementX * 0.004);
           this.facing = this.bore.heading;
           this.fpPitch = Math.min(1.1, Math.max(-1.1, this.fpPitch - e.movementY * 0.004));
-          this.bore.aimTo(this.fpPitch);
-          this.refreshAim();
         } else {
           // Third person: the drag pans the view — above ground a full
           // orbit, underground a tight override the trail cam resumes from
@@ -2582,9 +2756,11 @@ export class IslandScene {
       // (surface, chamber) is FREE. `chamberNow` says which FREE.
       free: this.railEdge >= 0 ? 0 : 1,
       chamberNow: this.chamberId !== null ? 1 : 0,
-      tunnelRadiusMm: TUNNEL_RADIUS * MM,
-      biteRadiusMm: BITE_RADIUS * MM,
-      aimDeg: (this.bore.pitch * 180) / Math.PI,
+      bodyLenMm: this.body.len * MM,
+      bodyWideMm: this.body.wide * MM,
+      bodyTallMm: this.body.tall * MM,
+      biteWidthMm: BITE_WIDTH_MM,
+      biteDepthMm: BITE_DEPTH_MM,
       asking: this.gateAsk ? 1 : 0,
       playerReady: this.playerReady ? 1 : 0,
       statsOpen: this.statsPanel.bodyVisible ? 1 : 0,
