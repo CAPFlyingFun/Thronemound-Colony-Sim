@@ -1,8 +1,24 @@
 name: Deploy game to GitHub Pages
 
+# TWO SITES, ONE DEPLOY.
+#
+# GitHub Pages serves a single artifact, so there is no second deployment to
+# be had — but there is nothing stopping one artifact holding two builds. The
+# root is MAIN, and stays the stable thing anyone can be pointed at. The
+# /preview/ folder is whatever is on the development branch, so work in
+# progress can be played on a phone without it going near a release.
+#
+# The deploy always runs FROM main, whichever way it was started: the Pages
+# environment only trusts the default branch, and a work-in-progress branch
+# has no business holding the deploy key to the live site either way.
+#
+#   root      https://capflyingfun.github.io/Thronemound-Colony-Sim/
+#   preview   https://capflyingfun.github.io/Thronemound-Colony-Sim/preview/
+
 on:
   push:
     branches: [main]
+  # How the preview gets refreshed: push the branch, then start this.
   workflow_dispatch:
 
 permissions:
@@ -13,6 +29,9 @@ permissions:
 concurrency:
   group: pages
   cancel-in-progress: true
+
+env:
+  PREVIEW_BRANCH: claude/html-game-pwa-7if2zs
 
 jobs:
   build:
@@ -37,6 +56,42 @@ jobs:
         run: npm run typecheck
       - name: Build
         run: npm run build
+
+      # ---------------------------------------------------------------- preview
+      # Everything below is best-effort on purpose. The preview exists to be
+      # LOOKED AT while it is still wrong — gating it on green tests would make
+      # it useless for the one job it has — and a branch that will not compile
+      # must never take the stable site down with it.
+      - name: Fetch the preview branch
+        id: preview_src
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PREVIEW_BRANCH }}
+          path: preview-src
+      - name: Build the preview
+        id: preview_build
+        if: steps.preview_src.outcome == 'success'
+        continue-on-error: true
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        working-directory: preview-src
+        # vite build, not npm run build: `tsc -b` would refuse a branch that is
+        # mid-thought, which is exactly the branch worth previewing.
+        run: |
+          npm ci
+          npx vite build --base=/Thronemound-Colony-Sim/preview/
+          mkdir -p ../dist/preview
+          cp -r dist/. ../dist/preview/
+      - name: Say what landed in /preview/
+        if: always()
+        run: |
+          if [ -f dist/preview/index.html ]; then
+            echo "preview: $(git -C preview-src rev-parse --short HEAD) on $PREVIEW_BRANCH"
+          else
+            echo "preview: NOT built this run — the root site is unaffected"
+          fi
+
       - name: Configure Pages
         uses: actions/configure-pages@v5
         with:
