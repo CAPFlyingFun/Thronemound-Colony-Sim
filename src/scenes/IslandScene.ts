@@ -36,6 +36,7 @@ import './DensityTerrainLabScene.css';
 import { buildSurfaceNets } from '../density/SurfaceNets';
 import { QueenModel } from '../anim/QueenModel';
 import { FOOT_CLEARANCE_MM } from '../anim/legDrive';
+import { stanceRadius } from '../anim/hexapod';
 import { buildNestView, type NestView } from '../nest/nestView';
 import { NestDesigner } from '../nest/NestDesigner';
 import { planBounds } from '../nest/nestCarve';
@@ -113,7 +114,33 @@ const LEAD_S = 0.45;
 const LEAD_MAX = 24 / MM;
 const SCROLL_COOLDOWN_MS = 150;
 
+/**
+ * One mouthful, in world units: her MANDIBLE, not her tunnel.
+ *
+ * 1.75 mm for a queen, from `CASTE_BITE_MM` where it was tuned against the
+ * models. A worker's is 0.75 and a major's 2.5, and a major out-digging a
+ * queen is most of the point of a major.
+ */
 const BITE_RADIUS = 1.75 / MM;
+
+/**
+ * How wide the tunnel has to END UP, which is a different question — and
+ * the one that was got wrong.
+ *
+ * A mandible-sized bite means a bore is no longer one stroke wide: a tunnel
+ * she can walk down has to be CUT wide, several bites across, instead of
+ * arriving free with the first one. Cutting a single 1.75 mm sphere per
+ * stroke left a 3.5 mm bore for a NINE millimetre ant, and she spent the
+ * whole time wearing it — reported as trying to fit down tunnels too small
+ * for her, which is exactly what it was.
+ *
+ * The width is her stance radius, read off the rig by
+ * `scripts/probe-stanceradius.mjs` rather than picked: 4.03 mm on a 9 mm
+ * queen. That is the number that matters because it is where her FEET land
+ * — cut narrower and every ground sample hits the rim, which is how she
+ * once became unable to get back into her own shaft.
+ */
+const TUNNEL_RADIUS = stanceRadius();
 
 /** How far ahead of her centre the jaws bite, in world units. */
 const JAW_REACH = 1.4 / MM;
@@ -219,6 +246,12 @@ export class IslandScene {
    * is held.
    */
   private readonly bore = new BoreRig(Math.PI);
+
+  /** Where her body's room was last cleared to — the tube is cut along the
+   *  path between that and where she is now, not at points. */
+  private readonly clearedTo = new THREE.Vector3();
+
+  private hasCleared = false;
 
   /** True from the first stroke until she is back out in the open — while
    *  it holds, travel follows the bore's line, so letting go of the button
@@ -1588,9 +1621,62 @@ export class IslandScene {
     next.z = Math.min(span - 2, Math.max(2, next.z));
     if (this.stream?.solidAtWu(next.x, next.y, next.z) === true) return;
     this.at.copy(next);
+    this.clearBodyRoom();
     this.lastSafe.copy(this.at);
     this.hasSafe = true;
     this.embedFrames = 0;
+  }
+
+  /**
+   * THE TUNNEL SIZE CHECK: her body's room, cut along the path she takes.
+   *
+   * Her jaws are 1.75 mm and she is nine millimetres long, so the face she
+   * bites is nowhere near the width of the hole she has to live in — a
+   * bore is several bites across, and the tube between them still has to
+   * be opened out. This does that opening as she passes, and it has to
+   * follow the PATH: a stroke is 0.42 s and covers about 6 mm, so clearing
+   * one sphere per stroke pinched the tube to 2.5 mm between them,
+   * scalloped along its length instead of around it and just as unwearable.
+   *
+   * It only runs while she is actually CUTTING. Without that she would
+   * carve a tunnel simply by walking underground, and the jaws would stop
+   * being what makes a nest.
+   */
+  private clearBodyRoom(): void {
+    if (!this.stream || !this.input.dig || !this.underground) {
+      this.hasCleared = false;
+      return;
+    }
+    const from = this.hasCleared ? this.clearedTo : this.at;
+    const stride = TUNNEL_RADIUS * 0.6;
+    const span = from.distanceTo(this.at);
+    if (this.hasCleared && span < stride * 0.5) return;
+    const steps = Math.min(24, Math.max(1, Math.ceil(span / stride)));
+    let minX = Infinity; let minY = Infinity; let minZ = Infinity;
+    let maxX = -Infinity; let maxY = -Infinity; let maxZ = -Infinity;
+    let touched = 0;
+    for (let i = 1; i <= steps; i += 1) {
+      const at = from.clone().lerp(this.at, i / steps);
+      const result = this.stream.subtractSphere(at, TUNNEL_RADIUS);
+      if (result.changedSamples === 0) continue;
+      touched += result.changedSamples;
+      const b = result.bounds;
+      minX = Math.min(minX, b.minX); maxX = Math.max(maxX, b.maxX);
+      minY = Math.min(minY, b.minY); maxY = Math.max(maxY, b.maxY);
+      minZ = Math.min(minZ, b.minZ); maxZ = Math.max(maxZ, b.maxZ);
+    }
+    this.clearedTo.copy(this.at);
+    this.hasCleared = true;
+    if (touched === 0) return;
+    const lo = (v: number) => Math.max(0, Math.floor((v - 1) / CH));
+    const hi = (v: number, max: number) => Math.min(max - 1, Math.floor((v + 1) / CH));
+    for (let cz = lo(minZ); cz <= hi(maxZ, CHUNKS_XZ); cz += 1) {
+      for (let cy = lo(minY); cy <= hi(maxY, CHUNKS_Y); cy += 1) {
+        for (let cx = lo(minX); cx <= hi(maxX, CHUNKS_XZ); cx += 1) {
+          this.enqueue(cx, cy, cz);
+        }
+      }
+    }
   }
 
   private nearestRail(p: THREE.Vector3): { i: number; t: number; d: number } | null {
@@ -1608,15 +1694,78 @@ export class IslandScene {
     return best;
   }
 
+  /**
+   * One stroke of the head, cut ACROSS the working face.
+   *
+   * Her jaws take a 1.75 mm mouthful, but the hole has to end up wide
+   * enough to walk down, so a stroke is several of those side by side: one
+   * on the axis and a ring of them around it, spaced so consecutive
+   * spheres overlap and the union clears a bore of TUNNEL_RADIUS with no
+   * scallops left between. The ring sits at exactly (tunnel − bite) from
+   * the axis, which puts the outer edge of the outer bites on the tunnel
+   * wall and not a millimetre beyond it: she cuts what she needs and no
+   * more, so the anatomy stays honest and the spoil stays truthful.
+   */
   private bite(): void {
-    const mouth = this.at.clone().addScaledVector(this.boreAim(), JAW_REACH);
-    const result = this.stream!.subtractSphere(mouth, BITE_RADIUS);
-    if (result.changedSamples === 0) return;
+    const aim = this.boreAim();
+    const centre = this.at.clone().addScaledVector(aim, JAW_REACH);
+    // A frame across the face. Any perpendicular will do; this one just
+    // has to not collapse when she is boring straight up or down.
+    const seed = Math.abs(aim.y) > 0.9
+      ? new THREE.Vector3(1, 0, 0)
+      : new THREE.Vector3(0, 1, 0);
+    const across = new THREE.Vector3().crossVectors(aim, seed).normalize();
+    const up = new THREE.Vector3().crossVectors(across, aim).normalize();
+    const ring = Math.max(0, TUNNEL_RADIUS - BITE_RADIUS);
+    const RING_BITES = 6;
+
+    let touched = 0;
+    let minX = Infinity; let minY = Infinity; let minZ = Infinity;
+    let maxX = -Infinity; let maxY = -Infinity; let maxZ = -Infinity;
+    const cut = (at: THREE.Vector3, radius = BITE_RADIUS) => {
+      const result = this.stream!.subtractSphere(at, radius);
+      if (result.changedSamples === 0) return;
+      touched += result.changedSamples;
+      const b = result.bounds;
+      minX = Math.min(minX, b.minX); maxX = Math.max(maxX, b.maxX);
+      minY = Math.min(minY, b.minY); maxY = Math.max(maxY, b.maxY);
+      minZ = Math.min(minZ, b.minZ); maxZ = Math.max(maxZ, b.maxZ);
+    };
+
+    cut(centre);
+    if (ring > 1e-6) {
+      for (let i = 0; i < RING_BITES; i += 1) {
+        const a = (i / RING_BITES) * Math.PI * 2;
+        cut(centre.clone()
+          .addScaledVector(across, Math.cos(a) * ring)
+          .addScaledVector(up, Math.sin(a) * ring));
+      }
+    }
+    /*
+     * AND THE TUNNEL SIZE CHECK, which is what actually guarantees the fit.
+     *
+     * A ring of round bites leaves scalloped valleys between them, so the
+     * TUBE she ends up travelling down is narrower than the face she cut —
+     * measured at 2.5 mm of clearance against a 4.03 mm stance, which is
+     * still an ant wearing her own tunnel. Rather than add more bites and
+     * hope the geometry adds up, the stroke also clears her own body's
+     * room as she passes: whatever is left inside TUNNEL_RADIUS of her
+     * centre comes out.
+     *
+     * It cannot be used to cheat forward, because digging never moves her
+     * and she can only advance into space already cleared — so her jaws
+     * still set the rate, and this only ever sets the SHAPE. Above ground
+     * it does not run at all, or standing on a hillside chewing would
+     * scoop a crater around her instead of scraping at the face.
+     */
+    if (touched === 0) return;
+
+    // One remesh for the whole face, not seven.
     const lo = (v: number) => Math.max(0, Math.floor((v - 1) / CH));
     const hi = (v: number, max: number) => Math.min(max - 1, Math.floor((v + 1) / CH));
-    for (let cz = lo(result.bounds.minZ); cz <= hi(result.bounds.maxZ, CHUNKS_XZ); cz += 1) {
-      for (let cy = lo(result.bounds.minY); cy <= hi(result.bounds.maxY, CHUNKS_Y); cy += 1) {
-        for (let cx = lo(result.bounds.minX); cx <= hi(result.bounds.maxX, CHUNKS_XZ); cx += 1) {
+    for (let cz = lo(minZ); cz <= hi(maxZ, CHUNKS_XZ); cz += 1) {
+      for (let cy = lo(minY); cy <= hi(maxY, CHUNKS_Y); cy += 1) {
+        for (let cx = lo(minX); cx <= hi(maxX, CHUNKS_XZ); cx += 1) {
           this.enqueue(cx, cy, cz);
         }
       }
@@ -1960,6 +2109,20 @@ export class IslandScene {
         ), this.chamberCam);
       }
       this.camera.position.lerp(desired, Math.min(1, dt * 9));
+      /*
+       * AND NEVER INSIDE THE WALL. A burrow is barely wider than she is —
+       * eight millimetres for a nine millimetre ant — so there is no room
+       * behind her for a chase camera to sit, and it ended up buried in
+       * the soil looking at the inside of her own tunnel. Her PATH is the
+       * one line certain to be clear, so a camera that finds itself in
+       * solid walks back along it toward her until it is not.
+       */
+      for (let i = 0; i < 6; i += 1) {
+        if (this.stream?.solidAtWu(
+          this.camera.position.x, this.camera.position.y, this.camera.position.z,
+        ) !== true) break;
+        this.camera.position.lerp(this.at, 0.3);
+      }
       this.camera.up.set(0, 1, 0);
       this.camera.lookAt(this.at.x, this.at.y + 0.15, this.at.z);
       return;
@@ -2419,6 +2582,9 @@ export class IslandScene {
       // (surface, chamber) is FREE. `chamberNow` says which FREE.
       free: this.railEdge >= 0 ? 0 : 1,
       chamberNow: this.chamberId !== null ? 1 : 0,
+      tunnelRadiusMm: TUNNEL_RADIUS * MM,
+      biteRadiusMm: BITE_RADIUS * MM,
+      aimDeg: (this.bore.pitch * 180) / Math.PI,
       asking: this.gateAsk ? 1 : 0,
       playerReady: this.playerReady ? 1 : 0,
       statsOpen: this.statsPanel.bodyVisible ? 1 : 0,

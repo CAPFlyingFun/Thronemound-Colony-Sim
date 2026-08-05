@@ -283,7 +283,11 @@ const dig = await page.evaluate(() => {
   s.input.dig = true;
   s.input.walk = 1;
   let embedded = 0;
-  for (let i = 0; i < 600; i += 1) {
+  /* Ten seconds, not twenty: a properly sized tube lets her advance far
+   * faster than the first cut did, and twenty seconds put her below the
+   * floating depth band — where `solidAtMm` has nothing to report and the
+   * test would be measuring the instrument rather than the burrow. */
+  for (let i = 0; i < 300; i += 1) {
     s.stepForTest(1 / 30, 1);
     if (i % 60 === 0) s.drainQueueForTest();
     if (s.stream.solidAtWu(s.at.x, s.at.y, s.at.z) === true) embedded += 1;
@@ -329,6 +333,69 @@ check('the dig is in the sparse store', dig.edited > 0, `${dig.edited} samples`)
 check('hole column unloaded while away', dig.goneWhileAway === null);
 check('the tunnel SURVIVED the round trip', dig.voidAfter === false,
   `solid where she stood: ${dig.voidAfter}`);
+
+console.log('\nDOES HER OWN TUNNEL FIT HER? (a queen is 9 mm; her stance radius 4.03 mm)');
+/*
+ * The bite is her MANDIBLE and the tunnel is a different question, which is
+ * the one that was got wrong: one 1.75 mm sphere a stroke cut a 3.5 mm bore
+ * for a nine millimetre ant, and she spent the whole time wearing it. A
+ * stroke now cuts a face several bites across AND clears her body's room as
+ * she passes, so what she travels down is measured against her stance rather
+ * than assumed to fit.
+ */
+const fit = await page.evaluate(() => {
+  const s = window.islandScene;
+  s.teleportMm(27600, 27600);
+  s.drainQueueForTest();
+  s.setFacingForTest(0);
+  for (let i = 0; i < 5; i += 1) s.bore.aim(-1); // in at fifty degrees
+  s.input.dig = true;
+  s.input.walk = 1;
+  for (let i = 0; i < 600; i += 1) {
+    s.stepForTest(1 / 30, 1);
+    if (i % 60 === 0) s.drainQueueForTest();
+  }
+  for (let i = 0; i < 5; i += 1) s.bore.aim(1); // then level, so we measure a RUN
+  for (let i = 0; i < 600; i += 1) {
+    s.stepForTest(1 / 30, 1);
+    if (i % 60 === 0) s.drainQueueForTest();
+  }
+  s.input.dig = false;
+  s.input.walk = 0;
+  s.drainQueueForTest();
+  s.stepForTest(1 / 30, 20);
+  // Clear air around her, swept in a ring perpendicular to a +z heading.
+  let worst = Infinity;
+  for (let a = 0; a < 12; a += 1) {
+    const ang = (a / 12) * Math.PI * 2;
+    let reach = 0;
+    for (let mm = 0.5; mm <= 8; mm += 0.5) {
+      const x = s.at.x + (Math.cos(ang) * mm) / 5;
+      const y = s.at.y + (Math.sin(ang) * mm) / 5;
+      if (s.stream.solidAtWu(x, y, s.at.z) === true) break;
+      reach = mm;
+    }
+    worst = Math.min(worst, reach);
+  }
+  const st = s.statsForTest();
+  return {
+    worst,
+    stance: st.tunnelRadiusMm,
+    bite: st.biteRadiusMm,
+    depth: s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5) - s.at.y * 5,
+    camSolid: s.stream.solidAtWu(
+      s.camera.position.x, s.camera.position.y, s.camera.position.z,
+    ) === true,
+  };
+});
+check('the bite stays her mandible', Math.abs(fit.bite - 1.75) < 0.01,
+  `${fit.bite.toFixed(2)} mm`);
+check('she is well underground for the measurement', fit.depth > 40,
+  `${fit.depth.toFixed(1)} mm down`);
+check('and her tunnel clears her stance all the way round',
+  fit.worst >= fit.stance - 0.75,
+  `worst clearance ${fit.worst.toFixed(1)} mm against a ${fit.stance.toFixed(2)} mm stance`);
+check('the camera is never buried in the tunnel wall', fit.camSolid === false);
 
 console.log('\nTHE WALKS (clearance is against the DRAWN triangles — below zero');
 console.log('is "she went underground", the playtest bug this pins down forever)');
@@ -719,8 +786,12 @@ const pan = await page.evaluate(() => {
   };
 });
 check('she is underground for the pan test', pan.under === 1);
-check('held drag orbits close around her', pan.heldDist > 3 && pan.heldDist < 9
-  && pan.heldY > 0.5, `${pan.heldDist.toFixed(1)} mm out, ${(pan.heldY * 5).toFixed(1)} mm up`);
+/* Closer than it used to sit, and deliberately: a burrow is barely wider
+ * than she is, so a camera that refuses to be inside the wall has to give
+ * up its distance. The orbit still has to be BEHIND her and above, just
+ * not out in the soil. */
+check('held drag orbits close around her', pan.heldDist > 1.5 && pan.heldDist < 9
+  && pan.heldY > 0.2, `${pan.heldDist.toFixed(1)} mm out, ${(pan.heldY * 5).toFixed(1)} mm up`);
 check('released, the trail capsule takes the camera back',
   pan.backDist > 2 && pan.backDist < 12, `${pan.backDist.toFixed(1)} mm back`);
 
