@@ -81,6 +81,30 @@ check('a STATS chip exists and starts collapsed', statsChip.hasChip && statsChip
 check('tap expands it and telemetry flows in', statsChip.openNow && statsBody.hasTelemetry);
 check('tap again folds it away', statsBody.closedAgain);
 
+/*
+ * Every probe below that wants to be UNDERGROUND has to knock: walking onto
+ * the mouth asks ENTER? and waits, so the old "walk east across the gate and
+ * fall in" preamble no longer descends on its own. This is that knock.
+ */
+await page.evaluate(() => {
+  window.__goIn = (fromXMm, fromZMm, facing, steps = 700) => {
+    const s = window.islandScene;
+    s.teleportMm(fromXMm, fromZMm);
+    s.drainQueueForTest();
+    s.setFacingForTest(facing);
+    s.input.walk = 1;
+    for (let i = 0; i < steps; i += 1) {
+      s.stepForTest(1 / 30, 1);
+      const ask = s.gateAskForTest();
+      if (ask && ask.kind === 'enter') {
+        s.answerGateForTest(true);
+        return true;
+      }
+    }
+    return false;
+  };
+});
+
 console.log('\nTHE ISLAND');
 const stats = await page.evaluate(() => window.islandScene.statsForTest());
 check('all 64 sections built', stats.verts === 64 * 65 * 65 && stats.tris === 64 * 64 * 64 * 2,
@@ -301,7 +325,8 @@ for (const [name, walk] of walks) {
     `worst clearance ${walk.minClearMm.toFixed(2)} mm`);
 }
 
-console.log('\nINTO THE HOLE (the playtest bug: "it bounced me back up")');
+console.log('\nINTO THE HOLE (asked at the mouth, then down; the playtest bug:');
+console.log('"it bounced me back up" — and the newer one, being dropped in unasked)');
 const descent = await page.evaluate(() => {
   const s = window.islandScene;
   const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
@@ -310,6 +335,17 @@ const descent = await page.evaluate(() => {
   s.drainQueueForTest();
   s.setFacingForTest(Math.PI / 2);
   s.input.walk = 1;
+  /* Walking onto her own mouth must ASK rather than drop her in — the
+   * anthill is not a trapdoor. She only goes down once the thumb says so. */
+  let askedIn = -1;
+  let droppedUnasked = 0;
+  for (let i = 0; i < 400; i += 1) {
+    s.stepForTest(1 / 30, 1);
+    const surface = s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5);
+    if (s.at.y * 5 < surface - 6) droppedUnasked += 1;
+    const ask = s.gateAskForTest();
+    if (ask && ask.kind === 'enter') { askedIn = i; s.answerGateForTest(true); break; }
+  }
   let deepest = Infinity;
   let bouncedUp = 0;
   let wasUnder = false;
@@ -326,9 +362,15 @@ const descent = await page.evaluate(() => {
     if (deepest < -40) break; // she's properly down the shaft — stop there
   }
   s.input.walk = 0;
-  return { deepest, bouncedUp, under: s.statsForTest().underground };
+  return {
+    deepest, bouncedUp, askedIn, droppedUnasked,
+    under: s.statsForTest().underground,
+  };
 });
-check('she gets INTO the hole', descent.deepest < -30,
+check('walking onto the mouth ASKS instead of dropping her in',
+  descent.askedIn >= 0 && descent.droppedUnasked === 0,
+  `ENTER? after ${descent.askedIn} steps, ${descent.droppedUnasked} unasked frames below ground`);
+check('and YES gets her INTO the hole', descent.deepest < -30,
   `deepest ${descent.deepest.toFixed(1)} mm below the surface`);
 check('and is never yanked back through the roof', descent.bouncedUp === 0,
   `${descent.bouncedUp} bounce frames`);
@@ -418,11 +460,18 @@ const rail = await page.evaluate(() => {
     s.stepForTest(1 / 30, 1);
     if (s.statsForTest().railBound === 1) { regripAt = i; break; }
   }
-  // ...and riding TOWARD the gate auto-surfaces her — no prompt, no press:
-  // armed at ~3 mm, released at ~0.5 mm, placed beside the mouth.
+  // ...and riding TOWARD the gate ASKS. Nothing crosses the threshold in
+  // either direction without an answer: the probe's thumb taps YES the
+  // moment SURFACE? appears, and expects daylight.
   let outAt = -1;
+  let askedOut = -1;
   for (let i = 0; i < 1600; i += 1) {
     s.stepForTest(1 / 30, 1);
+    const ask = s.gateAskForTest();
+    if (ask && ask.kind === 'surface') {
+      if (askedOut < 0) askedOut = i;
+      s.answerGateForTest(true);
+    }
     if (s.statsForTest().railBound === 0
       && s.at.y * 5 >= s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5) - 2) {
       outAt = i;
@@ -444,6 +493,7 @@ const rail = await page.evaluate(() => {
     roamedInRoom,
     regripAt,
     outAt,
+    askedOut,
     railBoundAfter: s.statsForTest().railBound,
     aboveMm: s.at.y * 5 - surface,
     gateOffMm,
@@ -463,7 +513,9 @@ check('she roams the room contained, never in the walls',
   `${rail.roomSolid} solid frames of 180`);
 check('the mouth GRIPs her back on the way out', rail.regripAt >= 0,
   `regripped after ${rail.regripAt} steps`);
-check('riding toward the gate auto-surfaces her beside it',
+check('riding toward the gate ASKS instead of ejecting', rail.askedOut >= 0,
+  `SURFACE? after ${rail.askedOut} steps`);
+check('and YES puts her in daylight beside it',
   rail.outAt >= 0 && rail.railBoundAfter === 0 && rail.aboveMm > -6
   && rail.gateOffMm < 30,
   `out after ${rail.outAt} steps, ${rail.aboveMm.toFixed(1)} mm vs surface, `
@@ -503,9 +555,7 @@ console.log('\nNEVER IN THE WALLS (grinding every direction at the joints)');
 const grind = await page.evaluate(() => {
   const s = window.islandScene;
   const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
-  s.teleportMm(n.gate.x - 18, n.gate.z);
-  s.drainQueueForTest();
-  s.setFacingForTest(Math.PI / 2);
+  window.__goIn(n.gate.x - 18, n.gate.z, Math.PI / 2);
   s.input.walk = 1;
   for (let i = 0; i < 500; i += 1) {
     s.stepForTest(1 / 30, 1);
@@ -601,9 +651,7 @@ const pan = await page.evaluate(() => {
   const s = window.islandScene;
   const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
   // Back into the nest: over the gate and down.
-  s.teleportMm(n.gate.x - 18, n.gate.z);
-  s.drainQueueForTest();
-  s.setFacingForTest(Math.PI / 2);
+  window.__goIn(n.gate.x - 18, n.gate.z, Math.PI / 2);
   s.input.walk = 1;
   for (let i = 0; i < 900; i += 1) {
     s.stepForTest(1 / 30, 1);
@@ -646,8 +694,9 @@ const modes = await page.evaluate(() => {
   const surfaceFree = s.statsForTest().free;
   const surfaceLabel = chip()?.textContent;
   const surfaceGripClass = chip()?.classList.contains('is-grip');
-  // Walk into the shaft: the bore MUST grip her — there is no opt-out.
-  s.setFacingForTest(Math.PI / 2);
+  // Go in at the mouth: past the threshold, the bore MUST grip her — that
+  // part has no opt-out, and the chip has to say so.
+  window.__goIn(n.gate.x - 18, n.gate.z, Math.PI / 2);
   s.input.walk = 1;
   let grabbedAt = -1;
   for (let i = 0; i < 900; i += 1) {

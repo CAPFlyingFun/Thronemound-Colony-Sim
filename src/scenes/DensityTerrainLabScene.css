@@ -1077,3 +1077,38 @@
   background: #e9c36f;
   box-shadow: 0 0 0 2px rgba(255, 250, 238, 0.75), 0 7px 20px rgba(0, 0, 0, 0.32);
 }
+
+/*
+ * The threshold question: ENTER? over a mouth, SURFACE? riding up to one.
+ *
+ * pointer-events IS the feature here. The HUD is pointer-events:none so the
+ * canvas can have the drags, and every control that works turns it back on.
+ * The previous prompt was styled inline and never did, so its YES/NO fell
+ * through to the canvas — where the left half of the screen spawns the
+ * joystick — and the buttons could not be pressed at all.
+ */
+.density-lab-gate-ask {
+  position: absolute;
+  z-index: 30;
+  left: 50%;
+  bottom: 22%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: rgba(20, 15, 10, 0.85);
+  color: #f4e9c8;
+  pointer-events: auto;
+}
+
+.density-lab-gate-label {
+  font: 800 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.08em;
+}
+
+/* Thumb-sized on a phone, and clear of the joystick's half of the screen. */
+@media (max-height: 480px) {
+  .density-lab-gate-ask { bottom: 30%; padding: 8px 12px; }
+}

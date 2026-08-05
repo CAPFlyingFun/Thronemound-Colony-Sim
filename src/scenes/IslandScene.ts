@@ -42,8 +42,7 @@ import { planBounds } from '../nest/nestCarve';
 import { addNode } from '../nest/nestEdit';
 import { type NestPlan } from '../nest/nestPlan';
 import {
-  chamberBox, chamberFloorY, chamberNorm, clampToChamber, roamBoundaryDist,
-  type ChamberBox,
+  chamberBox, chamberNorm, insideChamber, type ChamberBox,
 } from './ChamberMovement';
 import { DebugStatsPanel } from './DebugStatsPanel';
 import { LoadingOverlay } from './LoadingOverlay';
@@ -116,21 +115,18 @@ const SCROLL_COOLDOWN_MS = 150;
 const BITE_RADIUS = 1.9 / MM;
 const BITE_EVERY_S = 0.16;
 
-/** Riding TOWARD a gate ARMS the exit inside this — and riding away,
- *  however close, never surfaces her. No prompt, no button. */
-const SURFACE_ARM_MM = 3;
+/** Riding TOWARD a gate this close ASKS whether to surface. Riding away
+ *  never asks, however close she passes — the heading is what makes the
+ *  question worth asking, and what kept the old prompt from nagging. */
+const SURFACE_ASK_MM = 3;
 
-/** Armed and this close, she is released and placed on the surface. */
-const SURFACE_OUT_MM = 0.5;
-
-/** Her body's reach inside a room — the roam ellipse shrinks by this so a
- *  centred point never puts her abdomen through the chamber wall. */
-const BODY_MARGIN_MM = 2.5;
+/** A declined gate goes quiet until she is this far from it again. */
+const GATE_RESET_MM = 8;
 
 /** Chamber-norm threshold (1 = the carved shell): the rail lets go once
- *  its centerline point is this far inside the room. The exit grab lands
- *  her a step PAST this on purpose (see chamberExitGrab) — that gap is the
- *  hysteresis that stops a grab/release flicker at the mouth. */
+ *  its centerline point is this far inside the room, and does not reach
+ *  for her again until she has walked back out through the shell — which
+ *  is the hysteresis that stops a grab/release flicker at the mouth. */
 const CHAMBER_RELEASE_NORM = 0.55;
 
 /** The room camera starts blending in at norm 1.25 (~3 mm out) and is all
@@ -261,8 +257,26 @@ export class IslandScene {
   /** The room camera's share of the underground view, eased 0..1. */
   private chamberCam = 0;
 
-  /** Armed once she rides TOWARD a gate inside SURFACE_ARM_MM. */
-  private surfaceArmed = false;
+  /** The nearest gate on her current bore, refreshed by moveOnRail: how
+   *  far along the tube it is, and whether she is riding AT it. */
+  private railGate: { id: string; distMm: number; toward: boolean } | null = null;
+
+  /** The question on screen, if any. Nothing crosses the threshold in
+   *  either direction without an answer to it. */
+  private gateAsk: { kind: 'enter' | 'surface'; gateId: string } | null = null;
+
+  /** False from the moment a room takes her until she has stepped clear
+   *  of its doorway — see chamberMouthGrab. */
+  private chamberGrabArmed = false;
+
+  /** Gates she has said no to, quiet until she is GATE_RESET_MM away. */
+  private enterDeclined: string | null = null;
+
+  private surfaceDeclined: string | null = null;
+
+  private askEl: HTMLElement | null = null;
+
+  private askLabel: HTMLElement | null = null;
 
   /** The GRIP / FREE indicator chip. */
   private modeBtn: HTMLButtonElement | null = null;
@@ -545,6 +559,8 @@ export class IslandScene {
    * there must mean the drawn island, not the cap.
    */
   private floorBelow(x: number, z: number, fromY: number): number | null {
+    const lid = this.ventLidAt(x, z, fromY);
+    if (lid !== null) return lid;
     const stream = this.stream;
     if (!stream) return null;
     const fine = stream.surfaceBelowY(x, z, fromY);
@@ -552,6 +568,109 @@ export class IslandScene {
     const ceiling = stream.bandFloorWu + (CELLS_Y - CAP_PLANES - 1) * CELL_SIZE;
     if (fine >= ceiling - CELL_SIZE) return Math.max(fine, this.walkGroundAt(x, z));
     return fine;
+  }
+
+  /**
+   * A MOUTH IS A LID UNTIL SHE SAYS OTHERWISE.
+   *
+   * The vent is a real hole bored through the anthill, so the walker fell
+   * straight down it: walking west to east across her own nest dropped her
+   * fifty millimetres down the shaft without a word. Reported as being
+   * teleported underground, and fairly — she never asked to go in.
+   *
+   * So from ABOVE, a mouth reads as ground at the gate's own height. She
+   * can stand on her anthill and walk over it, and the ENTER? question is
+   * what opens it. From below there is no lid at all — this only answers
+   * something coming down ONTO the mouth — so riding up the shaft and
+   * surfacing is untouched.
+   */
+  private ventLidAt(x: number, z: number, fromY: number): number | null {
+    for (const node of this.railNodes.values()) {
+      if (node.kind !== 'entrance') continue;
+      const dx = x - node.p.x;
+      const dz = z - node.p.z;
+      if (dx * dx + dz * dz > node.r * node.r) continue;
+      // Only for a body standing ON the mouth, never one already below it,
+      // or the lid would form under her feet while she is in the shaft.
+      if (fromY < node.p.y + RIDE) continue;
+      return node.p.y;
+    }
+    return null;
+  }
+
+  /**
+   * THE WAY OUT OF A ROOM IS ITS DOORWAY, WHEREVER THAT IS.
+   *
+   * Inside a chamber the rail keeps its hands off, or every edge — they
+   * all run to the room's centre — would glue her to the middle of her own
+   * room. But that left the room a pit: a chamber whose only tunnel leaves
+   * through the CEILING, which is exactly what the designer's PLACE chain
+   * builds (each piece dropped straight below the last), has its doorway
+   * above the middle of the floor, and no amount of walking or wall-
+   * climbing gets a body up to it. Reported as being stuck in a room, and
+   * it was — the containment was only half of that bug.
+   *
+   * So the rail is offered again at the DOORWAY: the point where each
+   * tunnel crosses out through the room's shell. A tunnel that leaves
+   * sideways has its doorway in the wall, and she walks to it. One that
+   * leaves upward has its doorway in the ceiling, and she stands under it.
+   * Measured horizontally, so "under the hole in the roof" counts as being
+   * at it, which is the whole point. The doorway sits at norm ~1 and the
+   * rail only lets go below 0.55, so grabbing there cannot flicker.
+   */
+  private chamberMouthGrab(roomId: string): { i: number; t: number; d: number } | null {
+    const room = this.railNodes.get(roomId);
+    if (!room || room.kind !== 'chamber') return null;
+    const box = chamberBox(room.p.x, room.p.y, room.p.z, room.r);
+    let best: { i: number; t: number; d: number } | null = null;
+    for (let i = 0; i < this.rails.length; i += 1) {
+      const e = this.rails[i]!;
+      const atFrom = e.from === roomId;
+      if (!atFrom && e.to !== roomId) continue;
+      for (let k = 1; k <= 24; k += 1) {
+        const t = atFrom ? k / 24 : 1 - k / 24;
+        const px = e.a.x + (e.b.x - e.a.x) * t;
+        const py = e.a.y + (e.b.y - e.a.y) * t;
+        const pz = e.a.z + (e.b.z - e.a.z) * t;
+        if (chamberNorm(box, px, py, pz) <= 1) continue;
+        // The doorway. How far is she from standing in it, on the floor?
+        const d = Math.hypot(this.at.x - px, this.at.z - pz);
+        if (!best || d < best.d) best = { i, t, d };
+        break;
+      }
+    }
+    /*
+     * ARMED BY LEAVING IT. On arrival the rail sets her down a stride
+     * inside the room — still within reach of the doorway she just came
+     * through — so an unguarded test grabbed her back on the very frame it
+     * released her, and she hovered in the entrance instead of walking
+     * into her own room. Tightening the reach only traded that for a
+     * doorway she could no longer find on the way out.
+     *
+     * So the doorway goes live once she has been properly clear of it, and
+     * one reach serves both directions: step in, it arms behind her; come
+     * back to it, it takes her.
+     */
+    if (!best) return null;
+    const reach = this.rails[best.i]!.r * 1.6;
+    if (best.d > reach) {
+      this.chamberGrabArmed = true;
+      return null;
+    }
+    return this.chamberGrabArmed ? best : null;
+  }
+
+  /** The mouth she is standing on, if any — what ENTER? asks about. */
+  private gateUnderfoot(): string | null {
+    for (const [id, node] of this.railNodes) {
+      if (node.kind !== 'entrance') continue;
+      const dx = this.at.x - node.p.x;
+      const dz = this.at.z - node.p.z;
+      if (dx * dx + dz * dz > node.r * node.r) continue;
+      if (this.at.y < node.p.y - RIDE) continue;
+      return id;
+    }
+    return null;
   }
 
   /** Underfoot at HER height: tunnel floors are real, roofs above are not. */
@@ -846,20 +965,35 @@ export class IslandScene {
     const speed = this.input.walk * WALK_SPEED * (this.input.sprint ? SPRINT : 1);
     this.velocity.set(Math.sin(this.facing) * speed, 0, Math.cos(this.facing) * speed);
 
-    /* Off the rail, the ROOM she stands in (if any) is derived from where
-     * she IS — teleports, plan edits and rail releases all just fall out. */
-    if (this.railEdge < 0) this.chamberId = this.chamberAt(this.at);
-
     if (this.railEdge >= 0) {
       this.moveOnRail(dt, speed);
     } else {
-      const room = this.chamberId ? this.chamberBoxOf(this.chamberId) : null;
-      if (room) this.moveInChamber(dt, room);
-      else this.moveFree(dt, speed);
+      this.moveFree(dt, speed);
     }
 
     this.underground = this.at.y + RIDE
       < this.walkGroundAt(this.at.x, this.at.z) - UNDER_MM / MM;
+
+    /*
+     * Which ROOM she is loose in, if any. It is DERIVED from where she is,
+     * it is only ever asked below ground, and it decides exactly one
+     * thing: that the rail leaves her alone in here. It does not move her.
+     *
+     * Both halves of that matter, and both were reported as bugs. A room
+     * is a wide oval — a generous queen chamber is 22 mm across and 11 mm
+     * tall — so a shallow one reaches up through the hill, and asking the
+     * question on the SURFACE let the room claim someone standing on their
+     * own anthill and pull them down to its floor: "it teleports me
+     * underground". And when the room's containment also drove movement it
+     * was a cage rather than a floor, so a room whose only tunnel leaves
+     * straight up — which is exactly what the designer's PLACE chain
+     * builds, each piece dropped below the last — sealed her in: "I am
+     * stuck in a room". The carved soil is the only container she needs;
+     * a second, tighter, invisible one was the bug.
+     */
+    this.chamberId = this.underground && this.railEdge < 0
+      ? this.chamberAt(this.at)
+      : null;
     const last = this.trail[this.trail.length - 1];
     if (!last || last.distanceTo(this.at) > 0.3) {
       this.trail.push(this.at.clone());
@@ -875,30 +1009,33 @@ export class IslandScene {
      * rail snaps her on, and the noisy free-walker pose that let her
      * abdomen swing through the shaft wall never runs down there at all.
      * There is no FREE in a bore any more; FREE lives on the surface and
-     * inside rooms only. From a room the rail may only take her back at a
-     * MOUTH (see chamberExitGrab) — every edge ends at the room's centre,
-     * so a plain proximity test would glue her to the middle of her own
-     * chamber and she could never cross it.
+     * inside rooms only. Loose in a room the rail keeps its hands off —
+     * every edge into a chamber ends at its centre, so a bare proximity
+     * test would glue her to the middle of her own room — and it picks her
+     * up again the moment she walks out of the room's shell, by whichever
+     * opening she used: a planned tunnel, or a hole she chewed herself.
      */
     if (this.railEdge < 0 && this.underground && this.rails.length > 0) {
-      let take: { i: number; t: number } | null = null;
-      if (this.chamberId) {
-        take = this.chamberExitGrab();
-      } else {
-        const near = this.nearestRail(this.at);
-        if (near && near.d < this.rails[near.i]!.r * 1.6) take = near;
-      }
-      if (take) {
+      const take = this.chamberId === null
+        ? this.nearestRail(this.at)
+        : this.chamberMouthGrab(this.chamberId);
+      if (take && take.d < this.rails[take.i]!.r * 1.6) {
         this.railEdge = take.i;
         this.railT = take.t;
-        this.chamberId = null;
         const e = this.rails[take.i]!;
         const tan = e.b.clone().sub(e.a).normalize();
         /* A shaft is ENTERED downward; a level bore takes whichever way
          * she faces. Her wall starts on the side she faced when the rail
          * took her. */
+        /* A shaft is normally ENTERED downward, from its top. Leaving a
+         * room through a doorway in the CEILING is the other case: the
+         * grab point is above her, so travel has to run that way or the
+         * rail would take her straight back down into the room she is
+         * trying to leave. */
+        const up = this.rails[take.i]!.a.clone().lerp(this.rails[take.i]!.b, take.t).y
+          > this.at.y + RIDE;
         this.railDir = Math.abs(tan.y) > 0.7
-          ? (tan.y > 0 ? -1 : 1)
+          ? (up ? (tan.y > 0 ? 1 : -1) : (tan.y > 0 ? -1 : 1))
           : ((Math.sin(this.facing) * tan.x + Math.cos(this.facing) * tan.z) >= 0 ? 1 : -1);
         this.railRev = false;
         this.railWall.set(Math.sin(this.facing), 0, Math.cos(this.facing));
@@ -943,6 +1080,7 @@ export class IslandScene {
       this.reveal();
     }
 
+    this.updateGateAsk();
     this.refreshModeChip();
     this.pose(dt);
     // While the designer is up the camera is ITS fly rig, not the follow cam.
@@ -951,114 +1089,14 @@ export class IslandScene {
 
   /* ------------------------------------------------ chambers and the modes */
 
-  /** The carved room around a chamber node, in world units. */
-  private chamberBoxOf(nodeId: string): ChamberBox | null {
-    const node = this.railNodes.get(nodeId);
-    if (!node || node.kind !== 'chamber') return null;
-    return chamberBox(node.p.x, node.p.y, node.p.z, node.r);
-  }
-
   /** Which room contains this point, if any. */
   private chamberAt(p: THREE.Vector3): string | null {
     for (const [id, node] of this.railNodes) {
       if (node.kind !== 'chamber') continue;
       const box = chamberBox(node.p.x, node.p.y, node.p.z, node.r);
-      if (chamberNorm(box, p.x, p.y, p.z) <= 1) return id;
+      if (insideChamber(box, p.x, p.y, p.z)) return id;
     }
     return null;
-  }
-
-  /**
-   * LEAVING a room happens at a MOUTH, on purpose: she must be pressed
-   * against the roam wall AND walking along the direction a tunnel leaves
-   * the chamber. Proximity alone can never do it — every edge into a room
-   * runs to its CENTRE, so the nearest centerline point is always deep
-   * inside, and a naive "near the rail?" test would re-grip her the frame
-   * after the arrival released her, forever.
-   *
-   * The grab lands her at the mouth itself: the parameter where the
-   * centerline crosses back out of the release zone, so the release rule
-   * (centerline well inside the shell) cannot instantly undo the grab.
-   * A tunnel that leaves a room STRAIGHT up or down is not walkable-out
-   * this pass (nothing digs one today; the designer chains lateral runs).
-   */
-  private chamberExitGrab(): { i: number; t: number } | null {
-    const roomId = this.chamberId;
-    if (!roomId) return null;
-    const box = this.chamberBoxOf(roomId);
-    if (!box) return null;
-    const margin = BODY_MARGIN_MM / MM;
-    const ox = this.at.x - box.cx;
-    const oz = this.at.z - box.cz;
-    const oLen = Math.hypot(ox, oz);
-    if (oLen < 1e-6) return null;
-    // Pressed at the wall? Compare how far out she is with how far the
-    // roam ellipse reaches the way she is standing.
-    const wall = roamBoundaryDist(box, margin, ox, oz);
-    if (wall <= 0 || oLen < wall * 0.85) return null;
-    // And WALKING out, not merely standing there.
-    const vLen = Math.hypot(this.velocity.x, this.velocity.z);
-    if (vLen < 1e-6) return null;
-    for (let i = 0; i < this.rails.length; i += 1) {
-      const e = this.rails[i]!;
-      let dx: number;
-      let dz: number;
-      let fromEnd: 0 | 1;
-      if (e.from === roomId) {
-        dx = e.b.x - e.a.x; dz = e.b.z - e.a.z; fromEnd = 0;
-      } else if (e.to === roomId) {
-        dx = e.a.x - e.b.x; dz = e.a.z - e.b.z; fromEnd = 1;
-      } else continue;
-      const dLen = Math.hypot(dx, dz);
-      if (dLen < 1e-6) continue; // a plumb exit is not walkable
-      const align = (ox * dx + oz * dz) / (oLen * dLen);
-      if (align < 0.75) continue;
-      const push = (this.velocity.x * dx + this.velocity.z * dz) / (vLen * dLen);
-      if (push < 0.5) continue;
-      // Walk the parameter out from the chamber end to the mouth — the
-      // first sample past the release zone, so the grip sticks.
-      for (let k = 1; k <= 20; k += 1) {
-        const t = fromEnd === 0 ? k / 20 : 1 - k / 20;
-        const px = e.a.x + (e.b.x - e.a.x) * t;
-        const py = e.a.y + (e.b.y - e.a.y) * t;
-        const pz = e.a.z + (e.b.z - e.a.z) * t;
-        if (chamberNorm(box, px, py, pz) > CHAMBER_RELEASE_NORM + 0.1) {
-          return { i, t };
-        }
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Loose in a room: the stick moves her across the chamber floor, the roam
-   * ellipse (the safe interior, shrunk by her body) is the wall, and the
-   * floor under her is the carved shell's lower half with a skin of
-   * clearance — she can wander the whole room and never clip it.
-   */
-  private moveInChamber(dt: number, box: ChamberBox): void {
-    const margin = BODY_MARGIN_MM / MM;
-    const nx = this.at.x + this.velocity.x * dt;
-    const nz = this.at.z + this.velocity.z * dt;
-    const held = clampToChamber(box, margin, nx, nz);
-    this.at.x = held.x;
-    this.at.z = held.z;
-    const want = chamberFloorY(box, held.x, held.z) + RIDE;
-    this.at.y += (want - this.at.y) * Math.min(1, dt * 14);
-    /* Containment SHOULD guarantee air — but the same three-frame snap net
-     * as the free walker stays underneath it, so a rounding flicker at the
-     * funnel lip heals itself instead of accumulating. One net, one rule. */
-    if (this.stream?.solidAtWu(this.at.x, this.at.y, this.at.z) === true) {
-      this.embedFrames += 1;
-      if (this.embedFrames >= 3 && this.hasSafe) {
-        this.at.copy(this.lastSafe);
-        this.embedFrames = 0;
-      }
-    } else {
-      this.embedFrames = 0;
-      this.lastSafe.copy(this.at);
-      this.hasSafe = true;
-    }
   }
 
   /**
@@ -1071,8 +1109,12 @@ export class IslandScene {
     const node = this.railNodes.get(gateId);
     if (!node) return;
     this.railEdge = -1;
-    this.surfaceArmed = false;
+    this.railGate = null;
     this.chamberId = null;
+    /* Standing on her own mouth, the ENTER? question would fire the very
+     * next frame. It stays quiet until she has walked away and come back. */
+    this.enterDeclined = gateId;
+    this.hideGateAsk();
     /* Beside the vent, not on it: dropped dead-centre she stands over the
      * hole she just left and sinks straight back in. Her travel direction
      * (or facing, up a plumb shaft) picks which side of the mound. */
@@ -1094,6 +1136,114 @@ export class IslandScene {
     this.at.set(x, top + RIDE, z);
     this.trail.length = 0;
   }
+
+  /**
+   * THE THRESHOLD IS ALWAYS A QUESTION.
+   *
+   * Nothing carries her between daylight and the nest on its own — not
+   * walking over the vent, not riding into the gate. Above it she is asked
+   * ENTER?; riding up to it she is asked SURFACE?; a no is remembered until
+   * she is GATE_RESET_MM away, so it neither nags nor forgets.
+   */
+  private updateGateAsk(): void {
+    if (this.designer?.isOpen) { this.hideGateAsk(); return; }
+
+    if (this.railEdge >= 0) {
+      const near = this.railGate;
+      this.enterDeclined = null; // underground: the way IN is behind her
+      if (!near) { this.hideGateAsk(); return; }
+      if (near.distMm > GATE_RESET_MM && this.surfaceDeclined === near.id) {
+        this.surfaceDeclined = null;
+      }
+      const ask = near.toward && near.distMm <= SURFACE_ASK_MM
+        && this.surfaceDeclined !== near.id;
+      this.showGateAsk(ask ? { kind: 'surface', gateId: near.id } : null);
+      return;
+    }
+
+    this.surfaceDeclined = null; // on the surface: the way OUT is behind her
+    const under = this.gateUnderfoot();
+    if (under === null) {
+      /* Off the mouth entirely — a declined gate re-arms once she has put
+       * real distance between herself and it, not merely stepped aside. */
+      if (this.enterDeclined !== null) {
+        const node = this.railNodes.get(this.enterDeclined);
+        if (!node || this.at.distanceTo(node.p) * MM > GATE_RESET_MM) {
+          this.enterDeclined = null;
+        }
+      }
+      this.showGateAsk(null);
+      return;
+    }
+    this.showGateAsk(this.enterDeclined === under
+      ? null
+      : { kind: 'enter', gateId: under });
+  }
+
+  /** YES on ENTER?: down the vent and onto the bore below it. */
+  private enterVia(gateId: string): void {
+    const node = this.railNodes.get(gateId);
+    if (!node) return;
+    this.hideGateAsk();
+    this.enterDeclined = null;
+    /* Riding out again would be asked SURFACE? on the first frame, at the
+     * gate she just came through. Quiet until she has gone somewhere. */
+    this.surfaceDeclined = gateId;
+    this.trail.length = 0;
+    for (let i = 0; i < this.rails.length; i += 1) {
+      const e = this.rails[i]!;
+      const atFrom = e.from === gateId;
+      if (!atFrom && e.to !== gateId) continue;
+      this.railEdge = i;
+      this.railT = atFrom ? 0 : 1;
+      this.railDir = atFrom ? 1 : -1;
+      this.railRev = false;
+      this.railWall.set(Math.sin(this.facing), 0, Math.cos(this.facing));
+      this.at.copy(atFrom ? e.a : e.b);
+      this.underground = true;
+      this.chamberId = null;
+      return;
+    }
+    /* A mouth with nothing dug under it yet: step off the lid into its own
+     * vent and let the walker find the bottom. */
+    this.at.set(node.p.x, node.p.y - node.r, node.p.z);
+    this.underground = true;
+  }
+
+  answerGateForTest(yes: boolean): void { this.answerGate(yes); }
+
+  gateAskForTest(): { kind: string; gateId: string; shown: boolean } | null {
+    if (!this.gateAsk) return null;
+    return {
+      ...this.gateAsk,
+      shown: this.askEl !== null && this.askEl.style.display !== 'none',
+    };
+  }
+
+  private answerGate(yes: boolean): void {
+    const ask = this.gateAsk;
+    if (!ask) return;
+    if (!yes) {
+      if (ask.kind === 'enter') this.enterDeclined = ask.gateId;
+      else this.surfaceDeclined = ask.gateId;
+      this.showGateAsk(null);
+      return;
+    }
+    if (ask.kind === 'surface') this.surfaceTo(ask.gateId);
+    else this.enterVia(ask.gateId);
+  }
+
+  private showGateAsk(ask: { kind: 'enter' | 'surface'; gateId: string } | null): void {
+    const same = this.gateAsk?.kind === ask?.kind
+      && this.gateAsk?.gateId === ask?.gateId;
+    this.gateAsk = ask;
+    if (!this.askEl || !this.askLabel) return;
+    if (!ask) { this.askEl.style.display = 'none'; return; }
+    if (!same) this.askLabel.textContent = ask.kind === 'enter' ? 'ENTER?' : 'SURFACE?';
+    this.askEl.style.display = '';
+  }
+
+  private hideGateAsk(): void { this.showGateAsk(null); }
 
   /** The GRIP/FREE chip is an INDICATOR — the states switch themselves, so
    *  the chip's whole job is to make the current one obvious. */
@@ -1231,11 +1381,10 @@ export class IslandScene {
       const node = this.railNodes.get(nodeId);
       const travel = tan.clone().multiplyScalar(this.railT > 1 ? 1 : -1);
       if (node && node.kind === 'entrance') {
-        /* She rode INTO the gate — that IS the answer. The arm/release
-         * pair below normally surfaces her half a millimetre early; this
-         * branch catches a sprint frame that jumps clean past the release
-         * window, so she can never overshoot into a parked stall. */
-        this.surfaceTo(nodeId);
+        /* The gate does not eject her: she parks at the joint and SURFACE?
+         * decides. Riding into the end of the tube is not consent to be
+         * put out in the open. */
+        this.railT = Math.min(1, Math.max(0, this.railT));
         return;
       }
       let best = -1;
@@ -1302,7 +1451,8 @@ export class IslandScene {
       if (chamberNorm(box, center.x, center.y, center.z) < CHAMBER_RELEASE_NORM) {
         this.railEdge = -1;
         this.chamberId = roomId;
-        this.surfaceArmed = false;
+        this.chamberGrabArmed = false;
+        this.railGate = null;
         /* The hand-off must never strand her inside a rounding-thin wall:
          * her body lags the centerline by a frame of lerp. The centerline
          * point is air by construction — if her centre is not, take it. */
@@ -1316,36 +1466,32 @@ export class IslandScene {
       }
     }
 
-    /* AUTO-SURFACE: riding TOWARD a gate arms inside SURFACE_ARM_MM and
-     * releases at SURFACE_OUT_MM; riding away disarms. The distance is
-     * measured from her point ON the centerline, not her body (which rides
-     * offset toward the floor by nearly the bore radius and would never
-     * get "3 mm close"). */
+    /* How near the nearest gate is, and whether she is riding AT it. This
+     * only REPORTS — updateGateAsk turns it into the SURFACE? question and
+     * a tap turns that into daylight. Distance is measured from her point
+     * ON the centerline, not her body, which rides offset toward the floor
+     * by nearly the bore radius and would never read as "3 mm close". */
     const step = drive * this.railDir;
-    if (Math.abs(step) > 1e-6) {
-      let gateId: string | null = null;
-      let gateP: THREE.Vector3 | null = null;
-      let dist = Infinity;
-      for (const [id, gn] of this.railNodes) {
-        if (gn.kind !== 'entrance') continue;
-        const d = center.distanceTo(gn.p);
-        if (d < dist) { dist = d; gateId = id; gateP = gn.p; }
-      }
-      if (gateId && gateP) {
-        const toward = (tan.x * (gateP.x - center.x)
-          + tan.y * (gateP.y - center.y)
-          + tan.z * (gateP.z - center.z)) * Math.sign(step) > 0;
-        const dMm = dist * MM;
-        if (!toward || dMm > SURFACE_ARM_MM * 2) this.surfaceArmed = false;
-        else if (dMm <= SURFACE_ARM_MM) this.surfaceArmed = true;
-        if (this.surfaceArmed && toward && dMm <= SURFACE_OUT_MM) {
-          // Aim the exit along this frame's travel before letting go.
-          this.railForward.copy(tan).multiplyScalar(Math.sign(step));
-          this.surfaceTo(gateId);
-          return;
-        }
-      }
+    let gateId: string | null = null;
+    let gateP: THREE.Vector3 | null = null;
+    let dist = Infinity;
+    for (const [id, gn] of this.railNodes) {
+      if (gn.kind !== 'entrance') continue;
+      const d = center.distanceTo(gn.p);
+      if (d < dist) { dist = d; gateId = id; gateP = gn.p; }
     }
+    this.railGate = gateId && gateP
+      ? {
+        id: gateId,
+        distMm: dist * MM,
+        toward: Math.abs(step) > 1e-6 && (tan.x * (gateP.x - center.x)
+          + tan.y * (gateP.y - center.y)
+          + tan.z * (gateP.z - center.z)) * Math.sign(step) > 0,
+      }
+      : null;
+    /* Facing the way she travels, so an exit taken from here steps off on
+     * the side she was heading for. */
+    if (Math.abs(step) > 1e-6) S_FWD.copy(tan).multiplyScalar(Math.sign(step));
 
     const perp = S_PERP.set(0, -1, 0).addScaledVector(tan, tan.y);
     this.railWall.addScaledVector(tan, -this.railWall.dot(tan));
@@ -1601,7 +1747,10 @@ export class IslandScene {
     this.railEdge = -1;
     this.railRev = false;
     this.chamberId = null;
-    this.surfaceArmed = false;
+    this.railGate = null;
+    this.enterDeclined = null;
+    this.surfaceDeclined = null;
+    this.hideGateAsk();
     if (this.nestView) {
       this.nestView.dispose();
       this.scene.remove(this.nestView.root);
@@ -1819,6 +1968,41 @@ export class IslandScene {
     });
     actions.appendChild(plan);
 
+    /*
+     * THE THRESHOLD PROMPT — and the reason the last one did nothing.
+     *
+     * `.density-lab-hud` is pointer-events:none, and every control that
+     * works turns it back on (the actions bar, the designer panel, the
+     * stats chip). The old SURFACE? box was styled inline and never did,
+     * and neither button class sets it — only the actions CONTAINER does.
+     * So every tap fell straight through the prompt to the canvas, where
+     * the left half spawns the joystick: the buttons were untappable by
+     * construction, which is why they got removed. The class below lives
+     * in the stylesheet WITH pointer-events:auto, so they take a tap.
+     */
+    const ask = document.createElement('div');
+    ask.className = 'density-lab-gate-ask';
+    ask.style.display = 'none';
+    const askLabel = document.createElement('span');
+    askLabel.className = 'density-lab-gate-label';
+    ask.appendChild(askLabel);
+    const answer = (yes: boolean) => {
+      const button = document.createElement('button');
+      button.className = 'density-lab-button density-lab-mode';
+      button.textContent = yes ? 'YES' : 'NO';
+      button.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.answerGate(yes);
+      });
+      return button;
+    };
+    ask.appendChild(answer(true));
+    ask.appendChild(answer(false));
+    this.hud.appendChild(ask);
+    this.askEl = ask;
+    this.askLabel = askLabel;
+
     const view = document.createElement('button');
     view.className = 'density-lab-button density-lab-mode';
     view.textContent = 'VIEW';
@@ -1859,6 +2043,13 @@ export class IslandScene {
     };
     window.addEventListener('keydown', (e) => {
       const key = e.key.toLowerCase();
+      /* The threshold question takes a key as well as a tap — E or Enter
+       * to go through, Escape to stay put — so the PC hand never has to
+       * reach for the mouse mid-walk. */
+      if (this.gateAsk && !e.repeat) {
+        if (key === 'e' || key === 'enter') { this.answerGate(true); return; }
+        if (key === 'escape') { this.answerGate(false); return; }
+      }
       if (key === 'v' && !e.repeat) this.firstPerson = !this.firstPerson;
       if (key === 'p' && !e.repeat) {
         this.showPlan = !this.showPlan;
@@ -2026,7 +2217,10 @@ export class IslandScene {
     this.railEdge = -1;
     this.railRev = false;
     this.chamberId = null;
-    this.surfaceArmed = false;
+    this.railGate = null;
+    this.enterDeclined = null;
+    this.surfaceDeclined = null;
+    this.hideGateAsk();
     if (this.stream) {
       const scroll = this.stream.recentreOn(this.at.x, this.at.z);
       if (scroll) this.onScroll(scroll);
@@ -2089,6 +2283,7 @@ export class IslandScene {
       // (surface, chamber) is FREE. `chamberNow` says which FREE.
       free: this.railEdge >= 0 ? 0 : 1,
       chamberNow: this.chamberId !== null ? 1 : 0,
+      asking: this.gateAsk ? 1 : 0,
       playerReady: this.playerReady ? 1 : 0,
       statsOpen: this.statsPanel.bodyVisible ? 1 : 0,
       designing: this.designer?.isOpen ? 1 : 0,
