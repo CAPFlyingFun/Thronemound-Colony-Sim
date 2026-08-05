@@ -1061,3 +1061,19 @@
   color: #e8ddc4;
   white-space: pre-wrap;
 }
+
+/*
+ * The island's GRIP / FREE chip. It is an INDICATOR, not a switch — the
+ * tunnel takes her, the room and the surface free her, all by themselves —
+ * so it must read at a glance and never invite a tap it cannot honour.
+ */
+.density-lab-mode.is-indicator {
+  pointer-events: none;
+  opacity: 0.92;
+}
+
+/* GRIP: the same amber "currently on" the rest of the HUD speaks. */
+.density-lab-mode.is-grip {
+  background: #e9c36f;
+  box-shadow: 0 0 0 2px rgba(255, 250, 238, 0.75), 0 7px 20px rgba(0, 0, 0, 0.32);
+}

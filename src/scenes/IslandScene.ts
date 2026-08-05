@@ -39,7 +39,14 @@ import { FOOT_CLEARANCE_MM } from '../anim/legDrive';
 import { buildNestView, type NestView } from '../nest/nestView';
 import { NestDesigner } from '../nest/NestDesigner';
 import { planBounds } from '../nest/nestCarve';
+import { addNode } from '../nest/nestEdit';
 import { type NestPlan } from '../nest/nestPlan';
+import {
+  chamberBox, chamberFloorY, chamberNorm, clampToChamber, roamBoundaryDist,
+  type ChamberBox,
+} from './ChamberMovement';
+import { DebugStatsPanel } from './DebugStatsPanel';
+import { LoadingOverlay } from './LoadingOverlay';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
 import { makeIslandSoil, type IslandSoil } from '../world/islandSoil';
 import {
@@ -109,16 +116,27 @@ const SCROLL_COOLDOWN_MS = 150;
 const BITE_RADIUS = 1.9 / MM;
 const BITE_EVERY_S = 0.16;
 
-/** Riding within this of the surface gate OFFERS the exit (playtest asked
- *  for a yes/no at "like 2mm" instead of being thrown out to daylight). */
-const SURFACE_ASK_MM = 2.5;
+/** Riding TOWARD a gate ARMS the exit inside this — and riding away,
+ *  however close, never surfaces her. No prompt, no button. */
+const SURFACE_ARM_MM = 3;
 
-/** A declined offer re-arms once she rides this far from the gate again. */
-const SURFACE_RESET_MM = 6;
+/** Armed and this close, she is released and placed on the surface. */
+const SURFACE_OUT_MM = 0.5;
 
-/** DIG drops her off the rail; the snap-on waits this long so releasing
- *  the button doesn't glue her straight back to the centerline. */
-const RAIL_REGRAB_S = 1.5;
+/** Her body's reach inside a room — the roam ellipse shrinks by this so a
+ *  centred point never puts her abdomen through the chamber wall. */
+const BODY_MARGIN_MM = 2.5;
+
+/** Chamber-norm threshold (1 = the carved shell): the rail lets go once
+ *  its centerline point is this far inside the room. The exit grab lands
+ *  her a step PAST this on purpose (see chamberExitGrab) — that gap is the
+ *  hysteresis that stops a grab/release flicker at the mouth. */
+const CHAMBER_RELEASE_NORM = 0.55;
+
+/** The room camera starts blending in at norm 1.25 (~3 mm out) and is all
+ *  the way in by 0.75 — distance-driven, so walking pace sets the feel. */
+const CHAMBER_CAM_FAR = 1.25;
+const CHAMBER_CAM_NEAR = 0.75;
 
 export class IslandScene {
   ready = false;
@@ -211,8 +229,12 @@ export class IslandScene {
   /** The nest plan as rails: centerline segments with bore radii (wu). */
   private rails: { a: THREE.Vector3; b: THREE.Vector3; r: number; from: string; to: string }[] = [];
 
-  private readonly railNodes = new Map<string, { p: THREE.Vector3; kind: string }>();
+  private readonly railNodes = new Map<string,
+  { p: THREE.Vector3; kind: string; r: number }>();
 
+  /** GRIP is the law of the tunnels: railEdge >= 0 IS the GRIP state, and
+   *  it engages itself whenever she is underground near a planned bore.
+   *  FREE exists only where it is safe — the surface, or inside a room. */
   private railEdge = -1;
 
   private railT = 0;
@@ -231,13 +253,19 @@ export class IslandScene {
    *  no floor — unit vector, kept perpendicular to the current bore. */
   private readonly railWall = new THREE.Vector3(1, 0, 0);
 
-  /** Earliest time (ms) the rail may grab her again after a DIG drop-off. */
-  private railRegrabAt = 0;
+  /** The room she is loose in, or null. Set when the rail hands her into a
+   *  chamber (and when free walking carries her into one); cleared when a
+   *  mouth grabs her back or she surfaces. */
+  private chamberId: string | null = null;
 
-  /** FREE mode: she walks the soil herself and the rail never takes her. */
-  private freeMode = false;
+  /** The room camera's share of the underground view, eased 0..1. */
+  private chamberCam = 0;
 
-  private freeBtn: HTMLButtonElement | null = null;
+  /** Armed once she rides TOWARD a gate inside SURFACE_ARM_MM. */
+  private surfaceArmed = false;
+
+  /** The GRIP / FREE indicator chip. */
+  private modeBtn: HTMLButtonElement | null = null;
 
   /** The tunnel designer — built fresh each time DIG opens it, because its
    *  working box is fitted around wherever the plan has grown to. */
@@ -246,12 +274,6 @@ export class IslandScene {
   /** The designer's plan-local origin in island mm, for translating the
    *  plan into its working box and back. */
   private readonly designOriginMm = new THREE.Vector3();
-
-  private surfacePromptEl: HTMLElement | null = null;
-
-  private surfaceDeclined = false;
-
-  private surfaceGateId: string | null = null;
 
   /** Render scale breathes with the frame rate (phones): capped at retina,
    *  never below 1x. */
@@ -268,6 +290,14 @@ export class IslandScene {
   private embedFrames = 0;
 
   private queenReady = false;
+
+  /** The queen's GLB has RESOLVED — loaded or failed, either way settled.
+   *  `ready` is the WORLD (probes wait on it); the player-facing loading
+   *  screen waits for this too, so the reveal never shows a queenless hill. */
+  private queenSettled = false;
+
+  /** worldReady && queenSettled — the moment the loading screen lets go. */
+  playerReady = false;
 
   private paused = false;
 
@@ -292,7 +322,11 @@ export class IslandScene {
 
   private readonly hud: HTMLElement;
 
-  private readonly status: HTMLElement;
+  /** The telemetry, folded behind a small STATS chip (collapsed default). */
+  private readonly statsPanel: DebugStatsPanel;
+
+  /** The full-screen curtain that hides the raw start-up. */
+  private readonly loading: LoadingOverlay;
 
   private stickPointer: number | null = null;
 
@@ -341,13 +375,18 @@ export class IslandScene {
     this.hud = document.createElement('div');
     this.hud.className = 'density-lab-hud';
     host.appendChild(this.hud);
-    this.status = document.createElement('div');
-    this.status.className = 'density-lab-status';
-    this.status.style.pointerEvents = 'none';
-    this.hud.appendChild(this.status);
+    this.statsPanel = new DebugStatsPanel(this.hud);
     this.buildControls();
 
-    void this.load();
+    /* The curtain goes up LAST in the DOM and FIRST in importance: plain
+     * DOM, so it paints before any of the heavy lifting below, and opaque,
+     * so the HUD and the blue empty canvas never flash through. */
+    this.loading = new LoadingOverlay(host);
+
+    this.load().catch((err: unknown) => {
+      const why = err instanceof Error ? err.message : String(err);
+      this.loading.fail(`The island failed to load — ${why}. Refresh to try again.`);
+    });
 
     (window as unknown as { islandScene?: unknown }).islandScene = this;
     new ResizeObserver(() => this.resize()).observe(host);
@@ -356,11 +395,13 @@ export class IslandScene {
   }
 
   private async load(): Promise<void> {
+    this.loading.setStatus('Preparing the island…');
     const url = `${import.meta.env.BASE_URL}kauai-1025.bin`;
     const [raw, textures] = await Promise.all([
       (await fetch(url)).arrayBuffer(),
       loadBiomeTextures(import.meta.env.BASE_URL),
     ]);
+    this.loading.setStatus('Raising the island…');
     this.heights = new Int16Array(raw);
     this.heightsBase = this.heights.slice();
     this.textures = textures;
@@ -392,6 +433,7 @@ export class IslandScene {
     }
 
     this.buildIsland();
+    this.loading.setStatus('Streaming the soil…');
 
     // The middle of the island: the Waiʻaleʻale plateau, ~1,300 m up,
     // with the pre-tunnel's gate 40 mm to the east.
@@ -415,11 +457,20 @@ export class IslandScene {
     this.rebuildRails();
 
     /* The WORLD is ready here; the queen's model arrives when it arrives.
-     * Gating `ready` on her GLB made every probe hostage to one slow fetch. */
+     * Gating `ready` on her GLB made every probe hostage to one slow fetch —
+     * so the split is explicit: `ready` is the world (probes wait on it),
+     * `playerReady` also waits for the queen to settle (loaded OR failed),
+     * and only THAT lifts the curtain. The player never sees a queenless
+     * island; the probes never hang on a model fetch. */
     this.ready = true;
+    this.loading.setStatus('Waking the queen…');
     void this.queen.load().then((ok) => {
       this.queen.root.visible = ok;
       this.queenReady = ok;
+    }).finally(() => {
+      this.queenSettled = true;
+      this.playerReady = true;
+      void this.loading.finish();
     });
   }
 
@@ -764,17 +815,15 @@ export class IslandScene {
 
   setMeshBudgetCapForTest(cap: number): void { this.meshBudgetCapForTest = cap; }
 
-  surfaceOfferForTest(): boolean {
-    return this.surfacePromptEl !== null && this.surfacePromptEl.style.display !== 'none';
-  }
-
-  answerSurfaceForTest(yes: boolean): void {
-    if (yes && this.surfaceGateId) {
-      this.surfaceNow(this.surfaceGateId);
-    } else {
-      this.surfaceDeclined = true;
-      this.hideSurfacePrompt();
-    }
+  loadingStateForTest(): {
+    world: number; queenSettled: number; player: number; overlayGone: number;
+  } {
+    return {
+      world: this.ready ? 1 : 0,
+      queenSettled: this.queenSettled ? 1 : 0,
+      player: this.playerReady ? 1 : 0,
+      overlayGone: this.loading.done ? 1 : 0,
+    };
   }
 
   railStateForTest(): { edge: number; t: number; offMm: number; rMm: number } {
@@ -797,17 +846,16 @@ export class IslandScene {
     const speed = this.input.walk * WALK_SPEED * (this.input.sprint ? SPRINT : 1);
     this.velocity.set(Math.sin(this.facing) * speed, 0, Math.cos(this.facing) * speed);
 
-    // Digging hands her back to the free walker: the rail is the PLAN's
-    // tunnels, and a mandible is how new ones that aren't on it get made.
-    if (this.railEdge >= 0 && this.input.dig) {
-      this.railEdge = -1;
-      this.railRegrabAt = performance.now() + RAIL_REGRAB_S * 1000;
-    }
+    /* Off the rail, the ROOM she stands in (if any) is derived from where
+     * she IS — teleports, plan edits and rail releases all just fall out. */
+    if (this.railEdge < 0) this.chamberId = this.chamberAt(this.at);
 
     if (this.railEdge >= 0) {
       this.moveOnRail(dt, speed);
     } else {
-      this.moveFree(dt, speed);
+      const room = this.chamberId ? this.chamberBoxOf(this.chamberId) : null;
+      if (room) this.moveInChamber(dt, room);
+      else this.moveFree(dt, speed);
     }
 
     this.underground = this.at.y + RIDE
@@ -819,22 +867,32 @@ export class IslandScene {
     }
 
     /*
-     * THE RAIL — playtest's own architecture, verbatim: underground she
-     * follows "a path right down the middle of the tube", pitch locked to
-     * the tube's axis, roll irrelevant, the camera orbiting the line. The
-     * nest plan IS that path — a graph of centerlines with radii — so the
-     * moment she is underground and near a planned bore she snaps to it,
-     * and the noisy free-walker pose that let her abdomen swing through
-     * the shaft wall never runs down there at all.
+     * GRIP — playtest's own architecture, now the LAW of the tunnels:
+     * underground she follows "a path right down the middle of the tube",
+     * pitch locked to the tube's axis, roll irrelevant, the camera orbiting
+     * the line. The nest plan IS that path — a graph of centerlines with
+     * radii — so the moment she is underground and near a planned bore the
+     * rail snaps her on, and the noisy free-walker pose that let her
+     * abdomen swing through the shaft wall never runs down there at all.
+     * There is no FREE in a bore any more; FREE lives on the surface and
+     * inside rooms only. From a room the rail may only take her back at a
+     * MOUTH (see chamberExitGrab) — every edge ends at the room's centre,
+     * so a plain proximity test would glue her to the middle of her own
+     * chamber and she could never cross it.
      */
-    if (this.railEdge < 0 && this.underground && !this.input.dig && !this.freeMode
-      && this.rails.length > 0
-      && performance.now() >= this.railRegrabAt) {
-      const near = this.nearestRail(this.at);
-      if (near && near.d < this.rails[near.i]!.r * 1.6) {
-        this.railEdge = near.i;
-        this.railT = near.t;
-        const e = this.rails[near.i]!;
+    if (this.railEdge < 0 && this.underground && this.rails.length > 0) {
+      let take: { i: number; t: number } | null = null;
+      if (this.chamberId) {
+        take = this.chamberExitGrab();
+      } else {
+        const near = this.nearestRail(this.at);
+        if (near && near.d < this.rails[near.i]!.r * 1.6) take = near;
+      }
+      if (take) {
+        this.railEdge = take.i;
+        this.railT = take.t;
+        this.chamberId = null;
+        const e = this.rails[take.i]!;
         const tan = e.b.clone().sub(e.a).normalize();
         /* A shaft is ENTERED downward; a level bore takes whichever way
          * she faces. Her wall starts on the side she faced when the rail
@@ -885,106 +943,166 @@ export class IslandScene {
       this.reveal();
     }
 
-    this.updateSurfaceOffer();
+    this.refreshModeChip();
     this.pose(dt);
     // While the designer is up the camera is ITS fly rig, not the follow cam.
     if (!this.designer?.isOpen) this.aimCamera(dt);
   }
 
-  /* ------------------------------------------------- the surface offer */
+  /* ------------------------------------------------ chambers and the modes */
+
+  /** The carved room around a chamber node, in world units. */
+  private chamberBoxOf(nodeId: string): ChamberBox | null {
+    const node = this.railNodes.get(nodeId);
+    if (!node || node.kind !== 'chamber') return null;
+    return chamberBox(node.p.x, node.p.y, node.p.z, node.r);
+  }
+
+  /** Which room contains this point, if any. */
+  private chamberAt(p: THREE.Vector3): string | null {
+    for (const [id, node] of this.railNodes) {
+      if (node.kind !== 'chamber') continue;
+      const box = chamberBox(node.p.x, node.p.y, node.p.z, node.r);
+      if (chamberNorm(box, p.x, p.y, p.z) <= 1) return id;
+    }
+    return null;
+  }
 
   /**
-   * The gate ASKS instead of ejecting: near an entrance node the SURFACE?
-   * prompt appears, YES hands her back to daylight, NO parks the offer
-   * until she rides away and returns — playtest's spec, verbatim.
+   * LEAVING a room happens at a MOUTH, on purpose: she must be pressed
+   * against the roam wall AND walking along the direction a tunnel leaves
+   * the chamber. Proximity alone can never do it — every edge into a room
+   * runs to its CENTRE, so the nearest centerline point is always deep
+   * inside, and a naive "near the rail?" test would re-grip her the frame
+   * after the arrival released her, forever.
+   *
+   * The grab lands her at the mouth itself: the parameter where the
+   * centerline crosses back out of the release zone, so the release rule
+   * (centerline well inside the shell) cannot instantly undo the grab.
+   * A tunnel that leaves a room STRAIGHT up or down is not walkable-out
+   * this pass (nothing digs one today; the designer chains lateral runs).
    */
-  private updateSurfaceOffer(): void {
-    if (this.railEdge < 0) {
-      this.hideSurfacePrompt();
-      /* A NO survives a DIG drop-off and re-grab: only DISTANCE re-arms
-       * the offer, otherwise dropping off the rail right at the gate
-       * would ask again the moment the rail takes her back. */
-      if (this.surfaceDeclined) {
-        let dist = Infinity;
-        for (const node of this.railNodes.values()) {
-          if (node.kind !== 'entrance') continue;
-          dist = Math.min(dist, this.at.distanceTo(node.p));
+  private chamberExitGrab(): { i: number; t: number } | null {
+    const roomId = this.chamberId;
+    if (!roomId) return null;
+    const box = this.chamberBoxOf(roomId);
+    if (!box) return null;
+    const margin = BODY_MARGIN_MM / MM;
+    const ox = this.at.x - box.cx;
+    const oz = this.at.z - box.cz;
+    const oLen = Math.hypot(ox, oz);
+    if (oLen < 1e-6) return null;
+    // Pressed at the wall? Compare how far out she is with how far the
+    // roam ellipse reaches the way she is standing.
+    const wall = roamBoundaryDist(box, margin, ox, oz);
+    if (wall <= 0 || oLen < wall * 0.85) return null;
+    // And WALKING out, not merely standing there.
+    const vLen = Math.hypot(this.velocity.x, this.velocity.z);
+    if (vLen < 1e-6) return null;
+    for (let i = 0; i < this.rails.length; i += 1) {
+      const e = this.rails[i]!;
+      let dx: number;
+      let dz: number;
+      let fromEnd: 0 | 1;
+      if (e.from === roomId) {
+        dx = e.b.x - e.a.x; dz = e.b.z - e.a.z; fromEnd = 0;
+      } else if (e.to === roomId) {
+        dx = e.a.x - e.b.x; dz = e.a.z - e.b.z; fromEnd = 1;
+      } else continue;
+      const dLen = Math.hypot(dx, dz);
+      if (dLen < 1e-6) continue; // a plumb exit is not walkable
+      const align = (ox * dx + oz * dz) / (oLen * dLen);
+      if (align < 0.75) continue;
+      const push = (this.velocity.x * dx + this.velocity.z * dz) / (vLen * dLen);
+      if (push < 0.5) continue;
+      // Walk the parameter out from the chamber end to the mouth — the
+      // first sample past the release zone, so the grip sticks.
+      for (let k = 1; k <= 20; k += 1) {
+        const t = fromEnd === 0 ? k / 20 : 1 - k / 20;
+        const px = e.a.x + (e.b.x - e.a.x) * t;
+        const py = e.a.y + (e.b.y - e.a.y) * t;
+        const pz = e.a.z + (e.b.z - e.a.z) * t;
+        if (chamberNorm(box, px, py, pz) > CHAMBER_RELEASE_NORM + 0.1) {
+          return { i, t };
         }
-        if (dist * MM > SURFACE_RESET_MM) this.surfaceDeclined = false;
       }
-      return;
     }
-    /* Distance is measured along the tube — from her point ON the
-     * centerline, not her body (which rides offset toward the floor by
-     * nearly the bore radius and would never get "2 mm close"). */
-    const e = this.rails[this.railEdge]!;
-    const center = e.a.clone().lerp(e.b, Math.min(1, Math.max(0, this.railT)));
-    let gateId: string | null = null;
-    let dist = Infinity;
-    for (const [id, node] of this.railNodes) {
-      if (node.kind !== 'entrance') continue;
-      const d = center.distanceTo(node.p);
-      if (d < dist) { dist = d; gateId = id; }
-    }
-    if (gateId === null) return;
-    if (dist * MM <= SURFACE_ASK_MM) {
-      if (!this.surfaceDeclined) this.showSurfacePrompt(gateId);
+    return null;
+  }
+
+  /**
+   * Loose in a room: the stick moves her across the chamber floor, the roam
+   * ellipse (the safe interior, shrunk by her body) is the wall, and the
+   * floor under her is the carved shell's lower half with a skin of
+   * clearance — she can wander the whole room and never clip it.
+   */
+  private moveInChamber(dt: number, box: ChamberBox): void {
+    const margin = BODY_MARGIN_MM / MM;
+    const nx = this.at.x + this.velocity.x * dt;
+    const nz = this.at.z + this.velocity.z * dt;
+    const held = clampToChamber(box, margin, nx, nz);
+    this.at.x = held.x;
+    this.at.z = held.z;
+    const want = chamberFloorY(box, held.x, held.z) + RIDE;
+    this.at.y += (want - this.at.y) * Math.min(1, dt * 14);
+    /* Containment SHOULD guarantee air — but the same three-frame snap net
+     * as the free walker stays underneath it, so a rounding flicker at the
+     * funnel lip heals itself instead of accumulating. One net, one rule. */
+    if (this.stream?.solidAtWu(this.at.x, this.at.y, this.at.z) === true) {
+      this.embedFrames += 1;
+      if (this.embedFrames >= 3 && this.hasSafe) {
+        this.at.copy(this.lastSafe);
+        this.embedFrames = 0;
+      }
     } else {
-      this.hideSurfacePrompt();
-      if (dist * MM > SURFACE_RESET_MM) this.surfaceDeclined = false;
+      this.embedFrames = 0;
+      this.lastSafe.copy(this.at);
+      this.hasSafe = true;
     }
   }
 
-  private surfaceNow(gateId: string): void {
+  /**
+   * AUTO-SURFACE: riding TOWARD a gate arms the exit inside ~3 mm and lets
+   * go at half a millimetre, placing her on the daylight surface beside the
+   * mouth. Riding AWAY never surfaces her, however close she passes. The
+   * old SURFACE? YES/NO prompt is gone — the heading is the answer.
+   */
+  private surfaceTo(gateId: string): void {
     const node = this.railNodes.get(gateId);
     if (!node) return;
     this.railEdge = -1;
-    this.at.set(node.p.x, this.walkGroundAt(node.p.x, node.p.z) + RIDE, node.p.z);
+    this.surfaceArmed = false;
+    this.chamberId = null;
+    /* Beside the vent, not on it: dropped dead-centre she stands over the
+     * hole she just left and sinks straight back in. Her travel direction
+     * (or facing, up a plumb shaft) picks which side of the mound. */
+    const out = new THREE.Vector3(this.railForward.x, 0, this.railForward.z);
+    if (out.lengthSq() < 0.01) out.set(Math.sin(this.facing), 0, Math.cos(this.facing));
+    out.normalize();
+    const x = node.p.x + out.x * node.r * 1.6;
+    const z = node.p.z + out.z * node.r * 1.6;
+    /* ON the anthill, not inside it. Beside a gate the FINE soil carries
+     * the real spoil heap, which stands proud of the coarse island grid
+     * that `walkGroundAt` reads — planted at the grid height she arrives
+     * buried in her own mound and the anti-embed net has to dig her out.
+     * The streamed surface is the truth here; the grid is the fallback
+     * for a column the window does not hold. */
+    const fine = this.stream?.surfaceHeightAt(x, z);
+    const top = fine === null || fine === undefined
+      ? this.walkGroundAt(x, z)
+      : Math.max(this.walkGroundAt(x, z), fine);
+    this.at.set(x, top + RIDE, z);
     this.trail.length = 0;
-    this.surfaceDeclined = false;
-    this.hideSurfacePrompt();
   }
 
-  private showSurfacePrompt(gateId: string): void {
-    this.surfaceGateId = gateId;
-    if (this.surfacePromptEl) {
-      this.surfacePromptEl.style.display = '';
-      return;
-    }
-    const box = document.createElement('div');
-    box.className = 'density-lab-surface-ask';
-    box.style.cssText = 'position:absolute;left:50%;bottom:20%;transform:translateX(-50%);'
-      + 'display:flex;gap:10px;align-items:center;padding:10px 14px;border-radius:14px;'
-      + 'background:rgba(20,20,20,.85);color:#f4e9c8;'
-      + 'font:600 14px/1 ui-monospace,monospace;z-index:30;';
-    const label = document.createElement('span');
-    label.textContent = 'SURFACE?';
-    box.appendChild(label);
-    const yes = document.createElement('button');
-    yes.className = 'density-lab-button density-lab-mode';
-    yes.textContent = 'YES';
-    yes.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (this.surfaceGateId) this.surfaceNow(this.surfaceGateId);
-    });
-    box.appendChild(yes);
-    const no = document.createElement('button');
-    no.className = 'density-lab-button density-lab-mode';
-    no.textContent = 'NO';
-    no.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      this.surfaceDeclined = true;
-      this.hideSurfacePrompt();
-    });
-    box.appendChild(no);
-    this.hud.appendChild(box);
-    this.surfacePromptEl = box;
-  }
-
-  private hideSurfacePrompt(): void {
-    if (this.surfacePromptEl) this.surfacePromptEl.style.display = 'none';
+  /** The GRIP/FREE chip is an INDICATOR — the states switch themselves, so
+   *  the chip's whole job is to make the current one obvious. */
+  private refreshModeChip(): void {
+    if (!this.modeBtn) return;
+    const grip = this.railEdge >= 0;
+    const label = grip ? 'GRIP' : 'FREE';
+    if (this.modeBtn.textContent !== label) this.modeBtn.textContent = label;
+    this.modeBtn.classList.toggle('is-grip', grip);
   }
 
   /**
@@ -1113,10 +1231,11 @@ export class IslandScene {
       const node = this.railNodes.get(nodeId);
       const travel = tan.clone().multiplyScalar(this.railT > 1 ? 1 : -1);
       if (node && node.kind === 'entrance') {
-        /* The gate no longer ejects her: she parks at the joint and the
-         * SURFACE? prompt (see updateSurfaceOffer) decides — playtest kept
-         * wanting to stay in and got thrown out to daylight instead. */
-        this.railT = Math.min(1, Math.max(0, this.railT));
+        /* She rode INTO the gate — that IS the answer. The arm/release
+         * pair below normally surfaces her half a millimetre early; this
+         * branch catches a sprint frame that jumps clean past the release
+         * window, so she can never overshoot into a parked stall. */
+        this.surfaceTo(nodeId);
         return;
       }
       let best = -1;
@@ -1170,6 +1289,64 @@ export class IslandScene {
     // the centerline (playtest's screenshot spec: top of the ant at the
     // center point, legs away, crawling).
     const center = S_CENTER.copy(e.a).lerp(e.b, Math.min(1, Math.max(0, this.railT)));
+
+    /* ARRIVING IN A ROOM: every edge into a chamber runs to its centre, so
+     * "the point she rides is well inside the carved shell" is the moment
+     * the tunnel has become the room. The rail lets go there and she is
+     * FREE on the chamber floor — the tunnel's grip ends where the walls
+     * stop being close. */
+    for (const roomId of [e.from, e.to]) {
+      const cn = this.railNodes.get(roomId);
+      if (!cn || cn.kind !== 'chamber') continue;
+      const box = chamberBox(cn.p.x, cn.p.y, cn.p.z, cn.r);
+      if (chamberNorm(box, center.x, center.y, center.z) < CHAMBER_RELEASE_NORM) {
+        this.railEdge = -1;
+        this.chamberId = roomId;
+        this.surfaceArmed = false;
+        /* The hand-off must never strand her inside a rounding-thin wall:
+         * her body lags the centerline by a frame of lerp. The centerline
+         * point is air by construction — if her centre is not, take it. */
+        if (this.stream?.solidAtWu(this.at.x, this.at.y, this.at.z) === true) {
+          this.at.copy(center);
+        }
+        this.embedFrames = 0;
+        this.lastSafe.copy(this.at);
+        this.hasSafe = true;
+        return;
+      }
+    }
+
+    /* AUTO-SURFACE: riding TOWARD a gate arms inside SURFACE_ARM_MM and
+     * releases at SURFACE_OUT_MM; riding away disarms. The distance is
+     * measured from her point ON the centerline, not her body (which rides
+     * offset toward the floor by nearly the bore radius and would never
+     * get "3 mm close"). */
+    const step = drive * this.railDir;
+    if (Math.abs(step) > 1e-6) {
+      let gateId: string | null = null;
+      let gateP: THREE.Vector3 | null = null;
+      let dist = Infinity;
+      for (const [id, gn] of this.railNodes) {
+        if (gn.kind !== 'entrance') continue;
+        const d = center.distanceTo(gn.p);
+        if (d < dist) { dist = d; gateId = id; gateP = gn.p; }
+      }
+      if (gateId && gateP) {
+        const toward = (tan.x * (gateP.x - center.x)
+          + tan.y * (gateP.y - center.y)
+          + tan.z * (gateP.z - center.z)) * Math.sign(step) > 0;
+        const dMm = dist * MM;
+        if (!toward || dMm > SURFACE_ARM_MM * 2) this.surfaceArmed = false;
+        else if (dMm <= SURFACE_ARM_MM) this.surfaceArmed = true;
+        if (this.surfaceArmed && toward && dMm <= SURFACE_OUT_MM) {
+          // Aim the exit along this frame's travel before letting go.
+          this.railForward.copy(tan).multiplyScalar(Math.sign(step));
+          this.surfaceTo(gateId);
+          return;
+        }
+      }
+    }
+
     const perp = S_PERP.set(0, -1, 0).addScaledVector(tan, tan.y);
     this.railWall.addScaledVector(tan, -this.railWall.dot(tan));
     if (this.railWall.lengthSq() < 0.05) {
@@ -1240,6 +1417,7 @@ export class IslandScene {
       this.railNodes.set(n.id, {
         p: new THREE.Vector3(n.x / MM, n.y / MM, n.z / MM),
         kind: n.kind,
+        r: n.radiusMm / MM,
       });
     }
     this.rails = this.soil.plan.edges.map((edge) => ({
@@ -1300,7 +1478,24 @@ export class IslandScene {
       y: Math.max(b.max[1] + 48, terrainMax + 48) - this.designOriginMm.y,
       z: bz1 - this.designOriginMm.z,
     };
-    const local = this.shiftPlan(this.soil.plan, -1);
+    /*
+     * THE FOUNDING SEED: a nestless island's first DIG does not open an
+     * empty drawing and wait for the player to guess that PLACE comes
+     * first — it seeds the entrance at the queen's own feet, grounded on
+     * the drawn surface, and opens the tools around it already selected.
+     * The queen digs where the queen is.
+     */
+    let local = this.shiftPlan(this.soil.plan, -1);
+    let seeded = false;
+    if (!local.nodes.some((n) => n.kind === 'entrance')) {
+      local = addNode(local, 'entrance', {
+        x: this.at.x * MM - this.designOriginMm.x,
+        y: this.renderedHeightAtMm(this.at.x * MM, this.at.z * MM)
+          - this.designOriginMm.y,
+        z: this.at.z * MM - this.designOriginMm.z,
+      }).plan;
+      seeded = true;
+    }
     this.designer?.dispose();
     this.designer = new NestDesigner(
       this.scene, this.camera, this.renderer.domElement, this.hud,
@@ -1338,7 +1533,9 @@ export class IslandScene {
     this.lookPointer = null;
     this.stickEl.style.display = 'none';
     if (this.nestView) this.nestView.root.visible = false;
-    this.designer.show(local);
+    /* A seeded mouth is an EDIT — DONE must carve it even untouched, or
+     * the founding dig would quietly evaporate on close. */
+    this.designer.show(local, { dirty: seeded });
   }
 
   private closeDesigner(): void {
@@ -1399,10 +1596,12 @@ export class IslandScene {
     }
     this.rebuildRails();
     /* Her rail may have been resized, moved or deleted: let go and let the
-     * regrab find whatever bore is under her now. */
+     * regrab find whatever bore is under her now. The room she stood in may
+     * be gone too — it re-derives from her position next frame. */
     this.railEdge = -1;
     this.railRev = false;
-    this.railRegrabAt = 0;
+    this.chamberId = null;
+    this.surfaceArmed = false;
     if (this.nestView) {
       this.nestView.dispose();
       this.scene.remove(this.nestView.root);
@@ -1411,17 +1610,6 @@ export class IslandScene {
     this.nestView.root.scale.setScalar(1 / MM);
     this.nestView.root.visible = this.showPlan && !this.designer?.isOpen;
     this.scene.add(this.nestView.root);
-  }
-
-  /** FREE walking: the rail never takes her, and DIG is her own mandibles. */
-  setFreeMode(on: boolean): void {
-    this.freeMode = on;
-    if (this.freeBtn) this.freeBtn.textContent = on ? 'FREE' : 'free';
-    if (on && this.railEdge >= 0) {
-      this.railEdge = -1;
-      this.railRegrabAt = performance.now() + RAIL_REGRAB_S * 1000;
-    }
-    if (!on) this.input.dig = false;
   }
 
   private pose(dt: number): void {
@@ -1513,19 +1701,45 @@ export class IslandScene {
        * the capsule keeps following her, the player just turns it — and
        * letting go hands it back to the trail.
        */
+      /*
+       * THE ROOM CAMERA rides on top of the chase: from ~3 mm outside a
+       * chamber the view starts easing off the trail and onto a post under
+       * the room's ceiling that turns to face her — so a room reads as a
+       * PLACE the camera inhabits, not another stretch of tube — and the
+       * same distance eases it back out on the way to the door. Distance
+       * sets the target, time smooths the move.
+       */
+      let roomShare = 0;
+      let roomBox: ChamberBox | null = null;
+      for (const node of this.railNodes.values()) {
+        if (node.kind !== 'chamber') continue;
+        const box = chamberBox(node.p.x, node.p.y, node.p.z, node.r);
+        const u = chamberNorm(box, this.at.x, this.at.y, this.at.z);
+        const t = Math.min(1, Math.max(0,
+          (CHAMBER_CAM_FAR - u) / (CHAMBER_CAM_FAR - CHAMBER_CAM_NEAR)));
+        if (t > roomShare) { roomShare = t; roomBox = box; }
+      }
+      this.chamberCam += (roomShare - this.chamberCam) * Math.min(1, dt * 3);
+
+      const desired = new THREE.Vector3();
       if (this.lookPointer !== null) {
         const cp = Math.cos(this.camPitch);
         const dist = 1.2;
-        this.camera.position.lerp(new THREE.Vector3(
+        desired.set(
           this.at.x + Math.sin(this.camYaw) * dist * cp,
           this.at.y + Math.sin(this.camPitch) * dist,
           this.at.z + Math.cos(this.camYaw) * dist * cp,
-        ), Math.min(1, dt * 10));
+        );
       } else {
-        const behind = this.trailPointBehind(1.0);
-        behind.y += 0.32;
-        this.camera.position.lerp(behind, Math.min(1, dt * 8));
+        desired.copy(this.trailPointBehind(1.0));
+        desired.y += 0.32;
       }
+      if (roomBox && this.chamberCam > 0.01) {
+        desired.lerp(new THREE.Vector3(
+          roomBox.cx, roomBox.cy + roomBox.ry * 0.55, roomBox.cz,
+        ), this.chamberCam);
+      }
+      this.camera.position.lerp(desired, Math.min(1, dt * 9));
       this.camera.up.set(0, 1, 0);
       this.camera.lookAt(this.at.x, this.at.y + 0.15, this.at.z);
       return;
@@ -1573,34 +1787,31 @@ export class IslandScene {
     actions.className = 'density-lab-actions';
     this.hud.appendChild(actions);
 
-    /* DIG opens the tunnel designer — planning bores is how tunnels get
-     * made. Only in FREE mode is it the old hold-to-bite mandible. */
+    /* DIG means OPEN THE NEST BUILDING TOOLS — one meaning, everywhere.
+     * (The old hold-to-bite mandible still exists in code — `bite()`, fed
+     * by `input.dig` — but nothing wires a button to it: it is parked for
+     * the workers and majors to come.) */
     const dig = document.createElement('button');
     dig.className = 'density-lab-button density-lab-dig';
     dig.textContent = 'DIG';
     dig.addEventListener('pointerdown', (e) => {
       e.preventDefault();
-      if (this.freeMode) this.input.dig = true;
-      else this.openDesigner();
+      this.openDesigner();
     });
-    const stop = () => { this.input.dig = false; };
-    dig.addEventListener('pointerup', stop);
-    dig.addEventListener('pointercancel', stop);
     actions.appendChild(dig);
 
-    const free = document.createElement('button');
-    free.className = 'density-lab-button density-lab-mode';
-    free.textContent = 'free';
-    free.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      this.setFreeMode(!this.freeMode);
-    });
-    this.freeBtn = free;
-    actions.appendChild(free);
+    /* GRIP / FREE — an indicator, not a switch: the tunnel takes her, the
+     * room and the surface free her, all by themselves. It exists so the
+     * player always knows which rules they are moving under. */
+    const mode = document.createElement('button');
+    mode.className = 'density-lab-button density-lab-mode is-indicator';
+    mode.textContent = 'FREE';
+    this.modeBtn = mode;
+    actions.appendChild(mode);
 
     const plan = document.createElement('button');
     plan.className = 'density-lab-button density-lab-mode';
-    plan.textContent = 'PLAN';
+    plan.textContent = 'SONAR';
     plan.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       this.showPlan = !this.showPlan;
@@ -1619,7 +1830,7 @@ export class IslandScene {
 
     /*
      * WASD for the PC hand (playtest: "I was having trouble moving"):
-     * W/S walk, A/D turn, Shift sprint, Space digs, V swaps the view.
+     * W/S walk, A/D turn, Shift sprint, Space opens the tools, V swaps view.
      * Arrows mirror WASD. Keys and stick write the same inputs.
      */
     const applyKeys = () => {
@@ -1642,8 +1853,7 @@ export class IslandScene {
       this.input.sprint = k.has('shift');
       const space = k.has(' ');
       if (space !== this.spaceWasDown) {
-        if (this.freeMode) this.input.dig = space;
-        else if (space) this.openDesigner();
+        if (space) this.openDesigner();
         this.spaceWasDown = space;
       }
     };
@@ -1735,10 +1945,11 @@ export class IslandScene {
     const elevM = this.heights
       ? (this.groundHeightAt(this.at.x, this.at.z) * MM).toFixed(0)
       : '…';
-    this.status.innerHTML = `
+    const mode = this.railEdge >= 0 ? 'GRIP' : this.chamberId ? 'FREE (room)' : 'FREE';
+    this.statsPanel.setHTML(`
       <b>kauai island</b> · 56 m square · 1:1000 · all 64 sections resident<br>
       terrain ${this.terrainVerts.toLocaleString()} v / ${this.terrainTris.toLocaleString()} t
-      · elevation ${elevM} m<br>
+      · elevation ${elevM} m · mode ${mode}<br>
       soil window ${WINDOW_MM} mm · ${(WINDOW_BYTES / 1048576).toFixed(1)} MB ·
       chunks ${this.chunkMeshes.size} · queued ${this.queue.length} ·
       dug ${this.stream?.editedSamples ?? 0}<br>
@@ -1747,7 +1958,7 @@ export class IslandScene {
       at (${(this.at.x * MM / 1000).toFixed(1)}, ${(this.at.z * MM / 1000).toFixed(1)}) m ·
       ${memory ? `heap ${(memory.usedJSHeapSize / 1048576).toFixed(0)} MB · ` : ''}fps ${this.stats.fps}
       @ ${this.pixelRatioNow.toFixed(2)}x
-    `;
+    `);
   }
 
   /* --------------------------------------------------------------- loop */
@@ -1814,6 +2025,8 @@ export class IslandScene {
      * stale rail state used to drag her back into the tunnel she left. */
     this.railEdge = -1;
     this.railRev = false;
+    this.chamberId = null;
+    this.surfaceArmed = false;
     if (this.stream) {
       const scroll = this.stream.recentreOn(this.at.x, this.at.z);
       if (scroll) this.onScroll(scroll);
@@ -1872,7 +2085,12 @@ export class IslandScene {
       underground: this.underground ? 1 : 0,
       firstPerson: this.firstPerson ? 1 : 0,
       railBound: this.railEdge >= 0 ? 1 : 0,
-      free: this.freeMode ? 1 : 0,
+      // GRIP and FREE are one coin: on the rail is GRIP, everything else
+      // (surface, chamber) is FREE. `chamberNow` says which FREE.
+      free: this.railEdge >= 0 ? 0 : 1,
+      chamberNow: this.chamberId !== null ? 1 : 0,
+      playerReady: this.playerReady ? 1 : 0,
+      statsOpen: this.statsPanel.bodyVisible ? 1 : 0,
       designing: this.designer?.isOpen ? 1 : 0,
       rails: this.rails.length,
       planNodes: this.soil?.plan.nodes.length ?? 0,
@@ -1898,6 +2116,7 @@ export class IslandScene {
 
   dispose(): void {
     cancelAnimationFrame(this.frame);
+    this.statsPanel.dispose();
     this.designer?.dispose();
     this.scene.traverse((node) => {
       const mesh = node as THREE.Mesh;

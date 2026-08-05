@@ -182,6 +182,10 @@ export class NestDesigner {
 
     private readonly buttons = new Map<string, HTMLButtonElement>();
 
+    /** The panel's rows, kept so the panel can be CONTEXT-SENSITIVE: a row
+     *  only shows when the selection gives its buttons something to do. */
+    private readonly rows = new Map<string, HTMLDivElement>();
+
     private readonly help = document.createElement('div');
 
     /** Whether the instructions have been dismissed this session. */
@@ -249,8 +253,12 @@ export class NestDesigner {
     /** Whether anything has changed since the last BUILD. */
     get hasUnbuilt(): boolean { return this.dirty; }
 
-    show(plan: NestPlan): void {
+    show(plan: NestPlan, opts: { dirty?: boolean } = {}): void {
         this.plan = plan;
+        /* A seeded plan (the founding mouth the scene places at the queen)
+         * arrives dirty ON PURPOSE: DONE must carve it even if the player
+         * touches nothing else. */
+        if (opts.dirty) this.dirty = true;
         this.open = true;
         this.group.visible = true;
         this.panel.style.display = '';
@@ -790,8 +798,18 @@ export class NestDesigner {
         this.panel.className = 'nest-designer';
         this.panel.style.display = 'none';
 
+        /*
+         * CONTEXT-SENSITIVE, by row (the phone report: nineteen chips at
+         * once, "the controls still seem off"). Always there: the piece
+         * types, PLACE, and the bottom row (UNDO / DIG IT / ? / DONE).
+         * Appearing WITH a selection: the edit row (resize, delete, and
+         * whichever of LINK / FLOW the picked thing supports) and, for a
+         * node, the move pad. `refreshPanel` is the one place that
+         * decides; `buildPanel` only builds.
+         */
         const kinds = document.createElement('div');
-        kinds.className = 'nest-designer-row';
+        kinds.className = 'nest-designer-row nest-row-kinds';
+        this.rows.set('kinds', kinds);
         const kindList: Array<[NodeKind, string]> = [
             ['entrance', 'MOUTH'], ['junction', 'NODE'], ['chamber', 'ROOM'],
         ];
@@ -807,7 +825,8 @@ export class NestDesigner {
         this.panel.appendChild(kinds);
 
         const acts = document.createElement('div');
-        acts.className = 'nest-designer-row';
+        acts.className = 'nest-designer-row nest-row-acts';
+        this.rows.set('acts', acts);
         acts.appendChild(this.named('link', this.chip('LINK', () => {
             if (this.picked?.kind !== 'node') return;
             this.linkingFrom = this.linkingFrom ? null : this.picked.id;
@@ -836,7 +855,8 @@ export class NestDesigner {
          * piece on the grid.
          */
         const pad = document.createElement('div');
-        pad.className = 'nest-designer-row';
+        pad.className = 'nest-designer-row nest-row-pad';
+        this.rows.set('pad', pad);
         pad.appendChild(this.chip('◀', () => this.step(-1, 0, 0)));
         pad.appendChild(this.chip('▶', () => this.step(1, 0, 0)));
         pad.appendChild(this.chip('▲', () => this.step(0, 0, 1)));
@@ -853,7 +873,8 @@ export class NestDesigner {
         this.panel.appendChild(pad);
 
         const done = document.createElement('div');
-        done.className = 'nest-designer-row';
+        done.className = 'nest-designer-row nest-row-done';
+        this.rows.set('done', done);
         done.appendChild(this.named('undo', this.chip('UNDO', () => {
             const back = this.history.undo(this.plan);
             if (!back) return;
@@ -966,6 +987,20 @@ export class NestDesigner {
         this.buttons.get('link')?.classList.toggle('is-on', this.linkingFrom !== null);
         this.buttons.get('grnd')?.classList.toggle('is-on', this.groundSnap);
         this.buttons.get('undo')?.toggleAttribute('disabled', !this.history.canUndo);
+
+        /* The context: nothing picked shows only the always-rows (place a
+         * piece, or finish); a picked NODE adds the edit row with LINK and
+         * the move pad; a picked EDGE adds the edit row with FLOW and no
+         * pad — an edge has no position of its own to step about. */
+        const picked = this.picked;
+        const actsRow = this.rows.get('acts');
+        if (actsRow) actsRow.style.display = picked ? '' : 'none';
+        const padRow = this.rows.get('pad');
+        if (padRow) padRow.style.display = picked?.kind === 'node' ? '' : 'none';
+        const link = this.buttons.get('link');
+        if (link) link.style.display = picked?.kind === 'node' ? '' : 'none';
+        const flow = this.buttons.get('flow');
+        if (flow) flow.style.display = picked?.kind === 'edge' ? '' : 'none';
 
         if (this.linkingFrom) {
             this.hint.textContent = 'tap another node to join it';

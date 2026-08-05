@@ -10,6 +10,12 @@
  *      one red pixel below the horizon line means not one hole anywhere
  *   6. no page errors
  *
+ * And THE PROLOGUE PATH, end to end, which is what the stabilisation pass
+ * exists to keep true: the curtain lifts only when island AND queen are
+ * ready · DIG seeds a mouth at the queen · the shaft GRIPs her · she rides
+ * every orientation · the room frees her · she roams it without clipping ·
+ * the mouth GRIPs her back · riding toward the gate auto-surfaces her.
+ *
  *   SMOKE_URL=http://localhost:4173/Thronemound-Colony-Sim/ node scripts/probe-island.mjs
  */
 import { chromium } from 'playwright';
@@ -34,6 +40,46 @@ const check = (name, ok, detail = '') => {
 await page.goto(`${base}/?scene=island`, { waitUntil: 'domcontentloaded' });
 await page.waitForFunction(() => window.islandScene?.ready, null, { timeout: 60000 });
 await page.evaluate(() => window.islandScene.setPausedForTest(true));
+
+console.log('\nTHE LOADING SCREEN (a dark curtain until the island AND the queen settle)');
+const loadWorld = await page.evaluate(() => window.islandScene.loadingStateForTest());
+check('the world readies behind the curtain', loadWorld.world === 1);
+await page.waitForFunction(
+  () => window.islandScene.loadingStateForTest().player === 1, null, { timeout: 60000 },
+);
+await page.waitForFunction(
+  () => document.querySelector('.tm-loading-root') === null, null, { timeout: 15000 },
+);
+const loadDone = await page.evaluate(() => window.islandScene.loadingStateForTest());
+check('playerReady waited for the queen to settle',
+  loadDone.player === 1 && loadDone.queenSettled === 1);
+check('the curtain faded out and left the DOM', loadDone.overlayGone === 1);
+
+console.log('\nTHE STATS CHIP (telemetry folded away by default)');
+const statsChip = await page.evaluate(() => {
+  const chip = document.querySelector('.tm-stats-chip');
+  const body = document.querySelector('.density-lab-status');
+  const collapsed = body !== null && body.style.display === 'none';
+  chip?.click();
+  return {
+    hasChip: chip !== null,
+    collapsed,
+    openNow: body !== null && body.style.display !== 'none',
+  };
+});
+await page.waitForTimeout(1300); // one telemetry tick lands in the open body
+const statsBody = await page.evaluate(() => {
+  const body = document.querySelector('.density-lab-status');
+  const text = body?.textContent ?? '';
+  document.querySelector('.tm-stats-chip')?.click();
+  return {
+    hasTelemetry: text.includes('kauai island'),
+    closedAgain: body !== null && body.style.display === 'none',
+  };
+});
+check('a STATS chip exists and starts collapsed', statsChip.hasChip && statsChip.collapsed);
+check('tap expands it and telemetry flows in', statsChip.openNow && statsBody.hasTelemetry);
+check('tap again folds it away', statsBody.closedAgain);
 
 console.log('\nTHE ISLAND');
 const stats = await page.evaluate(() => window.islandScene.statsForTest());
@@ -67,27 +113,30 @@ console.log('\nTHE FOUNDING DIG (the island is born nestless; the queen digs the
 const founding = await page.evaluate(() => {
   const s = window.islandScene;
   const bornNestless = s.statsForTest().planNodes;
-  // With no nest at all, DIG must open the designer's box around HER —
-  // not around some phantom plan at the island's origin.
+  // With no nest at all, DIG SEEDS the founding mouth at the queen and
+  // opens the tools around HER — no premade tunnel, and no guessing that
+  // PLACE is the first move.
   s.openDesigner();
   const st = s.statsForTest();
   const boxNearHer = Math.abs(st.designX - (s.at.x * 5 - 160)) < 1
     && Math.abs(st.designZ - (s.at.z * 5 - 160)) < 1;
-  const openedEmpty = st.designing;
-  // A nestless plan presets PLACE to the MOUTH — the piece it must start with.
-  const presetMouth = s.designer.placing === 'entrance';
-  // The founding PLACE lands at the QUEEN, grounded — not ahead of a camera.
+  const opened = st.designing;
   const d = s.designer;
-  d.place();
-  const first = d.current().nodes[0];
-  const antOffMm = Math.hypot(
+  const seed = d.current();
+  const first = seed.nodes[0];
+  const seededMouth = seed.nodes.length === 1 && !!first && first.kind === 'entrance';
+  const seedSelected = !!d.picked && d.picked.kind === 'node' && !!first
+    && d.picked.id === first.id;
+  const antOffMm = first ? Math.hypot(
     first.x - (s.at.x * 5 - st.designX), first.z - (s.at.z * 5 - st.designZ),
-  );
-  const groundOffMm = Math.abs(
+  ) : 99;
+  const groundOffMm = first ? Math.abs(
     first.y - (s.renderedHeightAtMm(first.x + st.designX, first.z + st.designZ) - st.designY),
-  );
+  ) : 99;
+  // The seed is an EDIT: DONE with nothing else touched must still carve it.
+  const carvesOnDone = d.hasUnbuilt === true;
   // Leave the plan untouched for the scripted founding below: clear the
-  // scratch mouth so DONE has nothing to carve.
+  // seed so DONE has nothing to carve.
   d.plan = { nodes: [], edges: [] };
   d.picked = null;
   d.dirty = false;
@@ -113,18 +162,20 @@ const founding = await page.evaluate(() => {
   s.drainQueueForTest();
   const after = s.statsForTest();
   return {
-    bornNestless, openedEmpty, boxNearHer, presetMouth, antOffMm, groundOffMm,
-    nodes: after.planNodes, rails: after.rails,
+    bornNestless, opened, boxNearHer, seededMouth, seedSelected, antOffMm,
+    groundOffMm, carvesOnDone, nodes: after.planNodes, rails: after.rails,
   };
 });
 check('the island is born nestless', founding.bornNestless === 0,
   `${founding.bornNestless} plan nodes at spawn`);
-check('nestless DIG opens the designer around the queen',
-  founding.openedEmpty === 1 && founding.boxNearHer);
-check('and PLACE is preset to the MOUTH', founding.presetMouth === true);
-check('the founding mouth lands AT the queen, on the ground',
+check('nestless DIG opens the nest tools around the queen',
+  founding.opened === 1 && founding.boxNearHer);
+check('and SEEDS the founding mouth, selected',
+  founding.seededMouth === true && founding.seedSelected === true);
+check('the seeded mouth sits AT the queen, on the ground',
   founding.antOffMm < 2 && founding.groundOffMm < 1.5,
   `${founding.antOffMm.toFixed(1)} mm from her, ${founding.groundOffMm.toFixed(2)} mm off the surface`);
+check('and DONE would carve it untouched', founding.carvesOnDone === true);
 check('the founding dig took', founding.nodes === 4 && founding.rails === 3,
   `${founding.nodes} nodes, ${founding.rails} rails`);
 
@@ -342,18 +393,36 @@ const rail = await page.evaluate(() => {
   const atStore = Math.hypot(
     s.at.x * 5 - n.store.x, s.at.y * 5 - n.store.y, s.at.z * 5 - n.store.z,
   );
-  // ...then back out: pulling BACK is how you ride a vertical bore upward.
-  // The gate no longer ejects her — it ASKS. The probe's thumb presses YES
-  // the moment the SURFACE? offer appears, then expects daylight.
-  s.input.walk = -1;
+  // THE ROOM: arriving in the chamber the rail lets go by itself — FREE
+  // inside a room, no button. Roam it (avoiding the west mouth, which is
+  // the door and SHOULD take her): contained, never in soil, never gripped.
+  const roomState = s.statsForTest();
+  const inRoom = roomState.railBound === 0 && roomState.chamberNow === 1;
+  let roomSolid = 0;
+  let roomGripped = 0;
+  const roamFacings = [Math.PI / 2, Math.PI, 0]; // east, south, north
+  s.input.walk = 1;
+  for (let i = 0; i < 180; i += 1) {
+    if (i % 60 === 0) s.setFacingForTest(roamFacings[i / 60]);
+    s.stepForTest(1 / 30, 1);
+    if (s.stream.solidAtWu(s.at.x, s.at.y, s.at.z) === true) roomSolid += 1;
+    if (s.statsForTest().railBound === 1) roomGripped += 1;
+  }
+  s.input.walk = 0;
+  const roamedInRoom = s.statsForTest().chamberNow === 1 && roomGripped === 0;
+  // Walk out at the tunnel mouth: GRIP takes her back by itself...
+  s.setFacingForTest(-Math.PI / 2); // the run leaves the store westward
+  s.input.walk = 1;
+  let regripAt = -1;
+  for (let i = 0; i < 400; i += 1) {
+    s.stepForTest(1 / 30, 1);
+    if (s.statsForTest().railBound === 1) { regripAt = i; break; }
+  }
+  // ...and riding TOWARD the gate auto-surfaces her — no prompt, no press:
+  // armed at ~3 mm, released at ~0.5 mm, placed beside the mouth.
   let outAt = -1;
-  let offeredAt = -1;
   for (let i = 0; i < 1600; i += 1) {
     s.stepForTest(1 / 30, 1);
-    if (offeredAt < 0 && s.surfaceOfferForTest()) {
-      offeredAt = i;
-      s.answerSurfaceForTest(true);
-    }
     if (s.statsForTest().railBound === 0
       && s.at.y * 5 >= s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5) - 2) {
       outAt = i;
@@ -362,6 +431,7 @@ const rail = await page.evaluate(() => {
   }
   s.input.walk = 0;
   const surface = s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5);
+  const gateOffMm = Math.hypot(s.at.x * 5 - n.gate.x, s.at.z * 5 - n.gate.z);
   return {
     bound,
     railFrames,
@@ -369,10 +439,14 @@ const rail = await page.evaluate(() => {
     gapBadShare: railFrames > 0 ? gapBad / railFrames : 1,
     pitchShare: railFrames > 0 ? pitchOk / railFrames : 0,
     atStore,
+    inRoom,
+    roomSolid,
+    roamedInRoom,
+    regripAt,
     outAt,
-    offeredAt,
     railBoundAfter: s.statsForTest().railBound,
     aboveMm: s.at.y * 5 - surface,
+    gateOffMm,
   };
 });
 check('the shaft handed her to the rail', rail.bound === 1);
@@ -382,11 +456,18 @@ check('her body pitch follows the tube', rail.pitchShare > 0.85,
   `${(rail.pitchShare * 100).toFixed(0)}% of ${rail.railFrames} rail frames aligned`);
 check('the rail delivered her to the store', rail.atStore < 14,
   `${rail.atStore.toFixed(1)} mm from the chamber`);
-check('the gate ASKS instead of ejecting', rail.offeredAt >= 0,
-  `SURFACE? offered after ${rail.offeredAt} steps`);
-check('riding back surfaces her at the gate',
-  rail.outAt >= 0 && rail.railBoundAfter === 0 && rail.aboveMm > -6,
-  `out after ${rail.outAt} steps, ${rail.aboveMm.toFixed(1)} mm vs surface`);
+check('the room frees her on arrival — GRIP off, FREE in the chamber',
+  rail.inRoom === true);
+check('she roams the room contained, never in the walls',
+  rail.roamedInRoom === true && rail.roomSolid === 0,
+  `${rail.roomSolid} solid frames of 180`);
+check('the mouth GRIPs her back on the way out', rail.regripAt >= 0,
+  `regripped after ${rail.regripAt} steps`);
+check('riding toward the gate auto-surfaces her beside it',
+  rail.outAt >= 0 && rail.railBoundAfter === 0 && rail.aboveMm > -6
+  && rail.gateOffMm < 30,
+  `out after ${rail.outAt} steps, ${rail.aboveMm.toFixed(1)} mm vs surface, `
+  + `${rail.gateOffMm.toFixed(1)} mm from the gate`);
 
 console.log('\nNO HOLES EVEN STARVED (budget capped at 1 chunk/frame)');
 const churn = await page.evaluate(() => {
@@ -553,42 +634,44 @@ check('held drag orbits close around her', pan.heldDist > 3 && pan.heldDist < 9
 check('released, the trail capsule takes the camera back',
   pan.backDist > 2 && pan.backDist < 12, `${pan.backDist.toFixed(1)} mm back`);
 
-console.log('\nFREE MODE (the rail never takes her)');
-const freeMode = await page.evaluate(() => {
+console.log('\nGRIP AND FREE (GRIP is the law of the tunnels; the chip only reports)');
+const modes = await page.evaluate(() => {
   const s = window.islandScene;
   const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
-  s.setFreeMode(true);
+  const chip = () => document.querySelector('.density-lab-mode.is-indicator');
+  // On the surface: FREE, and the chip says so.
   s.teleportMm(n.gate.x - 18, n.gate.z);
   s.drainQueueForTest();
+  s.stepForTest(1 / 30, 5);
+  const surfaceFree = s.statsForTest().free;
+  const surfaceLabel = chip()?.textContent;
+  const surfaceGripClass = chip()?.classList.contains('is-grip');
+  // Walk into the shaft: the bore MUST grip her — there is no opt-out.
   s.setFacingForTest(Math.PI / 2);
   s.input.walk = 1;
-  let boundFrames = 0;
-  let wentUnder = 0;
+  let grabbedAt = -1;
   for (let i = 0; i < 900; i += 1) {
     s.stepForTest(1 / 30, 1);
-    const st = s.statsForTest();
-    if (st.railBound === 1) boundFrames += 1;
-    if (st.underground === 1) wentUnder = 1;
-    if (st.underground === 1
-      && s.at.y * 5 < s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5) - 40) break;
+    if (s.statsForTest().railBound === 1) { grabbedAt = i; break; }
   }
   s.input.walk = 0;
-  s.stepForTest(1 / 30, 30);
-  const stillFree = s.statsForTest().railBound;
-  const underNow = s.statsForTest().underground;
-  // Flip FREE off right where she stands: the rail may take her again.
-  s.setFreeMode(false);
-  s.stepForTest(1 / 30, 60);
-  const rebound = s.statsForTest().railBound;
-  return { boundFrames, wentUnder, stillFree, underNow, rebound };
+  s.stepForTest(1 / 30, 2);
+  const tunnelLabel = chip()?.textContent;
+  const tunnelGripClass = chip()?.classList.contains('is-grip');
+  const tunnelFree = s.statsForTest().free;
+  return {
+    surfaceFree, surfaceLabel, surfaceGripClass,
+    grabbedAt, tunnelLabel, tunnelGripClass, tunnelFree,
+  };
 });
-check('she went underground on her own six feet', freeMode.wentUnder === 1);
-check('the rail NEVER took her in free mode',
-  freeMode.boundFrames === 0 && freeMode.stillFree === 0,
-  `${freeMode.boundFrames} bound frames`);
-check('free off, underground: the rail takes her again',
-  freeMode.underNow !== 1 || freeMode.rebound === 1,
-  `under=${freeMode.underNow} rebound=${freeMode.rebound}`);
+check('on the surface the chip reads FREE',
+  modes.surfaceFree === 1 && modes.surfaceLabel === 'FREE'
+  && modes.surfaceGripClass === false);
+check('a bore GRIPs her — no opt-out in a tunnel',
+  modes.grabbedAt >= 0 && modes.tunnelFree === 0,
+  `gripped after ${modes.grabbedAt} steps`);
+check('and the chip reads GRIP, lit',
+  modes.tunnelLabel === 'GRIP' && modes.tunnelGripClass === true);
 
 console.log("\nTHE DESIGNER'S DIG IT (a planned tunnel becomes soil and rail)");
 const digIt = await page.evaluate(() => {
@@ -600,6 +683,32 @@ const digIt = await page.evaluate(() => {
   s.openDesigner();
   const opened = s.statsForTest().designing;
   const panelUp = document.querySelector('.nest-designer') !== null;
+  // CONTEXT-SENSITIVE panel: opening picks the entrance (a node), so the
+  // edit row and move pad show with LINK, not FLOW. Nothing picked — only
+  // the place and finish rows. An edge picked — FLOW, no LINK, no pad.
+  const d = s.designer;
+  const disp = (sel) => {
+    const el = document.querySelector(sel);
+    return el ? el.style.display : 'missing';
+  };
+  const withNode = {
+    acts: disp('.nest-row-acts'),
+    pad: disp('.nest-row-pad'),
+    kinds: disp('.nest-row-kinds'),
+    done: disp('.nest-row-done'),
+    link: d.buttons.get('link').style.display,
+    flow: d.buttons.get('flow').style.display,
+  };
+  d.picked = null;
+  d.refreshPanel();
+  const withNothing = { acts: disp('.nest-row-acts'), pad: disp('.nest-row-pad') };
+  d.selectForTest('edge', d.current().edges[0].id);
+  const withEdge = {
+    acts: disp('.nest-row-acts'),
+    pad: disp('.nest-row-pad'),
+    link: d.buttons.get('link').style.display,
+    flow: d.buttons.get('flow').style.display,
+  };
   s.closeDesignerForTest();
   const closed = s.statsForTest().designing;
   // Space opens it too — and a release WHILE it is open must not swallow
@@ -630,6 +739,9 @@ const digIt = await page.evaluate(() => {
   return {
     opened,
     panelUp,
+    withNode,
+    withNothing,
+    withEdge,
     closed,
     spaceOpened,
     spaceReopened,
@@ -642,8 +754,18 @@ const digIt = await page.evaluate(() => {
     soilBelow: s.solidAtMm(store.x + 48, store.y - 60, store.z),
   };
 });
-check('DIG opens the designer, DONE closes it',
+check('DIG opens the nest tools, DONE closes them',
   digIt.opened === 1 && digIt.panelUp && digIt.closed === 0);
+check('node picked: edit row + move pad, LINK not FLOW',
+  digIt.withNode.acts === '' && digIt.withNode.pad === ''
+  && digIt.withNode.link === '' && digIt.withNode.flow === 'none');
+check('the place and finish rows are always there',
+  digIt.withNode.kinds !== 'none' && digIt.withNode.done !== 'none');
+check('nothing picked: only the place and finish rows',
+  digIt.withNothing.acts === 'none' && digIt.withNothing.pad === 'none');
+check('edge picked: FLOW not LINK, and no move pad',
+  digIt.withEdge.acts === '' && digIt.withEdge.pad === 'none'
+  && digIt.withEdge.flow === '' && digIt.withEdge.link === 'none');
 check('Space opens it, and reopens after a release while open',
   digIt.spaceOpened === 1 && digIt.spaceReopened === 1,
   `first=${digIt.spaceOpened} again=${digIt.spaceReopened}`);
