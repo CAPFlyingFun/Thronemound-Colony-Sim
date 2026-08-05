@@ -256,37 +256,79 @@ check('store is air AGAIN', roundtrip.storeAgain === false, `solidAtMm=${roundtr
 check('reconstruction still cost zero saved samples', roundtrip.edited === 0,
   `${roundtrip.edited} edits stored`);
 
-console.log('\nA HAND-DIG THROUGH THE ISLAND SURFACE');
+console.log('\nA HAND-DIG: SHE CUTS HER OWN SHAFT, WITH NO PLAN AT ALL');
+/*
+ * The bore, end to end and on its own terms. Two rules shape this test and
+ * both are the dig room's: the AIM steers her travel, not just the bite, so
+ * a shaft is made by aiming down; and DIGGING NEVER MOVES HER, so the hole
+ * only deepens as she walks into the room she has cleared. Chewing on the
+ * spot cuts one sphere and then nothing, which is why this holds the stick
+ * as well as the jaws.
+ */
 const dig = await page.evaluate(() => {
   const s = window.islandScene;
-  s.teleportMm(27950, 27950);
+  const atX = 27950;
+  const atZ = 27950;
+  s.teleportMm(atX, atZ);
   s.drainQueueForTest();
-  s.setFacingForTest(0); // facing +z; the mouth rides 1.4 mm ahead
-  const mouthX = 27950 / 5;
-  const mouthZ = (27950 + 1.4) / 5;
-  const before = s.stream.surfaceHeightAt(mouthX, mouthZ) * 5;
+  s.setFacingForTest(0);
+  /* Measured where the shaft ENDS, not where it starts. Aiming down and
+   * walking in cuts a ramp, so the entry column is its shallow mouth and
+   * the hole proper is wherever she got to. */
+  const columnAt = (xMm, zMm) => {
+    const h = s.stream.surfaceHeightAt(xMm / 5, zMm / 5);
+    return h === null ? null : h * 5;
+  };
+  for (let i = 0; i < 5; i += 1) s.bore.aim(-1); // fifty degrees down
   s.input.dig = true;
-  s.stepForTest(1 / 30, 90); // three seconds of chewing, deterministic
+  s.input.walk = 1;
+  let embedded = 0;
+  for (let i = 0; i < 600; i += 1) {
+    s.stepForTest(1 / 30, 1);
+    if (i % 60 === 0) s.drainQueueForTest();
+    if (s.stream.solidAtWu(s.at.x, s.at.y, s.at.z) === true) embedded += 1;
+  }
   s.input.dig = false;
+  s.input.walk = 0;
+  for (let i = 0; i < 5; i += 1) s.bore.aim(1);
   s.drainQueueForTest();
-  const after = s.stream.surfaceHeightAt(mouthX, mouthZ) * 5;
-  // Leave far enough that the hole's column unloads, then come back.
+  const endX = s.at.x * 5;
+  const endZ = s.at.z * 5;
+  const endY = s.at.y * 5;
+  const drawnAtEnd = s.renderedHeightAtMm(endX, endZ);
+  const soilAtEnd = columnAt(endX, endZ);
+  const depth = drawnAtEnd - endY;
+  /* A TUNNEL, not a trench: air where she stands, and undisturbed ground
+   * still overhead. Aiming down and walking in should leave a roof on it —
+   * an open slot all the way to the sky would mean she had ploughed a
+   * furrow rather than bored in. */
+  const voidAtHer = s.solidAtMm(endX, endY, endZ);
+  const roofAbove = s.solidAtMm(endX, endY + 30, endZ);
+  // Leave far enough that the shaft's column unloads, then come back.
   s.teleportMm(20000, 20000);
   s.drainQueueForTest();
-  const goneWhileAway = s.solidAtMm(27950, 1300, 27951.4);
-  s.teleportMm(27950, 27950);
+  const goneWhileAway = s.solidAtMm(endX, 1300, endZ);
+  s.teleportMm(endX, endZ);
   s.drainQueueForTest();
-  const returned = s.stream.surfaceHeightAt(mouthX, mouthZ) * 5;
+  const voidAfter = s.solidAtMm(endX, endY, endZ);
   return {
-    before, after, returned, goneWhileAway, edited: s.statsForTest().edited,
+    depth, embedded, goneWhileAway, soilAtEnd, drawnAtEnd,
+    voidAtHer, roofAbove, voidAfter,
+    returned: columnAt(endX, endZ),
+    edited: s.statsForTest().edited,
   };
 });
-check('the surface under the mouth dropped', dig.after < dig.before - 1.5,
-  `${dig.before.toFixed(1)} → ${dig.after.toFixed(1)} mm`);
+check('aiming down and holding the jaws carried her into the ground',
+  dig.depth > 20, `${dig.depth.toFixed(1)} mm below the drawn surface`);
+check('what she cut is a TUNNEL — air at her, ground still overhead',
+  dig.voidAtHer === false && dig.roofAbove === true,
+  `at her solid=${dig.voidAtHer}, 30 mm above solid=${dig.roofAbove}`);
+check('she is never inside soil while cutting', dig.embedded === 0,
+  `${dig.embedded} frames of 600`);
 check('the dig is in the sparse store', dig.edited > 0, `${dig.edited} samples`);
 check('hole column unloaded while away', dig.goneWhileAway === null);
-check('the hole SURVIVED the round trip', Math.abs(dig.returned - dig.after) < 0.5,
-  `${dig.after.toFixed(1)} mm before, ${dig.returned.toFixed(1)} mm after`);
+check('the tunnel SURVIVED the round trip', dig.voidAfter === false,
+  `solid where she stood: ${dig.voidAfter}`);
 
 console.log('\nTHE WALKS (clearance is against the DRAWN triangles — below zero');
 console.log('is "she went underground", the playtest bug this pins down forever)');
@@ -763,13 +805,16 @@ const digIt = await page.evaluate(() => {
   // Space opens it too — and a release WHILE it is open must not swallow
   // the next press (the sticky-edge bug).
   const press = (key, type) => window.dispatchEvent(new KeyboardEvent(type, { key }));
-  press(' ', 'keydown');
+  /* Space is the JAWS now — the nest tools moved to B. The edge still has
+   * to survive a release while the panel is open, which was the sticky-key
+   * bug, so the check follows the key rather than being dropped. */
+  press('b', 'keydown');
   const spaceOpened = s.statsForTest().designing;
-  press(' ', 'keyup');
+  press('b', 'keyup');
   s.closeDesignerForTest();
-  press(' ', 'keydown');
+  press('b', 'keydown');
   const spaceReopened = s.statsForTest().designing;
-  press(' ', 'keyup');
+  press('b', 'keyup');
   s.closeDesignerForTest();
   // Extend the plan the way DIG IT does: a new run east off the store.
   const plan = s.currentPlanForTest();
@@ -815,7 +860,7 @@ check('nothing picked: only the place and finish rows',
 check('edge picked: FLOW not LINK, and no move pad',
   digIt.withEdge.acts === '' && digIt.withEdge.pad === 'none'
   && digIt.withEdge.flow === '' && digIt.withEdge.link === 'none');
-check('Space opens it, and reopens after a release while open',
+check('B opens the nest tools, and reopens after a release while open',
   digIt.spaceOpened === 1 && digIt.spaceReopened === 1,
   `first=${digIt.spaceOpened} again=${digIt.spaceReopened}`);
 check('DIG IT bored the planned run open', digIt.midAir === false,

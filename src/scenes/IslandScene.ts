@@ -44,6 +44,7 @@ import { type NestPlan } from '../nest/nestPlan';
 import {
   chamberBox, chamberNorm, insideChamber, type ChamberBox,
 } from './ChamberMovement';
+import { BoreRig } from './BoreControl';
 import { DebugStatsPanel } from './DebugStatsPanel';
 import { LoadingOverlay } from './LoadingOverlay';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
@@ -112,8 +113,10 @@ const LEAD_S = 0.45;
 const LEAD_MAX = 24 / MM;
 const SCROLL_COOLDOWN_MS = 150;
 
-const BITE_RADIUS = 1.9 / MM;
-const BITE_EVERY_S = 0.16;
+const BITE_RADIUS = 1.75 / MM;
+
+/** How far ahead of her centre the jaws bite, in world units. */
+const JAW_REACH = 1.4 / MM;
 
 /** Riding TOWARD a gate this close ASKS whether to surface. Riding away
  *  never asks, however close she passes — the heading is what makes the
@@ -201,6 +204,26 @@ export class IslandScene {
   private readonly velocity = new THREE.Vector3();
 
   readonly input = { walk: 0, yaw: 0, dig: false, sprint: false };
+
+  /**
+   * THE BORE — the dig room's control, brought over whole rather than
+   * re-invented: hold DIG and she strokes, soil leaves at the bottom of
+   * each stroke, steering is slow while cutting because a tunnel is a
+   * committed shape, and pitch is a dial from straight down to straight up.
+   *
+   * The rule that makes it a tunnel rather than a trench is that the aim
+   * steers TRAVEL, not just the bite — and the rule that makes it honest is
+   * that digging never moves her by itself. Each stroke clears a little
+   * more, and she can only walk into what has been cleared, so how fast a
+   * tunnel grows is a property of her jaws and not of how long the stick
+   * is held.
+   */
+  private readonly bore = new BoreRig(Math.PI);
+
+  /** True from the first stroke until she is back out in the open — while
+   *  it holds, travel follows the bore's line, so letting go of the button
+   *  means "stop", not "level out and grind into the wall". */
+  private boreEngaged = false;
 
   private readonly keysDown = new Set<string>();
 
@@ -353,6 +376,8 @@ export class IslandScene {
   private readonly stickKnob = document.createElement('div');
 
   private readonly crosshair = document.createElement('div');
+
+  private aimReadout: HTMLElement | null = null;
 
   constructor(host: HTMLElement) {
     this.host = host;
@@ -961,12 +986,24 @@ export class IslandScene {
 
   private simulate(dt: number): void {
     if (!this.heights) return;
-    this.facing -= this.input.yaw * TURN_RATE * dt;
+    /* The rig owns the heading: it steers slowly while she is cutting and
+     * at walking rate otherwise. Its yaw runs the other way to the stick's,
+     * hence the sign. */
+    const bore = this.bore.step(dt, {
+      yaw: -this.input.yaw,
+      forward: this.input.walk,
+      dig: this.input.dig,
+    });
+    this.facing = bore.heading;
+    if (bore.digging) this.boreEngaged = true;
+    else if (!this.underground) this.boreEngaged = false;
     const speed = this.input.walk * WALK_SPEED * (this.input.sprint ? SPRINT : 1);
     this.velocity.set(Math.sin(this.facing) * speed, 0, Math.cos(this.facing) * speed);
 
     if (this.railEdge >= 0) {
       this.moveOnRail(dt, speed);
+    } else if (this.boreEngaged) {
+      this.moveBore(dt, speed);
     } else {
       this.moveFree(dt, speed);
     }
@@ -1043,7 +1080,8 @@ export class IslandScene {
     }
 
     if (this.stream) {
-      if (this.input.dig) this.bite(dt);
+      // Soil leaves at the bottom of the stroke, not on the button.
+      if (bore.bite) this.bite();
 
       const lead = Math.min(LEAD_MAX, Math.abs(speed) * LEAD_S);
       const now = performance.now();
@@ -1244,6 +1282,13 @@ export class IslandScene {
   }
 
   private hideGateAsk(): void { this.showGateAsk(null); }
+
+  /** The dial, in degrees, where the thumb can see it. */
+  private refreshAim(): void {
+    if (!this.aimReadout) return;
+    const deg = Math.round((this.bore.pitch * 180) / Math.PI);
+    this.aimReadout.textContent = `${deg >= 0 ? '+' : ''}${deg}°`;
+  }
 
   /** The GRIP/FREE chip is an INDICATOR — the states switch themselves, so
    *  the chip's whole job is to make the current one obvious. */
@@ -1517,6 +1562,37 @@ export class IslandScene {
     this.embedFrames = 0;
   }
 
+  /** The way she is pointed AND pitched — the line the bore cuts and, while
+   *  she is engaged in one, the line she travels. */
+  private boreAim(): THREE.Vector3 {
+    const cp = Math.cos(this.bore.pitch);
+    return new THREE.Vector3(
+      Math.sin(this.facing) * cp, Math.sin(this.bore.pitch), Math.cos(this.facing) * cp,
+    );
+  }
+
+  /**
+   * Travel along the bore's line, paced by the space she has cleared.
+   *
+   * No floor-following and no step limit down here: she is in a tube she
+   * cut herself, and the only thing that may stop her is soil that is still
+   * there. That check is what makes the jaws set the rate of tunnelling —
+   * without it the stick drives her straight through the working face and
+   * out the far side of the hill, and the digging becomes decoration.
+   */
+  private moveBore(dt: number, speed: number): void {
+    if (Math.abs(speed) < 1e-6) return;
+    const span = SPAN_MM / MM;
+    const next = this.at.clone().addScaledVector(this.boreAim(), speed * dt);
+    next.x = Math.min(span - 2, Math.max(2, next.x));
+    next.z = Math.min(span - 2, Math.max(2, next.z));
+    if (this.stream?.solidAtWu(next.x, next.y, next.z) === true) return;
+    this.at.copy(next);
+    this.lastSafe.copy(this.at);
+    this.hasSafe = true;
+    this.embedFrames = 0;
+  }
+
   private nearestRail(p: THREE.Vector3): { i: number; t: number; d: number } | null {
     let best: { i: number; t: number; d: number } | null = null;
     const ap = new THREE.Vector3();
@@ -1532,14 +1608,8 @@ export class IslandScene {
     return best;
   }
 
-  private bite(dt: number): void {
-    this.biteAt += dt;
-    if (this.biteAt < BITE_EVERY_S) return;
-    this.biteAt = 0;
-    const mouth = this.at.clone().addScaledVector(
-      new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing)), 1.4 / MM,
-    );
-    mouth.y = this.at.y - RIDE * 0.4;
+  private bite(): void {
+    const mouth = this.at.clone().addScaledVector(this.boreAim(), JAW_REACH);
     const result = this.stream!.subtractSphere(mouth, BITE_RADIUS);
     if (result.changedSamples === 0) return;
     const lo = (v: number) => Math.max(0, Math.floor((v - 1) / CH));
@@ -1747,6 +1817,7 @@ export class IslandScene {
     this.railEdge = -1;
     this.railRev = false;
     this.chamberId = null;
+    this.boreEngaged = false;
     this.railGate = null;
     this.enterDeclined = null;
     this.surfaceDeclined = null;
@@ -1936,18 +2007,67 @@ export class IslandScene {
     actions.className = 'density-lab-actions';
     this.hud.appendChild(actions);
 
-    /* DIG means OPEN THE NEST BUILDING TOOLS — one meaning, everywhere.
-     * (The old hold-to-bite mandible still exists in code — `bite()`, fed
-     * by `input.dig` — but nothing wires a button to it: it is parked for
-     * the workers and majors to come.) */
+    /*
+     * DIG IS HER JAWS AGAIN, and it is the drive: hold it and she strokes,
+     * a bite of soil leaves at the bottom of each stroke, and she can walk
+     * forward into exactly as much room as she has made. A tunnel is then
+     * wherever she chewed — no plan to lay out first, nothing authored to
+     * be locked into, and nothing to ask her permission about at either
+     * end of it.
+     */
     const dig = document.createElement('button');
     dig.className = 'density-lab-button density-lab-dig';
     dig.textContent = 'DIG';
     dig.addEventListener('pointerdown', (e) => {
       e.preventDefault();
+      dig.setPointerCapture(e.pointerId);
+      this.input.dig = true;
+    });
+    const stopDig = () => { this.input.dig = false; };
+    dig.addEventListener('pointerup', stopDig);
+    dig.addEventListener('pointercancel', stopDig);
+    dig.addEventListener('lostpointercapture', stopDig);
+    actions.appendChild(dig);
+
+    /*
+     * THE PITCH DIAL. Aiming is the whole difference between a tunnel and a
+     * trench: pitch steers her TRAVEL, not just the bite, so a shaft is dug
+     * by aiming down and holding. Ten degrees a tap, straight down to
+     * straight up — symmetric, because an ant that digs down has to be able
+     * to dig back out. In her own eyes the look IS the aim and these are
+     * not needed; over her shoulder there is no gaze to read, so they are.
+     */
+    const aimRow = document.createElement('div');
+    aimRow.className = 'density-lab-aim';
+    const aimChip = (label: string, steps: number) => {
+      const b = document.createElement('button');
+      b.className = 'density-lab-button density-lab-mode';
+      b.textContent = label;
+      b.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.bore.aim(steps);
+        this.refreshAim();
+      });
+      return b;
+    };
+    aimRow.appendChild(aimChip('AIM ▲', 1));
+    this.aimReadout = document.createElement('span');
+    this.aimReadout.className = 'density-lab-aim-readout';
+    aimRow.appendChild(this.aimReadout);
+    aimRow.appendChild(aimChip('▼', -1));
+    actions.appendChild(aimRow);
+    this.refreshAim();
+
+    /* The nest tools are still here; they are just no longer what DIG means. */
+    const tools = document.createElement('button');
+    tools.className = 'density-lab-button density-lab-mode';
+    tools.textContent = 'PLAN';
+    tools.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
       this.openDesigner();
     });
-    actions.appendChild(dig);
+    actions.appendChild(tools);
 
     /* GRIP / FREE — an indicator, not a switch: the tunnel takes her, the
      * room and the surface free her, all by themselves. It exists so the
@@ -2014,7 +2134,8 @@ export class IslandScene {
 
     /*
      * WASD for the PC hand (playtest: "I was having trouble moving"):
-     * W/S walk, A/D turn, Shift sprint, Space opens the tools, V swaps view.
+     * W/S walk, A/D turn, Shift sprint, Space DIGS (hold), R/F aim up and
+     * down, B opens the nest tools, V swaps the view.
      * Arrows mirror WASD. Keys and stick write the same inputs.
      */
     const applyKeys = () => {
@@ -2035,9 +2156,10 @@ export class IslandScene {
         this.input.yaw = turn;
       }
       this.input.sprint = k.has('shift');
+      /* Space is the jaws, and it is HELD — the button is the drive. */
       const space = k.has(' ');
       if (space !== this.spaceWasDown) {
-        if (space) this.openDesigner();
+        this.input.dig = space;
         this.spaceWasDown = space;
       }
     };
@@ -2050,6 +2172,9 @@ export class IslandScene {
         if (key === 'e' || key === 'enter') { this.answerGate(true); return; }
         if (key === 'escape') { this.answerGate(false); return; }
       }
+      if (key === 'r' && !e.repeat) { this.bore.aim(1); this.refreshAim(); }
+      if (key === 'f' && !e.repeat) { this.bore.aim(-1); this.refreshAim(); }
+      if (key === 'b' && !e.repeat) this.openDesigner();
       if (key === 'v' && !e.repeat) this.firstPerson = !this.firstPerson;
       if (key === 'p' && !e.repeat) {
         this.showPlan = !this.showPlan;
@@ -2104,9 +2229,14 @@ export class IslandScene {
         this.stickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
       } else if (e.pointerId === this.lookPointer) {
         if (this.firstPerson) {
-          // In her eyes the drag turns HER; pitch is a glance up or down.
-          this.facing -= e.movementX * 0.004;
+          /* In her eyes the drag turns HER, and the glance IS the aim —
+           * one number, so the view and the bore can never disagree about
+           * which way she is pointed. */
+          this.bore.turn(-e.movementX * 0.004);
+          this.facing = this.bore.heading;
           this.fpPitch = Math.min(1.1, Math.max(-1.1, this.fpPitch - e.movementY * 0.004));
+          this.bore.aimTo(this.fpPitch);
+          this.refreshAim();
         } else {
           // Third person: the drag pans the view — above ground a full
           // orbit, underground a tight override the trail cam resumes from
@@ -2202,7 +2332,12 @@ export class IslandScene {
     for (let i = 0; i < steps; i += 1) this.simulate(dt);
   }
 
-  setFacingForTest(radians: number): void { this.facing = radians; }
+  setFacingForTest(radians: number): void {
+    /* The RIG owns the heading now, so setting the field alone would be
+     * overwritten on the next step. Turn the rig to match. */
+    this.facing = radians;
+    this.bore.turn(radians - this.bore.heading);
+  }
 
   teleportMm(xMm: number, zMm: number): void {
     this.at.x = xMm / MM;
@@ -2217,6 +2352,7 @@ export class IslandScene {
     this.railEdge = -1;
     this.railRev = false;
     this.chamberId = null;
+    this.boreEngaged = false;
     this.railGate = null;
     this.enterDeclined = null;
     this.surfaceDeclined = null;

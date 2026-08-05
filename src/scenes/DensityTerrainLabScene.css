@@ -1112,3 +1112,22 @@
 @media (max-height: 480px) {
   .density-lab-gate-ask { bottom: 30%; padding: 8px 12px; }
 }
+
+/* The bore's pitch dial: two taps and the angle between them. */
+.density-lab-aim {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  pointer-events: auto;
+}
+
+.density-lab-aim-readout {
+  min-width: 44px;
+  text-align: center;
+  padding: 4px 6px;
+  border-radius: 8px;
+  background: rgba(20, 15, 10, 0.72);
+  color: #f0d88e;
+  font: 800 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
