@@ -459,6 +459,11 @@ export class IslandScene {
 
   private readonly crosshair = document.createElement('div');
 
+  /** Her oval, drawn — green while it fits, red where it does not. */
+  private capsule: THREE.Mesh | null = null;
+
+  private showCapsule = false;
+
   constructor(host: HTMLElement) {
     this.host = host;
     host.classList.add('density-lab-host');
@@ -1040,6 +1045,43 @@ export class IslandScene {
 
   setMeshBudgetCapForTest(cap: number): void { this.meshBudgetCapForTest = cap; }
 
+  /**
+   * THE OVAL, MADE VISIBLE.
+   *
+   * The fit test is the thing deciding where she may go, so when it
+   * disagrees with what the screen shows there is no way to tell which is
+   * wrong without seeing it. Drawn as the ellipsoid it actually is —
+   * scaled to her measured half-extents, sat on her body rather than on
+   * her feet, turned to her heading — and coloured by the live answer:
+   * green where she fits, red where something is in the way.
+   */
+  private updateCapsule(): void {
+    if (!this.showCapsule) {
+      if (this.capsule) this.capsule.visible = false;
+      return;
+    }
+    if (!this.capsule) {
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(1, 16, 12),
+        new THREE.MeshBasicMaterial({
+          color: 0x51e07a, wireframe: true, transparent: true, opacity: 0.55,
+          depthTest: false,
+        }),
+      );
+      mesh.renderOrder = 8;
+      this.capsule = mesh;
+      this.scene.add(mesh);
+    }
+    const mesh = this.capsule;
+    mesh.visible = true;
+    mesh.scale.set(this.body.wide, this.body.tall, this.body.len);
+    const lift = Math.max(0, this.body.tall - RIDE) + BODY_FLOOR_MARGIN;
+    mesh.position.set(this.at.x, this.at.y + lift, this.at.z);
+    mesh.rotation.set(0, this.facing, 0);
+    const fits = this.bodyFits(this.at);
+    (mesh.material as THREE.MeshBasicMaterial).color.setHex(fits ? 0x51e07a : 0xe0553f);
+  }
+
   /** Which part of her oval is in the soil one step ahead — the wedge,
    *  named. -1 means she fits. For diagnosing a stuck dig. */
   blockedShellForTest(): { idx: number; aimY: number; stepMm: number } {
@@ -1059,6 +1101,8 @@ export class IslandScene {
     }
     return { idx, aimY: aim.y, stepMm: (this.at.distanceTo(next)) * MM };
   }
+
+  setCapsuleForTest(on: boolean): void { this.showCapsule = on; }
 
   /** Does her oval fit where she stands? For probing the wedge directly. */
   bodyFitsForTest(): { fits: number; engaged: number; under: number } {
@@ -1112,7 +1156,18 @@ export class IslandScene {
 
     if (this.railEdge >= 0) {
       this.moveOnRail(dt, speed);
-    } else if (this.boreEngaged) {
+    } else if (this.boreEngaged && this.input.dig) {
+      /*
+       * BORE TRAVEL IS FOR CUTTING, and only for cutting.
+       *
+       * It follows the aim and has no floor under it, which is right while
+       * her jaws are opening the way ahead and wrong the instant they
+       * stop. Letting it own every underground frame meant that once she
+       * was in, forward went wherever the CAMERA looked — steeply down, in
+       * third person, because that is where a camera behind her sits — and
+       * she drove straight through her own floor. Off the jaws, the walker
+       * has her: floors are floors and walls are walls.
+       */
       this.moveBore(dt, speed);
     } else {
       this.moveFree(dt, speed);
@@ -1229,6 +1284,7 @@ export class IslandScene {
     }
 
     this.updateGateAsk();
+    this.updateCapsule();
     this.refreshModeChip();
     this.pose(dt);
     // While the designer is up the camera is ITS fly rig, not the follow cam.
@@ -2399,6 +2455,17 @@ export class IslandScene {
     dig.addEventListener('lostpointercapture', stopDig);
     actions.appendChild(dig);
 
+    /* Her collision oval, on demand — for seeing WHY she will not go. */
+    const bodyChip = document.createElement('button');
+    bodyChip.className = 'density-lab-button density-lab-mode';
+    bodyChip.textContent = 'BODY';
+    bodyChip.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      this.showCapsule = !this.showCapsule;
+      bodyChip.classList.toggle('is-grip', this.showCapsule);
+    });
+    actions.appendChild(bodyChip);
+
     /* The nest tools are still here; they are just no longer what DIG means. */
     const tools = document.createElement('button');
     tools.className = 'density-lab-button density-lab-mode';
@@ -2514,6 +2581,7 @@ export class IslandScene {
         if (key === 'escape') { this.answerGate(false); return; }
       }
       if (key === 'b' && !e.repeat) this.openDesigner();
+      if (key === 'c' && !e.repeat) this.showCapsule = !this.showCapsule;
       if (key === 'v' && !e.repeat) this.firstPerson = !this.firstPerson;
       if (key === 'p' && !e.repeat) {
         this.showPlan = !this.showPlan;
