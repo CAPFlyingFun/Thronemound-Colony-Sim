@@ -1316,6 +1316,12 @@ export class IslandScene {
         groundMm: (xMm, zMm) => this.renderedHeightAtMm(
           this.designOriginMm.x + xMm, this.designOriginMm.z + zMm,
         ) - this.designOriginMm.y,
+        /* The founding mouth lands at HER feet, not ahead of the camera. */
+        antMm: {
+          x: this.at.x * MM - this.designOriginMm.x,
+          y: this.at.y * MM - this.designOriginMm.y,
+          z: this.at.z * MM - this.designOriginMm.z,
+        },
       },
       {
         build: (plan) => this.applyPlan(this.shiftPlan(plan, 1)),

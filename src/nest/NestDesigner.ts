@@ -52,6 +52,12 @@ export interface DesignerWorld {
      * anywhere else is either floating or buried. The GRND chip toggles it.
      */
     groundMm?: (xMm: number, zMm: number) => number;
+    /**
+     * Where the ANT stands, plan-local mm. The founding piece of a nest —
+     * no selection, nothing to hang off — lands HERE, not somewhere ahead
+     * of a camera: the queen digs where the queen is.
+     */
+    antMm?: { x: number; y: number; z: number };
 }
 
 export interface DesignerHooks {
@@ -746,9 +752,18 @@ export class NestDesigner {
         let at: { x: number; y: number; z: number };
         if (from) {
             at = { x: from.x, y: this.inBlock(from.y - DROP_MM, 'y'), z: from.z };
+        } else if (this.world.antMm) {
+            // No selection and no entrance: the FOUNDING piece. It lands at
+            // the ant herself — the queen digs where the queen is — and the
+            // ground snap then puts a mouth's height on the surface there.
+            at = {
+                x: this.inBlock(this.world.antMm.x, 'x'),
+                y: this.inBlock(this.world.antMm.y, 'y'),
+                z: this.inBlock(this.world.antMm.z, 'z'),
+            };
         } else {
-            // No selection and no entrance: drop it a little way ahead of the
-            // camera, which is at least somewhere the player is looking.
+            // No ant to stand in for us (the block room): drop it a little
+            // way ahead of the camera, somewhere the player is looking.
             const mm = this.world.mmPerUnit;
             const ahead = this.eye.clone().addScaledVector(this.lookVector(), 10);
             at = {

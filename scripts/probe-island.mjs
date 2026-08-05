@@ -76,6 +76,21 @@ const founding = await page.evaluate(() => {
   const openedEmpty = st.designing;
   // A nestless plan presets PLACE to the MOUTH — the piece it must start with.
   const presetMouth = s.designer.placing === 'entrance';
+  // The founding PLACE lands at the QUEEN, grounded — not ahead of a camera.
+  const d = s.designer;
+  d.place();
+  const first = d.current().nodes[0];
+  const antOffMm = Math.hypot(
+    first.x - (s.at.x * 5 - st.designX), first.z - (s.at.z * 5 - st.designZ),
+  );
+  const groundOffMm = Math.abs(
+    first.y - (s.renderedHeightAtMm(first.x + st.designX, first.z + st.designZ) - st.designY),
+  );
+  // Leave the plan untouched for the scripted founding below: clear the
+  // scratch mouth so DONE has nothing to carve.
+  d.plan = { nodes: [], edges: [] };
+  d.picked = null;
+  d.dirty = false;
   s.closeDesignerForTest();
   // Found the colony: the classic four-node nest, dug through the pipeline
   // the DIG IT button uses. Everything downstream probes THIS nest.
@@ -98,7 +113,7 @@ const founding = await page.evaluate(() => {
   s.drainQueueForTest();
   const after = s.statsForTest();
   return {
-    bornNestless, openedEmpty, boxNearHer, presetMouth,
+    bornNestless, openedEmpty, boxNearHer, presetMouth, antOffMm, groundOffMm,
     nodes: after.planNodes, rails: after.rails,
   };
 });
@@ -107,6 +122,9 @@ check('the island is born nestless', founding.bornNestless === 0,
 check('nestless DIG opens the designer around the queen',
   founding.openedEmpty === 1 && founding.boxNearHer);
 check('and PLACE is preset to the MOUTH', founding.presetMouth === true);
+check('the founding mouth lands AT the queen, on the ground',
+  founding.antOffMm < 2 && founding.groundOffMm < 1.5,
+  `${founding.antOffMm.toFixed(1)} mm from her, ${founding.groundOffMm.toFixed(2)} mm off the surface`);
 check('the founding dig took', founding.nodes === 4 && founding.rails === 3,
   `${founding.nodes} nodes, ${founding.rails} rails`);
 
