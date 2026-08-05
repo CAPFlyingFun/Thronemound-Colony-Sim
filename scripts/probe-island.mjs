@@ -279,7 +279,7 @@ const dig = await page.evaluate(() => {
     const h = s.stream.surfaceHeightAt(xMm / 5, zMm / 5);
     return h === null ? null : h * 5;
   };
-  for (let i = 0; i < 5; i += 1) s.bore.aim(-1); // fifty degrees down
+  s.aimPitch = -0.9; // point her down
   s.input.dig = true;
   s.input.walk = 1;
   let embedded = 0;
@@ -294,7 +294,7 @@ const dig = await page.evaluate(() => {
   }
   s.input.dig = false;
   s.input.walk = 0;
-  for (let i = 0; i < 5; i += 1) s.bore.aim(1);
+  s.aimPitch = 0;
   s.drainQueueForTest();
   const endX = s.at.x * 5;
   const endZ = s.at.z * 5;
@@ -348,14 +348,14 @@ const fit = await page.evaluate(() => {
   s.teleportMm(27600, 27600);
   s.drainQueueForTest();
   s.setFacingForTest(0);
-  for (let i = 0; i < 5; i += 1) s.bore.aim(-1); // in at fifty degrees
+  s.aimPitch = -0.9; // in at fifty degrees
   s.input.dig = true;
   s.input.walk = 1;
   for (let i = 0; i < 600; i += 1) {
     s.stepForTest(1 / 30, 1);
     if (i % 60 === 0) s.drainQueueForTest();
   }
-  for (let i = 0; i < 5; i += 1) s.bore.aim(1); // then level, so we measure a RUN
+  s.aimPitch = 0; // then level, so we measure a RUN
   for (let i = 0; i < 600; i += 1) {
     s.stepForTest(1 / 30, 1);
     if (i % 60 === 0) s.drainQueueForTest();
@@ -381,6 +381,7 @@ const fit = await page.evaluate(() => {
   return {
     worst,
     wide: st.bodyWideMm,
+    tall: st.bodyTallMm,
     biteW: st.biteWidthMm,
     biteD: st.biteDepthMm,
     depth: s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5) - s.at.y * 5,
@@ -394,9 +395,17 @@ check('the bite stays her mandible — 1.75 mm wide, half a mm deep',
   `${fit.biteW.toFixed(2)} mm wide x ${fit.biteD.toFixed(2)} mm deep`);
 check('she is well underground for the measurement', fit.depth > 40,
   `${fit.depth.toFixed(1)} mm down`);
-check('and her tunnel clears the oval she occupies, all the way round',
-  fit.worst >= fit.wide - 0.75,
-  `worst clearance ${fit.worst.toFixed(1)} mm against a ${fit.wide.toFixed(2)} mm half-width`);
+/*
+ * Her tunnel is an OVAL, because she is: wide as her legs and low as her
+ * back. So the tightest direction is the vertical one, and that is what
+ * this measures against — the ring sweep finds her ceiling long before it
+ * finds her walls, and comparing it to her WIDTH would demand a round bore
+ * an ant would never dig.
+ */
+check('and her tunnel clears the oval she occupies at its tightest',
+  fit.worst >= fit.tall,
+  `worst clearance ${fit.worst.toFixed(1)} mm against a ${fit.tall.toFixed(2)} mm `
+  + `half-height (and ${fit.wide.toFixed(2)} mm half-width)`);
 check('the camera is never buried in the tunnel wall', fit.camSolid === false);
 
 console.log('\nTHE WALKS (clearance is against the DRAWN triangles — below zero');

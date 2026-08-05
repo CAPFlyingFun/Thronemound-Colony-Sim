@@ -171,6 +171,10 @@ const BODY_HALF_TALL = 1.6 / MM;
 /** How far clear of her own feet the oval's belly rides. */
 const BODY_FLOOR_MARGIN = 0.3 / MM;
 
+/** How far up or down she may point: not quite the poles, where a heading
+ *  stops meaning anything. */
+const AIM_LIMIT = 1.4;
+
 /**
  * How much wider than herself she cuts.
  *
@@ -321,6 +325,18 @@ export class IslandScene {
 
   private fpPitch = 0;
 
+  /**
+   * WHERE SHE IS POINTED, up and down — and it STAYS there.
+   *
+   * Taking this from the camera's own look direction was a mistake with
+   * teeth: a third-person camera sits behind and above her, so its look is
+   * permanently tilted down, and "forward" therefore meant "downward" for
+   * as long as she was underground. She dug, sank, and could not aim back
+   * out of the hole she was making. A dial the player sets and the game
+   * leaves alone is the only thing that can mean ""along the tunnel"".
+   */
+  private aimPitch = 0;
+
   private underground = false;
 
   /** Her recent path — the underground chase camera follows THIS, because
@@ -462,7 +478,10 @@ export class IslandScene {
   /** Her oval, drawn — green while it fits, red where it does not. */
   private capsule: THREE.Mesh | null = null;
 
-  private showCapsule = false;
+  /* On by default while the digging is being worked out: it is the thing
+   * deciding where she may go, and a debug view you have to remember to
+   * switch on is a debug view nobody sees. */
+  private showCapsule = true;
 
   constructor(host: HTMLElement) {
     this.host = host;
@@ -1156,17 +1175,22 @@ export class IslandScene {
 
     if (this.railEdge >= 0) {
       this.moveOnRail(dt, speed);
-    } else if (this.boreEngaged && this.input.dig) {
+    } else if (this.boreEngaged) {
       /*
-       * BORE TRAVEL IS FOR CUTTING, and only for cutting.
+       * UNDERGROUND THERE IS NO FALLING.
        *
-       * It follows the aim and has no floor under it, which is right while
-       * her jaws are opening the way ahead and wrong the instant they
-       * stop. Letting it own every underground frame meant that once she
-       * was in, forward went wherever the CAMERA looked — steeply down, in
-       * third person, because that is where a camera behind her sits — and
-       * she drove straight through her own floor. Off the jaws, the walker
-       * has her: floors are floors and walls are walls.
+       * An ant in a burrow is not a thing balanced on a floor — it is
+       * gripping the tube it is inside, and it walks up a shaft as readily
+       * as along a drift. Running the surface walker down here gave her
+       * gravity she should never have had: she dug a pit, dropped into it
+       * the moment the jaws stopped, and then had nothing to climb with,
+       * so she kept digging and kept sinking.
+       *
+       * So once she has BORED IN — and only then; a surface walk that dips
+       * through a hollow must stay a walk — she travels along the line she
+       * is pointed, up or down, and the only thing that may stop her is
+       * her own body not fitting. Pull back and she retraces it, which is
+       * how she gets out of anything she can get into.
        */
       this.moveBore(dt, speed);
     } else {
@@ -1798,17 +1822,16 @@ export class IslandScene {
    *  she is engaged in one, the line she travels. */
   private boreAim(): THREE.Vector3 {
     /*
-     * SHE DIGS WHERE YOU ARE LOOKING, in either view, which is what let the
-     * ± dial go. In her own eyes that is her gaze; over her shoulder it is
-     * the way the camera faces her, so tilting the view down at the ground
-     * aims her into it and levelling it out tunnels her along. One rule,
-     * no gauge to read, and nothing that can disagree with the picture.
+     * SHE DIGS WHERE YOU ARE POINTING HER, and the pointing keeps still
+     * until you change it. Dragging up and down sets it in either view —
+     * no buttons, no gauge — and the camera follows it rather than setting
+     * it, which is the way round that stops "forward" quietly meaning
+     * "into the floor".
      */
-    const aim = this.camera.getWorldDirection(new THREE.Vector3());
-    if (aim.lengthSq() < 1e-6) {
-      return new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
-    }
-    return aim.normalize();
+    const cp = Math.cos(this.aimPitch);
+    return new THREE.Vector3(
+      Math.sin(this.facing) * cp, Math.sin(this.aimPitch), Math.cos(this.facing) * cp,
+    );
   }
 
   /**
@@ -2395,6 +2418,11 @@ export class IslandScene {
     while (d > Math.PI) d -= Math.PI * 2;
     while (d < -Math.PI) d += Math.PI * 2;
     if (this.lookPointer === null) this.camYaw += d * Math.min(1, dt * 2.4);
+    /* The camera FOLLOWS the aim: point her down and the view climbs so you
+     * are looking along the line she will cut, rather than at the back of
+     * her head while she vanishes into the floor. */
+    const wantPitch = Math.min(1.35, Math.max(0.06, 0.28 + Math.max(0, -this.aimPitch)));
+    this.camPitch += (wantPitch - this.camPitch) * Math.min(1, dt * 3);
     const cp = Math.cos(this.camPitch);
     this.camera.position.set(
       this.at.x + Math.sin(this.camYaw) * this.camDist * cp,
@@ -2641,13 +2669,19 @@ export class IslandScene {
            * which way she is pointed. */
           this.bore.turn(-e.movementX * 0.004);
           this.facing = this.bore.heading;
-          this.fpPitch = Math.min(1.1, Math.max(-1.1, this.fpPitch - e.movementY * 0.004));
+          this.aimPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
+            this.aimPitch - e.movementY * 0.004));
+          this.fpPitch = this.aimPitch;
         } else {
           // Third person: the drag pans the view — above ground a full
           // orbit, underground a tight override the trail cam resumes from
           // the moment the finger lifts.
+          /* Over her shoulder the vertical drag AIMS HER, and the camera
+           * elevation follows that aim, so what you are looking along is
+           * always the line she will cut. */
           this.camYaw -= e.movementX * 0.005;
-          this.camPitch = Math.min(1.35, Math.max(0.06, this.camPitch + e.movementY * 0.004));
+          this.aimPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
+            this.aimPitch - e.movementY * 0.004));
         }
       }
     });
@@ -2676,6 +2710,10 @@ export class IslandScene {
       <b>kauai island</b> · 56 m square · 1:1000 · all 64 sections resident<br>
       terrain ${this.terrainVerts.toLocaleString()} v / ${this.terrainTris.toLocaleString()} t
       · elevation ${elevM} m · mode ${mode}<br>
+      aim ${((this.aimPitch * 180) / Math.PI).toFixed(0)}° ·
+      body ${(this.body.len * MM * 2).toFixed(1)} x ${(this.body.wide * MM * 2).toFixed(1)}
+      x ${(this.body.tall * MM * 2).toFixed(1)} mm ·
+      bite ${BITE_WIDTH_MM} x ${BITE_DEPTH_MM} mm<br>
       soil window ${WINDOW_MM} mm · ${(WINDOW_BYTES / 1048576).toFixed(1)} MB ·
       chunks ${this.chunkMeshes.size} · queued ${this.queue.length} ·
       dug ${this.stream?.editedSamples ?? 0}<br>
@@ -2824,6 +2862,7 @@ export class IslandScene {
       // (surface, chamber) is FREE. `chamberNow` says which FREE.
       free: this.railEdge >= 0 ? 0 : 1,
       chamberNow: this.chamberId !== null ? 1 : 0,
+      aimDeg: (this.aimPitch * 180) / Math.PI,
       bodyLenMm: this.body.len * MM,
       bodyWideMm: this.body.wide * MM,
       bodyTallMm: this.body.tall * MM,
