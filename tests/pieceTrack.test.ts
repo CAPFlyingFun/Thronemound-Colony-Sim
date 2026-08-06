@@ -11,10 +11,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   BANK_MAX_DEG, PIECE_LENGTHS_MM, PITCH_STEP_DEG, TURN_STEP_DEG,
-  appendPiece, autoBankFor, buildRail, endStateOf, piecesToPlan,
+  appendPiece, autoBankFor, buildRail, endStateOf, pieceLabel, piecesToPlan,
 } from '../src/scenes/pieceTrack';
 import { PIECE_LIMITS, type DigPiece } from '../src/scenes/digPlan';
 import { validatePlan } from '../src/nest/nestPlan';
+import { carvePlan } from '../src/nest/nestCarve';
 
 const OPTS = { lengthMm: 6, autoBank: false };
 
@@ -203,5 +204,69 @@ describe('piecesToPlan', () => {
     expect(plan.nodes.length).toBe(1);
     expect(plan.edges.length).toBe(0);
     expect(validatePlan(plan)).toEqual([]);
+  });
+});
+
+describe('pieceLabel', () => {
+  it('always says the pitch, signed', () => {
+    expect(pieceLabel({ pitch: 10, turn: 0, roll: 0, length: 6 })).toBe('+10°');
+    expect(pieceLabel({ pitch: -70, turn: 0, roll: 0, length: 6 })).toBe('−70°');
+    expect(pieceLabel({ pitch: 0, turn: 0, roll: 0, length: 6 })).toBe('+0°');
+  });
+
+  it('adds yaw as a handedness, only when the piece turns', () => {
+    expect(pieceLabel({ pitch: -15, turn: 15, roll: 15, length: 6 })).toBe('−15° L15°');
+    expect(pieceLabel({ pitch: 30, turn: -45, roll: -30, length: 6 })).toBe('+30° R45°');
+  });
+});
+
+describe('carving the track out of soil', () => {
+  /** A 120 mm block of ground whose surface is y = 0. */
+  const soil = (x: number, y: number, z: number): number =>
+    Math.min(-y, y + 70, 60 - Math.abs(x), 60 - Math.abs(z - 30));
+
+  const DIVE: DigPiece[] = [
+    { pitch: -45, turn: 0, roll: 0, length: 10 },
+    { pitch: -45, turn: 0, roll: 0, length: 10 },
+    { pitch: 0, turn: 45, roll: 15, length: 10 },
+    { pitch: 0, turn: 0, roll: 0, length: 10 },
+  ];
+
+  it('opens air along the whole rail, bends included', () => {
+    const plan = piecesToPlan(DIVE, {
+      originMm: { x: 0, y: 0, z: 0 }, boreRadiusMm: 4, entranceRadiusMm: 6,
+    });
+    const carved = carvePlan(soil, plan);
+    const rail = buildRail(DIVE);
+    for (let s = 2; s <= rail.lengthMm - 0.5; s += 1) {
+      const f = rail.sample(s, 0)!;
+      // Deep enough that this is a real tunnel question, not the open sky.
+      // Positive is SOIL in the carve convention, so the bore must read
+      // negative — air — at every step of the centreline.
+      if (f.y > -3) continue;
+      expect(carved(f.x, f.y, f.z), `soil left in the bore at s=${s}`).toBeLessThan(0);
+    }
+  });
+
+  it('leaves the soil beside the bore untouched', () => {
+    const plan = piecesToPlan(DIVE, {
+      originMm: { x: 0, y: 0, z: 0 }, boreRadiusMm: 4, entranceRadiusMm: 6,
+    });
+    const carved = carvePlan(soil, plan);
+    const rail = buildRail(DIVE);
+    const f = rail.sample(rail.lengthMm * 0.6, 0)!;
+    // Fifteen millimetres to the side of a 4 mm bore is undug country.
+    expect(carved(f.x + 15, f.y, f.z)).toBeGreaterThan(0);
+    expect(carved(f.x, f.y - 15, f.z)).toBeGreaterThan(0);
+  });
+
+  it('heaps the entrance mound over the station', () => {
+    const plan = piecesToPlan(DIVE, {
+      originMm: { x: 0, y: 0, z: 0 }, boreRadiusMm: 4, entranceRadiusMm: 6,
+    });
+    const carved = carvePlan(soil, plan);
+    // Above the undug surface but inside the heap — and NOT down the vent.
+    expect(soil(8, 2, 0)).toBeLessThan(0);
+    expect(carved(8, 2, 0)).toBeGreaterThan(0);
   });
 });

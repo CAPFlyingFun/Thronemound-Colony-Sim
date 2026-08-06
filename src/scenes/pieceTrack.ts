@@ -90,6 +90,22 @@ export function appendPiece(
   return clampPiece({ pitch, turn, roll, length: opts.lengthMm });
 }
 
+/**
+ * The tag a piece wears in the world: its exact angles, spelled the way the
+ * palette speaks them. Pitch always — it is absolute, so "+10°" or "-70°"
+ * reads alone — and yaw only when the piece turns, as a handedness rather
+ * than a signed number, because "L15°" survives being read from any side of
+ * the track and "-15°" does not.
+ */
+export function pieceLabel(piece: DigPiece): string {
+  const pitch = `${piece.pitch >= 0 ? '+' : '−'}${Math.abs(piece.pitch)}°`;
+  if (piece.turn === 0) return pitch;
+  const yaw = piece.turn > 0
+    ? `L${piece.turn}°`
+    : `R${-piece.turn}°`;
+  return `${pitch} ${yaw}`;
+}
+
 /** Where a track starts unless the caller says otherwise: the origin,
  *  heading +Z — the same convention every scene in the project uses. */
 export const TRACK_START = {

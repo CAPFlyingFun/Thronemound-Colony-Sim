@@ -102,6 +102,41 @@ const smoothed = await page.evaluate(() => {
 check('smoothing leaves the pieces and the plan alone',
   smoothed.pieces === 5 && smoothed.planFaults === 0 && smoothed.smooth === 1);
 
+// The tags: one label per piece, wearing the exact angles.
+const labels = await page.evaluate(() => window.railScene.labelsForTest());
+check('one tag per piece', labels.length === 5, labels.join(' | '));
+check('tags carry pitch and yaw', labels[0] === '+0°' && labels[3] === '+30° L15°',
+  `${labels[0]} … ${labels[3]}`);
+check('tag sprites are in the scene',
+  await page.evaluate(() => window.railScene.labelSpritesForTest()) === 5);
+
+// THE DIRT COMES OUT: dive a fresh track underground and ask the field.
+const dig = await page.evaluate(() => {
+  const s = window.railScene;
+  s.clearForTest();
+  for (const kind of ['down', 'down', 'down', 'straight', 'straight', 'straight']) {
+    s.addPieceForTest(kind);
+  }
+  const stats = s.statsForTest();
+  // The last straight runs at -45 deg from roughly (0, -17, 24) onward; ask
+  // three spots: inside the bore, beside it, and the mound over the station.
+  const end = { x: stats.endX, y: stats.endY, z: stats.endZ };
+  const mid = { x: end.x / 2, y: end.y / 2, z: (end.z + 12) / 2 };
+  return {
+    carveMs: stats.carveMs,
+    endY: stats.endY,
+    inBore: s.solidAtMm(mid.x, mid.y, mid.z),
+    besideBore: s.solidAtMm(mid.x + 15, mid.y, mid.z),
+    // Outside the 8 mm vent, inside the mound's 25 mm spread.
+    mound: s.solidAtMm(11, 1.5, 0),
+  };
+});
+check('the dive went underground', dig.endY < -15, `end ${dig.endY.toFixed(1)} mm`);
+check('the bore is open air', dig.inBore === false, `solidAtMm ${dig.inBore}`);
+check('the soil beside the bore holds', dig.besideBore === true);
+check('the entrance mound is heaped over the station', dig.mound === true);
+check('a carve is a moment, not a hang', dig.carveMs < 2500, `${dig.carveMs.toFixed(0)} ms`);
+
 check('no page errors', errs.length === 0, errs.join(' | '));
 
 await browser.close();
