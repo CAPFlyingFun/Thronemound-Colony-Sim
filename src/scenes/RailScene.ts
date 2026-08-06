@@ -27,7 +27,7 @@ import { RAIL_SMOOTH_MM, type TunnelRail } from './tunnelRail';
 import { type DigPiece } from './digPlan';
 import {
   PIECE_LENGTHS_MM, appendPiece, buildRail, endStateOf, pieceLabel, piecesToPlan,
-  type PieceKind,
+  presetPieces, type PieceKind, type PresetId,
 } from './pieceTrack';
 import { MIN_ENTRANCE_RADIUS_MM, validatePlan, type NestPlan } from '../nest/nestPlan';
 import { carvePlan } from '../nest/nestCarve';
@@ -55,6 +55,19 @@ const SAVE_KEY = 'tcs-rail-pieces';
  *  walks past, which the readout would report as a permanent fault. */
 const BORE_RADIUS_MM = 4;
 const ENTRANCE_RADIUS_MM = MIN_ENTRANCE_RADIUS_MM;
+
+/**
+ * The rooms the ROOM button cycles: none, a store room, a queen chamber.
+ * Eleven millimetres of radius is the game's own "generous queen chamber
+ * is 22 mm across"; the store is a tunnel-and-a-half. Carved as the
+ * standard ant-room ellipsoid by `nestCarve`, so the proportions match
+ * every other room in the project.
+ */
+const ROOMS = [
+  { label: 'ROOM OFF', radiusMm: null },
+  { label: 'ROOM STORE', radiusMm: 6 },
+  { label: 'ROOM QUEEN', radiusMm: 11 },
+] as const;
 
 /**
  * THE SOIL: a block of ground under the station, surface at y = 0.
@@ -137,6 +150,11 @@ export class RailScene {
 
   private tagsBtn: HTMLButtonElement | null = null;
 
+  /** Which ROOMS entry the tunnel currently ends in. */
+  private roomIdx = 0;
+
+  private roomBtn: HTMLButtonElement | null = null;
+
   private carveMs = 0;
 
   private camYaw = -0.7;
@@ -197,6 +215,8 @@ export class RailScene {
     this.bindCamera();
 
     this.loadPieces();
+    // The ROOM chip was built before the save was read; catch it up.
+    if (this.roomBtn) this.roomBtn.textContent = ROOMS[this.roomIdx]!.label;
     this.rebuildTrack();
 
     (window as unknown as { railScene?: unknown }).railScene = this;
@@ -444,10 +464,12 @@ export class RailScene {
   /** The plan this track IS — one construction, shared by the carve, the
    *  readout and the probes, so they cannot disagree about radii. */
   private planOf(): NestPlan {
+    const room = ROOMS[this.roomIdx]!.radiusMm;
     return piecesToPlan(this.pieces, {
       originMm: { x: 0, y: 0, z: 0 },
       boreRadiusMm: BORE_RADIUS_MM,
       entranceRadiusMm: ENTRANCE_RADIUS_MM,
+      ...(room !== null ? { endChamberMm: room } : {}),
     });
   }
 
@@ -529,6 +551,21 @@ export class RailScene {
     this.rebuildTrack();
   }
 
+  /** A preset move: several pieces, one tap, one rebuild. */
+  private addPreset(id: PresetId): void {
+    this.pieces.push(...presetPieces(this.pieces, id, {
+      lengthMm: PIECE_LENGTHS_MM[this.lengthIdx]!,
+      autoBank: this.autoBank,
+    }));
+    this.rebuildTrack();
+  }
+
+  private setRoom(idx: number): void {
+    this.roomIdx = ((idx % ROOMS.length) + ROOMS.length) % ROOMS.length;
+    if (this.roomBtn) this.roomBtn.textContent = ROOMS[this.roomIdx]!.label;
+    this.rebuildTrack();
+  }
+
   private undo(): void {
     if (this.pieces.length === 0) return;
     this.pieces.pop();
@@ -545,7 +582,9 @@ export class RailScene {
 
   private savePieces(): void {
     try {
-      localStorage.setItem(SAVE_KEY, JSON.stringify(this.pieces));
+      localStorage.setItem(SAVE_KEY, JSON.stringify({
+        v: 2, pieces: this.pieces, roomIdx: this.roomIdx,
+      }));
     } catch { /* private mode, quota — the rig runs on regardless */ }
   }
 
@@ -553,11 +592,17 @@ export class RailScene {
     try {
       const raw = localStorage.getItem(SAVE_KEY);
       if (!raw) return;
-      const parsed = JSON.parse(raw) as DigPiece[];
-      if (Array.isArray(parsed)) {
-        this.pieces = parsed.filter((p) => Number.isFinite(p?.pitch)
+      const parsed = JSON.parse(raw) as
+        DigPiece[] | { v: number; pieces: DigPiece[]; roomIdx?: number };
+      // v1 saved the bare array; v2 wraps it to carry the room. Both load.
+      const pieces = Array.isArray(parsed) ? parsed : parsed.pieces;
+      if (Array.isArray(pieces)) {
+        this.pieces = pieces.filter((p) => Number.isFinite(p?.pitch)
           && Number.isFinite(p?.turn) && Number.isFinite(p?.roll)
           && Number.isFinite(p?.length) && p.length > 0);
+      }
+      if (!Array.isArray(parsed) && Number.isInteger(parsed.roomIdx)) {
+        this.roomIdx = Math.min(ROOMS.length - 1, Math.max(0, parsed.roomIdx!));
       }
     } catch { /* a bad save is an empty track, not a broken room */ }
   }
@@ -596,6 +641,37 @@ export class RailScene {
     piece('▼', 'down');
     piece('◀', 'left');
     piece('▶', 'right');
+
+    /* The PRESET shelf — whole moves, named for nest architecture. */
+    const preset = (label: string, id: PresetId): void => {
+      const button = document.createElement('button');
+      button.className = 'density-lab-button density-lab-mode';
+      button.textContent = label;
+      button.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.addPreset(id);
+      });
+      actions.appendChild(button);
+    };
+    preset('SHAFT', 'shaft');
+    preset('SPIRAL◀', 'spiralLeft');
+    preset('SPIRAL▶', 'spiralRight');
+    preset('U-TURN', 'uturn');
+
+    /* The Utilities panel, ant-sized: what the tunnel ENDS in. */
+    this.roomBtn = (() => {
+      const button = document.createElement('button');
+      button.className = 'density-lab-button density-lab-mode';
+      button.textContent = ROOMS[this.roomIdx]!.label;
+      button.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.setRoom(this.roomIdx + 1);
+      });
+      actions.appendChild(button);
+      return button;
+    })();
 
     const chip = (
       label: string, onTap: (button: HTMLButtonElement) => void,
@@ -683,7 +759,9 @@ export class RailScene {
     : '—'}<br>
       end (${end.x.toFixed(1)}, ${end.y.toFixed(1)}, ${end.z.toFixed(1)}) mm
       · heading ${end.headingDeg.toFixed(0)}° · grade ${end.pitchDeg.toFixed(0)}°<br>
-      cart ${this.cartS.toFixed(1)} / ${end.lengthMm.toFixed(0)} mm<br>
+      cart ${this.cartS.toFixed(1)} / ${end.lengthMm.toFixed(0)} mm
+      · ends in ${ROOMS[this.roomIdx]!.radiusMm === null
+    ? 'a junction' : `a ${ROOMS[this.roomIdx]!.radiusMm} mm room`}<br>
       space/─ straight · ▲▼ pitch ±15° · ◀▶ turn ±15° · L length · B bank
       · M smooth · R ride · X soil · T tags · U undo · C clear · drag orbits
     `;
@@ -773,6 +851,10 @@ export class RailScene {
 
   addPieceForTest(kind: PieceKind): void { this.add(kind); }
 
+  addPresetForTest(id: PresetId): void { this.addPreset(id); }
+
+  setRoomForTest(idx: number): void { this.setRoom(idx); }
+
   undoForTest(): void { this.undo(); }
 
   clearForTest(): void { this.clear(); }
@@ -834,6 +916,9 @@ export class RailScene {
       carveMs: this.carveMs,
       labels: this.labelGroup.children.length,
       soilMode: this.soilMode === 'xray' ? 0 : this.soilMode === 'solid' ? 1 : 2,
+      roomIdx: this.roomIdx,
+      roomMm: ROOMS[this.roomIdx]!.radiusMm ?? 0,
+      planChambers: plan.nodes.filter((n) => n.kind === 'chamber').length,
     };
   }
 

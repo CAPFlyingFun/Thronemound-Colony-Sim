@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 import {
   BANK_MAX_DEG, PIECE_LENGTHS_MM, PITCH_STEP_DEG, TURN_STEP_DEG,
   appendPiece, autoBankFor, buildRail, endStateOf, pieceLabel, piecesToPlan,
+  presetPieces,
 } from '../src/scenes/pieceTrack';
 import { PIECE_LIMITS, type DigPiece } from '../src/scenes/digPlan';
 import { validatePlan } from '../src/nest/nestPlan';
@@ -204,6 +205,86 @@ describe('piecesToPlan', () => {
     expect(plan.nodes.length).toBe(1);
     expect(plan.edges.length).toBe(0);
     expect(validatePlan(plan)).toEqual([]);
+  });
+});
+
+describe('presetPieces', () => {
+  const OPT = { lengthMm: 6, autoBank: true };
+
+  it('SHAFT plunges at the format limit, never past it', () => {
+    const shaft = presetPieces([], 'shaft', OPT);
+    expect(shaft.length).toBe(4);
+    for (const p of shaft) {
+      expect(p.pitch).toBe(PIECE_LIMITS.pitch.min);
+      expect(p.turn).toBe(0);
+    }
+  });
+
+  it('SPIRAL turns a half circle while descending, handed', () => {
+    for (const [id, sign] of [['spiralLeft', 1], ['spiralRight', -1]] as const) {
+      const spiral = presetPieces([], id, OPT);
+      const turn = spiral.reduce((sum, p) => sum + p.turn, 0);
+      expect(turn).toBe(180 * sign);
+      for (const p of spiral) {
+        expect(p.pitch).toBe(-45);
+        // Banked INTO the helix when auto-bank is on.
+        expect(Math.sign(p.roll)).toBe(sign);
+      }
+      const end = endStateOf(spiral);
+      expect(end.headingDeg).toBeCloseTo(180 * sign, 0);
+      expect(end.y).toBeLessThan(-10);
+    }
+  });
+
+  it('U-TURN keeps the grade it was asked at', () => {
+    const downhill = [appendPiece([], 'down', { lengthMm: 6, autoBank: false })];
+    const uturn = presetPieces(downhill, 'uturn', OPT);
+    expect(uturn.reduce((sum, p) => sum + p.turn, 0)).toBe(180);
+    for (const p of uturn) expect(p.pitch).toBe(downhill[0]!.pitch);
+  });
+
+  it('presets bank only when asked', () => {
+    for (const p of presetPieces([], 'spiralLeft', { lengthMm: 6, autoBank: false })) {
+      expect(p.roll).toBe(0);
+    }
+  });
+});
+
+describe('the end room', () => {
+  const OPTIONS = {
+    originMm: { x: 0, y: 0, z: 0 }, boreRadiusMm: 4, entranceRadiusMm: 8,
+  };
+  const DIVE = presetPieces([], 'shaft', { lengthMm: 6, autoBank: false });
+
+  it('turns the last node into a chamber of the asked size', () => {
+    const plan = piecesToPlan(DIVE, { ...OPTIONS, endChamberMm: 11 });
+    const last = plan.nodes[plan.nodes.length - 1]!;
+    expect(last.kind).toBe('chamber');
+    expect(last.radiusMm).toBe(11);
+    expect(plan.nodes.filter((n) => n.kind === 'chamber').length).toBe(1);
+    expect(validatePlan(plan)).toEqual([]);
+  });
+
+  it('leaves the plan roomless when not asked', () => {
+    const plan = piecesToPlan(DIVE, OPTIONS);
+    expect(plan.nodes.every((n) => n.kind !== 'chamber')).toBe(true);
+  });
+
+  it('never rooms an empty track — the station is not a chamber', () => {
+    const plan = piecesToPlan([], { ...OPTIONS, endChamberMm: 11 });
+    expect(plan.nodes.length).toBe(1);
+    expect(plan.nodes[0]!.kind).toBe('entrance');
+  });
+
+  it('carves wider than the bore where the room is', () => {
+    const soil = (x: number, y: number, z: number): number =>
+      Math.min(-y, y + 70, 60 - Math.abs(x), 60 - Math.abs(z - 30));
+    const plan = piecesToPlan(DIVE, { ...OPTIONS, endChamberMm: 11 });
+    const carved = carvePlan(soil, plan);
+    const end = plan.nodes[plan.nodes.length - 1]!;
+    // Ten millimetres to the side of the END is inside the room's 15.4 mm
+    // half-width but far outside the 4 mm bore.
+    expect(carved(end.x + 10, end.y, end.z)).toBeLessThan(0);
   });
 });
 
