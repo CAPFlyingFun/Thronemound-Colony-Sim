@@ -108,19 +108,20 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     steps:
+      # DO NOT ADD `timeout:` HERE. It was tried, on a day when three green
+      # builds in a row sat in `deployment_queued` for exactly ten minutes and
+      # were cancelled — the natural read being that ten minutes was simply not
+      # long enough. The action's ten minutes is a CEILING, not a default, and
+      # anything larger is quietly clamped back down to it:
+      #
+      #   Warning: timeout value is greater than the allowed maximum
+      #            - timeout set to the maximum of 600000 milliseconds.
+      #
+      # So the input does nothing except add that warning to every run. If a
+      # deploy is stuck queued for the full ten minutes, the wait is not the
+      # problem and no setting in this file will fix it: look at whether Pages
+      # is building from GITHUB ACTIONS rather than from a branch, and at
+      # GitHub's own status.
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-        with:
-          # Ten minutes is this action's default, and twice in a row it was not
-          # enough: the build was green, the artifact was byte-for-byte the size
-          # of the last one that shipped, and the deploy simply sat in
-          # `deployment_queued` until it gave up. What makes that worse than a
-          # slow day is what happens on the way out — the action CANCELS the
-          # queued deployment, and a cancelled deployment is still ahead of the
-          # next one in line. So a slow queue times out, the timeout wedges the
-          # queue, and the following push times out behind it.
-          #
-          # Half an hour instead. Nothing waits on this job, a queue that is
-          # merely slow now gets to finish, and the loop has nowhere to start.
-          timeout: 1800000
