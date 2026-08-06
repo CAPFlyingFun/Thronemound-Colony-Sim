@@ -175,17 +175,6 @@ const BODY_FLOOR_MARGIN = 0.3 / MM;
  *  stops meaning anything. */
 const AIM_LIMIT = 1.4;
 
-/**
- * How much wider than herself she cuts.
- *
- * The hole has to CONTAIN the oval, not merely touch it. Cutting to exactly
- * her own width put every fit probe precisely on the surface of what had
- * just been cleared, where a sample can read either way — and it read
- * solid, so she cleared her shoulders and was still told her shoulders were
- * in the wall. She stopped dead with the jaws running.
- */
-const CLEAR_MARGIN = 1.2 / MM;
-
 const BODY_SHELL: number[][] = [
   [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
   [0.6, 0.6, 0], [0.6, -0.6, 0], [-0.6, 0.6, 0], [-0.6, -0.6, 0],
@@ -293,12 +282,6 @@ export class IslandScene {
    * is held.
    */
   private readonly bore = new BoreRig(Math.PI);
-
-  /** Where her body's room was last cleared to — the tube is cut along the
-   *  path between that and where she is now, not at points. */
-  private readonly clearedTo = new THREE.Vector3();
-
-  private hasCleared = false;
 
   /** Half-extents of the oval she occupies: along her body, across her
    *  legs, and up to her tallest point. Measured from the model on load. */
@@ -1926,86 +1909,9 @@ export class IslandScene {
      * which is what makes the jaws, and not the stick, the thing that digs. */
     if (!this.bodyFits(next)) return;
     this.at.copy(next);
-    this.clearBodyRoom();
     this.lastSafe.copy(this.at);
     this.hasSafe = true;
     this.embedFrames = 0;
-  }
-
-  /**
-   * THE TUNNEL SIZE CHECK: her body's room, cut along the path she takes.
-   *
-   * Her jaws are 1.75 mm and she is nine millimetres long, so the face she
-   * bites is nowhere near the width of the hole she has to live in — a
-   * bore is several bites across, and the tube between them still has to
-   * be opened out. This does that opening as she passes, and it has to
-   * follow the PATH: a stroke is 0.42 s and covers about 6 mm, so clearing
-   * one sphere per stroke pinched the tube to 2.5 mm between them,
-   * scalloped along its length instead of around it and just as unwearable.
-   *
-   * It only runs while she is actually CUTTING. Without that she would
-   * carve a tunnel simply by walking underground, and the jaws would stop
-   * being what makes a nest.
-   */
-  private clearBodyRoom(here = false, aim?: THREE.Vector3): void {
-    if (!this.stream || !this.input.dig) {
-      this.hasCleared = false;
-      return;
-    }
-
-    const to = aim
-      ? this.at.clone().addScaledVector(aim, BITE_DEPTH_MM / MM)
-      : this.at.clone();
-    const from = this.hasCleared ? this.clearedTo : this.at;
-    const stride = this.body.tall * 0.8;
-    const span = from.distanceTo(to);
-    /* A stroke always cuts where she stands, however little she has moved;
-     * only the follow-along carve waits for real travel. */
-    if (!here && this.hasCleared && span < stride * 0.5) return;
-    const steps = Math.min(32, Math.max(1, Math.ceil(span / stride)));
-    let minX = Infinity; let minY = Infinity; let minZ = Infinity;
-    let maxX = -Infinity; let maxY = -Infinity; let maxZ = -Infinity;
-    let touched = 0;
-    for (let i = 1; i <= steps; i += 1) {
-      const at = from.clone().lerp(to, i / steps);
-      /* Her OVAL, not a ball: wide enough for her legs and tall enough for
-       * her back, swept along the line she took. A round tube big enough
-       * for her width would take out far more roof than an ant ever does. */
-      const fwd = S_FWD.set(Math.sin(this.facing), 0, Math.cos(this.facing));
-      const right = S_RIGHT.set(fwd.z, 0, -fwd.x);
-      const r = this.body.tall + CLEAR_MARGIN;
-      const lift = Math.max(0, this.body.tall - RIDE) + BODY_FLOOR_MARGIN;
-      /* Her WHOLE oval — nose to tail as well as flank to flank. Clearing
-       * only a cross-section left her ends in the soil, and the fit test
-       * then refused to let her move into the hole she had just cut. */
-      for (let j = -1; j <= 1; j += 1) {
-        for (let k = -1; k <= 1; k += 1) {
-          const spot = at.clone()
-            .addScaledVector(fwd, j * Math.max(0, this.body.len + CLEAR_MARGIN - r))
-            .addScaledVector(right, k * Math.max(0, this.body.wide + CLEAR_MARGIN - r));
-          spot.y += lift;
-          const result = this.stream.subtractSphere(spot, r);
-          if (result.changedSamples === 0) continue;
-          touched += result.changedSamples;
-          const b = result.bounds;
-          minX = Math.min(minX, b.minX); maxX = Math.max(maxX, b.maxX);
-          minY = Math.min(minY, b.minY); maxY = Math.max(maxY, b.maxY);
-          minZ = Math.min(minZ, b.minZ); maxZ = Math.max(maxZ, b.maxZ);
-        }
-      }
-    }
-    this.clearedTo.copy(to);
-    this.hasCleared = true;
-    if (touched === 0) return;
-    const lo = (v: number) => Math.max(0, Math.floor((v - 1) / CH));
-    const hi = (v: number, max: number) => Math.min(max - 1, Math.floor((v + 1) / CH));
-    for (let cz = lo(minZ); cz <= hi(maxZ, CHUNKS_XZ); cz += 1) {
-      for (let cy = lo(minY); cy <= hi(maxY, CHUNKS_Y); cy += 1) {
-        for (let cx = lo(minX); cx <= hi(maxX, CHUNKS_XZ); cx += 1) {
-          this.enqueue(cx, cy, cz);
-        }
-      }
-    }
   }
 
   private nearestRail(p: THREE.Vector3): { i: number; t: number; d: number } | null {
@@ -2024,98 +1930,38 @@ export class IslandScene {
   }
 
   /**
-   * One stroke of the head, cut ACROSS the working face.
+   * ONE MOUTHFUL. 1.75 mm across, half a millimetre deep, where she is
+   * pointed — and that is the whole of what a stroke removes.
    *
-   * Her jaws take a mouthful 1.75 mm across and half a millimetre deep, and
-   * the hole has to end up big enough to live in, so a stroke is a whole
-   * face of those: rings of scoops out to her own width and height, spaced
-   * so consecutive ones overlap and the union leaves no scallops between.
-   * The face is her OVAL — her legs across, her back up and down — so she
-   * opens exactly what she has to fit through and not a millimetre more,
-   * and the spoil stays truthful.
+   * Nothing here opens a tunnel. A bore is many times the width of a bite,
+   * so a hole big enough to fit through is made by TAKING MORE BITES:
+   * sweep the aim across the face and chew it out. The capsule is what
+   * makes that necessary rather than optional — she cannot enter a space
+   * her body does not fit, so a passage exists only once it has actually
+   * been cut to size.
+   *
+   * This replaced a body-sized sweep that opened her whole oval every time
+   * she moved. That made tunnels instantly, and it also made the mandible
+   * decoration: about fifty cubic millimetres left per millimetre
+   * travelled, against two thirds of one in a bite — ninety-nine parts in
+   * a hundred of the digging had nothing to do with her jaws.
    */
   private bite(): void {
     const aim = this.boreAim();
     // Set back so the sphere's leading cap cuts BITE_DEPTH and no more.
     const centre = this.at.clone().addScaledVector(aim, JAW_REACH + BITE_SETBACK);
-    // A frame across the face. Any perpendicular will do; this one just
-    // has to not collapse when she is boring straight up or down.
-    const seed = Math.abs(aim.y) > 0.9
-      ? new THREE.Vector3(1, 0, 0)
-      : new THREE.Vector3(0, 1, 0);
-    const across = new THREE.Vector3().crossVectors(aim, seed).normalize();
-    const up = new THREE.Vector3().crossVectors(across, aim).normalize();
-    /* The face is as wide as SHE is, cut in mouthfuls. A scoop is 1.75 mm
-     * across against a body eight millimetres wide, so that is two rings of
-     * them, not one — the outer at her flank and an inner one to take the
-     * scallops out between. */
-    /* The face is her SILHOUETTE looking down the aim, cut in mouthfuls. */
-    const halfAcross = this.bodyReach(across) + CLEAR_MARGIN;
-    const halfUp = this.bodyReach(up) + CLEAR_MARGIN;
-    const reach = Math.max(halfAcross, halfUp);
-    const step = (BITE_WIDTH_MM * 0.8) / MM;
-    const RING_BITES = 8;
 
     let touched = 0;
     let minX = Infinity; let minY = Infinity; let minZ = Infinity;
     let maxX = -Infinity; let maxY = -Infinity; let maxZ = -Infinity;
-    const cut = (at: THREE.Vector3, radius = BITE_RADIUS) => {
-      const result = this.stream!.subtractSphere(at, radius);
-      if (result.changedSamples === 0) return;
-      touched += result.changedSamples;
+    const result = this.stream!.subtractSphere(centre, BITE_RADIUS);
+    if (result.changedSamples > 0) {
+      touched = result.changedSamples;
       const b = result.bounds;
-      minX = Math.min(minX, b.minX); maxX = Math.max(maxX, b.maxX);
-      minY = Math.min(minY, b.minY); maxY = Math.max(maxY, b.maxY);
-      minZ = Math.min(minZ, b.minZ); maxZ = Math.max(maxZ, b.maxZ);
-    };
-
-    cut(centre);
-    for (let r = step; r <= reach + 1e-6; r += step) {
-      const bites = Math.max(RING_BITES, Math.ceil((2 * Math.PI * r) / step));
-      for (let i = 0; i < bites; i += 1) {
-        const a = (i / bites) * Math.PI * 2;
-        // An OVAL face: her width across, her height up and down.
-        const wx = Math.cos(a) * Math.min(r, halfAcross);
-        const wy = Math.sin(a) * Math.min(r, halfUp);
-        cut(centre.clone().addScaledVector(across, wx).addScaledVector(up, wy));
-      }
+      minX = b.minX; maxX = b.maxX;
+      minY = b.minY; maxY = b.maxY;
+      minZ = b.minZ; maxZ = b.maxZ;
     }
-    /*
-     * AND THE TUNNEL SIZE CHECK, which is what actually guarantees the fit.
-     *
-     * A ring of round bites leaves scalloped valleys between them, so the
-     * TUBE she ends up travelling down is narrower than the face she cut —
-     * measured at 2.5 mm of clearance against a 4.03 mm stance, which is
-     * still an ant wearing her own tunnel. Rather than add more bites and
-     * hope the geometry adds up, the stroke also clears her own body's
-     * room as she passes: whatever is left inside the oval she occupies
-     * comes out.
-     *
-     * It cannot be used to cheat forward, because digging never moves her
-     * and she can only advance into space already cleared — so her jaws
-     * still set the rate, and this only ever sets the SHAPE. Above ground
-     * it does not run at all, or standing on a hillside chewing would
-     * scoop a crater around her instead of scraping at the face.
-     */
-    /*
-     * And her own room, every stroke. Clearing only ever on a successful
-     * MOVE was a deadlock: her oval cannot fit until the tunnel is opened,
-     * and the tunnel was only opened once she had moved. Cutting where she
-     * stands breaks that — the hole grows around her, and the fit test
-     * then lets her walk on into it.
-     */
-    /*
-     * ONE BITE FURTHER ON, which is what actually lets her advance.
-     *
-     * Clearing only where she STANDS cannot move her: the oval there is
-     * already open, and a 0.5 mm face is a slab far too thin to reach a
-     * nose four and a half millimetres out in front — she cleared her own
-     * room, was told her nose was in the wall, and stopped dead with the
-     * jaws running. So a stroke opens her room one mouthful along the aim
-     * and she creeps into it. The jaws still set the pace exactly: half a
-     * millimetre a stroke, and nowhere to go that has not been cut.
-     */
-    this.clearBodyRoom(true, aim);
     if (touched === 0) return;
 
     // One remesh for the whole face, not seven.
