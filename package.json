@@ -23,6 +23,7 @@
     "probe:clod": "node scripts/probe-clod.mjs",
     "probe:blocksize": "node scripts/probe-blocksize.mjs",
     "probe:bench": "node scripts/probe-bench.mjs",
+    "probe:rail": "node scripts/probe-rail.mjs",
     "smoke:pwa": "node scripts/smoke-pwa.mjs",
     "icons": "node scripts/make-icons.mjs"
   },
