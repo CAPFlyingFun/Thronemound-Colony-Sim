@@ -141,6 +141,82 @@
   background: rgba(255, 250, 238, 0.96);
 }
 
+/* ARMED, coaster-editor style: the chip you aimed glows amber until you
+ * either tap it again to place the piece or stand it down. */
+.density-lab-armed {
+  background: #e9c36f !important;
+  box-shadow: 0 0 0 3px #d97c2b, 0 7px 20px rgba(0, 0, 0, 0.32);
+}
+
+/*
+ * THE WHEEL: the radial piece adjuster, pinned to the track's working end
+ * by the scene each frame (left/top are set from a 3D projection). Spokes
+ * are compass-placed — pitch N/S, turn W/E, bank on the upper diagonals,
+ * length on the lower — and the hub commits.
+ */
+.rail-wheel {
+  position: absolute;
+  z-index: 5;
+  width: 172px;
+  height: 172px;
+  margin: -86px 0 0 -86px;
+  pointer-events: none;
+}
+
+.rail-wheel::before {
+  content: '';
+  position: absolute;
+  inset: 20px;
+  border: 2px solid rgba(244, 236, 216, 0.4);
+  border-radius: 50%;
+}
+
+.rail-wheel-btn {
+  position: absolute;
+  pointer-events: auto;
+  width: 42px;
+  height: 42px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(244, 236, 216, 0.92);
+  color: #2a241c;
+  font: 700 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  touch-action: manipulation;
+}
+
+.rail-wheel-btn:active {
+  transform: scale(0.94);
+  background: rgba(255, 250, 238, 0.98);
+}
+
+.rw-n { left: 65px; top: 0; }
+.rw-s { left: 65px; bottom: 0; }
+.rw-w { left: 0; top: 65px; }
+.rw-e { right: 0; top: 65px; }
+.rw-nw { left: 18px; top: 18px; }
+.rw-ne { right: 18px; top: 18px; }
+.rw-sw { left: 18px; bottom: 18px; }
+.rw-se { right: 18px; bottom: 18px; }
+
+/* The hub: the commit. Amber like everything that builds in this game. */
+.rw-c {
+  left: 65px;
+  top: 65px;
+  background: #e9c36f;
+  font-size: 16px;
+}
+
+/* The one chip that deletes something: unmistakably not a builder. */
+.density-lab-danger {
+  background: #c86248 !important;
+  color: #fff4ea;
+}
+
+.density-lab-danger:active {
+  background: #d8745a !important;
+}
+
 /*
  * The eye tuner: temporary by design. It exists so the first-person camera
  * can be dialled in on a real device and the settled numbers folded into the

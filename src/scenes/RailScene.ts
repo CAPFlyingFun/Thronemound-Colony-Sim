@@ -24,10 +24,10 @@
 import * as THREE from 'three';
 import './DensityTerrainLabScene.css';
 import { RAIL_SMOOTH_MM, type TunnelRail } from './tunnelRail';
-import { type DigPiece } from './digPlan';
+import { PIECE_LIMITS, clampPiece, type DigPiece } from './digPlan';
 import {
-  PIECE_LENGTHS_MM, appendPiece, buildRail, endStateOf, pieceLabel, piecesToPlan,
-  presetPieces, type PieceKind, type PresetId,
+  PIECE_LENGTHS_MM, appendPiece, autoBankFor, buildRail, endStateOf, pieceLabel,
+  piecesToPlan, presetPieces, type PieceKind, type PresetId,
 } from './pieceTrack';
 import { MIN_ENTRANCE_RADIUS_MM, validatePlan, type NestPlan } from '../nest/nestPlan';
 import { carvePlan } from '../nest/nestCarve';
@@ -132,6 +132,55 @@ export class RailScene {
   /** One tag per piece, floating over its midpoint: "+15°", "−45° L15°". */
   private readonly labelGroup = new THREE.Group();
 
+  /**
+   * ARM-THEN-PLACE, the way the coaster editors do it: the first tap on a
+   * palette chip ARMS the piece — the chip lights up and a translucent
+   * ghost of exactly what it would add hangs off the end of the track —
+   * and the second tap PLACES it. The chip stays armed after placing, so
+   * a run of straights is tap-tap-tap, and tapping a different chip just
+   * re-aims the ghost. Escape (or the ✕ chip) stands down.
+   */
+  private armed: { piece: PieceKind } | { preset: PresetId } | null = null;
+
+  private armedBtn: HTMLButtonElement | null = null;
+
+  /** The ghost of the armed piece, drawn but not yet real. */
+  private readonly ghostGroup = new THREE.Group();
+
+  /**
+   * The SELECTED piece, for surgical removal: ◀ PIECE / PIECE ▶ walk the
+   * highlight along the track and DESTROY takes out exactly that piece —
+   * the rest of the line re-anchors behind it, because pieces are relative
+   * and the whole rail recompiles from the list. −1 is nothing selected.
+   */
+  private selIdx = -1;
+
+  private readonly selGroup = new THREE.Group();
+
+  private cancelBtn: HTMLButtonElement | null = null;
+
+  private destroyBtn: HTMLButtonElement | null = null;
+
+  /**
+   * THE WHEEL — the coaster editors' radial adjuster, hung on the working
+   * end of the track. While a single piece is armed it tunes the GHOST
+   * (pitch, turn, bank, length) before you commit; while a placed piece is
+   * selected it re-shapes THAT piece in place and the line re-links. It is
+   * a DOM ring projected onto the 3D end point every frame, so it rides
+   * the track through every orbit of the camera.
+   */
+  private wheelEl: HTMLElement | null = null;
+
+  private wheelCenter: HTMLButtonElement | null = null;
+
+  private wheelMode: 'ghost' | 'sel' | null = null;
+
+  private readonly wheelAnchor = new THREE.Vector3();
+
+  /** The armed SINGLE piece, tweakable by the wheel before it is placed.
+   *  Null while a preset is armed (presets place as authored). */
+  private ghostPiece: DigPiece | null = null;
+
   private labelsOn = true;
 
   private labelTexts: string[] = [];
@@ -205,6 +254,8 @@ export class RailScene {
     this.buildStation();
     this.scene.add(this.trackGroup);
     this.scene.add(this.labelGroup);
+    this.scene.add(this.ghostGroup);
+    this.scene.add(this.selGroup);
     this.buildSoil();
     this.buildCart();
 
@@ -356,6 +407,8 @@ export class RailScene {
    * whose edits are button taps.
    */
   private rebuildTrack(): void {
+    // The track end moved, so the armed ghost re-derives from the new end.
+    this.ghostPiece = null;
     for (const child of [...this.trackGroup.children]) {
       this.trackGroup.remove(child);
       const mesh = child as THREE.Mesh;
@@ -367,6 +420,8 @@ export class RailScene {
     if (length <= 0) {
       this.cartS = 0;
       this.rebuildLabels();
+      this.rebuildGhost();
+      this.rebuildSelection();
       this.recarve();
       this.refreshReadout(true);
       this.savePieces();
@@ -455,6 +510,8 @@ export class RailScene {
 
     this.cartS = Math.min(this.cartS, length);
     this.rebuildLabels();
+    this.rebuildGhost();
+    this.rebuildSelection();
     this.recarve();
     this.frameCamera();
     this.refreshReadout(true);
@@ -580,6 +637,233 @@ export class RailScene {
     this.rebuildTrack();
   }
 
+  /* ------------------------------------------------- arm, ghost, select */
+
+  /** What the armed chip WOULD add, computed fresh off the current track
+   *  end — so the ghost is always honest about length, bank and pitch. */
+  private armedPieces(): DigPiece[] {
+    if (!this.armed) return [];
+    const opts = {
+      lengthMm: PIECE_LENGTHS_MM[this.lengthIdx]!,
+      autoBank: this.autoBank,
+    };
+    if ('piece' in this.armed) {
+      if (!this.ghostPiece) {
+        this.ghostPiece = appendPiece(this.pieces, this.armed.piece, opts);
+      }
+      return [this.ghostPiece];
+    }
+    return presetPieces(this.pieces, this.armed.preset, opts);
+  }
+
+  /** First tap arms (chip lights, ghost appears); a tap on the ARMED chip
+   *  places it and stays armed for the next one. */
+  private armOrPlace(
+    button: HTMLButtonElement,
+    spec: { piece: PieceKind } | { preset: PresetId },
+  ): void {
+    if (this.armed && this.armedBtn === button) {
+      // Place WHAT THE GHOST SHOWS — wheel tweaks and all.
+      if ('piece' in spec && this.ghostPiece) this.placeGhost();
+      else if ('piece' in spec) this.add(spec.piece);
+      else this.addPreset(spec.preset);
+      return; // rebuildTrack refreshed the ghost for the next placement
+    }
+    // Arming and selecting are two hands on the same track end — one at a
+    // time, or the wheel cannot know which piece it is turning.
+    if (this.selIdx >= 0) { this.selIdx = -1; this.rebuildSelection(); }
+    this.armedBtn?.classList.remove('density-lab-armed');
+    this.armed = spec;
+    this.ghostPiece = null;
+    this.armedBtn = button;
+    button.classList.add('density-lab-armed');
+    if (this.cancelBtn) this.cancelBtn.style.display = '';
+    this.rebuildGhost();
+    this.refreshReadout(true);
+  }
+
+  private cancelArm(): void {
+    this.armedBtn?.classList.remove('density-lab-armed');
+    this.armed = null;
+    this.ghostPiece = null;
+    this.armedBtn = null;
+    if (this.cancelBtn) this.cancelBtn.style.display = 'none';
+    this.rebuildGhost();
+    this.refreshReadout(true);
+  }
+
+  /** Commit the ghost — wheel tweaks included — as the next real piece. */
+  private placeGhost(): void {
+    if (!this.ghostPiece) return;
+    this.pieces.push(this.ghostPiece);
+    this.rebuildTrack();
+  }
+
+  /**
+   * One wheel tap: a single exact step of the field it names, routed to
+   * whichever piece the wheel is riding — the armed ghost, or the selected
+   * placed piece (which re-shapes in place; the line re-links behind it).
+   * With BANK AUTO on, a turn or length change re-derives the bank, the
+   * same arithmetic the palette uses.
+   */
+  private wheelTap(
+    field: 'pitch' | 'turn' | 'roll' | 'length', dir: 1 | -1,
+  ): void {
+    const stepOne = (piece: DigPiece): DigPiece => {
+      const stepped = {
+        ...piece, [field]: piece[field] + PIECE_LIMITS[field].step * dir,
+      };
+      if (this.autoBank && (field === 'turn' || field === 'length')) {
+        stepped.roll = autoBankFor(stepped.turn, stepped.length);
+      }
+      return clampPiece(stepped);
+    };
+    if (this.selIdx >= 0 && this.pieces[this.selIdx]) {
+      this.pieces[this.selIdx] = stepOne(this.pieces[this.selIdx]!);
+      this.rebuildTrack(); // keeps the selection; re-highlights the new shape
+      return;
+    }
+    if (this.ghostPiece) {
+      this.ghostPiece = stepOne(this.ghostPiece);
+      this.rebuildGhost();
+      this.refreshReadout(true);
+    }
+  }
+
+  private static emptyGroup(group: THREE.Group): void {
+    for (const child of [...group.children]) {
+      group.remove(child);
+      const mesh = child as THREE.Mesh;
+      mesh.geometry?.dispose();
+      if (mesh.material instanceof THREE.Material) mesh.material.dispose();
+    }
+  }
+
+  /** A tube swept along `rail` between two arc lengths — the beam builder's
+   *  sweep, reusable, so the ghost and the highlight are drawn by the same
+   *  arithmetic as the track they annotate. */
+  private sweepTube(
+    rail: TunnelRail, s0: number, s1: number, radius: number,
+  ): THREE.BufferGeometry | null {
+    if (s1 - s0 <= 0.01) return null;
+    const RING = 8;
+    const steps = Math.max(2, Math.ceil((s1 - s0) / DRAW_STEP_MM) + 1);
+    const positions = new Float32Array(steps * RING * 3);
+    const right = new THREE.Vector3();
+    const up = new THREE.Vector3();
+    let at = 0;
+    for (let i = 0; i < steps; i += 1) {
+      const s = s0 + (i / (steps - 1)) * (s1 - s0);
+      const f = rail.sample(Math.min(s, rail.lengthMm), this.sampleWindow)!;
+      up.set(f.ux, f.uy, f.uz);
+      right.set(
+        f.uy * f.fz - f.uz * f.fy,
+        f.uz * f.fx - f.ux * f.fz,
+        f.ux * f.fy - f.uy * f.fx,
+      );
+      for (let k = 0; k < RING; k += 1) {
+        const a = (k / RING) * Math.PI * 2;
+        const c = Math.cos(a) * radius;
+        const sn = Math.sin(a) * radius;
+        positions[at] = f.x + right.x * c + up.x * sn;
+        positions[at + 1] = f.y + right.y * c + up.y * sn;
+        positions[at + 2] = f.z + right.z * c + up.z * sn;
+        at += 3;
+      }
+    }
+    const index: number[] = [];
+    for (let i = 0; i + 1 < steps; i += 1) {
+      for (let k = 0; k < RING; k += 1) {
+        const a = i * RING + k;
+        const b = i * RING + ((k + 1) % RING);
+        const c = a + RING;
+        const d = b + RING;
+        index.push(a, c, b, b, c, d);
+      }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setIndex(index);
+    geometry.computeVertexNormals();
+    return geometry;
+  }
+
+  /** The armed piece, drawn as an amber ghost off the end of the track —
+   *  visible through the soil, because a preview you cannot see is a trap. */
+  private rebuildGhost(): void {
+    RailScene.emptyGroup(this.ghostGroup);
+    const ghost = this.armedPieces();
+    if (ghost.length === 0) return;
+    const total = buildRail([...this.pieces, ...ghost]);
+    const from = buildRail(this.pieces).lengthMm;
+    const geometry = this.sweepTube(total, from, total.lengthMm, BEAM_RADIUS * 1.15);
+    if (!geometry) return;
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({
+      color: 0xe8b23c,
+      transparent: true,
+      opacity: 0.55,
+      depthTest: false,
+    }));
+    mesh.renderOrder = 10;
+    this.ghostGroup.add(mesh);
+    // A cap where the ghost ends, so the eye finds the landing point.
+    const endFrame = total.sample(total.lengthMm, this.sampleWindow)!;
+    const cap = new THREE.Mesh(
+      new THREE.SphereGeometry(1.0, 10, 8),
+      new THREE.MeshLambertMaterial({
+        color: 0xe8b23c, transparent: true, opacity: 0.7, depthTest: false,
+      }),
+    );
+    cap.renderOrder = 10;
+    cap.position.set(endFrame.x, endFrame.y, endFrame.z);
+    this.ghostGroup.add(cap);
+    // The wheel rides the ghost's landing point.
+    this.wheelAnchor.set(endFrame.x, endFrame.y, endFrame.z);
+  }
+
+  /** Walk the selection along the track: ◀ starts from the LAST piece
+   *  (the one you most likely regret), ▶ from the first. */
+  private stepSelection(delta: 1 | -1): void {
+    if (this.armed) this.cancelArm();
+    const n = this.pieces.length;
+    if (n === 0) { this.selIdx = -1; this.rebuildSelection(); return; }
+    if (this.selIdx < 0) this.selIdx = delta > 0 ? 0 : n - 1;
+    else this.selIdx = (((this.selIdx + delta) % n) + n) % n;
+    this.rebuildSelection();
+    this.refreshReadout(true);
+  }
+
+  private destroySelected(): void {
+    if (this.selIdx < 0 || this.selIdx >= this.pieces.length) return;
+    this.pieces.splice(this.selIdx, 1);
+    if (this.selIdx >= this.pieces.length) this.selIdx = this.pieces.length - 1;
+    this.rebuildTrack(); // clamps, redraws, and re-highlights
+  }
+
+  /** The red sleeve over the selected piece. Also clamps a selection the
+   *  last edit orphaned, so it runs with every rebuild. */
+  private rebuildSelection(): void {
+    if (this.selIdx >= this.pieces.length) this.selIdx = this.pieces.length - 1;
+    RailScene.emptyGroup(this.selGroup);
+    if (this.destroyBtn) {
+      this.destroyBtn.style.display = this.selIdx >= 0 ? '' : 'none';
+    }
+    if (this.selIdx < 0) return;
+    let s0 = 0;
+    for (let i = 0; i < this.selIdx; i += 1) s0 += this.pieces[i]!.length;
+    const s1 = s0 + this.pieces[this.selIdx]!.length;
+    const geometry = this.sweepTube(this.rail, s0, s1, BEAM_RADIUS * 1.7);
+    if (!geometry) return;
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({
+      color: 0xd8563c,
+      transparent: true,
+      opacity: 0.5,
+      depthTest: false,
+    }));
+    mesh.renderOrder = 11;
+    this.selGroup.add(mesh);
+  }
+
   private savePieces(): void {
     try {
       localStorage.setItem(SAVE_KEY, JSON.stringify({
@@ -632,7 +916,7 @@ export class RailScene {
       button.addEventListener('pointerdown', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        this.add(kind);
+        this.armOrPlace(button, { piece: kind });
       });
       actions.appendChild(button);
     };
@@ -650,7 +934,7 @@ export class RailScene {
       button.addEventListener('pointerdown', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        this.addPreset(id);
+        this.armOrPlace(button, { preset: id });
       });
       actions.appendChild(button);
     };
@@ -690,10 +974,14 @@ export class RailScene {
     this.lenBtn = chip(`LEN ${PIECE_LENGTHS_MM[this.lengthIdx]}`, (b) => {
       this.lengthIdx = (this.lengthIdx + 1) % PIECE_LENGTHS_MM.length;
       b.textContent = `LEN ${PIECE_LENGTHS_MM[this.lengthIdx]}`;
+      this.ghostPiece = null; // re-derive: the ghost wears the new default
+      this.rebuildGhost();
     });
     this.bankBtn = chip('BANK AUTO', (b) => {
       this.autoBank = !this.autoBank;
       b.textContent = this.autoBank ? 'BANK AUTO' : 'BANK OFF';
+      this.ghostPiece = null;
+      this.rebuildGhost();
     });
     this.smoothBtn = chip('SMOOTH OFF', (b) => {
       this.smooth = !this.smooth;
@@ -718,6 +1006,20 @@ export class RailScene {
     chip('UNDO', () => this.undo());
     chip('CLEAR', () => this.clear());
 
+    /* Standing down: shown only while a chip is armed. */
+    this.cancelBtn = chip('✕ AIM', () => this.cancelArm());
+    this.cancelBtn.style.display = 'none';
+
+    /* Surgical removal, the mobile builders' way: walk a highlight along
+     * the track and DESTROY exactly the piece it sits on. */
+    chip('◀ PIECE', () => this.stepSelection(-1));
+    chip('PIECE ▶', () => this.stepSelection(1));
+    this.destroyBtn = chip('DESTROY', () => this.destroySelected());
+    this.destroyBtn.classList.add('density-lab-danger');
+    this.destroyBtn.style.display = 'none';
+
+    this.buildWheel();
+
     this.readout = document.createElement('div');
     this.readout.className = 'density-lab-status';
     this.hud.appendChild(this.readout);
@@ -732,6 +1034,10 @@ export class RailScene {
       if (key === 'arrowright' || key === 'd') this.add('right');
       if (key === 'u') this.undo();
       if (key === 'c') this.clear();
+      if (key === 'escape') this.cancelArm();
+      if (key === '[') this.stepSelection(-1);
+      if (key === ']') this.stepSelection(1);
+      if (key === 'delete' || key === 'backspace') this.destroySelected();
       if (key === 'x') this.soilBtn?.dispatchEvent(new PointerEvent('pointerdown'));
       if (key === 't') this.tagsBtn?.dispatchEvent(new PointerEvent('pointerdown'));
       if (key === 'b') this.bankBtn?.dispatchEvent(new PointerEvent('pointerdown'));
@@ -739,6 +1045,86 @@ export class RailScene {
       if (key === 'r') this.rideBtn?.dispatchEvent(new PointerEvent('pointerdown'));
       if (key === 'l') this.lenBtn?.dispatchEvent(new PointerEvent('pointerdown'));
     });
+  }
+
+  /**
+   * The radial adjuster itself: eight spokes and a hub. Compass layout —
+   * pitch up top, pitch down bottom, turn on the sides, bank on the upper
+   * diagonals, length on the lower — so the hand learns positions, not
+   * labels. The hub commits (ghost) or dismisses (selection).
+   */
+  private buildWheel(): void {
+    const wheel = document.createElement('div');
+    wheel.className = 'rail-wheel';
+    wheel.style.display = 'none';
+    const spoke = (
+      cls: string, label: string, onTap: () => void,
+    ): HTMLButtonElement => {
+      const button = document.createElement('button');
+      button.className = `rail-wheel-btn ${cls}`;
+      button.textContent = label;
+      button.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onTap();
+      });
+      wheel.appendChild(button);
+      return button;
+    };
+    spoke('rw-n', '▲', () => this.wheelTap('pitch', 1));
+    spoke('rw-s', '▼', () => this.wheelTap('pitch', -1));
+    spoke('rw-w', '◀', () => this.wheelTap('turn', 1));
+    spoke('rw-e', '▶', () => this.wheelTap('turn', -1));
+    spoke('rw-nw', 'B−', () => this.wheelTap('roll', -1));
+    spoke('rw-ne', 'B+', () => this.wheelTap('roll', 1));
+    spoke('rw-sw', 'L−', () => this.wheelTap('length', -1));
+    spoke('rw-se', 'L+', () => this.wheelTap('length', 1));
+    this.wheelCenter = spoke('rw-c', '✓', () => {
+      if (this.wheelMode === 'ghost') this.placeGhost();
+      else if (this.wheelMode === 'sel') {
+        this.selIdx = -1;
+        this.rebuildSelection();
+        this.refreshReadout(true);
+      }
+    });
+    this.hud.appendChild(wheel);
+    this.wheelEl = wheel;
+  }
+
+  /** Pin the wheel to the working end, every frame, through every orbit. */
+  private updateWheel(): void {
+    const wheel = this.wheelEl;
+    if (!wheel) return;
+    let mode: 'ghost' | 'sel' | null = null;
+    if (this.selIdx >= 0 && this.pieces[this.selIdx]) {
+      let s1 = 0;
+      for (let i = 0; i <= this.selIdx; i += 1) s1 += this.pieces[i]!.length;
+      const f = this.rail.sample(Math.min(s1, this.rail.lengthMm), this.sampleWindow);
+      if (f) { this.wheelAnchor.set(f.x, f.y, f.z); mode = 'sel'; }
+    } else if (this.armed && this.ghostPiece
+      && this.ghostGroup.children.length > 0) {
+      // Only when the ghost actually drew — a wheel on a stale anchor
+      // would be adjusting a piece that is not where it points.
+      mode = 'ghost';
+    }
+    if (!mode) {
+      wheel.style.display = 'none';
+      this.wheelMode = null;
+      return;
+    }
+    const v = this.wheelAnchor.clone().project(this.camera);
+    if (v.z > 1) { wheel.style.display = 'none'; return; }
+    wheel.style.display = '';
+    wheel.style.left = `${(v.x * 0.5 + 0.5) * (this.host.clientWidth || 1)}px`;
+    wheel.style.top = `${(-v.y * 0.5 + 0.5) * (this.host.clientHeight || 1)}px`;
+    if (mode !== this.wheelMode) {
+      this.wheelMode = mode;
+      if (this.wheelCenter) {
+        this.wheelCenter.textContent = mode === 'ghost' ? '✓' : '✕';
+        this.wheelCenter.title = mode === 'ghost'
+          ? 'place this piece' : 'done with this piece';
+      }
+    }
   }
 
   private refreshReadout(force = false): void {
@@ -749,6 +1135,16 @@ export class RailScene {
     const last = this.pieces[this.pieces.length - 1];
     const end = endStateOf(this.pieces);
     const faults = validatePlan(this.planOf()).length;
+    const armedLabel = !this.armed ? 'tap a chip to AIM it'
+      : 'piece' in this.armed
+        ? `ARMED ${this.armed.piece.toUpperCase()}${this.ghostPiece
+          ? ` (pitch ${this.ghostPiece.pitch}° · turn ${this.ghostPiece.turn}°`
+            + ` · bank ${this.ghostPiece.roll}° · ${this.ghostPiece.length} mm)`
+          : ''} — wheel tunes it, ✓ or the chip places it`
+        : `ARMED ${this.armed.preset.toUpperCase()} — tap it again to place`;
+    const selLabel = this.selIdx >= 0 && this.pieces[this.selIdx]
+      ? ` · selected #${this.selIdx + 1} ${pieceLabel(this.pieces[this.selIdx]!)}`
+      : '';
     this.readout.innerHTML = `
       <b>monorail rig</b> · pieces ${this.pieces.length}
       · track ${end.lengthMm.toFixed(0)} mm · plan faults ${faults}
@@ -762,8 +1158,10 @@ export class RailScene {
       cart ${this.cartS.toFixed(1)} / ${end.lengthMm.toFixed(0)} mm
       · ends in ${ROOMS[this.roomIdx]!.radiusMm === null
     ? 'a junction' : `a ${ROOMS[this.roomIdx]!.radiusMm} mm room`}<br>
+      ${armedLabel}${selLabel}<br>
       space/─ straight · ▲▼ pitch ±15° · ◀▶ turn ±15° · L length · B bank
-      · M smooth · R ride · X soil · T tags · U undo · C clear · drag orbits
+      · M smooth · R ride · X soil · T tags · U undo · C clear
+      · esc stands down · [ ] select piece · del destroys · drag orbits
     `;
   }
 
@@ -859,6 +1257,30 @@ export class RailScene {
 
   clearForTest(): void { this.clear(); }
 
+  armForTest(kind: PieceKind): void {
+    const buttons = this.hud.querySelectorAll<HTMLButtonElement>('button');
+    const label = { straight: '─', up: '▲', down: '▼', left: '◀', right: '▶' }[kind];
+    for (const b of buttons) {
+      if (b.textContent === label) { this.armOrPlace(b, { piece: kind }); return; }
+    }
+  }
+
+  cancelArmForTest(): void { this.cancelArm(); }
+
+  wheelTapForTest(
+    field: 'pitch' | 'turn' | 'roll' | 'length', dir: 1 | -1,
+  ): void { this.wheelTap(field, dir); }
+
+  placeGhostForTest(): void { this.placeGhost(); }
+
+  ghostPieceForTest(): DigPiece | null {
+    return this.ghostPiece ? { ...this.ghostPiece } : null;
+  }
+
+  stepSelectionForTest(delta: 1 | -1): void { this.stepSelection(delta); }
+
+  destroySelectedForTest(): void { this.destroySelected(); }
+
   setAutoBankForTest(on: boolean): void {
     this.autoBank = on;
     if (this.bankBtn) this.bankBtn.textContent = on ? 'BANK AUTO' : 'BANK OFF';
@@ -919,6 +1341,14 @@ export class RailScene {
       roomIdx: this.roomIdx,
       roomMm: ROOMS[this.roomIdx]!.radiusMm ?? 0,
       planChambers: plan.nodes.filter((n) => n.kind === 'chamber').length,
+      armed: this.armed ? 1 : 0,
+      ghostMeshes: this.ghostGroup.children.length,
+      selIdx: this.selIdx,
+      selMeshes: this.selGroup.children.length,
+      ghostPitch: this.ghostPiece?.pitch ?? 0,
+      ghostTurn: this.ghostPiece?.turn ?? 0,
+      ghostRoll: this.ghostPiece?.roll ?? 0,
+      ghostLen: this.ghostPiece?.length ?? 0,
     };
   }
 
@@ -939,6 +1369,7 @@ export class RailScene {
     const dt = Math.min(0.05, (now - this.previous) / 1000);
     this.previous = now;
     if (!this.paused) this.simulate(dt);
+    this.updateWheel();
     this.renderer.render(this.scene, this.camera);
     this.frame = requestAnimationFrame(this.animate);
   };
