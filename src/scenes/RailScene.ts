@@ -26,10 +26,13 @@ import './DensityTerrainLabScene.css';
 import { RAIL_SMOOTH_MM, type TunnelRail } from './tunnelRail';
 import { type DigPiece } from './digPlan';
 import {
-  PIECE_LENGTHS_MM, appendPiece, buildRail, endStateOf, piecesToPlan,
+  PIECE_LENGTHS_MM, appendPiece, buildRail, endStateOf, pieceLabel, piecesToPlan,
   type PieceKind,
 } from './pieceTrack';
-import { validatePlan } from '../nest/nestPlan';
+import { MIN_ENTRANCE_RADIUS_MM, validatePlan, type NestPlan } from '../nest/nestPlan';
+import { carvePlan } from '../nest/nestCarve';
+import { DensityField } from '../density/DensityField';
+import { buildSurfaceNets } from '../density/SurfaceNets';
 
 /** How fast the cart shuttles, in mm/s. A monorail, not a coaster drop. */
 const CART_SPEED = 12;
@@ -46,6 +49,31 @@ const DRAW_STEP_MM = 0.5;
 
 /** Where the track saves itself, so a refresh keeps the work. */
 const SAVE_KEY = 'tcs-rail-pieces';
+
+/** The bore every piece cuts, and the mouth at the station. The mouth takes
+ *  the plan's own minimum — narrower and validatePlan calls it a door she
+ *  walks past, which the readout would report as a permanent fault. */
+const BORE_RADIUS_MM = 4;
+const ENTRANCE_RADIUS_MM = MIN_ENTRANCE_RADIUS_MM;
+
+/**
+ * THE SOIL: a block of ground under the station, surface at y = 0.
+ *
+ * The field reaches a few cells past the soil on every side so surface nets
+ * closes the block's faces (the block room's own lesson: a field that is
+ * still positive on its boundary sample has no crossing to draw). One
+ * millimetre cells, matching the room's one-unit-is-one-millimetre rule, so
+ * the carve and the field speak the same numbers.
+ */
+const SOIL = {
+  x0: -50, x1: 50, z0: -20, z1: 80, floor: -60, top: 0,
+} as const;
+const FIELD_PAD = 3;
+const FIELD_ORIGIN = {
+  x: SOIL.x0 - FIELD_PAD, y: SOIL.floor - FIELD_PAD, z: SOIL.z0 - FIELD_PAD,
+} as const;
+/** Headroom above the surface, so the entrance mound has field to exist in. */
+const FIELD_SKY = 12;
 
 export class RailScene {
   ready = false;
@@ -87,6 +115,29 @@ export class RailScene {
   private cart: THREE.Group | null = null;
 
   private trackGroup = new THREE.Group();
+
+  /** One tag per piece, floating over its midpoint: "+15°", "−45° L15°". */
+  private readonly labelGroup = new THREE.Group();
+
+  private labelsOn = true;
+
+  private labelTexts: string[] = [];
+
+  /** The dirt, and the tunnel removed from it. */
+  private soilField: DensityField | null = null;
+
+  private soilMesh: THREE.Mesh | null = null;
+
+  private soilMaterial: THREE.MeshLambertMaterial | null = null;
+
+  /** XRAY shows the tunnel through the dirt; SOLID is the honest view. */
+  private soilMode: 'xray' | 'solid' | 'off' = 'xray';
+
+  private soilBtn: HTMLButtonElement | null = null;
+
+  private tagsBtn: HTMLButtonElement | null = null;
+
+  private carveMs = 0;
 
   private camYaw = -0.7;
 
@@ -135,6 +186,8 @@ export class RailScene {
     this.buildGround();
     this.buildStation();
     this.scene.add(this.trackGroup);
+    this.scene.add(this.labelGroup);
+    this.buildSoil();
     this.buildCart();
 
     this.hud = document.createElement('div');
@@ -156,45 +209,93 @@ export class RailScene {
   /* ------------------------------------------------------------- the room */
 
   private buildGround(): void {
+    // The grid is the wider world's floor; the SOIL BLOCK is the ground that
+    // matters, and it is real carved geometry now, not a lawn.
     const grid = new THREE.GridHelper(240, 48, 0x7d8a96, 0xa8b6c2);
     grid.position.y = -0.02;
     this.scene.add(grid);
-    /*
-     * TRANSLUCENT, because these tracks are TUNNELS: nearly everything this
-     * room builds dives below the surface, and an opaque lawn hid the whole
-     * of the first descending test track. The grid stays fully drawn, so the
-     * surface still reads as a surface; the track reads through it the way
-     * the island's sonar view reads through the hill.
-     */
-    const plane = new THREE.Mesh(
-      new THREE.PlaneGeometry(240, 240),
-      new THREE.MeshLambertMaterial({
-        color: 0x8da06f, transparent: true, opacity: 0.38,
-        depthWrite: false, side: THREE.DoubleSide,
-      }),
-    );
-    plane.rotation.x = -Math.PI / 2;
-    plane.position.y = -0.05;
-    this.scene.add(plane);
   }
 
-  /** The station: the entrance mouth the track grows out of. */
+  /** The station marker: a ring at the mouth, findable with the soil off. */
   private buildStation(): void {
-    const station = new THREE.Group();
-    const pad = new THREE.Mesh(
-      new THREE.CylinderGeometry(6, 7, 1.2, 24),
-      new THREE.MeshLambertMaterial({ color: 0xb08a5a }),
-    );
-    pad.position.y = -0.6;
-    station.add(pad);
     const mouth = new THREE.Mesh(
-      new THREE.TorusGeometry(2.6, 0.5, 10, 24),
+      new THREE.TorusGeometry(ENTRANCE_RADIUS_MM, 0.4, 10, 28),
       new THREE.MeshLambertMaterial({ color: 0x5a4632 }),
     );
     mouth.rotation.x = Math.PI / 2;
     mouth.position.y = 0.15;
-    station.add(mouth);
-    this.scene.add(station);
+    this.scene.add(mouth);
+  }
+
+  /* ------------------------------------------------------------- the soil */
+
+  private buildSoil(): void {
+    this.soilField = new DensityField({
+      cellsX: (SOIL.x1 - SOIL.x0) + FIELD_PAD * 2,
+      cellsY: (SOIL.top - SOIL.floor) + FIELD_PAD + FIELD_SKY,
+      cellsZ: (SOIL.z1 - SOIL.z0) + FIELD_PAD * 2,
+      cellSize: 1,
+    });
+    this.soilMaterial = new THREE.MeshLambertMaterial({ color: 0x8a6b48 });
+  }
+
+  /** The undug ground: a block of soil whose surface is y = 0. */
+  private static soilBase(x: number, y: number, z: number): number {
+    return Math.min(
+      SOIL.top - y, y - SOIL.floor,
+      x - SOIL.x0, SOIL.x1 - x,
+      z - SOIL.z0, SOIL.z1 - z,
+    );
+  }
+
+  /**
+   * THE DIRT COMES OUT. The pieces compile to a NestPlan and `carvePlan`
+   * does the rest — tunnels bored, the entrance mound heaped over the
+   * station with a vent through it — exactly the machinery the island uses,
+   * pointed at this room's little block. Run on every edit: this block is
+   * ~0.9M samples against the block room's 4M, and the readout carries the
+   * cost so a regression is a number rather than a feel.
+   */
+  private recarve(): void {
+    const field = this.soilField;
+    if (!field) return;
+    const started = performance.now();
+    const carved = carvePlan(RailScene.soilBase, this.planOf());
+    field.fill((lx, ly, lz) => carved(
+      FIELD_ORIGIN.x + lx, FIELD_ORIGIN.y + ly, FIELD_ORIGIN.z + lz,
+    ));
+    this.carveMs = performance.now() - started;
+    this.rebuildSoilMesh();
+  }
+
+  private rebuildSoilMesh(): void {
+    if (this.soilMesh) {
+      this.scene.remove(this.soilMesh);
+      this.soilMesh.geometry.dispose();
+      this.soilMesh = null;
+    }
+    if (!this.soilField || !this.soilMaterial) return;
+    const data = buildSurfaceNets(this.soilField, 0);
+    if (data.indices.length === 0) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+    geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
+    geometry.computeVertexNormals();
+    const mesh = new THREE.Mesh(geometry, this.soilMaterial);
+    mesh.position.set(FIELD_ORIGIN.x, FIELD_ORIGIN.y, FIELD_ORIGIN.z);
+    this.scene.add(mesh);
+    this.soilMesh = mesh;
+    this.applySoilMode();
+  }
+
+  private applySoilMode(): void {
+    if (!this.soilMesh || !this.soilMaterial) return;
+    this.soilMesh.visible = this.soilMode !== 'off';
+    const xray = this.soilMode === 'xray';
+    this.soilMaterial.transparent = xray;
+    this.soilMaterial.opacity = xray ? 0.45 : 1;
+    this.soilMaterial.depthWrite = !xray;
+    this.soilMaterial.needsUpdate = true;
   }
 
   private buildCart(): void {
@@ -245,6 +346,8 @@ export class RailScene {
     const length = this.rail.lengthMm;
     if (length <= 0) {
       this.cartS = 0;
+      this.rebuildLabels();
+      this.recarve();
       this.refreshReadout(true);
       this.savePieces();
       return;
@@ -331,9 +434,77 @@ export class RailScene {
     this.trackGroup.add(buffer);
 
     this.cartS = Math.min(this.cartS, length);
+    this.rebuildLabels();
+    this.recarve();
     this.frameCamera();
     this.refreshReadout(true);
     this.savePieces();
+  }
+
+  /** The plan this track IS — one construction, shared by the carve, the
+   *  readout and the probes, so they cannot disagree about radii. */
+  private planOf(): NestPlan {
+    return piecesToPlan(this.pieces, {
+      originMm: { x: 0, y: 0, z: 0 },
+      boreRadiusMm: BORE_RADIUS_MM,
+      entranceRadiusMm: ENTRANCE_RADIUS_MM,
+    });
+  }
+
+  /* ------------------------------------------------------------ the tags */
+
+  /**
+   * One floating tag per piece — its exact pitch, and its yaw as a
+   * handedness — hung over the piece's midpoint the way the coaster editors
+   * tag their nodes. Rebuilt with the track; a sprite, so it faces the
+   * camera from anywhere without owning any orientation of its own.
+   */
+  private rebuildLabels(): void {
+    for (const child of [...this.labelGroup.children]) {
+      this.labelGroup.remove(child);
+      const sprite = child as THREE.Sprite;
+      (sprite.material.map as THREE.Texture | null)?.dispose();
+      sprite.material.dispose();
+    }
+    this.labelTexts = this.pieces.map(pieceLabel);
+    if (!this.labelsOn) return;
+    let s = 0;
+    for (let i = 0; i < this.pieces.length; i += 1) {
+      const piece = this.pieces[i]!;
+      const frame = this.rail.sample(s + piece.length / 2, this.sampleWindow);
+      s += piece.length;
+      if (!frame) continue;
+      const sprite = this.makeLabel(this.labelTexts[i]!);
+      sprite.position.set(
+        frame.x + frame.ux * 4, frame.y + frame.uy * 4, frame.z + frame.uz * 4,
+      );
+      this.labelGroup.add(sprite);
+    }
+  }
+
+  private makeLabel(text: string): THREE.Sprite {
+    const canvas = document.createElement('canvas');
+    canvas.width = 192;
+    canvas.height = 56;
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = 'rgba(20, 24, 20, 0.78)';
+    ctx.beginPath();
+    ctx.roundRect(2, 2, canvas.width - 4, canvas.height - 4, 14);
+    ctx.fill();
+    ctx.font = '700 30px ui-monospace, Menlo, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffe9b8';
+    ctx.fillText(text, canvas.width / 2, canvas.height / 2 + 1);
+    const map = new THREE.CanvasTexture(canvas);
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+      map, depthTest: false, transparent: true,
+    }));
+    sprite.renderOrder = 9;
+    // 12 x 3.5 mm on a 9 mm ant's scale: readable at the framing distance,
+    // small enough that a long track is a line of tags rather than a wall.
+    sprite.scale.set(12, 3.5, 1);
+    return sprite;
   }
 
   /** Keep the whole track in shot as it grows, without stealing the orbit. */
@@ -457,6 +628,17 @@ export class RailScene {
       this.riding = !this.riding;
       b.textContent = this.riding ? 'RIDE ON' : 'RIDE OFF';
     });
+    this.soilBtn = chip('SOIL XRAY', (b) => {
+      this.soilMode = this.soilMode === 'xray' ? 'solid'
+        : this.soilMode === 'solid' ? 'off' : 'xray';
+      b.textContent = `SOIL ${this.soilMode.toUpperCase()}`;
+      this.applySoilMode();
+    });
+    this.tagsBtn = chip('TAGS ON', (b) => {
+      this.labelsOn = !this.labelsOn;
+      b.textContent = this.labelsOn ? 'TAGS ON' : 'TAGS OFF';
+      this.rebuildLabels();
+    });
     chip('UNDO', () => this.undo());
     chip('CLEAR', () => this.clear());
 
@@ -474,6 +656,8 @@ export class RailScene {
       if (key === 'arrowright' || key === 'd') this.add('right');
       if (key === 'u') this.undo();
       if (key === 'c') this.clear();
+      if (key === 'x') this.soilBtn?.dispatchEvent(new PointerEvent('pointerdown'));
+      if (key === 't') this.tagsBtn?.dispatchEvent(new PointerEvent('pointerdown'));
       if (key === 'b') this.bankBtn?.dispatchEvent(new PointerEvent('pointerdown'));
       if (key === 'm') this.smoothBtn?.dispatchEvent(new PointerEvent('pointerdown'));
       if (key === 'r') this.rideBtn?.dispatchEvent(new PointerEvent('pointerdown'));
@@ -488,12 +672,11 @@ export class RailScene {
     this.readoutAt = now;
     const last = this.pieces[this.pieces.length - 1];
     const end = endStateOf(this.pieces);
-    const faults = validatePlan(piecesToPlan(this.pieces, {
-      originMm: { x: 0, y: 0, z: 0 }, boreRadiusMm: 4, entranceRadiusMm: 8,
-    })).length;
+    const faults = validatePlan(this.planOf()).length;
     this.readout.innerHTML = `
       <b>monorail rig</b> · pieces ${this.pieces.length}
-      · track ${end.lengthMm.toFixed(0)} mm · plan faults ${faults}<br>
+      · track ${end.lengthMm.toFixed(0)} mm · plan faults ${faults}
+      · carve ${this.carveMs.toFixed(0)} ms<br>
       last ${last
     ? `pitch ${last.pitch}° · turn ${last.turn > 0 ? '+' : ''}${last.turn}°`
         + ` · bank ${last.roll > 0 ? '+' : ''}${last.roll}° · ${last.length} mm`
@@ -502,7 +685,7 @@ export class RailScene {
       · heading ${end.headingDeg.toFixed(0)}° · grade ${end.pitchDeg.toFixed(0)}°<br>
       cart ${this.cartS.toFixed(1)} / ${end.lengthMm.toFixed(0)} mm<br>
       space/─ straight · ▲▼ pitch ±15° · ◀▶ turn ±15° · L length · B bank
-      · M smooth · R ride · U undo · C clear · drag orbits
+      · M smooth · R ride · X soil · T tags · U undo · C clear · drag orbits
     `;
   }
 
@@ -614,11 +797,25 @@ export class RailScene {
     return this.pieces.map((p) => ({ ...p }));
   }
 
+  labelsForTest(): string[] { return [...this.labelTexts]; }
+
+  labelSpritesForTest(): number { return this.labelGroup.children.length; }
+
+  /** Is there soil at this millimetre position? Off the carved field. */
+  solidAtMm(x: number, y: number, z: number): boolean | null {
+    const field = this.soilField;
+    if (!field) return null;
+    const cx = Math.round(x - FIELD_ORIGIN.x);
+    const cy = Math.round(y - FIELD_ORIGIN.y);
+    const cz = Math.round(z - FIELD_ORIGIN.z);
+    if (cx < 0 || cx > field.cellsX || cy < 0 || cy > field.cellsY
+      || cz < 0 || cz > field.cellsZ) return null;
+    return field.get(cx, cy, cz) > 0;
+  }
+
   statsForTest(): Record<string, number> {
     const end = endStateOf(this.pieces);
-    const plan = piecesToPlan(this.pieces, {
-      originMm: { x: 0, y: 0, z: 0 }, boreRadiusMm: 4, entranceRadiusMm: 8,
-    });
+    const plan = this.planOf();
     return {
       pieces: this.pieces.length,
       lengthMm: end.lengthMm,
@@ -634,6 +831,9 @@ export class RailScene {
       planNodes: plan.nodes.length,
       planEdges: plan.edges.length,
       planFaults: validatePlan(plan).length,
+      carveMs: this.carveMs,
+      labels: this.labelGroup.children.length,
+      soilMode: this.soilMode === 'xray' ? 0 : this.soilMode === 'solid' ? 1 : 2,
     };
   }
 
