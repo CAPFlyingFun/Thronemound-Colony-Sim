@@ -137,6 +137,34 @@ check('the soil beside the bore holds', dig.besideBore === true);
 check('the entrance mound is heaped over the station', dig.mound === true);
 check('a carve is a moment, not a hang', dig.carveMs < 2500, `${dig.carveMs.toFixed(0)} ms`);
 
+// PRESETS AND THE ROOM: whole nest moves in one tap, ended in a chamber.
+const nest = await page.evaluate(() => {
+  const s = window.railScene;
+  s.clearForTest();
+  s.addPresetForTest('shaft');
+  s.addPresetForTest('spiralLeft');
+  s.setRoomForTest(2); // the queen room
+  const stats = s.statsForTest();
+  return {
+    pieces: stats.pieces,
+    endY: stats.endY,
+    heading: stats.endHeadingDeg,
+    chambers: stats.planChambers,
+    faults: stats.planFaults,
+    roomAir: s.solidAtMm(stats.endX + 9, stats.endY, stats.endZ),
+    labels: s.labelsForTest().length,
+  };
+});
+check('presets append whole moves', nest.pieces === 8, `${nest.pieces} pieces`);
+check('shaft + spiral dig deep', nest.endY < -35, `${nest.endY.toFixed(1)} mm`);
+check('the spiral came half round',
+  Math.abs(Math.abs(nest.heading) - 180) < 2, `${nest.heading.toFixed(0)} deg`);
+check('the tunnel ends in exactly one chamber, plan clean',
+  nest.chambers === 1 && nest.faults === 0,
+  `${nest.chambers} chambers, ${nest.faults} faults`);
+check('the queen room is carved wider than the bore', nest.roomAir === false);
+check('preset pieces wear tags too', nest.labels === 8, `${nest.labels} tags`);
+
 check('no page errors', errs.length === 0, errs.join(' | '));
 
 await browser.close();

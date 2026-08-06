@@ -156,6 +156,58 @@ export function endStateOf(
   };
 }
 
+/* ------------------------------------------------------------- presets */
+
+/**
+ * PRESET MOVES — several pieces in one tap, the way a coaster builder's
+ * panel offers a whole shape. Named for what an ant digs, not what a
+ * coaster rides:
+ *
+ *  SHAFT      a plunge at the piece format's own steepest grade. −75°, not
+ *             −90: pitch is capped there by `PIECE_LIMITS`, and the rail's
+ *             frame degenerates at true plumb (up has nothing to be
+ *             perpendicular to) — a real vertical needs that fixed first,
+ *             and −75 already reads as a shaft.
+ *  SPIRAL     the classic nest helix: down at −45° while turning 180°,
+ *             handed left or right.
+ *  U-TURN     a switchback at the CURRENT grade — 180° of turn and no
+ *             change of pitch, which is how a nest gains depth under a
+ *             small footprint.
+ */
+export type PresetId = 'shaft' | 'spiralLeft' | 'spiralRight' | 'uturn';
+
+export const PRESET_IDS: readonly PresetId[] = [
+  'shaft', 'spiralLeft', 'spiralRight', 'uturn',
+];
+
+/** The pieces a preset appends, given the track so far. */
+export function presetPieces(
+  pieces: readonly DigPiece[], id: PresetId, opts: AppendOptions,
+): DigPiece[] {
+  const lastPitch = pieces.length ? pieces[pieces.length - 1]!.pitch : 0;
+  const make = (pitch: number, turn: number): DigPiece => clampPiece({
+    pitch,
+    turn,
+    roll: opts.autoBank ? autoBankFor(turn, opts.lengthMm) : 0,
+    length: opts.lengthMm,
+  });
+  switch (id) {
+    case 'shaft':
+      return [make(-75, 0), make(-75, 0), make(-75, 0), make(-75, 0)];
+    case 'spiralLeft':
+      return [make(-45, 45), make(-45, 45), make(-45, 45), make(-45, 45)];
+    case 'spiralRight':
+      return [make(-45, -45), make(-45, -45), make(-45, -45), make(-45, -45)];
+    case 'uturn':
+      return [
+        make(lastPitch, 45), make(lastPitch, 45),
+        make(lastPitch, 45), make(lastPitch, 45),
+      ];
+    default:
+      return [];
+  }
+}
+
 export interface PlanOptions {
   /** Where the track's start sits, in the plan's millimetre frame. */
   originMm: Vec3Like;
@@ -166,6 +218,13 @@ export interface PlanOptions {
   entranceRadiusMm: number;
   /** The longest straight edge a curved piece may be flattened into. */
   maxChordMm?: number;
+  /**
+   * End the tunnel in a ROOM of this radius instead of a bare junction —
+   * the Utilities panel's whole idea. The node becomes a `chamber`, and
+   * `nestCarve` carves it as the standard ant-room ellipsoid (wide, long,
+   * vertically squashed) that `ChamberMovement` already knows how to walk.
+   */
+  endChamberMm?: number;
 }
 
 /**
@@ -195,13 +254,17 @@ export function piecesToPlan(
   }
   const nodes = stops.map((at, i) => {
     const frame = rail.sample(at, 0);
+    const room = opts.endChamberMm !== undefined
+      && pieces.length > 0 && i === stops.length - 1;
     return {
       id: `rail-${i}`,
-      kind: (i === 0 ? 'entrance' : 'junction') as 'entrance' | 'junction',
+      kind: (i === 0 ? 'entrance' : room ? 'chamber' : 'junction') as
+        'entrance' | 'chamber' | 'junction',
       x: opts.originMm.x + (frame?.x ?? 0),
       y: opts.originMm.y + (frame?.y ?? 0),
       z: opts.originMm.z + (frame?.z ?? 0),
-      radiusMm: i === 0 ? opts.entranceRadiusMm : opts.boreRadiusMm,
+      radiusMm: i === 0 ? opts.entranceRadiusMm
+        : room ? opts.endChamberMm! : opts.boreRadiusMm,
     };
   });
   const edges = stops.slice(1).map((_, i) => ({
