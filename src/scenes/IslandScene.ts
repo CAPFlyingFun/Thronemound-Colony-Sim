@@ -144,8 +144,18 @@ const BITE_RADIUS = ((BITE_WIDTH_MM * BITE_WIDTH_MM) / 4 + BITE_DEPTH_MM * BITE_
 /** How far behind the face its centre sits, so it only cuts BITE_DEPTH. */
 const BITE_SETBACK = BITE_RADIUS - BITE_DEPTH_MM / MM;
 
-/** How far ahead of her centre the jaws bite, in world units. */
-const JAW_REACH = 1.4 / MM;
+/**
+ * How far PAST HER NOSE the jaws close — not how far past her centre.
+ *
+ * This was 1.4 mm from her middle, on a body whose half-length is 4.5 mm,
+ * which put her mandibles inside her own thorax. She could only ever chew a
+ * pocket she was already standing in, and never the slab of soil in front
+ * that she has to move into, so digging deadlocked: measured, 637 of 643
+ * strokes cut nothing at all and she advanced 0.00 mm in five minutes.
+ *
+ * Her mouth is at the front of her, so the reach is measured from there.
+ */
+const JAW_PAST_NOSE = 0.6 / MM;
 
 /**
  * HER BODY, as the space she needs rather than as a point.
@@ -1949,7 +1959,11 @@ export class IslandScene {
   private bite(): void {
     const aim = this.boreAim();
     // Set back so the sphere's leading cap cuts BITE_DEPTH and no more.
-    const centre = this.at.clone().addScaledVector(aim, JAW_REACH + BITE_SETBACK);
+    /* From her MOUTH: the front of her oval along the way she is pointed,
+     * plus a whisker, plus the set-back that keeps the cut half a
+     * millimetre deep. */
+    const reach = this.bodyReach(aim) + JAW_PAST_NOSE + BITE_SETBACK;
+    const centre = this.at.clone().addScaledVector(aim, reach);
 
     let touched = 0;
     let minX = Infinity; let minY = Infinity; let minZ = Infinity;

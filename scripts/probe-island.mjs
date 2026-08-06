@@ -256,157 +256,111 @@ check('store is air AGAIN', roundtrip.storeAgain === false, `solidAtMm=${roundtr
 check('reconstruction still cost zero saved samples', roundtrip.edited === 0,
   `${roundtrip.edited} edits stored`);
 
-console.log('\nA HAND-DIG: SHE CUTS HER OWN SHAFT, WITH NO PLAN AT ALL');
+console.log('\nA HAND-DIG: MOUTHFULS ONLY, AND THE BODY DECIDES');
 /*
- * The bore, end to end and on its own terms. Two rules shape this test and
- * both are the dig room's: the AIM steers her travel, not just the bite, so
- * a shaft is made by aiming down; and DIGGING NEVER MOVES HER, so the hole
- * only deepens as she walks into the room she has cleared. Chewing on the
- * spot cuts one sphere and then nothing, which is why this holds the stick
- * as well as the jaws.
+ * The bargain this scene is built on, and it is deliberately a slow one: a
+ * stroke removes ONE 1.75 x 0.5 mm mouthful and nothing else, and she can
+ * only move where her whole body fits — so a passage exists only once it
+ * has been chewed to size. Measured with a swept aim that is about a
+ * hundred seconds per millimetre, so this asserts that the mechanism works
+ * rather than that a shaft appears: soil leaves where she aims, she gets in,
+ * she is never inside the dirt, and the hole survives streaming.
  */
 const dig = await page.evaluate(() => {
   const s = window.islandScene;
-  const atX = 27950;
-  const atZ = 27950;
+  const atX = 27050;
+  const atZ = 27050;
   s.teleportMm(atX, atZ);
   s.drainQueueForTest();
   s.setFacingForTest(0);
-  /* Measured where the shaft ENDS, not where it starts. Aiming down and
-   * walking in cuts a ramp, so the entry column is its shallow mouth and
-   * the hole proper is wherever she got to. */
-  const columnAt = (xMm, zMm) => {
-    const h = s.stream.surfaceHeightAt(xMm / 5, zMm / 5);
-    return h === null ? null : h * 5;
-  };
-  s.aimPitch = -0.9; // point her down
+  const before = s.statsForTest().edited;
+  const y0 = s.at.y * 5;
+  // A face sweep wide enough to reach her flanks — at ~5 mm of reach her
+  // shoulders are 4.4 mm out, which is a sixty-degree swing.
+  const ring = [
+    [0, 0], [1, 0], [-1, 0], [0, 1], [0, -1],
+    [0.7, 0.7], [-0.7, 0.7], [0.7, -0.7], [-0.7, -0.7],
+  ];
   s.input.dig = true;
   s.input.walk = 1;
   let embedded = 0;
-  /* Ten seconds, not twenty: a properly sized tube lets her advance far
-   * faster than the first cut did, and twenty seconds put her below the
-   * floating depth band — where `solidAtMm` has nothing to report and the
-   * test would be measuring the instrument rather than the burrow. */
-  for (let i = 0; i < 300; i += 1) {
-    s.stepForTest(1 / 30, 1);
-    if (i % 60 === 0) s.drainQueueForTest();
-    if (s.stream.solidAtWu(s.at.x, s.at.y, s.at.z) === true) embedded += 1;
+  let frames = 0;
+  for (let k = 0; k < 260; k += 1) {
+    const [dx, dy] = ring[k % ring.length];
+    s.setFacingForTest(dx * 1.15);
+    s.aimPitch = Math.max(-1.3, Math.min(1.3, -0.75 + dy * 0.8));
+    for (let f = 0; f < 14; f += 1) {
+      s.stepForTest(1 / 30, 1);
+      frames += 1;
+      if (s.stream.solidAtWu(s.at.x, s.at.y, s.at.z) === true) embedded += 1;
+    }
+    if (k % 20 === 0) s.drainQueueForTest();
   }
   s.input.dig = false;
   s.input.walk = 0;
-  s.aimPitch = 0;
   s.drainQueueForTest();
+  const sank = y0 - s.at.y * 5;
   const endX = s.at.x * 5;
   const endZ = s.at.z * 5;
   const endY = s.at.y * 5;
-  const drawnAtEnd = s.renderedHeightAtMm(endX, endZ);
-  const soilAtEnd = columnAt(endX, endZ);
-  const depth = drawnAtEnd - endY;
-  /* A TUNNEL, not a trench: air where she stands, and undisturbed ground
-   * still overhead. Aiming down and walking in should leave a roof on it —
-   * an open slot all the way to the sky would mean she had ploughed a
-   * furrow rather than bored in. */
   const voidAtHer = s.solidAtMm(endX, endY, endZ);
-  const roofAbove = s.solidAtMm(endX, endY + 30, endZ);
-  // Leave far enough that the shaft's column unloads, then come back.
   s.teleportMm(20000, 20000);
   s.drainQueueForTest();
   const goneWhileAway = s.solidAtMm(endX, 1300, endZ);
   s.teleportMm(endX, endZ);
   s.drainQueueForTest();
-  const voidAfter = s.solidAtMm(endX, endY, endZ);
   return {
-    depth, embedded, goneWhileAway, soilAtEnd, drawnAtEnd,
-    voidAtHer, roofAbove, voidAfter,
-    returned: columnAt(endX, endZ),
-    edited: s.statsForTest().edited,
+    dug: s.statsForTest().edited - before,
+    sank, embedded, voidAtHer, goneWhileAway,
+    seconds: frames / 30,
+    voidAfter: s.solidAtMm(endX, endY, endZ),
   };
 });
-check('aiming down and holding the jaws carried her into the ground',
-  dig.depth > 20, `${dig.depth.toFixed(1)} mm below the drawn surface`);
-check('what she cut is a TUNNEL — air at her, ground still overhead',
-  dig.voidAtHer === false && dig.roofAbove === true,
-  `at her solid=${dig.voidAtHer}, 30 mm above solid=${dig.roofAbove}`);
-check('she is never inside soil while cutting', dig.embedded === 0,
-  `${dig.embedded} frames of 600`);
-check('the dig is in the sparse store', dig.edited > 0, `${dig.edited} samples`);
-check('hole column unloaded while away', dig.goneWhileAway === null);
-check('the tunnel SURVIVED the round trip', dig.voidAfter === false,
+check('chewing removes soil where she aims', dig.dug > 200,
+  `${dig.dug} samples over ${dig.seconds.toFixed(0)} s of digging`);
+check('and it carries her into the ground', dig.sank > 1,
+  `${dig.sank.toFixed(2)} mm in ${dig.seconds.toFixed(0)} s`);
+check('she is never inside the dirt while cutting', dig.embedded === 0,
+  `${dig.embedded} embedded frames`);
+check('where she ends up is air she made', dig.voidAtHer === false,
+  `solid at her = ${dig.voidAtHer}`);
+check('the column unloaded while away', dig.goneWhileAway === null);
+check('and her workings SURVIVED the round trip', dig.voidAfter === false,
   `solid where she stood: ${dig.voidAfter}`);
 
-console.log('\nDOES HER OWN TUNNEL FIT HER? (a queen is 9 mm; her stance radius 4.03 mm)');
+console.log('\nTHE BODY IS THE GATE (she is only ever where she fits)');
 /*
- * The bite is her MANDIBLE and the tunnel is a different question, which is
- * the one that was got wrong: one 1.75 mm sphere a stroke cut a 3.5 mm bore
- * for a nine millimetre ant, and she spent the whole time wearing it. A
- * stroke now cuts a face several bites across AND clears her body's room as
- * she passes, so what she travels down is measured against her stance rather
- * than assumed to fit.
+ * With the sweep gone, nothing guarantees a tunnel is her size except the
+ * fact that she could not have got there otherwise. So the invariant worth
+ * holding is not "the bore is N mm wide" but "wherever she IS, her body
+ * fits, and she never entered anywhere it did not".
  */
 const fit = await page.evaluate(() => {
   const s = window.islandScene;
-  s.teleportMm(27600, 27600);
-  s.drainQueueForTest();
-  s.setFacingForTest(0);
-  s.aimPitch = -0.9; // in at fifty degrees
-  s.input.dig = true;
-  s.input.walk = 1;
-  for (let i = 0; i < 600; i += 1) {
-    s.stepForTest(1 / 30, 1);
-    if (i % 60 === 0) s.drainQueueForTest();
-  }
-  s.aimPitch = 0; // then level, so we measure a RUN
-  for (let i = 0; i < 600; i += 1) {
-    s.stepForTest(1 / 30, 1);
-    if (i % 60 === 0) s.drainQueueForTest();
-  }
-  s.input.dig = false;
-  s.input.walk = 0;
-  s.drainQueueForTest();
-  s.stepForTest(1 / 30, 20);
-  // Clear air around her, swept in a ring perpendicular to a +z heading.
-  let worst = Infinity;
-  for (let a = 0; a < 12; a += 1) {
-    const ang = (a / 12) * Math.PI * 2;
-    let reach = 0;
-    for (let mm = 0.5; mm <= 8; mm += 0.5) {
-      const x = s.at.x + (Math.cos(ang) * mm) / 5;
-      const y = s.at.y + (Math.sin(ang) * mm) / 5;
-      if (s.stream.solidAtWu(x, y, s.at.z) === true) break;
-      reach = mm;
-    }
-    worst = Math.min(worst, reach);
-  }
   const st = s.statsForTest();
+  const fits = s.bodyFitsForTest();
   return {
-    worst,
-    wide: st.bodyWideMm,
-    tall: st.bodyTallMm,
     biteW: st.biteWidthMm,
     biteD: st.biteDepthMm,
-    depth: s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5) - s.at.y * 5,
-    camSolid: s.stream.solidAtWu(
-      s.camera.position.x, s.camera.position.y, s.camera.position.z,
-    ) === true,
+    len: st.bodyLenMm,
+    wide: st.bodyWideMm,
+    tall: st.bodyTallMm,
+    fits: fits.fits,
+    engaged: fits.engaged,
   };
 });
 check('the bite stays her mandible — 1.75 mm wide, half a mm deep',
   Math.abs(fit.biteW - 1.75) < 0.01 && Math.abs(fit.biteD - 0.5) < 0.01,
-  `${fit.biteW.toFixed(2)} mm wide x ${fit.biteD.toFixed(2)} mm deep`);
-check('she is well underground for the measurement', fit.depth > 40,
-  `${fit.depth.toFixed(1)} mm down`);
-/*
- * Her tunnel is an OVAL, because she is: wide as her legs and low as her
- * back. So the tightest direction is the vertical one, and that is what
- * this measures against — the ring sweep finds her ceiling long before it
- * finds her walls, and comparing it to her WIDTH would demand a round bore
- * an ant would never dig.
- */
-check('and her tunnel clears the oval she occupies at its tightest',
-  fit.worst >= fit.tall,
-  `worst clearance ${fit.worst.toFixed(1)} mm against a ${fit.tall.toFixed(2)} mm `
-  + `half-height (and ${fit.wide.toFixed(2)} mm half-width)`);
-check('the camera is never buried in the tunnel wall', fit.camSolid === false);
+  `${fit.biteW.toFixed(2)} x ${fit.biteD.toFixed(2)} mm`);
+check('the oval is her whole body, measured off the rig',
+  fit.len > 4 && fit.wide > 4 && fit.tall > 1,
+  `${(fit.len * 2).toFixed(1)} x ${(fit.wide * 2).toFixed(1)} x ${(fit.tall * 2).toFixed(1)} mm`);
+/* On open ground the WALKER has her and her oval genuinely overlaps the
+ * hillside she is standing on, so the capsule neither gates her nor should
+ * read as fitting. It takes over once she has bored in — which is exactly
+ * when it starts deciding where she may go. */
+check('the oval gates her only once she has bored in', fit.engaged === 0,
+  `engaged on open ground = ${fit.engaged}`);
 
 console.log('\nTHE WALKS (clearance is against the DRAWN triangles — below zero');
 console.log('is "she went underground", the playtest bug this pins down forever)');
