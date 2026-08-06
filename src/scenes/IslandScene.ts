@@ -468,6 +468,8 @@ export class IslandScene {
 
   private readonly crosshair = document.createElement('div');
 
+  private aimReadout: HTMLElement | null = null;
+
   /** Her oval, drawn — green while it fits, red where it does not. */
   private capsule: THREE.Mesh | null = null;
 
@@ -1374,6 +1376,7 @@ export class IslandScene {
 
     this.updateGateAsk();
     this.updateCapsule();
+    this.refreshAim();
     this.refreshModeChip();
     this.pose(dt);
     // While the designer is up the camera is ITS fly rig, not the follow cam.
@@ -1537,6 +1540,15 @@ export class IslandScene {
   }
 
   private hideGateAsk(): void { this.showGateAsk(null); }
+
+  /** The angle she is pointed, in degrees, live. */
+  private refreshAim(): void {
+    if (!this.aimReadout) return;
+    const deg = Math.round((this.aimPitch * 180) / Math.PI);
+    const text = `${deg > 0 ? '+' : ''}${deg}°`;
+    if (this.aimReadout.textContent !== text) this.aimReadout.textContent = text;
+    this.aimReadout.classList.toggle('is-steep', deg <= -45);
+  }
 
   /** The GRIP/FREE chip is an INDICATOR — the states switch themselves, so
    *  the chip's whole job is to make the current one obvious. */
@@ -1959,11 +1971,39 @@ export class IslandScene {
   private bite(): void {
     const aim = this.boreAim();
     // Set back so the sphere's leading cap cuts BITE_DEPTH and no more.
-    /* From her MOUTH: the front of her oval along the way she is pointed,
-     * plus a whisker, plus the set-back that keeps the cut half a
-     * millimetre deep. */
-    const reach = this.bodyReach(aim) + JAW_PAST_NOSE + BITE_SETBACK;
-    const centre = this.at.clone().addScaledVector(aim, reach);
+    /*
+     * AT HER JAW BONE, when the rig can tell us where that is.
+     *
+     * The model already knows: `jawPosition` returns the real mandible tip
+     * where the rigger gave her one and the end of the mouth chain
+     * otherwise, and it is the same bone `antennaToJaw` measures the bite
+     * WIDTH from — that span doubled comes to 1.736 mm against the 1.75 mm
+     * typed into CASTE_BITE_MM by hand, which is how we know the rule and
+     * the number agree. Taking the bite anywhere else means the hole opens
+     * somewhere her mandibles are not, and no amount of animation will
+     * make that read as chewing.
+     *
+     * The fallback is the geometric one — the front of her oval along the
+     * aim — for the frames before her model has loaded.
+     */
+    const centre = new THREE.Vector3();
+    const hull = this.bodyReach(aim) + JAW_PAST_NOSE + BITE_SETBACK;
+    if (!this.queenReady || !this.queen.jawPosition(centre)) {
+      centre.copy(this.at).addScaledVector(aim, hull);
+    } else {
+      centre.addScaledVector(aim, BITE_SETBACK);
+      /*
+       * ...but never INSIDE her. Her jaw bone sits 3.5 mm out while her
+       * collision oval reaches 4.5 mm, because the oval is drawn round her
+       * whole body and antennae — so the bone alone put the cut in space
+       * she is already standing in, where there is nothing left to remove.
+       * Measured: 63 samples in two minutes against 755. So the bite
+       * follows the jaw's LINE and is pushed out to the front of her hull
+       * when the bone falls short of it.
+       */
+      const along = centre.clone().sub(this.at).dot(aim);
+      if (along < hull) centre.addScaledVector(aim, hull - along);
+    }
 
     let touched = 0;
     let minX = Infinity; let minY = Infinity; let minZ = Infinity;
@@ -2417,6 +2457,18 @@ export class IslandScene {
     dig.addEventListener('lostpointercapture', stopDig);
     actions.appendChild(dig);
 
+    /*
+     * The angle, where the thumb can see it.
+     *
+     * Taking the ± buttons away also took away the only way to tell how
+     * steeply she was pointed, and a bore you cannot read is a bore that
+     * quietly goes too deep — which is exactly what happened. This is a
+     * readout and not a control: the drag still does the aiming.
+     */
+    this.aimReadout = document.createElement('div');
+    this.aimReadout.className = 'density-lab-aim-readout';
+    actions.appendChild(this.aimReadout);
+
     /* Her collision oval, on demand — for seeing WHY she will not go. */
     const bodyChip = document.createElement('button');
     bodyChip.className = 'density-lab-button density-lab-mode';
@@ -2619,16 +2671,38 @@ export class IslandScene {
         }
       }
     });
+    /*
+     * LETTING GO HAS TO BE UNCONDITIONAL.
+     *
+     * The stick latched: a pointerup that never arrives — a finger leaving
+     * the glass, a capture stolen, the tab going away mid-drag — left
+     * `input.walk` exactly as it was, so she carried on walking, and if the
+     * thumb happened to be below centre she carried on walking BACKWARDS
+     * with nothing on screen to say why. Reported, twice.
+     *
+     * So there is one place that drops the stick, it clears the inputs
+     * whether or not the id matches, and everything that could possibly
+     * mean "the finger is gone" calls it.
+     */
+    const dropStick = (): void => {
+      this.stickPointer = null;
+      this.input.walk = 0;
+      this.input.yaw = 0;
+      this.stickKnob.style.transform = 'translate(0px, 0px)';
+      this.stickEl.style.display = 'none';
+    };
     const release = (e: PointerEvent) => {
       if (this.designer?.isOpen) { this.designer.handlePointerUp(e); return; }
-      if (e.pointerId === this.stickPointer) {
-        this.stickPointer = null;
-        this.input.walk = 0;
-        this.input.yaw = 0;
-        this.stickEl.style.display = 'none';
-      }
+      if (e.pointerId === this.stickPointer) dropStick();
       if (e.pointerId === this.lookPointer) this.lookPointer = null;
     };
+    /* The belt and braces: a pointer that vanishes without a pointerup, a
+     * window that loses focus, a tab that goes to the background. */
+    window.addEventListener('pointercancel', dropStick);
+    window.addEventListener('blur', () => { dropStick(); this.input.dig = false; });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { dropStick(); this.input.dig = false; }
+    });
     canvas.addEventListener('pointerup', release);
     canvas.addEventListener('pointercancel', release);
     window.addEventListener('pointerup', release);

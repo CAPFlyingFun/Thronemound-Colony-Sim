@@ -1122,12 +1122,20 @@
 }
 
 .density-lab-aim-readout {
-  min-width: 44px;
+  align-self: flex-end;
+  min-width: 52px;
   text-align: center;
-  padding: 4px 6px;
+  padding: 5px 8px;
   border-radius: 8px;
   background: rgba(20, 15, 10, 0.72);
   color: #f0d88e;
   font: 800 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
   font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+/* Steeply down is where a bore runs away from you — say so. */
+.density-lab-aim-readout.is-steep {
+  background: rgba(90, 30, 15, 0.82);
+  color: #ffd0a8;
 }
