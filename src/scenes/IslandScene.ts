@@ -808,6 +808,68 @@ export class IslandScene {
     return this.floorBelow(x, z, this.at.y + 0.4) ?? this.walkGroundAt(x, z);
   }
 
+  /**
+   * Underfoot at THE FOOT'S OWN height, which is a different question and
+   * the one the solver actually asks.
+   *
+   * Passing her body's height for all six feet asks about HER, not about
+   * them — the solver's own note warns of exactly this: a foot pressed
+   * against the wall of a shaft is inside soil, so the query climbs out of
+   * it, and climbing out from her body's height in a column that is solid
+   * all the way up lands on the rim overhead. The island had been throwing
+   * the third argument away and handing every foot her own elevation,
+   * which is why her legs reached for the surface while she was down a
+   * hole.
+   */
+  private footingFrom(x: number, z: number, y: number): number {
+    return this.floorBelow(x, z, y + 0.4) ?? this.walkGroundAt(x, z);
+  }
+
+  /**
+   * HER FRAME IN A BURROW — which way is up for her, and where the surface
+   * under a point is measured ALONG that up.
+   *
+   * On open ground up is world vertical and a foot falls to a height. In a
+   * tunnel neither is true: she is inside a tube, her up is whatever her
+   * body is pressed against, and the surface under a foot may be a wall or
+   * a ceiling. The solver has always been able to take this frame; the
+   * island simply never gave it one, so her legs went on solving against a
+   * floor that was not underneath her — and she could not climb out.
+   */
+  private boreFrame(): {
+    up: readonly [number, number, number];
+    surface: (x: number, y: number, z: number) => number;
+  } {
+    const aim = this.boreAim();
+    /* Perpendicular to the way she is pointed, in the vertical plane that
+     * contains it: level in a level drift, and tipping over as she climbs
+     * so a shaft is walked up its wall rather than fallen down. */
+    const up = new THREE.Vector3(0, 1, 0).addScaledVector(aim, -aim.y);
+    if (up.lengthSq() < 1e-4) up.set(-Math.sin(this.facing), 0, -Math.cos(this.facing));
+    up.normalize();
+    const stream = this.stream;
+    const probe = new THREE.Vector3();
+    const REACH = (this.body.tall * 2) + BODY_FLOOR_MARGIN;
+    const STEPS = 14;
+    return {
+      up: [up.x, up.y, up.z] as const,
+      surface: (x: number, y: number, z: number): number => {
+        const elevOf = (px: number, py: number, pz: number) => px * up.x + py * up.y + pz * up.z;
+        if (!stream) return elevOf(x, this.walkGroundAt(x, z), z);
+        /* Feel DOWN her own up until the soil starts, and report where it
+         * started. Nothing found means open tube — she keeps her stance. */
+        for (let i = 0; i <= STEPS; i += 1) {
+          const t = (i / STEPS) * REACH;
+          probe.set(x - up.x * t, y - up.y * t, z - up.z * t);
+          if (stream.solidAtWu(probe.x, probe.y, probe.z) === true) {
+            return elevOf(probe.x, probe.y, probe.z);
+          }
+        }
+        return elevOf(x, y, z) - REACH;
+      },
+    };
+  }
+
   /** All sixty-four sections, built once, never touched again. */
   private buildIsland(): void {
     for (let sz = 0; sz < SECTIONS; sz += 1) {
@@ -1097,8 +1159,18 @@ export class IslandScene {
     const lift = Math.max(0, this.body.tall - RIDE) + BODY_FLOOR_MARGIN;
     mesh.position.set(this.at.x, this.at.y + lift, this.at.z);
     mesh.rotation.set(0, this.facing, 0);
-    const fits = this.bodyFits(this.at);
-    (mesh.material as THREE.MeshBasicMaterial).color.setHex(fits ? 0x51e07a : 0xe0553f);
+    /*
+     * Red only where the oval is what DECIDES. On open ground the walker
+     * has her and her body genuinely overlaps the hillside she is standing
+     * on — every slope and tussock read as a collision, so it was red most
+     * of the time and meant nothing. Underground it gates her, and there
+     * red is worth seeing.
+     */
+    const govern = this.boreEngaged;
+    const fits = !govern || this.bodyFits(this.at);
+    (mesh.material as THREE.MeshBasicMaterial).color.setHex(
+      !govern ? 0x6f8fa8 : (fits ? 0x51e07a : 0xe0553f),
+    );
   }
 
   /** Which part of her oval is in the soil one step ahead — the wedge,
@@ -2291,7 +2363,7 @@ export class IslandScene {
         headYaw: 0,
       });
       this.queen.solveFeet(
-        (x, z) => this.footingAt(x, z),
+        (x, z, y) => this.footingFrom(x, z, y),
         FOOT_CLEARANCE_MM / MM,
         RIDE * 2,
       );
@@ -2316,9 +2388,11 @@ export class IslandScene {
       headYaw: 0,
     });
     this.queen.solveFeet(
-      (x, z) => this.footingAt(x, z),
+      (x, z, y) => this.footingFrom(x, z, y),
       FOOT_CLEARANCE_MM / MM,
       RIDE * 2,
+      undefined,
+      this.boreEngaged ? this.boreFrame() : undefined,
     );
   }
 
