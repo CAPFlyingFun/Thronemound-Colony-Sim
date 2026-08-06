@@ -111,3 +111,16 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          # Ten minutes is this action's default, and twice in a row it was not
+          # enough: the build was green, the artifact was byte-for-byte the size
+          # of the last one that shipped, and the deploy simply sat in
+          # `deployment_queued` until it gave up. What makes that worse than a
+          # slow day is what happens on the way out — the action CANCELS the
+          # queued deployment, and a cancelled deployment is still ahead of the
+          # next one in line. So a slow queue times out, the timeout wedges the
+          # queue, and the following push times out behind it.
+          #
+          # Half an hour instead. Nothing waits on this job, a queue that is
+          # merely slow now gets to finish, and the loop has nowhere to start.
+          timeout: 1800000
