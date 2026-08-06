@@ -59,6 +59,13 @@ if (host) {
   } else if (scene === 'dig') {
     // The original dig room remains available explicitly as a reference rig.
     void import('./scenes/DigScene').then(({ DigScene }) => new DigScene(host));
+  } else if (scene === 'rail') {
+    /*
+     * The monorail room: the coaster-style tunnel builder on its own, with a
+     * cart riding the track. Pieces compile to a NestPlan, so what this room
+     * proves carries into the carved, jaws-executed version unchanged.
+     */
+    void import('./scenes/RailScene').then(({ RailScene }) => new RailScene(host));
   } else {
     /*
      * Default and `?scene=island`: Beyond Extinction's Kauai at 1:1000,
