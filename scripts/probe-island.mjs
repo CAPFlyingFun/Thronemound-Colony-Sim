@@ -945,6 +945,52 @@ check('dragging it re-finds the ground', grounded.movedXZ > 3 && grounded.steppe
 check('GRND off frees the height', grounded.rose > 3,
   `rose ${grounded.rose.toFixed(1)} mm with the toggle off`);
 
+/*
+ * The reported symptom was "empty space underground when the camera dips" —
+ * unlit soil is black soil, and black soil reads as a hole in the world. The
+ * density lab already solved it by sensing rather than lighting the dirt, so
+ * what is checked here is the crossover: dark below, lit above, and the ramp
+ * between the two rather than a switch.
+ */
+console.log('\nTHE UNDERGROUND SENSE (soil is sensed down there, lit up here)');
+const sensed = await page.evaluate(() => {
+  const s = window.islandScene;
+  const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
+  s.stepForTest(1 / 30, 30);
+  const above = s.sense ? s.sense.uSense.value : -1;
+  window.__goIn(n.gate.x - 18, n.gate.z, Math.PI / 2);
+  s.input.walk = 1;
+  for (let i = 0; i < 400; i += 1) s.stepForTest(1 / 30, 1);
+  s.input.walk = 0;
+  const under = s.sense ? s.sense.uSense.value : -1;
+  const wasUnder = s.statsForTest().underground;
+  // And back to daylight: a sense that never lets go would tint the island.
+  s.teleportMm(28000, 28000);
+  s.drainQueueForTest();
+  const half = (() => {
+    s.stepForTest(1 / 30, 3);
+    return s.sense ? s.sense.uSense.value : -1;
+  })();
+  s.stepForTest(1 / 30, 60);
+  return {
+    wired: !!s.sense,
+    soilOnly: s.islandMaterial !== s.soilMaterial,
+    above,
+    under,
+    wasUnder,
+    half,
+    back: s.sense ? s.sense.uSense.value : -1,
+  };
+});
+check('the soil knows how to be sensed', sensed.wired && sensed.soilOnly,
+  'uniforms on the soil, not on the island sheet');
+check('above ground the dirt is simply lit', sensed.above < 0.02,
+  `uSense ${sensed.above.toFixed(3)}`);
+check('in a bore it is sensed instead', sensed.wasUnder === 1 && sensed.under > 0.95,
+  `uSense ${sensed.under.toFixed(3)} underground`);
+check('and surfacing eases back rather than snapping', sensed.half > 0.1 && sensed.back < 0.05,
+  `${sensed.half.toFixed(2)} three frames out, ${sensed.back.toFixed(3)} settled`);
+
 console.log('\nTHE RED-SKY TEST (fog off, red background, island panorama)');
 await page.evaluate(() => {
   const s = window.islandScene;

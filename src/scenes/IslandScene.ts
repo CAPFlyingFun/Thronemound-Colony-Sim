@@ -48,6 +48,7 @@ import {
 import { BoreRig } from './BoreControl';
 import { DebugStatsPanel } from './DebugStatsPanel';
 import { LoadingOverlay } from './LoadingOverlay';
+import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
 import { makeIslandSoil, type IslandSoil } from '../world/islandSoil';
 import {
@@ -240,6 +241,18 @@ export class IslandScene {
   private islandMaterial: THREE.MeshStandardMaterial | null = null;
 
   private soilMaterial: THREE.MeshStandardMaterial | null = null;
+
+  /**
+   * THE UNDERGROUND SENSE, the density lab's answer to a problem this room
+   * had too: inside the soil every wall is the same brown, a tunnel is a
+   * featureless void, and a camera that dips below the surface shows empty
+   * space rather than dirt. Underground the terrain stops being lit and
+   * becomes SENSED — near surfaces keep their shading, everything further
+   * reads as contours on darkness, past her reach is unknown. A bubble
+   * around her rather than an x-ray, so where the nest goes next is still
+   * a decision and not a readout.
+   */
+  private sense: SenseUniforms | null = null;
 
   /** The fine window's rectangle, in world units. Island fragments inside die. */
   private readonly clip = { value: new THREE.Vector4(0, 0, 0, 0) };
@@ -545,6 +558,9 @@ export class IslandScene {
     this.textures = textures;
     this.islandMaterial = makeBiomeMaterial(textures, this.clip);
     this.soilMaterial = makeBiomeMaterial(textures);
+    /* The soil only: the island's own surface sheet is the lit world she
+     * is standing on, and contouring that would be an x-ray of the hill. */
+    this.sense = makeSensed(this.soilMaterial);
 
     /*
      * The soil's "natural surface" is the DRAWN base island (triangle-exact
@@ -1374,6 +1390,13 @@ export class IslandScene {
       this.reveal();
     }
 
+    /* The crossover is deliberately not instant: breaking the surface is
+     * one of the moments this game has, and half a second of contours
+     * resolving into daylight is the whole of the effect. */
+    if (this.sense) {
+      this.sense.uSense.value += ((this.underground ? 1 : 0) - this.sense.uSense.value)
+        * (1 - Math.exp(-SENSE_EASE * dt));
+    }
     this.updateGateAsk();
     this.updateCapsule();
     this.refreshAim();
