@@ -68,7 +68,9 @@ export function makeBiomeMaterial(
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
-        '#include <common>\nattribute float aElev;\nvarying float vElev;\nvarying vec3 vBiomeW;\nvarying vec3 vBiomeN;',
+        '#include <common>\nattribute float aElev;\nattribute float aOrig;\n'
+          + 'varying float vElev;\nvarying float vOrig;\n'
+          + 'varying vec3 vBiomeW;\nvarying vec3 vBiomeN;',
       )
       .replace(
         '#include <beginnormal_vertex>',
@@ -76,13 +78,14 @@ export function makeBiomeMaterial(
       )
       .replace(
         '#include <begin_vertex>',
-        '#include <begin_vertex>\n  vBiomeW = (modelMatrix * vec4(transformed, 1.0)).xyz;\n  vElev = aElev;',
+        '#include <begin_vertex>\n  vBiomeW = (modelMatrix * vec4(transformed, 1.0)).xyz;\n  vElev = aElev;\n  vOrig = aOrig;',
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
         '#include <common>',
         `#include <common>
 varying float vElev;
+varying float vOrig;
 varying vec3 vBiomeW;
 varying vec3 vBiomeN;
 uniform sampler2D tSand, tGrass, tJungle, tRock, tMtn, tSnow, tReef;
@@ -191,6 +194,14 @@ vec3 triplanar(sampler2D tex, vec3 wp, vec3 n, float scale) {
     vec3 underwater = mix(reef, vec3(0.015, 0.06, 0.10), d * d);
     c = mix(c, underwater, smoothstep(-0.5, -3.6, e));
   }
+  // DUG GROUND IS DIRT. Soil vertices carry the ORIGINAL surface elevation
+  // in aOrig (the island mesh carries none, so vOrig is 0 there and this
+  // whole term vanishes); anything meaningfully below it is an excavation,
+  // and an excavation shows soil — the cliff texture, tiled tight — not the
+  // altitude biome. Without this a burrow near the summit painted its walls
+  // with the SNOW band, which reads as white plaster, not a hole in dirt.
+  float dug = smoothstep(1.5, 4.0, vOrig - vElev);
+  if (dug > 0.004) c = mix(c, s2l(triplanar(tRock, wpM, nrm, 3.0)) * 0.8, dug);
   diffuseColor.rgb *= c;
 }`,
       )

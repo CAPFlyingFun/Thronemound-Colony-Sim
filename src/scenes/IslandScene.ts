@@ -1007,6 +1007,17 @@ export class IslandScene {
       elev[v] = (data.positions[v * 3 + 1]! + stream.bandFloorWu) * MM;
     }
     geometry.setAttribute('aElev', new THREE.BufferAttribute(elev, 1));
+    // ...and the ORIGINAL surface elevation at each vertex, so the shader
+    // can tell an undug top (paint the biome, match the island seamlessly)
+    // from an excavated wall or floor (paint dirt, whatever the altitude).
+    const orig = new Float32Array(elev.length);
+    for (let v = 0; v < orig.length; v += 1) {
+      orig[v] = this.groundHeightAt(
+        stream.originWorldX + data.positions[v * 3]!,
+        stream.originWorldZ + data.positions[v * 3 + 2]!,
+      ) * MM;
+    }
+    geometry.setAttribute('aOrig', new THREE.BufferAttribute(orig, 1));
     geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
     geometry.computeVertexNormals();
     const mesh = new THREE.Mesh(geometry, this.soilMaterial!);
@@ -1935,6 +1946,25 @@ export class IslandScene {
     );
   }
 
+  /**
+   * The scoop must clear HER, not just itself. Her body lies flat whatever
+   * the aim does, so a shaft driven steeply down has to pass a body that is
+   * 9 mm LONG through its cross-section — and the fixed 6 mm bore could
+   * not, which is why she dug down fine for a while and then wedged. The
+   * radius is the widest half-extent of her oval measured PERPENDICULAR to
+   * the aim, plus clearance, floored at the scoop's own size.
+   */
+  private scoopRadius(aim: THREE.Vector3): number {
+    const fwd = Math.sin(this.facing) * aim.x + Math.cos(this.facing) * aim.z;
+    const right = aim.x * Math.cos(this.facing) - aim.z * Math.sin(this.facing);
+    const perp = Math.max(
+      this.body.len * Math.sqrt(Math.max(0, 1 - fwd * fwd)),
+      this.body.wide * Math.sqrt(Math.max(0, 1 - right * right)),
+      this.body.tall * Math.sqrt(Math.max(0, 1 - aim.y * aim.y)),
+    );
+    return Math.max(SCOOP_RADIUS, perp + 0.8 / MM);
+  }
+
   /** The way she is pointed AND pitched — the line the bore cuts and, while
    *  she is engaged in one, the line she travels. */
   private boreAim(): THREE.Vector3 {
@@ -2040,10 +2070,12 @@ export class IslandScene {
     let touched = 0;
     let minX = Infinity; let minY = Infinity; let minZ = Infinity;
     let maxX = -Infinity; let maxY = -Infinity; let maxZ = -Infinity;
-    // The scoop: a 6 mm capsule driven 9 mm along the aim, as three spheres.
+    // The scoop: a capsule driven along the aim as three spheres, wide
+    // enough for the bore AND for her body to follow it down.
+    const r = this.scoopRadius(aim);
     for (let i = 0; i < SCOOP_STEPS; i += 1) {
       const at = centre.clone().addScaledVector(aim, i * SCOOP_STEP);
-      const result = this.stream!.subtractSphere(at, SCOOP_RADIUS);
+      const result = this.stream!.subtractSphere(at, r);
       if (result.changedSamples === 0) continue;
       touched += result.changedSamples;
       const b = result.bounds;

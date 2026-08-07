@@ -79,7 +79,18 @@ self.addEventListener('fetch', (event) => {
 
   event.respondWith((async () => {
     try {
-      const response = await fetch(request);
+      /*
+       * Navigations dodge the browser's OWN cache too. GitHub Pages serves
+       * index.html with max-age=600, so for ten minutes after a deploy a
+       * plain fetch() can return yesterday's page from the HTTP cache —
+       * yesterday's game, from a worker whose whole policy is freshness.
+       * 'no-cache' revalidates instead: a 304 when nothing changed, the new
+       * page the moment there is one.
+       */
+      const req = request.mode === 'navigate'
+        ? new Request(request, { cache: 'no-cache' })
+        : request;
+      const response = await fetch(req);
       /*
        * Only complete, same-origin successes are stored. A 206 from a range
        * request cannot be replayed as a whole file, and caching an error page
