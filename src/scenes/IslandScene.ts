@@ -168,6 +168,10 @@ const SCOOP_STEPS = 3; // centres 0, 3, 6 mm past the face — 9 mm of reach
  */
 const BORE_HUG_WIDE = 2.4 / MM;
 
+/** The collision oval wears the measured body 20% small — legs are not
+ *  walls, and a shell-sized fit perched her on every rim and pedestal. */
+const BODY_FIT_SCALE = 0.8;
+
 /**
  * How far PAST HER NOSE the jaws close — not how far past her centre.
  *
@@ -1917,9 +1921,17 @@ export class IslandScene {
     if (box.isEmpty()) return;
     const size = box.getSize(new THREE.Vector3());
     if (!Number.isFinite(size.x) || size.x <= 0) return;
-    this.body.len = Math.max(size.z / 2, BODY_HALF_LEN);
-    this.body.wide = Math.max(size.x / 2, BODY_HALF_WIDE);
-    this.body.tall = Math.max(size.y / 2, BODY_HALF_TALL);
+    /*
+     * ...then worn 20% SMALL. The raw box is her rest pose to the leg tips
+     * and tallest hair, and colliding at that size means the SHELL does
+     * the walking: she perches on crater rims and pedestals her own bites
+     * leave, held off the ground she is visibly standing over. Legs are
+     * not walls — shrinking the fit lets them straddle the small stuff,
+     * and the feet visually carry her over what the capsule now ignores.
+     */
+    this.body.len = Math.max(size.z / 2, BODY_HALF_LEN) * BODY_FIT_SCALE;
+    this.body.wide = Math.max(size.x / 2, BODY_HALF_WIDE) * BODY_FIT_SCALE;
+    this.body.tall = Math.max(size.y / 2, BODY_HALF_TALL) * BODY_FIT_SCALE;
   }
 
   /**
@@ -2442,7 +2454,11 @@ export class IslandScene {
       const upv = onRail && this.railUp.lengthSq() > 0.1
         ? this.railUp.clone().normalize()
         : new THREE.Vector3(0, 1, 0);
-      const eye = this.at.clone().addScaledVector(fwd, 0.26).addScaledVector(upv, 0.3);
+      /* The eye rides ON her centre-line, not above it: the bore is carved
+       * along the line through `at`, so any eye height above that line
+       * makes every tunnel land visibly BELOW the crosshair that aimed it.
+       * A trace of lift stays so level ground doesn't fill half the frame. */
+      const eye = this.at.clone().addScaledVector(fwd, 0.26).addScaledVector(upv, 0.06);
       this.camera.position.copy(eye);
       this.camera.up.copy(upv);
       const dir = fwd.clone().multiplyScalar(Math.cos(this.fpPitch))
