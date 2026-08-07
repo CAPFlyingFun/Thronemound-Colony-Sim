@@ -21,7 +21,8 @@ registerServiceWorker();
  * Everything is imported lazily so a route only pays for its own scene.
  */
 const params = new URLSearchParams(window.location.search);
-const scene = params.get('scene');
+// Case-blind on purpose: "?scene=Sandbox" typed on a phone should work.
+const scene = params.get('scene')?.toLowerCase() ?? null;
 const map = params.get('map');
 const colonySim = scene === 'density'
   || map === 'densityterrainlab'
