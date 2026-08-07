@@ -1252,7 +1252,8 @@
 }
 
 /* GRIP: the same amber "currently on" the rest of the HUD speaks. */
-.density-lab-mode.is-grip {
+.density-lab-mode.is-grip,
+.density-lab-dig.is-grip {
   background: #e9c36f;
   box-shadow: 0 0 0 2px rgba(255, 250, 238, 0.75), 0 7px 20px rgba(0, 0, 0, 0.32);
 }

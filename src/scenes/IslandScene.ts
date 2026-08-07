@@ -146,6 +146,20 @@ const BITE_RADIUS = ((BITE_WIDTH_MM * BITE_WIDTH_MM) / 4 + BITE_DEPTH_MM * BITE_
 const BITE_SETBACK = BITE_RADIUS - BITE_DEPTH_MM / MM;
 
 /**
+ * THE SHOVEL 🪏 — dig mode's mouthful, sized for making progress.
+ *
+ * 6 mm wide, 6 mm tall, 9 mm deep per stroke: a bore she can walk straight
+ * into, not a mandible-true nibble. The 1.75 mm bite was honest and it also
+ * took all day, and a passage barely her own width made walking a squeeze —
+ * so dig mode trades the biology for a tunnel that opens at playable speed
+ * with clearance to move in. Cut as three 3 mm-radius spheres stepped along
+ * the aim, because spheres are what the field subtracts.
+ */
+const SCOOP_RADIUS = 3 / MM;
+const SCOOP_STEP = 3 / MM;
+const SCOOP_STEPS = 3; // centres 0, 3, 6 mm past the face — 9 mm of reach
+
+/**
  * How far PAST HER NOSE the jaws close — not how far past her centre.
  *
  * This was 1.4 mm from her middle, on a body whose half-length is 4.5 mm,
@@ -316,6 +330,9 @@ export class IslandScene {
    *  it holds, travel follows the bore's line, so letting go of the button
    *  means "stop", not "level out and grind into the wall". */
   private boreEngaged = false;
+
+  /** DIG is a MODE now: the DIG chip arms it, the 🪏 button strokes. */
+  private digMode = false;
 
   private readonly keysDown = new Set<string>();
 
@@ -1975,21 +1992,13 @@ export class IslandScene {
   }
 
   /**
-   * ONE MOUTHFUL. 1.75 mm across, half a millimetre deep, where she is
-   * pointed — and that is the whole of what a stroke removes.
+   * ONE STROKE OF THE SHOVEL: a 6 mm bore driven 9 mm along the aim, from
+   * where she is pointed — SCOOP_RADIUS / SCOOP_STEP up top for the whys.
    *
-   * Nothing here opens a tunnel. A bore is many times the width of a bite,
-   * so a hole big enough to fit through is made by TAKING MORE BITES:
-   * sweep the aim across the face and chew it out. The capsule is what
-   * makes that necessary rather than optional — she cannot enter a space
-   * her body does not fit, so a passage exists only once it has actually
-   * been cut to size.
-   *
-   * This replaced a body-sized sweep that opened her whole oval every time
-   * she moved. That made tunnels instantly, and it also made the mandible
-   * decoration: about fifty cubic millimetres left per millimetre
-   * travelled, against two thirds of one in a bite — ninety-nine parts in
-   * a hundred of the digging had nothing to do with her jaws.
+   * She still cannot enter a space her body does not fit — travel is gated
+   * by the oval as ever — but one stroke now opens a passage she can walk
+   * straight into, so tunnelling is held strokes rather than an afternoon
+   * of sweeping a mandible across a face.
    */
   private bite(): void {
     const aim = this.boreAim();
@@ -2031,13 +2040,16 @@ export class IslandScene {
     let touched = 0;
     let minX = Infinity; let minY = Infinity; let minZ = Infinity;
     let maxX = -Infinity; let maxY = -Infinity; let maxZ = -Infinity;
-    const result = this.stream!.subtractSphere(centre, BITE_RADIUS);
-    if (result.changedSamples > 0) {
-      touched = result.changedSamples;
+    // The scoop: a 6 mm capsule driven 9 mm along the aim, as three spheres.
+    for (let i = 0; i < SCOOP_STEPS; i += 1) {
+      const at = centre.clone().addScaledVector(aim, i * SCOOP_STEP);
+      const result = this.stream!.subtractSphere(at, SCOOP_RADIUS);
+      if (result.changedSamples === 0) continue;
+      touched += result.changedSamples;
       const b = result.bounds;
-      minX = b.minX; maxX = b.maxX;
-      minY = b.minY; maxY = b.maxY;
-      minZ = b.minZ; maxZ = b.maxZ;
+      minX = Math.min(minX, b.minX); maxX = Math.max(maxX, b.maxX);
+      minY = Math.min(minY, b.minY); maxY = Math.max(maxY, b.maxY);
+      minZ = Math.min(minZ, b.minZ); maxZ = Math.max(maxZ, b.maxZ);
     }
     if (touched === 0) return;
 
@@ -2459,26 +2471,39 @@ export class IslandScene {
     this.hud.appendChild(actions);
 
     /*
-     * DIG IS HER JAWS AGAIN, and it is the drive: hold it and she strokes,
-     * a bite of soil leaves at the bottom of each stroke, and she can walk
-     * forward into exactly as much room as she has made. A tunnel is then
-     * wherever she chewed — no plan to lay out first, nothing authored to
-     * be locked into, and nothing to ask her permission about at either
-     * end of it.
+     * DIG IS A MODE: tap DIG to arm it, and the 🪏 appears. HOLDING the 🪏
+     * is what strokes — each stroke carves the 6 x 9 mm scoop along the aim
+     * (the camera's own angle in first person) and she can walk forward
+     * into exactly as much room as she has made. A tunnel is wherever she
+     * dug — no plan to lay out first, nothing authored to be locked into.
+     * The two-step is deliberate: a lone held button carved tunnels out of
+     * pocket-brushes and mis-taps, and a scoop this size deserves intent.
      */
     const dig = document.createElement('button');
     dig.className = 'density-lab-button density-lab-dig';
     dig.textContent = 'DIG';
+    const scoopBtn = document.createElement('button');
+    scoopBtn.className = 'density-lab-button density-lab-dig';
+    scoopBtn.textContent = '🪏';
+    scoopBtn.style.display = 'none';
     dig.addEventListener('pointerdown', (e) => {
       e.preventDefault();
-      dig.setPointerCapture(e.pointerId);
+      this.digMode = !this.digMode;
+      dig.classList.toggle('is-grip', this.digMode);
+      scoopBtn.style.display = this.digMode ? '' : 'none';
+      if (!this.digMode) this.input.dig = false;
+    });
+    actions.appendChild(dig);
+    scoopBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      scoopBtn.setPointerCapture(e.pointerId);
       this.input.dig = true;
     });
     const stopDig = () => { this.input.dig = false; };
-    dig.addEventListener('pointerup', stopDig);
-    dig.addEventListener('pointercancel', stopDig);
-    dig.addEventListener('lostpointercapture', stopDig);
-    actions.appendChild(dig);
+    scoopBtn.addEventListener('pointerup', stopDig);
+    scoopBtn.addEventListener('pointercancel', stopDig);
+    scoopBtn.addEventListener('lostpointercapture', stopDig);
+    actions.appendChild(scoopBtn);
 
     /*
      * The angle, where the thumb can see it.
@@ -2601,10 +2626,10 @@ export class IslandScene {
         this.input.yaw = turn;
       }
       this.input.sprint = k.has('shift');
-      /* Space is the jaws, and it is HELD — the button is the drive. */
+      /* Space is the shovel, and it is HELD — but only once DIG is armed. */
       const space = k.has(' ');
       if (space !== this.spaceWasDown) {
-        this.input.dig = space;
+        this.input.dig = this.digMode && space;
         this.spaceWasDown = space;
       }
     };
@@ -2899,6 +2924,7 @@ export class IslandScene {
       bodyTallMm: this.body.tall * MM,
       biteWidthMm: BITE_WIDTH_MM,
       biteDepthMm: BITE_DEPTH_MM,
+      digMode: this.digMode ? 1 : 0,
       asking: this.gateAsk ? 1 : 0,
       playerReady: this.playerReady ? 1 : 0,
       statsOpen: this.statsPanel.bodyVisible ? 1 : 0,
