@@ -204,22 +204,39 @@ check('the foot solver runs against the tunnel wall',
   Number.isFinite(feet.footPenMm) && feet.footPenMm < 2.5,
   `worst pre-solve penetration ${feet.footPenMm.toFixed(2)} mm`);
 
-// GHOST AND WHEEL: arm a piece, tune it, place what the ghost shows.
-const ghost = await page.evaluate(() => {
+// THE COCKPIT: instruments in her eyes, the editor in free cam, never both.
+const cockpit = await page.evaluate(() => {
   const s = window.railScene;
-  s.armForTest('straight');
-  s.wheelTapForTest('pitch', -1);
-  const tuned = s.ghostPieceForTest();
-  const before = s.statsForTest().pieces;
-  s.placeGhostForTest();
-  const after = s.piecesForTest();
-  s.cancelArmForTest();
-  return { tuned, before, placed: after[after.length - 1], count: after.length };
+  s.setViewForTest(true);
+  s.setAimForTest(s.hudForTest().endHeadingDeg + 37, -52);
+  const fp = s.hudForTest();
+  s.setViewForTest(false);
+  const ed = s.hudForTest();
+  return { fp, ed };
 });
-check('the wheel tunes the ghost', ghost.tuned.pitch === -60,
-  `ghost pitch ${ghost.tuned.pitch}`);
-check('placing commits what the ghost shows',
-  ghost.count === ghost.before + 1 && ghost.placed.pitch === -60);
+check('first person shows the tapes and DIG, hides the editor',
+  cockpit.fp.tapesVisible === 1 && cockpit.fp.digVisible === 1
+  && cockpit.fp.editorVisible === 0);
+check('free cam shows the editor, hides the cockpit',
+  cockpit.ed.tapesVisible === 0 && cockpit.ed.digVisible === 0
+  && cockpit.ed.editorVisible === 1);
+check('the instruments read the SNAPPED next piece',
+  cockpit.fp.nextPitch === -45 && cockpit.fp.nextTurn === 30,
+  `pitch ${cockpit.fp.nextPitch}, turn ${cockpit.fp.nextTurn}`);
+
+// PIECE SURGERY: tap-select still works the wheel on a placed piece.
+const surgery = await page.evaluate(() => {
+  const s = window.railScene;
+  s.stepSelectionForTest(-1); // the last piece
+  const idx = s.piecesForTest().length - 1;
+  const before = s.piecesForTest()[idx].turn;
+  s.wheelTapForTest('turn', 1);
+  const after = s.piecesForTest()[idx].turn;
+  return { before, after };
+});
+check('the wheel reshapes a selected piece in place',
+  surgery.after === surgery.before + 15,
+  `turn ${surgery.before} → ${surgery.after}`);
 
 // UNDO still undoes; smoothing still changes only the view.
 const tidy = await page.evaluate(() => {

@@ -216,6 +216,37 @@ export class RailScene {
 
   private readonly crosshair = document.createElement('div');
 
+  private editorBar: HTMLElement | null = null;
+
+  private antRightBar: HTMLElement | null = null;
+
+  private antLeftBar: HTMLElement | null = null;
+
+  private camBtn: HTMLButtonElement | null = null;
+
+  /** The cockpit instruments: heading tape, pitch ladder, next-piece strip. */
+  private headingTapeEl: HTMLElement | null = null;
+
+  private headingTicks: SVGGElement | null = null;
+
+  private headingSnapText: SVGTextElement | null = null;
+
+  private headingEndMark: SVGPathElement | null = null;
+
+  private pitchTapeEl: HTMLElement | null = null;
+
+  private pitchTicks: SVGGElement | null = null;
+
+  private pitchSnapText: SVGTextElement | null = null;
+
+  private pitchEndMark: SVGPathElement | null = null;
+
+  private nextStrip: HTMLElement | null = null;
+
+  /** The working end's direction, cached per rebuild — the instruments
+   *  read it every frame and must not rebuild a rail to do so. */
+  private readonly endCache = { headingDeg: 0, pitchDeg: 0 };
+
   /** Worst foot penetration before the last solve, mm — a health number. */
   private footPenMm = 0;
 
@@ -223,21 +254,6 @@ export class RailScene {
 
   /** One tag per piece, floating over its midpoint: "+15°", "−45° L15°". */
   private readonly labelGroup = new THREE.Group();
-
-  /**
-   * ARM-THEN-PLACE, the way the coaster editors do it: the first tap on a
-   * palette chip ARMS the piece — the chip lights up and a translucent
-   * ghost of exactly what it would add hangs off the end of the track —
-   * and the second tap PLACES it. The chip stays armed after placing, so
-   * a run of straights is tap-tap-tap, and tapping a different chip just
-   * re-aims the ghost. Escape (or the ✕ chip) stands down.
-   */
-  private armed: { piece: PieceKind } | { preset: PresetId } | null = null;
-
-  private armedBtn: HTMLButtonElement | null = null;
-
-  /** The ghost of the armed piece, drawn but not yet real. */
-  private readonly ghostGroup = new THREE.Group();
 
   /**
    * The SELECTED piece, for surgical removal: ◀ PIECE / PIECE ▶ walk the
@@ -248,8 +264,6 @@ export class RailScene {
   private selIdx = -1;
 
   private readonly selGroup = new THREE.Group();
-
-  private cancelBtn: HTMLButtonElement | null = null;
 
   private destroyBtn: HTMLButtonElement | null = null;
 
@@ -268,10 +282,6 @@ export class RailScene {
   private wheelMode: 'ghost' | 'sel' | null = null;
 
   private readonly wheelAnchor = new THREE.Vector3();
-
-  /** The armed SINGLE piece, tweakable by the wheel before it is placed.
-   *  Null while a preset is armed (presets place as authored). */
-  private ghostPiece: DigPiece | null = null;
 
   private labelsOn = true;
 
@@ -365,7 +375,6 @@ export class RailScene {
     this.buildStation();
     this.scene.add(this.trackGroup);
     this.scene.add(this.labelGroup);
-    this.scene.add(this.ghostGroup);
     this.scene.add(this.selGroup);
     this.buildSoil();
     this.buildCart();
@@ -383,6 +392,7 @@ export class RailScene {
     this.hud.className = 'density-lab-hud';
     host.appendChild(this.hud);
     this.buildControls();
+    this.buildTapes();
     this.bindCamera();
 
     this.loadPieces();
@@ -391,6 +401,7 @@ export class RailScene {
     this.rebuildTrack();
     this.antS = this.rail.lengthMm;
     this.seedAim();
+    this.applyViewChrome();
 
     (window as unknown as { railScene?: unknown }).railScene = this;
     new ResizeObserver(() => this.resize()).observe(host);
@@ -529,8 +540,6 @@ export class RailScene {
    * whose edits are button taps.
    */
   private rebuildTrack(): void {
-    // The track end moved, so the armed ghost re-derives from the new end.
-    this.ghostPiece = null;
     RailScene.emptyGroup(this.trackGroup);
     this.beamMeshes = [];
 
@@ -540,6 +549,7 @@ export class RailScene {
         at: start.at, forward: start.forward,
       });
     });
+    this.refreshEndCache();
 
     const right = new THREE.Vector3();
     const up = new THREE.Vector3();
@@ -609,7 +619,6 @@ export class RailScene {
 
     this.antS = Math.min(this.antS, this.rail.lengthMm);
     this.rebuildLabels();
-    this.rebuildGhost();
     this.rebuildSelection();
     this.rebuildHubs();
     this.recarve();
@@ -742,12 +751,7 @@ export class RailScene {
    * just cut, because digging is where the ant is.
    */
   private growTube(): void {
-    const start = this.startOfActive();
-    const end = endStateOf(this.pieces, { at: start.at, forward: start.forward });
-    this.pieces.push(aimPiece(
-      end.headingDeg, this.aimHeadingDeg, this.aimPitchDeg,
-      { lengthMm: PIECE_LENGTHS_MM[this.lengthIdx]!, autoBank: this.autoBank },
-    ));
+    this.pieces.push(this.snappedNext());
     this.rebuildTrack();
     this.antS = this.rail.lengthMm;
     this.facingDir = 1;
@@ -798,7 +802,6 @@ export class RailScene {
    *  including the ant, who walks the working line. */
   private activateBranch(index: number): void {
     if (index < 0 || index >= this.branches.length) return;
-    if (this.armed) this.cancelArm();
     this.active = index;
     this.selIdx = -1;
     this.openHub = -1;
@@ -847,69 +850,7 @@ export class RailScene {
     this.rebuildTrack();
   }
 
-  /* ------------------------------------------------- arm, ghost, select */
-
-  /** What the armed chip WOULD add, computed fresh off the current track
-   *  end — so the ghost is always honest about length, bank and pitch. */
-  private armedPieces(): DigPiece[] {
-    if (!this.armed) return [];
-    const opts = {
-      lengthMm: PIECE_LENGTHS_MM[this.lengthIdx]!,
-      autoBank: this.autoBank,
-    };
-    if ('piece' in this.armed) {
-      if (!this.ghostPiece) {
-        this.ghostPiece = this.nextPiece(this.armed.piece);
-      }
-      return [this.ghostPiece];
-    }
-    return presetPieces(this.pieces, this.armed.preset, {
-      ...opts, seedPitchDeg: this.startOfActive().seedPitchDeg,
-    });
-  }
-
-  /** First tap arms (chip lights, ghost appears); a tap on the ARMED chip
-   *  places it and stays armed for the next one. */
-  private armOrPlace(
-    button: HTMLButtonElement,
-    spec: { piece: PieceKind } | { preset: PresetId },
-  ): void {
-    if (this.armed && this.armedBtn === button) {
-      // Place WHAT THE GHOST SHOWS — wheel tweaks and all.
-      if ('piece' in spec && this.ghostPiece) this.placeGhost();
-      else if ('piece' in spec) this.add(spec.piece);
-      else this.addPreset(spec.preset);
-      return; // rebuildTrack refreshed the ghost for the next placement
-    }
-    // Arming and selecting are two hands on the same track end — one at a
-    // time, or the wheel cannot know which piece it is turning.
-    if (this.selIdx >= 0) { this.selIdx = -1; this.rebuildSelection(); }
-    this.armedBtn?.classList.remove('density-lab-armed');
-    this.armed = spec;
-    this.ghostPiece = null;
-    this.armedBtn = button;
-    button.classList.add('density-lab-armed');
-    if (this.cancelBtn) this.cancelBtn.style.display = '';
-    this.rebuildGhost();
-    this.refreshReadout(true);
-  }
-
-  private cancelArm(): void {
-    this.armedBtn?.classList.remove('density-lab-armed');
-    this.armed = null;
-    this.ghostPiece = null;
-    this.armedBtn = null;
-    if (this.cancelBtn) this.cancelBtn.style.display = 'none';
-    this.rebuildGhost();
-    this.refreshReadout(true);
-  }
-
-  /** Commit the ghost — wheel tweaks included — as the next real piece. */
-  private placeGhost(): void {
-    if (!this.ghostPiece) return;
-    this.pieces.push(this.ghostPiece);
-    this.rebuildTrack();
-  }
+  /* ------------------------------------------------------------ select */
 
   /**
    * One wheel tap: a single exact step of the field it names, routed to
@@ -933,12 +874,6 @@ export class RailScene {
     if (this.selIdx >= 0 && this.pieces[this.selIdx]) {
       this.pieces[this.selIdx] = stepOne(this.pieces[this.selIdx]!);
       this.rebuildTrack(); // keeps the selection; re-highlights the new shape
-      return;
-    }
-    if (this.ghostPiece) {
-      this.ghostPiece = stepOne(this.ghostPiece);
-      this.rebuildGhost();
-      this.refreshReadout(true);
     }
   }
 
@@ -1000,45 +935,9 @@ export class RailScene {
     return geometry;
   }
 
-  /** The armed piece, drawn as an amber ghost off the end of the track —
-   *  visible through the soil, because a preview you cannot see is a trap. */
-  private rebuildGhost(): void {
-    RailScene.emptyGroup(this.ghostGroup);
-    const ghost = this.armedPieces();
-    if (ghost.length === 0) return;
-    const start = this.startOfActive();
-    const anchor = { at: start.at, forward: start.forward };
-    const total = buildRail([...this.pieces, ...ghost], anchor);
-    const from = buildRail(this.pieces, anchor).lengthMm;
-    const geometry = this.sweepTube(total, from, total.lengthMm, BEAM_RADIUS * 1.15);
-    if (!geometry) return;
-    const mesh = new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({
-      color: 0xe8b23c,
-      transparent: true,
-      opacity: 0.55,
-      depthTest: false,
-    }));
-    mesh.renderOrder = 10;
-    this.ghostGroup.add(mesh);
-    // A cap where the ghost ends, so the eye finds the landing point.
-    const endFrame = total.sample(total.lengthMm, this.sampleWindow)!;
-    const cap = new THREE.Mesh(
-      new THREE.SphereGeometry(1.0, 10, 8),
-      new THREE.MeshLambertMaterial({
-        color: 0xe8b23c, transparent: true, opacity: 0.7, depthTest: false,
-      }),
-    );
-    cap.renderOrder = 10;
-    cap.position.set(endFrame.x, endFrame.y, endFrame.z);
-    this.ghostGroup.add(cap);
-    // The wheel rides the ghost's landing point.
-    this.wheelAnchor.set(endFrame.x, endFrame.y, endFrame.z);
-  }
-
   /** Walk the selection along the track: ◀ starts from the LAST piece
    *  (the one you most likely regret), ▶ from the first. */
   private stepSelection(delta: 1 | -1): void {
-    if (this.armed) this.cancelArm();
     const n = this.pieces.length;
     if (n === 0) { this.selIdx = -1; this.rebuildSelection(); return; }
     if (this.selIdx < 0) this.selIdx = delta > 0 ? 0 : n - 1;
@@ -1171,29 +1070,37 @@ export class RailScene {
   /* -------------------------------------------------------------- the HUD */
 
   private buildControls(): void {
+    /*
+     * THE COCKPIT SPLIT: one verb per view. First person is where tunnels
+     * are BUILT — dig, ride, room, instruments. Free cam is where they are
+     * EDITED — select, tune, destroy, branch. Each view's controls live in
+     * their own cluster and `applyViewChrome` shows exactly one set, which
+     * is the whole cure for buttons that did similar things.
+     */
     const actions = document.createElement('div');
     actions.className = 'density-lab-actions';
-    /* Eleven buttons in the lab's single column overflow a landscape phone
-     * (430 px tall against ~800 of buttons) — the palette wraps into rows
-     * from the corner instead. */
     actions.style.flexFlow = 'row-reverse wrap-reverse';
     actions.style.justifyContent = 'flex-start';
     actions.style.alignItems = 'flex-end';
     actions.style.maxWidth = '340px';
     this.hud.appendChild(actions);
+    this.editorBar = actions;
 
-    /*
-     * THE LEFT HAND: dig and ride. The big DIG is HELD — the tube grows
-     * along her aim for as long as the thumb is down — and the two ride
-     * buttons walk her along the working line. The right hand keeps the
-     * whole piece-editing shelf; the left hand is the ant.
-     */
-    const left = document.createElement('div');
-    left.className = 'density-lab-actions';
-    left.style.left = 'max(16px, env(safe-area-inset-left))';
-    left.style.right = 'auto';
-    left.style.alignItems = 'flex-start';
-    this.hud.appendChild(left);
+    /* The ant's right hand: ROOM over a big held DIG. */
+    const antRight = document.createElement('div');
+    antRight.className = 'density-lab-actions';
+    this.hud.appendChild(antRight);
+    this.antRightBar = antRight;
+
+    this.roomBtn = document.createElement('button');
+    this.roomBtn.className = 'density-lab-button density-lab-mode';
+    this.roomBtn.textContent = ROOMS[0]!.label;
+    this.roomBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.cycleRoom();
+    });
+    antRight.appendChild(this.roomBtn);
 
     const dig = document.createElement('button');
     dig.className = 'density-lab-button density-lab-dig';
@@ -1208,7 +1115,16 @@ export class RailScene {
     dig.addEventListener('pointerup', stopDig);
     dig.addEventListener('pointercancel', stopDig);
     dig.addEventListener('lostpointercapture', stopDig);
-    left.appendChild(dig);
+    antRight.appendChild(dig);
+
+    /* The ant's left hand: ride her along the working line. */
+    const antLeft = document.createElement('div');
+    antLeft.className = 'density-lab-actions';
+    antLeft.style.left = 'max(16px, env(safe-area-inset-left))';
+    antLeft.style.right = 'auto';
+    antLeft.style.alignItems = 'flex-start';
+    this.hud.appendChild(antLeft);
+    this.antLeftBar = antLeft;
 
     const ride = (label: string, dir: 1 | -1): void => {
       const button = document.createElement('button');
@@ -1226,31 +1142,25 @@ export class RailScene {
       button.addEventListener('pointerup', stop);
       button.addEventListener('pointercancel', stop);
       button.addEventListener('lostpointercapture', stop);
-      left.appendChild(button);
+      antLeft.appendChild(button);
     };
     ride('⇧', 1);
     ride('⇩', -1);
 
-    const piece = (label: string, kind: PieceKind): void => {
-      const button = document.createElement('button');
-      button.className = 'density-lab-button density-lab-dig';
-      // The lab's 94 px thumb pad is one button; five of them are a palette,
-      // and a palette earns its keep by fitting on a phone in a row.
-      button.style.width = '58px';
-      button.style.height = '58px';
-      button.textContent = label;
-      button.addEventListener('pointerdown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.armOrPlace(button, { piece: kind });
-      });
-      actions.appendChild(button);
-    };
-    piece('─', 'straight');
-    piece('▲', 'up');
-    piece('▼', 'down');
-    piece('◀', 'left');
-    piece('▶', 'right');
+    /* The one view toggle, top right, labelled by where it TAKES you. */
+    const camBtn = document.createElement('button');
+    camBtn.className = 'density-lab-button density-lab-mode';
+    camBtn.style.position = 'absolute';
+    camBtn.style.top = 'max(14px, env(safe-area-inset-top))';
+    camBtn.style.right = 'max(16px, env(safe-area-inset-right))';
+    camBtn.style.pointerEvents = 'auto';
+    camBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.setFirstPerson(!this.firstPerson);
+    });
+    this.hud.appendChild(camBtn);
+    this.camBtn = camBtn;
 
     const chip = (
       label: string, onTap: (button: HTMLButtonElement) => void,
@@ -1278,8 +1188,6 @@ export class RailScene {
      * lives behind the ⋯ chip. A control a novice cannot misread beats a
      * control an expert can reach one tap sooner.
      */
-    this.roomBtn = chip(ROOMS[0]!.label, () => this.cycleRoom());
-    chip('VIEW', () => { this.firstPerson = !this.firstPerson; });
     chip('UNDO', () => this.undo());
     this.moreBtn = chip('⋯', (b) => {
       this.drawerOpen = !this.drawerOpen;
@@ -1291,10 +1199,7 @@ export class RailScene {
 
     /* The drawer: presets first (they build), then the toggles. */
     const preset = (label: string, id: PresetId): void => {
-      const button = chip(label, (b) => {
-        this.armOrPlace(b, { preset: id });
-      }, true);
-      void button;
+      chip(label, () => this.addPreset(id), true);
     };
     preset('SHAFT', 'shaft');
     preset('SPIRAL◀', 'spiralLeft');
@@ -1303,14 +1208,10 @@ export class RailScene {
     this.lenBtn = chip(`LEN ${PIECE_LENGTHS_MM[this.lengthIdx]}`, (b) => {
       this.lengthIdx = (this.lengthIdx + 1) % PIECE_LENGTHS_MM.length;
       b.textContent = `LEN ${PIECE_LENGTHS_MM[this.lengthIdx]}`;
-      this.ghostPiece = null; // re-derive: the ghost wears the new default
-      this.rebuildGhost();
     }, true);
     this.bankBtn = chip('BANK AUTO', (b) => {
       this.autoBank = !this.autoBank;
       b.textContent = this.autoBank ? 'BANK AUTO' : 'BANK OFF';
-      this.ghostPiece = null;
-      this.rebuildGhost();
     }, true);
     this.smoothBtn = chip('SMOOTH OFF', (b) => {
       this.smooth = !this.smooth;
@@ -1329,10 +1230,6 @@ export class RailScene {
       this.rebuildLabels();
     }, true);
     chip('CLEAR', () => this.clear(), true);
-
-    /* Standing down: shown only while a chip is armed. */
-    this.cancelBtn = chip('✕', () => this.cancelArm());
-    this.cancelBtn.style.display = 'none';
 
     /* Removal: tap a piece on the track to select it, then DESTROY. */
     this.destroyBtn = chip('DESTROY', () => this.destroySelected());
@@ -1370,14 +1267,18 @@ export class RailScene {
       if (key === 'w') { this.walkInput = 1; return; }
       if (key === 's') { this.walkInput = -1; return; }
       if (e.repeat) return;
-      if (key === 'arrowup') this.add('up');
-      if (key === 'arrowdown') this.add('down');
-      if (key === 'arrowleft') this.add('left');
-      if (key === 'arrowright') this.add('right');
+      /* Arrows nudge the AIM in her eyes, one exact step at a time. */
+      if (key === 'arrowup') this.aimPitchDeg = Math.min(85, this.aimPitchDeg + 15);
+      if (key === 'arrowdown') this.aimPitchDeg = Math.max(-85, this.aimPitchDeg - 15);
+      if (key === 'arrowleft') this.aimHeadingDeg += 15;
+      if (key === 'arrowright') this.aimHeadingDeg -= 15;
       if (key === 'u') this.undo();
       if (key === 'c') this.clear();
-      if (key === 'v') this.firstPerson = !this.firstPerson;
-      if (key === 'escape') this.cancelArm();
+      if (key === 'v') this.setFirstPerson(!this.firstPerson);
+      if (key === 'escape') {
+        this.selIdx = -1;
+        this.rebuildSelection();
+      }
       if (key === '[') this.stepSelection(-1);
       if (key === ']') this.stepSelection(1);
       if (key === 'delete' || key === 'backspace') this.destroySelected();
@@ -1432,16 +1333,257 @@ export class RailScene {
     spoke('rw-ne', 'B+', () => this.wheelTap('roll', 1));
     spoke('rw-sw', 'L−', () => this.wheelTap('length', -1));
     spoke('rw-se', 'L+', () => this.wheelTap('length', 1));
-    this.wheelCenter = spoke('rw-c', '✓', () => {
-      if (this.wheelMode === 'ghost') this.placeGhost();
-      else if (this.wheelMode === 'sel') {
-        this.selIdx = -1;
-        this.rebuildSelection();
-        this.refreshReadout(true);
-      }
+    this.wheelCenter = spoke('rw-c', '✕', () => {
+      this.selIdx = -1;
+      this.rebuildSelection();
+      this.refreshReadout(true);
     });
     this.hud.appendChild(wheel);
     this.wheelEl = wheel;
+  }
+
+  /* -------------------------------------------------------- the cockpit */
+
+  private setFirstPerson(on: boolean): void {
+    this.firstPerson = on;
+    if (on) { this.selIdx = -1; this.rebuildSelection(); }
+    this.applyViewChrome();
+  }
+
+  /** One verb per view: show the ant's controls OR the editor's, never
+   *  both. The cure for two sets of arrows meaning different things. */
+  private applyViewChrome(): void {
+    const fp = this.firstPerson;
+    const show = (el: HTMLElement | null, yes: boolean): void => {
+      if (el) el.style.display = yes ? '' : 'none';
+    };
+    show(this.antRightBar, fp);
+    show(this.antLeftBar, fp);
+    show(this.headingTapeEl, fp);
+    show(this.pitchTapeEl, fp);
+    show(this.nextStrip, fp);
+    this.crosshair.style.display = fp ? '' : 'none';
+    show(this.editorBar, !fp);
+    show(this.hubLayer, !fp);
+    show(this.readout, !fp);
+    if (this.camBtn) this.camBtn.textContent = fp ? 'FREE CAM' : 'RIDE ANT';
+  }
+
+  /** Pixels per degree on each tape. */
+  private static readonly HDG_PX = 1.6;
+
+  private static readonly PITCH_PX = 1.5;
+
+  /**
+   * THE INSTRUMENTS — the G1000 idea, ant-sized. A heading tape top
+   * centre and a pitch ladder left middle. White ticks are the world;
+   * the amber lozenge is the SNAPPED angle the next piece will actually
+   * take from this spline point, and the hollow caret is where the
+   * track currently ends — so "am I about to put a kink in the line"
+   * is readable at a glance, which is what the arrows never were.
+   */
+  private buildTapes(): void {
+    const NS = 'http://www.w3.org/2000/svg';
+    const make = (tag: string): SVGElement => document.createElementNS(NS, tag);
+
+    /* Heading tape: ticks for -360..720 so any wrapped window is covered. */
+    const hWrap = document.createElement('div');
+    hWrap.style.cssText = 'position:absolute; left:50%; top:max(10px, env(safe-area-inset-top)); '
+      + 'transform:translateX(-50%); width:min(46vw, 340px); pointer-events:none;';
+    const hSvg = make('svg') as SVGSVGElement;
+    hSvg.setAttribute('viewBox', '0 0 320 36');
+    hSvg.style.width = '100%';
+    const hBg = make('rect');
+    hBg.setAttribute('x', '0'); hBg.setAttribute('y', '0');
+    hBg.setAttribute('width', '320'); hBg.setAttribute('height', '36');
+    hBg.setAttribute('rx', '7'); hBg.setAttribute('fill', 'rgba(16,12,8,0.72)');
+    hSvg.appendChild(hBg);
+    const hClip = make('g');
+    const hTicks = make('g') as SVGGElement;
+    for (let deg = -360; deg <= 720; deg += 10) {
+      const x = 160 + deg * RailScene.HDG_PX;
+      const major = deg % 30 === 0;
+      const line = make('line');
+      line.setAttribute('x1', `${x}`); line.setAttribute('x2', `${x}`);
+      line.setAttribute('y1', major ? '20' : '24'); line.setAttribute('y2', '31');
+      line.setAttribute('stroke', '#cbb98d'); line.setAttribute('stroke-width', '1');
+      hTicks.appendChild(line);
+      if (major) {
+        const t = make('text') as SVGTextElement;
+        const shown = ((deg % 360) + 360) % 360;
+        t.setAttribute('x', `${x}`); t.setAttribute('y', '16');
+        t.setAttribute('fill', '#cbb98d'); t.setAttribute('font-size', '9');
+        t.setAttribute('text-anchor', 'middle');
+        t.textContent = `${shown}`.padStart(3, '0');
+        hTicks.appendChild(t);
+      }
+    }
+    hClip.appendChild(hTicks);
+    hSvg.appendChild(hClip);
+    const hEnd = make('path') as SVGPathElement;
+    hEnd.setAttribute('d', 'M160 31 l-5 5 h10 z');
+    hEnd.setAttribute('fill', 'none');
+    hEnd.setAttribute('stroke', '#ffe9b8');
+    hSvg.appendChild(hEnd);
+    const hCaret = make('path');
+    hCaret.setAttribute('d', 'M160 31 l-6 -6 h12 z');
+    hCaret.setAttribute('fill', '#e8b23c');
+    hSvg.appendChild(hCaret);
+    const hBox = make('rect');
+    hBox.setAttribute('x', '138'); hBox.setAttribute('y', '2');
+    hBox.setAttribute('width', '44'); hBox.setAttribute('height', '16');
+    hBox.setAttribute('rx', '3'); hBox.setAttribute('fill', '#e8b23c');
+    hSvg.appendChild(hBox);
+    const hText = make('text') as SVGTextElement;
+    hText.setAttribute('x', '160'); hText.setAttribute('y', '14');
+    hText.setAttribute('fill', '#221a08'); hText.setAttribute('font-size', '11');
+    hText.setAttribute('font-weight', '700'); hText.setAttribute('text-anchor', 'middle');
+    hSvg.appendChild(hText);
+    hWrap.appendChild(hSvg);
+    this.hud.appendChild(hWrap);
+    this.headingTapeEl = hWrap;
+    this.headingTicks = hTicks;
+    this.headingSnapText = hText;
+    this.headingEndMark = hEnd;
+
+    /* Pitch ladder: -90..90, scrolled so the window rides the aim. */
+    const pWrap = document.createElement('div');
+    pWrap.style.cssText = 'position:absolute; left:max(12px, env(safe-area-inset-left)); '
+      + 'top:50%; transform:translateY(-50%); width:min(7vw, 52px); pointer-events:none;';
+    const pSvg = make('svg') as SVGSVGElement;
+    pSvg.setAttribute('viewBox', '0 0 48 170');
+    pSvg.style.width = '100%';
+    const pBg = make('rect');
+    pBg.setAttribute('x', '0'); pBg.setAttribute('y', '0');
+    pBg.setAttribute('width', '48'); pBg.setAttribute('height', '170');
+    pBg.setAttribute('rx', '7'); pBg.setAttribute('fill', 'rgba(16,12,8,0.72)');
+    pSvg.appendChild(pBg);
+    const pTicks = make('g') as SVGGElement;
+    for (let deg = -90; deg <= 90; deg += 5) {
+      const y = 85 - deg * RailScene.PITCH_PX;
+      const major = deg % 15 === 0;
+      const line = make('line');
+      line.setAttribute('x1', major ? '30' : '36'); line.setAttribute('x2', '44');
+      line.setAttribute('y1', `${y}`); line.setAttribute('y2', `${y}`);
+      line.setAttribute('stroke', '#cbb98d'); line.setAttribute('stroke-width', '1');
+      pTicks.appendChild(line);
+      if (deg % 30 === 0) {
+        const t = make('text') as SVGTextElement;
+        t.setAttribute('x', '27'); t.setAttribute('y', `${y + 3}`);
+        t.setAttribute('fill', '#cbb98d'); t.setAttribute('font-size', '8');
+        t.setAttribute('text-anchor', 'end');
+        t.textContent = deg > 0 ? `+${deg}` : `${deg}`;
+        pTicks.appendChild(t);
+      }
+    }
+    pSvg.appendChild(pTicks);
+    const pEnd = make('path') as SVGPathElement;
+    pEnd.setAttribute('d', 'M44 85 l6 -4 v8 z');
+    pEnd.setAttribute('fill', 'none');
+    pEnd.setAttribute('stroke', '#ffe9b8');
+    pSvg.appendChild(pEnd);
+    const pCaret = make('path');
+    pCaret.setAttribute('d', 'M44 85 l-7 -5 v10 z');
+    pCaret.setAttribute('fill', '#e8b23c');
+    pSvg.appendChild(pCaret);
+    const pBox = make('rect');
+    pBox.setAttribute('x', '2'); pBox.setAttribute('y', '77');
+    pBox.setAttribute('width', '26'); pBox.setAttribute('height', '16');
+    pBox.setAttribute('rx', '3'); pBox.setAttribute('fill', '#e8b23c');
+    pSvg.appendChild(pBox);
+    const pText = make('text') as SVGTextElement;
+    pText.setAttribute('x', '15'); pText.setAttribute('y', '89');
+    pText.setAttribute('fill', '#221a08'); pText.setAttribute('font-size', '10');
+    pText.setAttribute('font-weight', '700'); pText.setAttribute('text-anchor', 'middle');
+    pSvg.appendChild(pText);
+    pWrap.appendChild(pSvg);
+    this.hud.appendChild(pWrap);
+    this.pitchTapeEl = pWrap;
+    this.pitchTicks = pTicks;
+    this.pitchSnapText = pText;
+    this.pitchEndMark = pEnd;
+
+    /* The next-piece strip: what one more quantum of DIG will lay down. */
+    const strip = document.createElement('div');
+    strip.style.cssText = 'position:absolute; left:50%; '
+      + 'bottom:max(14px, env(safe-area-inset-bottom)); transform:translateX(-50%); '
+      + 'background:rgba(16,12,8,0.72); color:#ffe9b8; border-radius:8px; '
+      + 'padding:6px 12px; font:600 12px ui-monospace, Menlo, monospace; '
+      + 'letter-spacing:0.04em; pointer-events:none; white-space:nowrap;';
+    this.hud.appendChild(strip);
+    this.nextStrip = strip;
+  }
+
+  private refreshEndCache(): void {
+    const start = this.startOfActive();
+    const rail = this.rail;
+    const f = rail.lengthMm > 0 ? rail.sample(rail.lengthMm, 0) : null;
+    if (!f) {
+      this.endCache.headingDeg = start.headingDeg;
+      this.endCache.pitchDeg = start.seedPitchDeg;
+      return;
+    }
+    this.endCache.headingDeg = (Math.atan2(f.fx, f.fz) * 180) / Math.PI;
+    this.endCache.pitchDeg =
+      (Math.asin(Math.max(-1, Math.min(1, f.fy))) * 180) / Math.PI;
+  }
+
+  /** The angles a held DIG would take right now — the instruments' truth. */
+  private snappedNext(): DigPiece {
+    return aimPiece(
+      this.endCache.headingDeg, this.aimHeadingDeg, this.aimPitchDeg,
+      { lengthMm: PIECE_LENGTHS_MM[this.lengthIdx]!, autoBank: this.autoBank },
+    );
+  }
+
+  private updateTapes(): void {
+    if (!this.headingTicks || !this.pitchTicks) return;
+    const wrap = (a: number): number => ((a % 360) + 360) % 360;
+    const aimW = wrap(this.aimHeadingDeg);
+    this.headingTicks.setAttribute('transform',
+      `translate(${-aimW * RailScene.HDG_PX}, 0)`);
+
+    const endHeading = this.endCache.headingDeg;
+    const next = this.snappedNext();
+    const snapHeading = wrap(endHeading + next.turn);
+
+    if (this.headingSnapText) {
+      this.headingSnapText.textContent = `${Math.round(snapHeading)}`.padStart(3, '0');
+    }
+    if (this.headingEndMark) {
+      let delta = wrap(endHeading) - aimW;
+      while (delta > 180) delta -= 360;
+      while (delta < -180) delta += 360;
+      const off = Math.abs(delta) > 95;
+      this.headingEndMark.style.display = off ? 'none' : '';
+      if (!off) {
+        this.headingEndMark.setAttribute('transform',
+          `translate(${delta * RailScene.HDG_PX}, 0)`);
+      }
+    }
+
+    this.pitchTicks.setAttribute('transform',
+      `translate(0, ${this.aimPitchDeg * RailScene.PITCH_PX})`);
+    if (this.pitchSnapText) {
+      this.pitchSnapText.textContent =
+        `${next.pitch > 0 ? '+' : ''}${next.pitch}`;
+    }
+    if (this.pitchEndMark) {
+      const endPitch = this.endCache.pitchDeg;
+      const delta = endPitch - this.aimPitchDeg;
+      const off = Math.abs(delta) > 52;
+      this.pitchEndMark.style.display = off ? 'none' : '';
+      if (!off) {
+        this.pitchEndMark.setAttribute('transform',
+          `translate(0, ${-delta * RailScene.PITCH_PX})`);
+      }
+    }
+
+    if (this.nextStrip) {
+      const text = `next ${pieceLabel(next)} · ${next.length} mm`
+        + `${this.branches[this.active]!.roomMm !== null ? ' · roomed end' : ''}`;
+      if (this.nextStrip.textContent !== text) this.nextStrip.textContent = text;
+    }
   }
 
   /** Pin the wheel to the working end, every frame, through every orbit. */
@@ -1449,16 +1591,11 @@ export class RailScene {
     const wheel = this.wheelEl;
     if (!wheel) return;
     let mode: 'ghost' | 'sel' | null = null;
-    if (this.selIdx >= 0 && this.pieces[this.selIdx]) {
+    if (!this.firstPerson && this.selIdx >= 0 && this.pieces[this.selIdx]) {
       let s1 = 0;
       for (let i = 0; i <= this.selIdx; i += 1) s1 += this.pieces[i]!.length;
       const f = this.rail.sample(Math.min(s1, this.rail.lengthMm), this.sampleWindow);
       if (f) { this.wheelAnchor.set(f.x, f.y, f.z); mode = 'sel'; }
-    } else if (this.armed && this.ghostPiece
-      && this.ghostGroup.children.length > 0) {
-      // Only when the ghost actually drew — a wheel on a stale anchor
-      // would be adjusting a piece that is not where it points.
-      mode = 'ghost';
     }
     if (!mode) {
       wheel.style.display = 'none';
@@ -1470,14 +1607,7 @@ export class RailScene {
     wheel.style.display = '';
     wheel.style.left = `${(v.x * 0.5 + 0.5) * (this.host.clientWidth || 1)}px`;
     wheel.style.top = `${(-v.y * 0.5 + 0.5) * (this.host.clientHeight || 1)}px`;
-    if (mode !== this.wheelMode) {
-      this.wheelMode = mode;
-      if (this.wheelCenter) {
-        this.wheelCenter.textContent = mode === 'ghost' ? '✓' : '✕';
-        this.wheelCenter.title = mode === 'ghost'
-          ? 'place this piece' : 'done with this piece';
-      }
-    }
+    this.wheelMode = mode;
   }
 
   /* ------------------------------------------------------------ the hubs */
@@ -1586,7 +1716,6 @@ export class RailScene {
    * wins — which is the tolerance a phone actually needs.
    */
   private tapTrack(clientX: number, clientY: number): void {
-    if (this.armed) return; // aiming has its own working end
     const rect = this.renderer.domElement.getBoundingClientRect();
     const px = clientX - rect.left;
     const py = clientY - rect.top;
@@ -1650,16 +1779,9 @@ export class RailScene {
       .reduce((n, b) => n + b.pieces.length, 0);
     const branchName = this.active === 0
       ? 'main line' : `branch ${this.active}`;
-    const stateLabel = this.armed
-      ? ('piece' in this.armed
-        ? `AIMING ${this.armed.piece.toUpperCase()}${this.ghostPiece
-          ? ` · ${this.ghostPiece.pitch}° / ${this.ghostPiece.turn}°`
-            + ` / ${this.ghostPiece.length} mm`
-          : ''}`
-        : `AIMING ${this.armed.preset.toUpperCase()} — tap again to place`)
-      : this.selIdx >= 0 && this.pieces[this.selIdx]
-        ? `piece #${this.selIdx + 1} ${pieceLabel(this.pieces[this.selIdx]!)}`
-        : '';
+    const stateLabel = this.selIdx >= 0 && this.pieces[this.selIdx]
+      ? `piece #${this.selIdx + 1} ${pieceLabel(this.pieces[this.selIdx]!)}`
+      : '';
     const mini = `<b>${totalPieces}</b> pieces · ${end.lengthMm.toFixed(0)} mm
       · ${branchName}${this.branches.length > 1
   ? ` of ${this.branches.length}` : ''}
@@ -1689,16 +1811,66 @@ export class RailScene {
 
   /* ------------------------------------------------------------ the orbit */
 
+  private readonly touchPts = new Map<number, { x: number; y: number }>();
+
+  private pinchDist = 0;
+
   private bindCamera(): void {
     const canvas = this.renderer.domElement;
     canvas.addEventListener('pointerdown', (e) => {
       try { canvas.setPointerCapture(e.pointerId); } catch { /* fine */ }
-      if (this.dragPointer === null) {
+      this.touchPts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (this.touchPts.size === 2) {
+        // A second finger promotes the gesture to pan/pinch: the orbit
+        // lets go, and no tap can come of it.
+        const [a, b] = [...this.touchPts.values()];
+        this.pinchDist = Math.hypot(a!.x - b!.x, a!.y - b!.y);
+        this.dragPointer = null;
+        this.tapAt = null;
+      } else if (this.dragPointer === null) {
         this.dragPointer = e.pointerId;
         this.tapAt = { x: e.clientX, y: e.clientY, t: performance.now() };
       }
     });
     canvas.addEventListener('pointermove', (e) => {
+      const prev = this.touchPts.get(e.pointerId);
+      if (prev) {
+        /* TWO FINGERS, free cam: pan on the midpoint, zoom on the spread —
+         * the camera the phone hand expects. */
+        if (this.touchPts.size >= 2 && !this.firstPerson) {
+          const before = [...this.touchPts.values()];
+          const midBefore = {
+            x: (before[0]!.x + before[1]!.x) / 2,
+            y: (before[0]!.y + before[1]!.y) / 2,
+          };
+          this.touchPts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+          const after = [...this.touchPts.values()];
+          const midAfter = {
+            x: (after[0]!.x + after[1]!.x) / 2,
+            y: (after[0]!.y + after[1]!.y) / 2,
+          };
+          const spread = Math.hypot(
+            after[0]!.x - after[1]!.x, after[0]!.y - after[1]!.y,
+          );
+          if (this.pinchDist > 1) {
+            this.camDist = Math.min(500, Math.max(25,
+              this.camDist * (this.pinchDist / Math.max(1, spread))));
+          }
+          this.pinchDist = spread;
+          // The world follows the fingers: pixel deltas scaled to world
+          // units at the target's distance.
+          const h = this.host.clientHeight || 1;
+          const wpp = (2 * this.camDist
+            * Math.tan((this.camera.fov * Math.PI) / 360)) / h;
+          const right = new THREE.Vector3().setFromMatrixColumn(this.camera.matrix, 0);
+          const upv = new THREE.Vector3().setFromMatrixColumn(this.camera.matrix, 1);
+          this.camTarget
+            .addScaledVector(right, -(midAfter.x - midBefore.x) * wpp)
+            .addScaledVector(upv, (midAfter.y - midBefore.y) * wpp);
+          return;
+        }
+        this.touchPts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      }
       if (e.pointerId !== this.dragPointer) return;
       if (this.firstPerson) {
         /* In her eyes the drag IS the aim — one number for the view and
@@ -1712,6 +1884,8 @@ export class RailScene {
       this.camPitch = Math.min(1.45, Math.max(0.05, this.camPitch + e.movementY * 0.004));
     });
     const release = (e: PointerEvent): void => {
+      this.touchPts.delete(e.pointerId);
+      if (this.touchPts.size < 2) this.pinchDist = 0;
       if (e.pointerId !== this.dragPointer) return;
       this.dragPointer = null;
       // A press that never travelled is a TAP — the select gesture. The
@@ -1727,6 +1901,8 @@ export class RailScene {
     };
     canvas.addEventListener('pointerup', release);
     canvas.addEventListener('pointercancel', (e) => {
+      this.touchPts.delete(e.pointerId);
+      if (this.touchPts.size < 2) this.pinchDist = 0;
       if (e.pointerId === this.dragPointer) this.dragPointer = null;
       this.tapAt = null;
     });
@@ -1737,7 +1913,6 @@ export class RailScene {
   }
 
   private aimCamera(): void {
-    this.crosshair.style.display = this.firstPerson ? '' : 'none';
     if (this.firstPerson) {
       /* Her own eyes, looking along the AIM — the same number a held DIG
        * grows the tube along, so the view and the dig cannot disagree. */
@@ -1862,7 +2037,6 @@ export class RailScene {
    * is deliberately left alone, because the aim is how she steered here.
    */
   private setActiveForRide(index: number, atS: number): void {
-    if (this.armed) this.cancelArm();
     this.active = index;
     this.selIdx = -1;
     this.openHub = -1;
@@ -1872,6 +2046,7 @@ export class RailScene {
     this.retintBeams();
     this.rebuildLabels();
     this.antS = Math.min(atS, this.rail.lengthMm);
+    this.refreshEndCache();
     this.refreshReadout(true);
   }
 
@@ -1895,10 +2070,8 @@ export class RailScene {
       .map((b, i) => ({ b, i }))
       .filter(({ b }) => b.parent?.branch === this.active);
     if (children.length === 0) return false;
-    const start = this.startOfActive();
-    const end = endStateOf(this.pieces, { at: start.at, forward: start.forward });
     const exit = bestExitToward(
-      this.aimHeadingDeg, this.aimPitchDeg, end.headingDeg,
+      this.aimHeadingDeg, this.aimPitchDeg, this.endCache.headingDeg,
       children.map(({ b }) => b.parent!.exit),
     );
     if (!exit) return false;
@@ -1943,7 +2116,8 @@ export class RailScene {
     }
 
     this.poseRider(dt);
-    this.refreshReadout();
+    if (this.firstPerson) this.updateTapes();
+    else this.refreshReadout();
     this.aimCamera();
   }
 
@@ -2016,25 +2190,9 @@ export class RailScene {
 
   clearForTest(): void { this.clear(); }
 
-  armForTest(kind: PieceKind): void {
-    const buttons = this.hud.querySelectorAll<HTMLButtonElement>('button');
-    const label = { straight: '─', up: '▲', down: '▼', left: '◀', right: '▶' }[kind];
-    for (const b of buttons) {
-      if (b.textContent === label) { this.armOrPlace(b, { piece: kind }); return; }
-    }
-  }
-
-  cancelArmForTest(): void { this.cancelArm(); }
-
   wheelTapForTest(
     field: 'pitch' | 'turn' | 'roll' | 'length', dir: 1 | -1,
   ): void { this.wheelTap(field, dir); }
-
-  placeGhostForTest(): void { this.placeGhost(); }
-
-  ghostPieceForTest(): DigPiece | null {
-    return this.ghostPiece ? { ...this.ghostPiece } : null;
-  }
 
   stepSelectionForTest(delta: 1 | -1): void { this.stepSelection(delta); }
 
@@ -2063,7 +2221,24 @@ export class RailScene {
 
   setWalkForTest(dir: -1 | 0 | 1): void { this.walkInput = dir; }
 
-  setViewForTest(first: boolean): void { this.firstPerson = first; }
+  setViewForTest(first: boolean): void { this.setFirstPerson(first); }
+
+  hudForTest(): Record<string, number> {
+    const next = this.snappedNext();
+    const visible = (el: HTMLElement | null): number =>
+      (el && el.style.display !== 'none' ? 1 : 0);
+    return {
+      firstPerson: this.firstPerson ? 1 : 0,
+      tapesVisible: visible(this.headingTapeEl),
+      digVisible: visible(this.antRightBar),
+      editorVisible: visible(this.editorBar),
+      nextPitch: next.pitch,
+      nextTurn: next.turn,
+      nextRoll: next.roll,
+      endHeadingDeg: this.endCache.headingDeg,
+      endPitchDeg: this.endCache.pitchDeg,
+    };
+  }
 
   antForTest(): Record<string, number> {
     return {
@@ -2130,14 +2305,8 @@ export class RailScene {
       soilMode: this.soilMode === 'xray' ? 0 : this.soilMode === 'solid' ? 1 : 2,
       roomMm: this.branches[this.active]!.roomMm ?? 0,
       planChambers: plan.nodes.filter((n) => n.kind === 'chamber').length,
-      armed: this.armed ? 1 : 0,
-      ghostMeshes: this.ghostGroup.children.length,
       selIdx: this.selIdx,
       selMeshes: this.selGroup.children.length,
-      ghostPitch: this.ghostPiece?.pitch ?? 0,
-      ghostTurn: this.ghostPiece?.turn ?? 0,
-      ghostRoll: this.ghostPiece?.roll ?? 0,
-      ghostLen: this.ghostPiece?.length ?? 0,
     };
   }
 
