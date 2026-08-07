@@ -155,8 +155,22 @@ export class PipesScene {
 
   private camPointer: number | null = null;
 
-  /** First-person look pitch — the right-half drag sets it. */
+  /** First-person free look — the right-half drag sets BOTH, and the
+   *  body keeps its own heading; the neck covers the difference. */
   private fpPitch = 0;
+
+  private fpYaw = 0;
+
+  /** A second right-half touch makes the drag a PINCH: zoom. */
+  private pinchPointer: number | null = null;
+
+  private pinchLast = 0;
+
+  private readonly touchAt = new Map<number, { x: number; y: number }>();
+
+  /** Hub room centres, refreshed with the markers — positional room
+   *  detection, because "am I in the room" is a question about SPACE. */
+  private hubCentres: { branch: number; x: number; y: number; z: number; r: number }[] = [];
 
   private stickPointer: number | null = null;
 
@@ -327,10 +341,14 @@ export class PipesScene {
       });
     }
     this.roomMarkers = new THREE.Group();
+    this.hubCentres = [];
     this.branches.forEach((branch, i) => {
       if (branch.roomMm === null || branch.pieces.length === 0) return;
       const start = branchStartOf(this.branches, i);
       const end = endStateOf(branch.pieces, { at: start.at, forward: start.forward });
+      this.hubCentres.push({
+        branch: i, x: end.x, y: end.y, z: end.z, r: branch.roomMm,
+      });
       const kind = this.roomKind.get(i) ?? 'junction';
       const ring = new THREE.Mesh(
         new THREE.TorusGeometry(branch.roomMm + 1.5, 0.45, 8, 26),
@@ -378,19 +396,15 @@ export class PipesScene {
     return { line: this.rideBranch };
   }
 
-  /** The hub whose ROOM she is physically standing in, or -1. A room's
-   *  whole radius counts — a 2.5 mm sweet spot was impossible to stop
-   *  inside on a phone. */
+  /** The hub whose ROOM she is physically standing in, or -1 — measured
+   *  against the room SPHERES themselves, not a rail projection, because
+   *  free crawling stands wherever it likes inside a room. */
   private hubZone(): number {
-    const branch = this.branches[this.rideBranch];
-    const rail = this.rideRail();
-    if (branch && rail) {
-      if (branch.roomMm !== null && this.rideS > rail.lengthMm - ROOM_RADIUS_MM) {
-        return this.rideBranch;
-      }
-      if (branch.parent && this.rideS < ROOM_RADIUS_MM) {
-        return branch.parent.branch;
-      }
+    for (const h of this.hubCentres) {
+      const d = Math.hypot(
+        this.antPos.x - h.x, this.antPos.y - h.y, this.antPos.z - h.z,
+      );
+      if (d < h.r + 2.5) return h.branch;
     }
     return -1;
   }
@@ -491,7 +505,7 @@ export class PipesScene {
     this.armedKind = null;
     this.clearGhost();
     this.recarve();
-    this.snapRideToEnd();
+    this.unbury();
     this.refreshChips();
   }
 
@@ -530,7 +544,7 @@ export class PipesScene {
     this.armedKind = null;
     this.clearGhost();
     this.recarve();
-    this.snapRideToEnd();
+    this.unbury();
     this.refreshChips();
   }
 
@@ -658,12 +672,6 @@ export class PipesScene {
 
   private invalidateRails(): void { this.railCache.clear(); }
 
-  private snapRideToEnd(): void {
-    this.rideBranch = this.active;
-    const rail = this.rideRail();
-    this.rideS = rail ? rail.lengthMm : 0;
-  }
-
   /* ------------------------------------------------------ free crawling */
 
   /** Solid soil at a world point? The carved pipes are the only air. */
@@ -674,16 +682,20 @@ export class PipesScene {
     ) > 0;
   }
 
-  /** The first standable surface at or below `fromY`, or null. */
-  private floorBelow(x: number, z: number, fromY: number): number | null {
+  /** The first standable surface at or below `fromY`, or null.
+   *
+   *  A buried start may pop up only `maxPopMm` — enough to shrug off a
+   *  ceiling graze or a thin heap, NEVER enough to tunnel through a
+   *  pipe roof to daylight (the first cut popped unbounded, and
+   *  crawling a tube ended on the lawn). The one-time unbounded unbury
+   *  after a re-carve is `unbury()`'s job, not this one's. */
+  private floorBelow(
+    x: number, z: number, fromY: number, maxPopMm = 4,
+  ): number | null {
     const solid = (y: number): boolean => this.solidAt(x, y, z);
     let y = fromY;
     if (solid(y)) {
-      /* BURIED — a mound heaped over her feet by a fresh carve, or an
-       * edit under her. The standable surface is UP: find air and stand
-       * on the boundary. Returning null here was an infinite fall
-       * through solid ground the moment the entrance mound grew. */
-      for (; y < fromY + 30; y += 0.5) {
+      for (; y < fromY + maxPopMm; y += 0.5) {
         if (!solid(y)) break;
       }
       if (solid(y)) return null;
@@ -778,38 +790,80 @@ export class PipesScene {
       }
     }
 
+    /*
+     * The safety net under all of it: her centre must be AIR. A frame
+     * that ends inside soil (ceiling graze mid-climb, an edit under
+     * her) restores the last provably-open position instead of letting
+     * the walker escape through a roof or sink through a floor.
+     */
+    if (this.solidAt(this.antPos.x, this.antPos.y, this.antPos.z)) {
+      this.embedFrames += 1;
+      if (this.embedFrames >= 3 && this.haveSafe) {
+        this.antPos.copy(this.lastSafe);
+        this.fallV = 0;
+        this.embedFrames = 0;
+      }
+    } else {
+      this.embedFrames = 0;
+      this.lastSafe.copy(this.antPos);
+      this.haveSafe = true;
+    }
+
     this.projectOntoNetwork();
     this.poseQueen(dt);
     this.updateReadout();
+  }
+
+  private readonly lastSafe = new THREE.Vector3();
+
+  private haveSafe = false;
+
+  private embedFrames = 0;
+
+  /** One-time, unbounded: after a carve changes the ground she stands
+   *  on (a mound heaped over her), seat her on the surface above. */
+  private unbury(): void {
+    if (!this.solidAt(this.antPos.x, this.antPos.y, this.antPos.z)) return;
+    for (let y = this.antPos.y; y < this.antPos.y + 40; y += 0.5) {
+      if (!this.solidAt(this.antPos.x, y, this.antPos.z)) {
+        this.antPos.y = y + RIDE_MM * 0.5;
+        this.fallV = 0;
+        this.haveSafe = false;
+        return;
+      }
+    }
   }
 
   private poseQueen(dt: number): void {
     const fwdFlat = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
     if (this.queenReady) {
       this.queen.root.visible = !this.firstPerson;
-      /* Up follows the floor she stands on, probed around her stance. */
-      const probe = 1.4;
+      /*
+       * THE BODY BENDS. Pitch follows the floor she actually stands on
+       * (probed fore and beside her, full-strength so a plunging elbow
+       * pitches her nose-down into it), and the NECK covers the angle
+       * between her body and the camera — look around in first person,
+       * orbit in third, and she turns her head to meet it, gaster
+       * counter-swinging, instead of riding stiff as a railcar.
+       */
+      const probe = 1.6;
       const hC = this.floorBelow(this.antPos.x, this.antPos.z, this.antPos.y + 1)
         ?? this.antPos.y - RIDE_MM;
       const hF = this.floorBelow(
         this.antPos.x + fwdFlat.x * probe, this.antPos.z + fwdFlat.z * probe,
-        this.antPos.y + 1.5,
+        this.antPos.y + 2.2,
       ) ?? hC;
       const hR = this.floorBelow(
         this.antPos.x + fwdFlat.z * probe, this.antPos.z - fwdFlat.x * probe,
-        this.antPos.y + 1.5,
+        this.antPos.y + 2.2,
       ) ?? hC;
-      const up = new THREE.Vector3(-(hR - hC) * 0, hC * 0 + 1, 0);
-      up.set(
-        -((hR - hC) / probe) * 0.0 - fwdFlat.z * ((hR - hC) / probe) * 0,
-        1, 0,
-      );
-      /* Slope from the two probes, expressed as a tilt of world up. */
-      const gradF = (hF - hC) / probe;
-      const gradR = (hR - hC) / probe;
-      up.set(0, 1, 0)
-        .addScaledVector(fwdFlat, -gradF * 0.6)
-        .addScaledVector(new THREE.Vector3(fwdFlat.z, 0, -fwdFlat.x), -gradR * 0.6)
+      const clampG = (v: number): number => Math.max(-2.4, Math.min(2.4, v));
+      const gradF = clampG((hF - hC) / probe);
+      const gradR = clampG((hR - hC) / probe);
+      const right2 = new THREE.Vector3(fwdFlat.z, 0, -fwdFlat.x);
+      const up = new THREE.Vector3(0, 1, 0)
+        .addScaledVector(fwdFlat, -gradF)
+        .addScaledVector(right2, -gradR)
         .normalize();
       const fwd = fwdFlat.clone().addScaledVector(up, -fwdFlat.dot(up)).normalize();
       const wantBank = Math.max(-0.5, Math.min(0.5, this.turnInput * 0.3));
@@ -829,12 +883,26 @@ export class PipesScene {
       this.queen.root.position.copy(this.smoothPos);
       this.queen.root.position.y = this.smoothPos.y - RIDE_MM;
       this.queen.root.quaternion.copy(this.smoothQuat);
+      /* The neck: where is the VIEW, relative to her body? */
+      let neckYaw: number;
+      let neckPitch: number | undefined;
+      if (this.firstPerson) {
+        neckYaw = this.fpYaw;
+        neckPitch = this.fpPitch;
+      } else {
+        const camLook = this.camera.getWorldDirection(new THREE.Vector3());
+        neckYaw = Math.atan2(camLook.x, camLook.z) - this.facing;
+        while (neckYaw > Math.PI) neckYaw -= Math.PI * 2;
+        while (neckYaw < -Math.PI) neckYaw += Math.PI * 2;
+        neckPitch = undefined; // over the shoulder, her eyes stay hers
+      }
       this.queen.update(dt, {
         speed: (Math.abs(this.walkInput) * 14) / MODEL_SCALE,
         turn: this.turnInput * 2.6,
         digging: 0,
         carrying: 0,
-        headYaw: 0,
+        headYaw: neckYaw,
+        headPitch: neckPitch,
       });
       this.queen.solveFeet(
         (x, z) => this.floorBelow(x, z, this.antPos.y + 1.5)
@@ -851,11 +919,12 @@ export class PipesScene {
       const eye = at.clone().addScaledVector(fwd, 1.2).add(new THREE.Vector3(0, 0.9, 0));
       this.camera.position.copy(eye);
       this.camera.up.set(0, 1, 0);
+      const yaw = this.facing + this.fpYaw;
       const p = this.fpPitch;
       this.camera.lookAt(
-        eye.x + fwd.x * Math.cos(p),
+        eye.x + Math.sin(yaw) * Math.cos(p),
         eye.y + Math.sin(p),
-        eye.z + fwd.z * Math.cos(p),
+        eye.z + Math.cos(yaw) * Math.cos(p),
       );
       return;
     }
@@ -1019,6 +1088,15 @@ export class PipesScene {
       }
       if (!leftHalf && this.camPointer === null) {
         this.camPointer = e.pointerId;
+        this.touchAt.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        el.setPointerCapture(e.pointerId);
+        return;
+      }
+      if (!leftHalf && this.pinchPointer === null) {
+        this.pinchPointer = e.pointerId;
+        this.touchAt.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        const a = this.touchAt.get(this.camPointer!);
+        if (a) this.pinchLast = Math.hypot(e.clientX - a.x, e.clientY - a.y);
         el.setPointerCapture(e.pointerId);
       }
     });
@@ -1038,9 +1116,26 @@ export class PipesScene {
         }
         return;
       }
+      if (this.touchAt.has(e.pointerId)) {
+        this.touchAt.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      }
+      if (this.camPointer !== null && this.pinchPointer !== null) {
+        if (e.pointerId !== this.camPointer && e.pointerId !== this.pinchPointer) return;
+        const a = this.touchAt.get(this.camPointer);
+        const b = this.touchAt.get(this.pinchPointer);
+        if (!a || !b) return;
+        const now = Math.hypot(b.x - a.x, b.y - a.y);
+        if (this.pinchLast > 1 && now > 1) {
+          this.camDist = Math.min(180, Math.max(16, this.camDist * (this.pinchLast / now)));
+        }
+        this.pinchLast = now;
+        return;
+      }
       if (e.pointerId !== this.camPointer) return;
       if (this.firstPerson) {
-        this.facing -= e.movementX * 0.005;
+        /* FREE LOOK: the drag turns her NECK and eyes, not her body —
+         * the joystick owns the body. */
+        this.fpYaw = Math.min(2.2, Math.max(-2.2, this.fpYaw - e.movementX * 0.005));
         this.fpPitch = Math.min(1.1, Math.max(-1.1, this.fpPitch - e.movementY * 0.004));
       } else {
         this.camYaw -= e.movementX * 0.006;
@@ -1056,9 +1151,30 @@ export class PipesScene {
         if (this.knobEl) this.knobEl.style.transform = 'translate(-50%,-50%)';
       }
       if (e.pointerId === this.camPointer) this.camPointer = null;
+      if (e.pointerId === this.pinchPointer) this.pinchPointer = null;
+      this.touchAt.delete(e.pointerId);
+      if (this.camPointer === null && this.pinchPointer !== null) {
+        this.camPointer = this.pinchPointer;
+        this.pinchPointer = null;
+      }
     };
     el.addEventListener('pointerup', done);
     el.addEventListener('pointercancel', done);
+    el.addEventListener('lostpointercapture', done);
+    /* The lockup insurance: releases can die off-canvas (browser UI,
+     * notification pulls). WINDOW-level teardown means a lost finger can
+     * never wedge the camera or the stick permanently. */
+    window.addEventListener('pointerup', done);
+    window.addEventListener('pointercancel', done);
+    window.addEventListener('blur', () => {
+      this.stickPointer = null;
+      this.camPointer = null;
+      this.pinchPointer = null;
+      this.walkInput = 0;
+      this.turnInput = 0;
+      this.touchAt.clear();
+      if (this.stickEl) this.stickEl.style.display = 'none';
+    });
     el.addEventListener('wheel', (e) => {
       this.camDist = Math.min(180, Math.max(20, this.camDist + e.deltaY * 0.06));
     }, { passive: true });
@@ -1121,6 +1237,7 @@ export class PipesScene {
       this.armedKind = null;
       this.clearGhost();
       this.recarve();
+      this.unbury();
       this.flash('nest loaded');
     } catch {
       this.flash('save was unreadable');
