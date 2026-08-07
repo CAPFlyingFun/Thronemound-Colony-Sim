@@ -1349,7 +1349,22 @@ export class IslandScene {
      */
     if (bore.digging) {
       this.boreEngaged = this.underground || this.biteTouched;
-    } else if (!this.underground) this.boreEngaged = false;
+    } else if (!this.underground) {
+      this.boreEngaged = false;
+    } else if (this.boreEngaged
+      && (this.chamberId !== null || this.openSpaceAround())) {
+      /*
+       * A CHAMBER FREES HER, plan or no plan. Engagement used to persist
+       * for as long as she was underground, because in a TUBE that is
+       * what grip means — but a jaw-carved room has no plan entry, so
+       * the old chamber test never fired and she rode her aim line
+       * through open air: the "stuck and floating" report, exactly. If
+       * the soil around her says open room rather than tube, the free
+       * walker (which has gravity, floors and the wall-press climb)
+       * takes her back. The next stroke into a wall re-engages.
+       */
+      this.boreEngaged = false;
+    }
     const speed = this.input.walk * WALK_SPEED * (this.input.sprint ? SPRINT : 1);
     this.velocity.set(Math.sin(this.facing) * speed, 0, Math.cos(this.facing) * speed);
 
@@ -2075,7 +2090,26 @@ export class IslandScene {
    * out the far side of the hill, and the digging becomes decoration.
    */
   private moveBore(dt: number, speed: number): void {
-    if (Math.abs(speed) < 1e-6) return;
+    if (Math.abs(speed) < 1e-6) {
+      /*
+       * IDLE IN GRIP still touches down. Hanging motionless on the aim
+       * line read as floating whenever the space around her was roomier
+       * than a tube — so with the jaws quiet and the stick centred she
+       * eases onto any floor within hover reach. A real shaft's floor is
+       * far below and does NOT qualify: grip keeps holding her there,
+       * which is the whole point of grip.
+       */
+      if (!this.input.dig) {
+        const floor = this.floorBelow(this.at.x, this.at.z, this.at.y + 0.5);
+        if (floor !== null) {
+          const want = floor + RIDE;
+          if (want < this.at.y && this.at.y - want < 1.2) {
+            this.at.y += (want - this.at.y) * Math.min(1, dt * 8);
+          }
+        }
+      }
+      return;
+    }
     const span = SPAN_MM / MM;
     const next = this.at.clone().addScaledVector(this.boreAim(), speed * dt);
     next.x = Math.min(span - 2, Math.max(2, next.x));
@@ -2178,7 +2212,12 @@ export class IslandScene {
     // with the digging apparently working and nothing ahead but air.
     const points: THREE.Vector3[] = [];
     if (this.boreEngaged) {
+      /* Three, not two: with only the end spheres, the fit probe at her
+       * FLANK sat exactly on both their surfaces (√(1.8²+2.4²) = 3.0 mm
+       * against a 3.0 mm radius) and a wall grazing her middle wedged
+       * her — measured as a frozen climb out of a half-dug room. */
       points.push(this.at.clone().addScaledVector(aim, -this.body.len / 2));
+      points.push(this.at.clone());
       points.push(this.at.clone().addScaledVector(aim, this.body.len / 2));
     }
     for (let i = 0; i < SCOOP_STEPS; i += 1) {
@@ -2641,6 +2680,13 @@ export class IslandScene {
       dig.classList.toggle('is-grip', this.digMode);
       scoopBtn.style.display = this.digMode ? '' : 'none';
       if (!this.digMode) this.input.dig = false;
+      /* Digging is aiming, and aiming is done down her own eyes: arming
+       * DIG drops into first person with a wide 100° field so the tunnel
+       * mouth and the instruments share the frame. Disarming narrows the
+       * lens back; the VIEW chip still switches freely either way. */
+      if (this.digMode) this.firstPerson = true;
+      this.camera.fov = this.digMode ? 100 : 60;
+      this.camera.updateProjectionMatrix();
     });
     actions.appendChild(dig);
     scoopBtn.addEventListener('pointerdown', (e) => {
@@ -2969,6 +3015,29 @@ export class IslandScene {
   /* -------------------------------------------------------------- probes */
 
   /* ------------------------------------------------- the founding quests */
+
+  /**
+   * Tube or room? Eight probes on a ring wider than any bore she cuts:
+   * inside a tunnel most of them sit in soil; in a hollowed chamber most
+   * sit in air. Decides only whether GRIP may let go of her.
+   */
+  private openSpaceAround(): boolean {
+    const stream = this.stream;
+    if (!stream) return false;
+    const r = this.body.len * 2;
+    let air = 0;
+    for (let i = 0; i < 8; i += 1) {
+      const a = (i / 8) * Math.PI * 2;
+      if (stream.solidAtWu(
+        this.at.x + Math.sin(a) * r, this.at.y, this.at.z + Math.cos(a) * r,
+      ) !== true) air += 1;
+    }
+    /* A vertical shaft shows NO air on the ring, a straight tube two
+     * (fore and aft), a curve three — so four or more is a room, even a
+     * half-hollowed one. Climbing shafts, the case grip exists for, can
+     * never trip this; and a held 🪏 re-grips underground regardless. */
+    return air >= 4;
+  }
 
   /** How far below the ORIGINAL ground she is, in mm. Never negative. */
   private depthMm(): number {
