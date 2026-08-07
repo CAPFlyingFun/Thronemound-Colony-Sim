@@ -574,7 +574,7 @@ export class IslandScene {
     this.heightsBase = this.heights.slice();
     this.textures = textures;
     this.islandMaterial = makeBiomeMaterial(textures, this.clip);
-    this.soilMaterial = makeBiomeMaterial(textures);
+    this.soilMaterial = makeBiomeMaterial(textures, undefined, true);
     /* The soil only: the island's own surface sheet is the lit world she
      * is standing on, and contouring that would be an x-ray of the hill. */
     this.sense = makeSensed(this.soilMaterial);
@@ -1011,13 +1011,22 @@ export class IslandScene {
     // can tell an undug top (paint the biome, match the island seamlessly)
     // from an excavated wall or floor (paint dirt, whatever the altitude).
     const orig = new Float32Array(elev.length);
+    // ...and the original terrain's SLOPE (its normal's Y), so undug soil
+    // bands by the same slope the island does. Surface-nets normals read
+    // flatter than the data grid's, and the flat reading turned the mound's
+    // dark cliff bands into open mountain/snow — white ground at her feet.
+    const groundNy = new Float32Array(elev.length);
+    const d = STEP_MM / MM; // one data cell, in world units
     for (let v = 0; v < orig.length; v += 1) {
-      orig[v] = this.groundHeightAt(
-        stream.originWorldX + data.positions[v * 3]!,
-        stream.originWorldZ + data.positions[v * 3 + 2]!,
-      ) * MM;
+      const wx = stream.originWorldX + data.positions[v * 3]!;
+      const wz = stream.originWorldZ + data.positions[v * 3 + 2]!;
+      orig[v] = this.groundHeightAt(wx, wz) * MM;
+      const dhx = (this.groundHeightAt(wx + d, wz) - this.groundHeightAt(wx - d, wz)) / (2 * d);
+      const dhz = (this.groundHeightAt(wx, wz + d) - this.groundHeightAt(wx, wz - d)) / (2 * d);
+      groundNy[v] = 1 / Math.hypot(dhx, 1, dhz);
     }
     geometry.setAttribute('aOrig', new THREE.BufferAttribute(orig, 1));
+    geometry.setAttribute('aGroundNy', new THREE.BufferAttribute(groundNy, 1));
     geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
     geometry.computeVertexNormals();
     const mesh = new THREE.Mesh(geometry, this.soilMaterial!);

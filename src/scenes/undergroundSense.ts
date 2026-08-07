@@ -97,7 +97,23 @@ export function makeSensed(material: THREE.Material): SenseUniforms {
     uDeep: { value: new THREE.Color(0x040c09) },
   };
 
-  material.onBeforeCompile = (shader) => {
+  /*
+   * CHAIN the hook, never replace it. This material may already carry a
+   * shader hook — the soil's is the whole biome paint job — and assigning
+   * over it silently erased that: the soil window rendered as a bald white
+   * MeshStandardMaterial wherever she walked, textures gone. The sense is
+   * a LAYER over whatever the material already is, so its injections run
+   * after the prior hook's (none of the includes it edits are ones the
+   * biome hook removes). The program cache key chains for the same reason:
+   * three.js keys compiled programs on the hook's source text, and two
+   * different hooks with a colliding key would hand one material the
+   * other's program.
+   */
+  const prior = material.onBeforeCompile;
+  const priorKey = material.customProgramCacheKey.bind(material);
+  material.customProgramCacheKey = () => `${priorKey()}-sensed`;
+  material.onBeforeCompile = (shader, renderer) => {
+    prior.call(material, shader, renderer);
     for (const [name, uniform] of Object.entries(uniforms)) {
       shader.uniforms[name] = uniform as THREE.IUniform;
     }

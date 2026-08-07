@@ -46,9 +46,19 @@ export async function loadBiomeTextures(baseUrl: string): Promise<BiomeTextureSe
   return out as BiomeTextureSet;
 }
 
+/**
+ * `soilSlope`: band by the ORIGINAL terrain's slope (per-vertex aGroundNy)
+ * instead of the mesh's own normal. The diggable soil window re-meshes the
+ * same ground with surface nets, whose smoothed normals read FLATTER than
+ * the island's data-grid slopes — so a mound face the island paints as dark
+ * cliff banded as open mountain/snow in the window, and the ground turned
+ * white wherever she walked. Same slope source, same paint, invisible seam.
+ * (Dug surfaces never get here — the aOrig dirt override wins first.)
+ */
 export function makeBiomeMaterial(
   tex: BiomeTextureSet,
   clip?: { value: THREE.Vector4 },
+  soilSlope = false,
 ): THREE.MeshStandardMaterial {
   const mat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
@@ -56,6 +66,15 @@ export function makeBiomeMaterial(
     metalness: 0,
     side: THREE.DoubleSide,
   });
+  /*
+   * One compiled program PER VARIANT. three.js keys its program cache on
+   * onBeforeCompile.toString(), and every material this factory makes
+   * shares that source text even though the GLSL it emits differs (clip
+   * discard, slope source) — so whichever variant compiled first got its
+   * program silently REUSED by the others, whose own injections never ran.
+   */
+  mat.customProgramCacheKey = () =>
+    `biome${clip ? '-clip' : ''}${soilSlope ? '-soil' : ''}`;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.tSand = { value: tex.sand };
     shader.uniforms.tGrass = { value: tex.grass };
@@ -69,7 +88,8 @@ export function makeBiomeMaterial(
       .replace(
         '#include <common>',
         '#include <common>\nattribute float aElev;\nattribute float aOrig;\n'
-          + 'varying float vElev;\nvarying float vOrig;\n'
+          + 'attribute float aGroundNy;\n'
+          + 'varying float vElev;\nvarying float vOrig;\nvarying float vGroundNy;\n'
           + 'varying vec3 vBiomeW;\nvarying vec3 vBiomeN;',
       )
       .replace(
@@ -78,7 +98,7 @@ export function makeBiomeMaterial(
       )
       .replace(
         '#include <begin_vertex>',
-        '#include <begin_vertex>\n  vBiomeW = (modelMatrix * vec4(transformed, 1.0)).xyz;\n  vElev = aElev;\n  vOrig = aOrig;',
+        '#include <begin_vertex>\n  vBiomeW = (modelMatrix * vec4(transformed, 1.0)).xyz;\n  vElev = aElev;\n  vOrig = aOrig;\n  vGroundNy = aGroundNy;',
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
@@ -86,6 +106,7 @@ export function makeBiomeMaterial(
         `#include <common>
 varying float vElev;
 varying float vOrig;
+varying float vGroundNy;
 varying vec3 vBiomeW;
 varying vec3 vBiomeN;
 uniform sampler2D tSand, tGrass, tJungle, tRock, tMtn, tSnow, tReef;
@@ -141,7 +162,7 @@ vec3 triplanar(sampler2D tex, vec3 wp, vec3 n, float scale) {
         `{
   float e = vElev;                               // elevation (real m)
   vec3 nrm = normalize(vBiomeN);                 // varying denormalizes across a triangle
-  float slope = 1.0 - clamp(nrm.y, 0.0, 1.0);
+  float slope = 1.0 - clamp(${soilSlope ? 'vGroundNy' : 'nrm.y'}, 0.0, 1.0);
   vec3 wpM = vBiomeW * ${M_PER_WU.toFixed(1)};   // ant world units -> real metres
   vec2 uv = wpM.xz;                              // world-space tiling (flat areas)
   // Jittered band elevation: two octaves of world noise wobble the biome
