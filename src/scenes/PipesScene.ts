@@ -70,7 +70,15 @@ const PALETTE: readonly { kind: PipeKind; label: string }[] = [
 
 const HUBS: ReadonlySet<PipeKind> = new Set(['tee', 'wye', 'cross']);
 
-/** The rotate racks: what the two rotate buttons cycle through. */
+/**
+ * The rotate racks: what the two rotate buttons cycle through.
+ *
+ * Vertical tops out at ±75°, not ±90°, and that is the piece FORMAT's
+ * limit, not a whim: a truly vertical tube has no heading — the math
+ * that orients every joint and junction degenerates (the same reason
+ * the hubs' UP/DOWN exits lead at 75°). The chip says "steep" so the
+ * number reads as the ceiling it is.
+ */
 const YAW_RACK = [0, 45, 90, -45, -90] as const;
 const PITCH_RACK = [0, 45, 75, -45, -75] as const;
 
@@ -341,12 +349,25 @@ export class PipesScene {
    * arm is the whole grammar — no hidden "active branch" to lose.
    */
   private buildAnchor(): { hub: number } | { line: number } {
+    const branch = this.branches[this.rideBranch];
+    const rail = this.rideRail();
+    /*
+     * THE OPEN END WINS. Standing at the growing tip of her line always
+     * extends that line — checked BEFORE the hub zone, because a young
+     * arm out of a junction lies entirely inside the room's radius, and
+     * the hub-first rule made every placement there spawn ANOTHER stub
+     * inside the ball (the "10 lines, 15 pieces" screenshot) instead of
+     * growing the arm out of it. Placement snaps her to the new tip, so
+     * repeated placing walks the line outward naturally.
+     */
+    if (branch && rail && branch.roomMm === null
+      && this.rideS > rail.lengthMm - 6) {
+      return { line: this.rideBranch };
+    }
     const zone = this.hubZone();
     if (zone >= 0) return { hub: zone };
-    const branch = this.branches[this.rideBranch];
     /* A line that ends in a room is CLOSED — its only open ends are the
-     * hub's exits, so building anywhere on it builds from the hub. The
-     * old rule appended pieces THROUGH the room instead. */
+     * hub's exits, so building anywhere on it builds from the hub. */
     if (branch && branch.roomMm !== null) return { hub: this.rideBranch };
     return { line: this.rideBranch };
   }
@@ -381,9 +402,14 @@ export class PipesScene {
     const pitch = PITCH_RACK[this.armedPitchIx]!;
     const branch = this.branches[this.active]!;
     if (this.armedKind === 'straight') {
-      /* One run in the armed direction: the joint takes the yaw, the run
-       * takes the pitch, ends snap by construction. */
-      return [clampPiece({ pitch, turn: yaw, roll: 0, length: PIPE_LEN_MM })];
+      /* TWO 10 mm runs, not one: the piece format caps a piece at 10 mm
+       * and the junction ball is 12 mm — a single run placed from a hub
+       * was born ENTIRELY INSIDE the room, invisible and unreachable.
+       * The joint takes the yaw on the first, the second runs on. */
+      return [
+        clampPiece({ pitch, turn: yaw, roll: 0, length: PIPE_LEN_MM }),
+        clampPiece({ pitch, turn: 0, roll: 0, length: PIPE_LEN_MM }),
+      ];
     }
     if (this.armedKind === 'bend90') {
       /* A quarter bend: yaw rack picks the plane (left/right when yawed,
@@ -878,7 +904,9 @@ export class PipesScene {
       this.rotHBtn.textContent = `ROT ↔ ${YAW_RACK[this.armedYawIx]}°`;
     }
     if (this.rotVBtn) {
-      this.rotVBtn.textContent = `ROT ↕ ${PITCH_RACK[this.armedPitchIx]}°`;
+      const p = PITCH_RACK[this.armedPitchIx]!;
+      this.rotVBtn.textContent = Math.abs(p) === 75
+        ? `ROT ↕ ${p}° steep` : `ROT ↕ ${p}°`;
     }
     const anchor = this.buildAnchor();
     const buildHub = 'hub' in anchor ? anchor.hub : -1;
