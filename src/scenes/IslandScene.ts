@@ -625,8 +625,17 @@ export class IslandScene {
     this.heights = new Int16Array(raw);
     this.heightsBase = this.heights.slice();
     this.textures = textures;
-    this.islandMaterial = makeBiomeMaterial(textures, this.clip);
+    /* BOTH surfaces band by the stride-1 data slope (aGroundNy): the
+     * island's LOD rings and the soil window then agree on where rock
+     * meets sand, instead of each mesh reading its own normals. */
+    this.islandMaterial = makeBiomeMaterial(textures, this.clip, true);
     this.soilMaterial = makeBiomeMaterial(textures, undefined, true);
+    /* The soil window's rim lies coplanar with the island surface it
+     * replaces — polygon offset pulls the soil forward a hair so the
+     * seam is a line, not a z-fight shimmer. */
+    this.soilMaterial.polygonOffset = true;
+    this.soilMaterial.polygonOffsetFactor = -1;
+    this.soilMaterial.polygonOffsetUnits = -1;
     /* The soil only: the island's own surface sheet is the lit world she
      * is standing on, and contouring that would be an x-ray of the hill. */
     this.sense = makeSensed(this.soilMaterial);
@@ -963,6 +972,7 @@ export class IslandScene {
     const positions = new Float32Array(SEC_VERTS * SEC_VERTS * 3);
     const normals = new Float32Array(SEC_VERTS * SEC_VERTS * 3);
     const elev = new Float32Array(SEC_VERTS * SEC_VERTS);
+    const groundNy = new Float32Array(SEC_VERTS * SEC_VERTS);
     const stride = (N - 1) / (MESH_N - 1);
     let at = 0;
     for (let j = 0; j < SEC_VERTS; j += 1) {
@@ -983,6 +993,16 @@ export class IslandScene {
         normals[at] = -dx * inv;
         normals[at + 1] = inv;
         normals[at + 2] = -dz * inv;
+        /* The BAND slope is measured at stride 1, whatever this section's
+         * LOD stride is. Banding off the mesh normal made the rock/sand
+         * split move with the LOD rings — the same hillside wore
+         * different ground on each side of a detail boundary, and never
+         * quite agreed with the soil window's fine-grid slopes either. */
+        const dx1 = (this.sample(g + 1, gz) - this.sample(g - 1, gz))
+          / (2 * STEP_MM);
+        const dz1 = (this.sample(g, gz + 1) - this.sample(g, gz - 1))
+          / (2 * STEP_MM);
+        groundNy[at / 3] = 1 / Math.hypot(dx1, 1, dz1);
         elev[at / 3] = h; // mm IS real metres at 1:1000 — the biome bands read it raw
         at += 3;
       }
@@ -1001,6 +1021,7 @@ export class IslandScene {
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geometry.setAttribute('aElev', new THREE.BufferAttribute(elev, 1));
+    geometry.setAttribute('aGroundNy', new THREE.BufferAttribute(groundNy, 1));
     geometry.setIndex(index);
     geometry.computeBoundingSphere();
     const mesh = new THREE.Mesh(geometry, this.islandMaterial!);
