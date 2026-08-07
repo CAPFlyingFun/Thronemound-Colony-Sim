@@ -61,6 +61,15 @@ export const STROKE_SECONDS = 0.42;
 /** Where in the stroke the jaws are deepest, as a fraction of it. */
 const STRIKE_AT = 0.55;
 
+/**
+ * Seconds from a cold press to the FIRST bite. The full wind-up puts the
+ * strike 0.23 s after the button, which reads as the button not working —
+ * a tap appeared to do nothing, and players pressed three times for one
+ * bite. A stroke already in flight keeps the honest cadence; only the
+ * first from rest starts mid-dip so soil leaves almost on the press.
+ */
+const FIRST_BITE_S = 0.08;
+
 export interface BoreInput {
   /** -1, 0 or 1: steer left, hold, steer right. */
   yaw: number;
@@ -160,7 +169,9 @@ export class BoreRig {
     let bite = false;
     const working = this.digging;
     if (this.phase < 0) {
-      if (working) this.phase = 0;
+      // From rest, start mid-dip: the first bite lands FIRST_BITE_S after
+      // the press instead of a full wind-up later.
+      if (working) this.phase = Math.max(0, STROKE_SECONDS * STRIKE_AT - FIRST_BITE_S);
     } else {
       const before = this.phase;
       this.phase += dt;
