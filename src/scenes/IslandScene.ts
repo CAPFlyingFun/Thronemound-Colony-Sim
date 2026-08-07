@@ -46,6 +46,9 @@ import {
   chamberBox, chamberNorm, insideChamber, type ChamberBox,
 } from './ChamberMovement';
 import { BoreRig } from './BoreControl';
+import {
+  cycleSelection, defaultOption, optionsAt, type SwitchOption,
+} from './railSwitch';
 import { DebugStatsPanel } from './DebugStatsPanel';
 import { LoadingOverlay } from './LoadingOverlay';
 import {
@@ -97,6 +100,7 @@ const S_UP = new THREE.Vector3();
 const S_RIGHT = new THREE.Vector3();
 const S_MAT = new THREE.Matrix4();
 const S_QUAT = new THREE.Quaternion();
+const S_SWITCH = new THREE.Vector3();
 
 /** The tallest ledge she steps up in one stride; anything higher is a WALL
  *  and blocks her — the fix for walking "through" tunnel ends. */
@@ -397,6 +401,12 @@ export class IslandScene {
 
   private jointRow: HTMLDivElement | null = null;
 
+  /** The points chooser, and what it last drew — a row rebuilt every frame
+   *  is a row whose buttons die under the finger pressing them. */
+  private switchRow: HTMLDivElement | null = null;
+
+  private switchRowKey = '';
+
   private scoopBtn: HTMLButtonElement | null = null;
 
   private readonly keysDown = new Set<string>();
@@ -453,6 +463,21 @@ export class IslandScene {
   /** Vertical-bore reverse latch: true while the back-pedal that already
    *  turned her around is still held, so it only turns her ONCE. */
   private railRev = false;
+
+  /** The roads out of the junction she is RIDING TOWARD, or empty when the
+   *  tube ahead simply carries on. Refreshed as she approaches. */
+  private switchOptions: SwitchOption[] = [];
+
+  /** Which of them the points are set to. Index into `switchOptions`. */
+  private switchPick = 0;
+
+  /** The junction those roads belong to, so approaching the same one twice
+   *  does not keep resetting a switch the player has deliberately thrown. */
+  private switchNode: string | null = null;
+
+  /** How far ahead a junction starts offering its roads, in mm — far enough
+   *  to read the buttons and throw them before she is committed. */
+  private static readonly SWITCH_LOOK_MM = 26;
 
   /** The remembered wall she crawls in a plumb shaft, where gravity picks
    *  no floor — unit vector, kept perpendicular to the current bore. */
@@ -1592,6 +1617,8 @@ export class IslandScene {
     }
     this.builder.tick(dt);
     this.scoopCooldownS = Math.max(0, this.scoopCooldownS - dt);
+    this.updateSwitch();
+    this.refreshSwitchRow();
     this.updateGuide();
     this.updateBuilderHud();
     this.updateGateAsk();
@@ -1882,23 +1909,26 @@ export class IslandScene {
     const tan = S_TAN.copy(e.b).sub(e.a);
     const len = tan.length();
     tan.divideScalar(len);
-    // Turning re-aims travel when her facing meaningfully agrees or
-    // disagrees with the bore. A VERTICAL bore has no facing to steer
-    // with, so the HEADING is the state: forward rides the way she faces
-    // along the shaft, and pulling back TURNS HER AROUND — once. Release
-    // and push forward again and she carries on the NEW way (playtest:
-    // "as soon as I press W it doesn't continue that same direction").
-    const align = Math.sin(this.facing) * tan.x + Math.cos(this.facing) * tan.z;
-    let drive = speed;
-    if (Math.abs(tan.y) > 0.7) {
-      const reversing = speed < -1e-6;
-      if (reversing && !this.railRev) this.railDir = this.railDir === 1 ? -1 : 1;
-      this.railRev = reversing;
-      drive = Math.abs(speed);
-    } else {
-      this.railRev = false;
-      if (Math.abs(align) > 0.35) this.railDir = align >= 0 ? 1 : -1;
-    }
+    /*
+     * WHICH WAY SHE TRAVELS IS OWNED, NOT READ OFF THE CAMERA.
+     *
+     * This line used to be `if (|align| > 0.35) railDir = align >= 0 ? 1 :
+     * -1` — her direction along the tube re-derived every frame from
+     * `facing`, which is the number the look-drag writes. Pan the view far
+     * enough off the tube's axis and she reversed, and because the model's
+     * forward is `tangent × railDir` the body span round with it. That is
+     * the "body angle is not the direction" report, and no threshold fixes
+     * it: while the look owns direction the two can never settle.
+     *
+     * So direction is state now. It changes when she is DRIVEN backwards,
+     * and at a junction when the points are thrown — never because of
+     * where the camera happens to point. Reversing still turns her round
+     * once per press, which is the one place a stick may set it.
+     */
+    const reversing = speed < -1e-6;
+    if (reversing && !this.railRev) this.railDir = this.railDir === 1 ? -1 : 1;
+    this.railRev = reversing;
+    const drive = Math.abs(speed);
     this.railT += (drive * this.railDir * dt) / len;
 
     if (this.railT > 1 || this.railT < 0) {
@@ -1912,48 +1942,35 @@ export class IslandScene {
         this.railT = Math.min(1, Math.max(0, this.railT));
         return;
       }
-      let best = -1;
-      let bestDot = 0.2;
-      let bestStart = 0;
-      let bestDir: 1 | -1 = 1;
-      for (let i = 0; i < this.rails.length; i += 1) {
-        if (i === this.railEdge) continue;
-        const c = this.rails[i]!;
-        let start: number;
-        let dir: 1 | -1;
-        if (c.from === nodeId) { start = 0; dir = 1; } else if (c.to === nodeId) { start = 1; dir = -1; } else continue;
-        const ct = c.b.clone().sub(c.a).normalize().multiplyScalar(dir);
-        const d = ct.dot(travel);
-        if (d > bestDot) {
-          best = i;
-          bestDot = d;
-          bestStart = start;
-          bestDir = dir;
-        }
-      }
-      if (best >= 0) {
-        this.railEdge = best;
-        this.railT = bestStart;
-        /* railDir maps her INPUT onto the edge parameter. bestDir is the
-         * parameter direction that CONTINUES the travel; when she is
-         * riding backwards (walk < 0), the same continuation needs the
-         * opposite mapping — without this she ping-ponged at every joint
-         * on the way out (the playtest's suspected "- for a +", found).
-         * A VERTICAL next edge runs on |speed| along the heading instead,
-         * so there the continuation IS bestDir — and a held reverse was
-         * already spent turning her, so the latch must not flip again. */
-        const nt = this.rails[best]!;
-        const ny = Math.abs(nt.b.y - nt.a.y) / nt.b.distanceTo(nt.a);
-        if (ny > 0.7) {
-          this.railDir = bestDir;
-          this.railRev = speed < -1e-6;
-        } else {
-          this.railDir = speed < 0 ? (bestDir === 1 ? -1 : 1) : bestDir;
-          this.railRev = false;
-        }
+      /*
+         * THE POINTS DECIDE, and they were set before she got here.
+         *
+         * This was a best-tangent-dot search: whichever road most nearly
+         * continued her travel won, and a symmetric fork was a coin toss
+         * she could not call in advance. A junction is a switch now — the
+         * roads are offered by `railSwitch.optionsAt`, one is selected
+         * (straight on by default, LEFT/RIGHT throws it), and arriving
+         * takes the selected one. She can see the choice before she gets
+         * to it, which is the whole point of a switch.
+         */
+      const options = optionsAt(this.rails, nodeId, this.railEdge, travel);
+      const taken = options[this.switchPick] ?? defaultOption(options);
+      if (taken) {
+        this.railEdge = taken.edge;
+        this.railT = taken.startT;
+        /* `dir` is the parameter direction that carries her ONWARD down
+         * the chosen road. Riding backwards keeps that meaning — she is
+         * still going the way she is going — so the reverse latch does not
+         * flip again here; it already turned her round when it was pressed. */
+        this.railDir = taken.dir;
+        this.railRev = reversing;
       } else {
         this.railT = Math.min(1, Math.max(0, this.railT)); // dead end
       }
+      /* The next junction is a fresh choice: a switch thrown for THIS one
+       * must not silently pick the third road at the next. */
+      this.switchPick = 0;
+      this.switchOptions = [];
       return;
     }
 
@@ -2021,8 +2038,11 @@ export class IslandScene {
     const perp = S_PERP.set(0, -1, 0).addScaledVector(tan, tan.y);
     this.railWall.addScaledVector(tan, -this.railWall.dot(tan));
     if (this.railWall.lengthSq() < 0.05) {
-      this.railWall.set(Math.sin(this.facing), 0, Math.cos(this.facing))
-        .addScaledVector(tan, -align);
+      /* Re-seed from her facing, projected off the tube's axis — the only
+       * place the look still has a say, and it only picks WHICH WALL she
+       * is crawling on, never which way she is going. */
+      this.railWall.set(Math.sin(this.facing), 0, Math.cos(this.facing));
+      this.railWall.addScaledVector(tan, -this.railWall.dot(tan));
     }
     this.railWall.normalize();
     const level = perp.length(); // 1 in a level bore, 0 in a plumb shaft
@@ -2030,12 +2050,21 @@ export class IslandScene {
       .addScaledVector(this.railWall, Math.max(0, 1 - level)).normalize();
     const target = S_TARGET.copy(center).addScaledVector(rad, Math.max(0, e.r - RIDE));
     this.at.lerp(target, Math.min(1, dt * 12));
-    /* She FACES the way she is travelling: pulling back rides the bore the
-     * other way and the model turns WITH it, instead of moonwalking with
-     * the stick held forward (playtest caught her walking backwards). */
-    if (Math.abs(drive) > 1e-6) {
-      this.railForward.copy(tan).multiplyScalar(this.railDir * (drive < 0 ? -1 : 1));
-    }
+    /*
+     * BODY ANGLE *IS* DIRECTION, and now it is so by construction.
+     *
+     * `railDir` is the only thing that says which way she goes, so her
+     * forward is simply the tangent along it — there is no second opinion
+     * left to disagree with. Pulling back throws the direction once (the
+     * reverse latch) and she turns to face the new way, on a level drift
+     * exactly as in a plumb shaft; the two used to have separate rules and
+     * the level one read its direction off the camera.
+     *
+     * Held only while she is actually moving, because a tangent scaled by
+     * a zero speed is a zero-length forward, and a zero-length forward is
+     * a model that snaps to some arbitrary axis the moment she stops.
+     */
+    if (drive > 1e-6) this.railForward.copy(tan).multiplyScalar(this.railDir);
     this.railUp.copy(rad).multiplyScalar(-1);
     this.hasSafe = true;
     this.lastSafe.copy(this.at);
@@ -2340,6 +2369,91 @@ export class IslandScene {
         }
       }
     }
+  }
+
+  /* --------------------------------------------------------- the points */
+
+  /**
+   * Offer the junction she is riding toward, while there is still tube left
+   * to change her mind in.
+   *
+   * Only a real fork counts. One road on is the tunnel carrying on and
+   * needs no chooser — putting buttons up for it would mean the HUD flashed
+   * at every bend of an ordinary run.
+   */
+  private updateSwitch(): void {
+    const clear = (): void => {
+      if (this.switchOptions.length > 0 || this.switchNode !== null) {
+        this.switchOptions = [];
+        this.switchNode = null;
+        this.switchPick = 0;
+      }
+    };
+    if (this.railEdge < 0 || this.designer?.isOpen) { clear(); return; }
+    const e = this.rails[this.railEdge];
+    if (!e) { clear(); return; }
+    const len = e.b.distanceTo(e.a);
+    if (len < 1e-6) { clear(); return; }
+    const ahead = this.railDir >= 0 ? 1 - this.railT : this.railT;
+    if (ahead * len * MM > IslandScene.SWITCH_LOOK_MM) { clear(); return; }
+
+    const nodeId = this.railDir >= 0 ? e.to : e.from;
+    const node = this.railNodes.get(nodeId);
+    /* A mouth is not a junction — SURFACE? already owns that decision, and
+     * a second chooser on top of it would be two prompts for one doorway. */
+    if (node?.kind === 'entrance') { clear(); return; }
+    const travel = S_SWITCH.copy(e.b).sub(e.a).normalize().multiplyScalar(this.railDir);
+    const options = optionsAt(this.rails, nodeId, this.railEdge, travel);
+    if (options.length < 2) { clear(); return; }
+
+    if (this.switchNode !== nodeId) {
+      this.switchNode = nodeId;
+      const fallback = defaultOption(options);
+      this.switchPick = fallback ? options.indexOf(fallback) : 0;
+    }
+    this.switchOptions = options;
+    if (this.switchPick >= options.length) this.switchPick = 0;
+  }
+
+  /** Throw the points one road along. The LEFT/RIGHT buttons and the
+   *  keyboard both come here, so there is one definition of "the next road". */
+  throwSwitch(step: number): void {
+    if (this.switchOptions.length < 2) return;
+    this.switchPick = cycleSelection(this.switchOptions, this.switchPick, step);
+    this.refreshSwitchRow();
+  }
+
+  /** The chooser itself: one chip per road, the set one lit. */
+  private refreshSwitchRow(): void {
+    const row = this.switchRow;
+    if (!row) return;
+    if (this.switchOptions.length < 2) {
+      if (row.style.display !== 'none') {
+        row.style.display = 'none';
+        row.textContent = '';
+        this.switchRowKey = '';
+      }
+      return;
+    }
+    const key = `${this.switchNode}:${this.switchOptions.map((o) => o.label).join(',')}`
+      + `:${this.switchPick}`;
+    if (key === this.switchRowKey) return;
+    this.switchRowKey = key;
+    row.style.display = '';
+    row.textContent = '';
+    this.switchOptions.forEach((option, i) => {
+      const chip = document.createElement('button');
+      chip.className = 'density-lab-button density-lab-mode';
+      chip.textContent = option.label.toUpperCase();
+      chip.classList.toggle('is-grip', i === this.switchPick);
+      chip.addEventListener('pointerdown', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.switchPick = i;
+        this.refreshSwitchRow();
+      });
+      row.appendChild(chip);
+    });
   }
 
   /* ------------------------------------------------- the tunnel builder */
@@ -3129,6 +3243,20 @@ export class IslandScene {
     actions.parentElement?.appendChild(jointRow) ?? actions.appendChild(jointRow);
 
     /*
+     * THE POINTS: a chooser that appears only where there is a choice —
+     * within a body-length or three of a fork, naming its roads the way a
+     * driver would. Set it and ride on; the junction takes the road it is
+     * set to, whatever the camera is doing.
+     */
+    const switchRow = document.createElement('div');
+    switchRow.className = 'density-lab-actions';
+    switchRow.style.display = 'none';
+    switchRow.style.flexWrap = 'wrap';
+    switchRow.style.justifyContent = 'center';
+    this.switchRow = switchRow;
+    actions.parentElement?.appendChild(switchRow) ?? actions.appendChild(switchRow);
+
+    /*
      * The angle, where the thumb can see it.
      *
      * Taking the ± buttons away also took away the only way to tell how
@@ -3653,6 +3781,15 @@ export class IslandScene {
   renderedHeightAtMm(xMm: number, zMm: number): number {
     if (!this.heights) return 0;
     return this.renderedOn(this.heights, xMm, zMm);
+  }
+
+  /** The points, as the probe sees them: what is offered, what is set. */
+  switchForTest(): { labels: string[]; pick: number; node: string | null } {
+    return {
+      labels: this.switchOptions.map((o) => o.label),
+      pick: this.switchPick,
+      node: this.switchNode,
+    };
   }
 
   statsForTest(): Record<string, number> {

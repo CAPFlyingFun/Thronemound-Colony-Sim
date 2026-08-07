@@ -702,6 +702,104 @@ check('and YES puts her in daylight beside it',
   `out after ${rail.outAt} steps, ${rail.aboveMm.toFixed(1)} mm vs surface, `
   + `${rail.gateOffMm.toFixed(1)} mm from the gate`);
 
+console.log('\nTHE POINTS (a junction is a switch, and the camera has no vote)');
+/*
+ * The bug this replaces, stated as a test: her direction along a tube used
+ * to be re-derived from `facing` every frame, so panning the view past the
+ * tube's axis reversed her travel and spun the model with it. The first
+ * check here is that the camera can be swung right round WITHOUT her
+ * changing direction — that is the whole fix. The rest is the switch: a
+ * fork offers its roads, one is set, and arriving takes the set one.
+ */
+const points = await page.evaluate(() => {
+  const s = window.islandScene;
+  const ex = 28040;
+  const ez = 28000;
+  const ground = s.heightAtMm(ex, ez);
+  const deep = ground - 40;
+  /* This section needs a FORK, which the founding nest has not got — so it
+   * borrows the world and puts it back. Without the restore the sections
+   * after this one inherit a nest they were not written against, and four
+   * of them failed on a plan they never asked for. */
+  const founding = JSON.parse(JSON.stringify(s.soil.plan));
+  /* A T underground: in from the west, then left (+X) or right (-X). */
+  s.applyPlanForTest({
+    nodes: [
+      { id: 'gate', kind: 'entrance', x: ex, y: ground, z: ez, radiusMm: 8 },
+      { id: 'top', kind: 'junction', x: ex, y: deep, z: ez, radiusMm: 4 },
+      { id: 'run', kind: 'junction', x: ex, y: deep, z: ez + 60, radiusMm: 4 },
+      { id: 'left', kind: 'chamber', x: ex + 60, y: deep, z: ez + 60, radiusMm: 10 },
+      { id: 'right', kind: 'chamber', x: ex - 60, y: deep, z: ez + 60, radiusMm: 10 },
+    ],
+    edges: [
+      { id: 'shaft', from: 'gate', to: 'top', radiusMm: 4, flow: 'both' },
+      { id: 'drift', from: 'top', to: 'run', radiusMm: 4, flow: 'both' },
+      { id: 'toL', from: 'run', to: 'left', radiusMm: 4, flow: 'both' },
+      { id: 'toR', from: 'run', to: 'right', radiusMm: 4, flow: 'both' },
+    ],
+  });
+  s.drainQueueForTest();
+
+  /* Put her on the drift, heading toward the T (+Z), and drive. */
+  const board = () => {
+    s.teleportMm(ex, ez + 10);
+    s.at.y = deep / 5;
+    s.setFacingForTest(0);
+    s.input.walk = 1;
+    for (let i = 0; i < 90 && s.statsForTest().railBound !== 1; i += 1) s.stepForTest(1 / 30, 1);
+    return s.statsForTest().railBound === 1;
+  };
+  const boarded = board();
+
+  /* THE CAMERA HAS NO VOTE: swing the view right round mid-drive and she
+   * must carry on the way she was going. */
+  const zBefore = s.at.z;
+  for (let i = 0; i < 20; i += 1) s.stepForTest(1 / 30, 1);
+  const zMid = s.at.z;
+  s.setFacingForTest(Math.PI);          // look back the way she came
+  for (let i = 0; i < 20; i += 1) s.stepForTest(1 / 30, 1);
+  const zAfter = s.at.z;
+  const keptGoing = (zMid - zBefore) > 0 && (zAfter - zMid) > 0;
+
+  /* The chooser: ride up to the T and see what it offers. */
+  let offered = null;
+  for (let i = 0; i < 400; i += 1) {
+    s.stepForTest(1 / 30, 1);
+    const sw = s.switchForTest();
+    if (sw.labels.length >= 2) { offered = sw; break; }
+  }
+
+  /* Throw the points to the other road, ride through, see where she lands. */
+  let landed = null;
+  if (offered) {
+    s.throwSwitch(1);
+    const picked = s.switchForTest().pick;
+    for (let i = 0; i < 900; i += 1) {
+      s.stepForTest(1 / 30, 1);
+      const room = s.statsForTest().chamberNow;
+      if (room === 1) break;
+    }
+    landed = { picked, x: s.at.x * 5 - ex };
+  }
+  s.input.walk = 0;
+  // Hand the world back exactly as it was lent.
+  s.applyPlanForTest(founding);
+  s.teleportMm(28000, 28000);
+  s.drainQueueForTest();
+  return { boarded, keptGoing, offered, landed };
+});
+check('she boards the drift', points.boarded);
+check('panning the camera right round does NOT reverse her', points.keptGoing);
+check('the T offers both its roads', !!points.offered
+  && points.offered.labels.length === 2, points.offered
+  ? points.offered.labels.join(' / ') : 'nothing offered');
+check('naming them the way a driver would', !!points.offered
+  && points.offered.labels.includes('left') && points.offered.labels.includes('right'),
+  points.offered ? points.offered.labels.join(' / ') : '');
+check('throwing the points sends her down the other road', !!points.landed
+  && Math.abs(points.landed.x) > 20,
+  points.landed ? `${points.landed.x.toFixed(0)} mm off the junction` : 'never arrived');
+
 console.log('\nNO HOLES EVEN STARVED (budget capped at 1 chunk/frame)');
 const churn = await page.evaluate(() => {
   const s = window.islandScene;
