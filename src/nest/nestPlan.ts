@@ -59,6 +59,17 @@ export interface NestEdge {
      * tunnel and it bends. Positive bows toward the bend vector.
      */
     bow?: { x: number; y: number; z: number };
+    /**
+     * Vertical squash of the bore's cross-section: 1 (or absent) is round,
+     * 2/3 is the tunnel builder's egg — 9 mm wide, 6 mm tall on the level.
+     *
+     * Applied to the cross-section's VERTICAL component only, so a level
+     * tunnel is an oval an ant actually walks (wide floor, low ceiling)
+     * while a plumb shaft — whose cross-section is horizontal — stays a
+     * round drop the rail can ride. Designer tunnels omit it and stay
+     * round, which is what their ride clearances were tuned against.
+     */
+    squashY?: number;
 }
 
 export interface NestPlan {

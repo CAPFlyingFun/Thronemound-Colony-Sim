@@ -206,6 +206,23 @@ export class TunnelBuilder {
     return { pieces, points, lengthMm: rail.lengthMm };
   }
 
+  /** The locked leg's own guide — same shape `previewLeg` returns, but from
+   *  the pieces the scoops are actually marching down, camera long gone. */
+  pendingPreview(): LegPreview | null {
+    const leg = this.pending;
+    if (!leg) return null;
+    const start = this.legStart(leg.source);
+    const rail = buildRail(leg.pieces, { at: start.at, forward: start.forward });
+    const points: Vec3Like[] = [];
+    for (let s = 0; s <= rail.lengthMm; s += 2) {
+      const f = rail.sample(s, 0);
+      if (f) points.push({ x: f.x, y: f.y, z: f.z });
+    }
+    const tail = rail.sample(rail.lengthMm, 0);
+    if (tail) points.push({ x: tail.x, y: tail.y, z: tail.z });
+    return { pieces: leg.pieces, points, lengthMm: rail.lengthMm };
+  }
+
   /** Lock the aim: from here the guide stops following the camera and the
    *  scoops march down it. The first press of the shovel calls this. */
   startLeg(source: LegSource, aimHeadingDeg: number, aimPitchDeg: number): void {
@@ -309,13 +326,19 @@ export class TunnelBuilder {
 
   /* -------------------------------------------------------------- output */
 
-  /** The whole tree as a NestPlan, anchored at `originMm` in island space. */
+  /** The whole tree as a NestPlan, anchored at `originMm` in island space.
+   *  Edges carry the egg's vertical squash, so the tunnel the plan
+   *  regenerates is the tunnel the scoops actually cut. */
   plan(originMm: Vec3Like): NestPlan {
-    return branchesToPlan(this.branches, {
+    const plan = branchesToPlan(this.branches, {
       originMm,
       boreRadiusMm: BORE_RADIUS_MM,
       entranceRadiusMm: MIN_ENTRANCE_RADIUS_MM,
     });
+    return {
+      nodes: plan.nodes,
+      edges: plan.edges.map((e) => ({ ...e, squashY: BORE_SQUASH })),
+    };
   }
 
   /** Anything dug yet? An empty builder compiles to an empty plan. */

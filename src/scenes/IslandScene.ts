@@ -48,6 +48,11 @@ import {
 import { BoreRig } from './BoreControl';
 import { DebugStatsPanel } from './DebugStatsPanel';
 import { LoadingOverlay } from './LoadingOverlay';
+import {
+  JUNCTION_KINDS, ROOM_KINDS, SCOOP_DEEP_MM, SCOOP_TALL_MM, SCOOP_WIDE_MM,
+  STEEP_DEG, TunnelBuilder, BORE_RADIUS_MM as BUILDER_BORE_MM,
+  type JointKind, type LegPreview, type LegSource,
+} from './tunnelBuilder';
 import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
 import { makeIslandSoil, type IslandSoil } from '../world/islandSoil';
@@ -359,6 +364,41 @@ export class IslandScene {
   /** DIG is a MODE now: the DIG chip arms it, the 🪏 button strokes. */
   private digMode = false;
 
+  /**
+   * THE TUNNEL BUILDER — the guided dig. While DIG is armed, the shovel
+   * stops stroking freeform mouthfuls and instead takes stamina-paced egg
+   * scoops down a snapped, previewed leg (see `tunnelBuilder.ts`, whose
+   * numbers are the player's own spec). The freeform chew still exists —
+   * it is what the probes and the old reflexes exercise when DIG mode is
+   * off and `input.dig` is driven directly.
+   */
+  private builder = new TunnelBuilder();
+
+  /** Where the builder's mm frame sits on the island: the first leg's
+   *  start, set the moment the founding scoop is taken. Null = no nest. */
+  private builderOriginMm: { x: number; y: number; z: number } | null = null;
+
+  /** The branch the next bare leg extends — the growing tip. */
+  private activeBranch = 0;
+
+  /** Refractory between scoops, so a held shovel is a pace, not a hose.
+   *  SIMULATED seconds, not wall-clock: probes step time far faster than
+   *  it passes, and a real-time gate throttled a simulated dig to the test
+   *  machine's own speed — measured as a 12-second leg taking 64. */
+  private scoopCooldownS = 0;
+
+  /** The monorail guide: the leg the camera is currently describing. */
+  private guide: THREE.Mesh | null = null;
+
+  private guideKey = '';
+
+  /** The joint the chips are showing for, as a branch index. -1 = hidden. */
+  private jointRowFor = -1;
+
+  private jointRow: HTMLDivElement | null = null;
+
+  private scoopBtn: HTMLButtonElement | null = null;
+
   private readonly keysDown = new Set<string>();
 
   private spaceWasDown = false;
@@ -646,6 +686,12 @@ export class IslandScene {
      * at the window rim with nothing to stitch.
      */
     this.soil = makeIslandSoil((xMm, zMm) => this.renderedOn(this.heightsBase!, xMm, zMm));
+
+    /* The saved nest, folded in BEFORE anything reads the plan: the mound
+     * stamp below sees its entrance, the first generate carves its runs,
+     * and the rails are its graph — a reload is a continuation, not a
+     * fresh island with a hole to re-dig. */
+    this.loadNest();
 
     /*
      * Stamp the nest's mound into the STAMPED grid: the island mesh and the
@@ -1355,10 +1401,18 @@ export class IslandScene {
     /* The rig owns the heading: it steers slowly while she is cutting and
      * at walking rate otherwise. Its yaw runs the other way to the stick's,
      * hence the sign. */
+    /*
+     * In DIG mode the shovel belongs to the TUNNEL BUILDER — instant
+     * stamina-paced scoops down the guide — so the rig never sees the
+     * button: no strokes, no freeform mouthfuls, and no bore engagement,
+     * because builder tunnels are walked (or railed, when steep), never
+     * aim-line travelled. The freeform chew still runs whenever probes or
+     * code drive `input.dig` with DIG mode off.
+     */
     const bore = this.bore.step(dt, {
       yaw: -this.input.yaw,
       forward: this.input.walk,
-      dig: this.input.dig,
+      dig: this.digMode ? false : this.input.dig,
     });
     this.facing = bore.heading;
     /*
@@ -1463,7 +1517,8 @@ export class IslandScene {
       const take = this.chamberId === null
         ? this.nearestRail(this.at)
         : this.chamberMouthGrab(this.chamberId);
-      if (take && take.d < this.rails[take.i]!.r * 1.6) {
+      if (take && take.d < this.rails[take.i]!.r * 1.6
+        && !this.shallowBuilderEdge(take.i)) {
         this.railEdge = take.i;
         this.railT = take.t;
         const e = this.rails[take.i]!;
@@ -1489,6 +1544,9 @@ export class IslandScene {
     if (this.stream) {
       // Soil leaves at the bottom of the stroke, not on the button.
       if (bore.bite) this.bite();
+
+      // The builder's dig: held shovel, scoops as stamina allows.
+      if (this.digMode && this.input.dig) this.builderDig();
 
       const lead = Math.min(LEAD_MAX, Math.abs(speed) * LEAD_S);
       const now = performance.now();
@@ -1532,6 +1590,10 @@ export class IslandScene {
       this.sense.uSense.value += ((this.underground ? 1 : 0) - this.sense.uSense.value)
         * (1 - Math.exp(-SENSE_EASE * dt));
     }
+    this.builder.tick(dt);
+    this.scoopCooldownS = Math.max(0, this.scoopCooldownS - dt);
+    this.updateGuide();
+    this.updateBuilderHud();
     this.updateGateAsk();
     this.updateCapsule();
     this.refreshAim();
@@ -2280,6 +2342,317 @@ export class IslandScene {
     }
   }
 
+  /* ------------------------------------------------- the tunnel builder */
+
+  private static readonly NEST_KEY = 'thronemound-island-nest-v1';
+
+  /** Builder ids are `b{k}-{i}` and `b{k}-e{i}` — how its half of a merged
+   *  plan is told apart from anything the designer or a probe authored. */
+  private static isBuilderId(id: string): boolean {
+    return /^b\d+-/.test(id);
+  }
+
+  private aimHeadingDeg(): number {
+    return (this.facing * 180) / Math.PI;
+  }
+
+  private aimPitchDeg(): number {
+    return (this.aimPitch * 180) / Math.PI;
+  }
+
+  /**
+   * The whole nest as one plan: everything foreign kept as it stands, the
+   * builder's own nodes and edges replaced wholesale by a fresh compile.
+   * A probe's applied plan and the player's dug one coexist this way.
+   */
+  private builderMergedPlan(): NestPlan {
+    const own = this.builderOriginMm
+      ? this.builder.plan(this.builderOriginMm)
+      : { nodes: [], edges: [] };
+    const nodes = this.soil?.plan.nodes.filter((n) => !IslandScene.isBuilderId(n.id)) ?? [];
+    const edges = this.soil?.plan.edges.filter((e) => !IslandScene.isBuilderId(e.id)) ?? [];
+    return { nodes: [...nodes, ...own.nodes], edges: [...edges, ...own.edges] };
+  }
+
+  /**
+   * Where the next leg would grow from, WITHOUT founding anything: the
+   * guide asks this every frame, and a guide must have no side effects.
+   */
+  private peekLegSource(): LegSource | null {
+    if (this.builderOriginMm === null) {
+      return this.underground ? null : { extend: 0 };
+    }
+    const joint = this.nearestJoint();
+    if (joint !== null && this.builder.exitsAvailable(joint).length > 0) {
+      const exit = this.builder.pickExit(joint, this.aimHeadingDeg(), this.aimPitchDeg());
+      if (exit) return { branch: joint, exit };
+    }
+    const tip = this.builder.branches[this.activeBranch];
+    if (tip && tip.roomMm === null) return { extend: this.activeBranch };
+    return null;
+  }
+
+  /** The committed joint she is standing at, as a branch index, or null. */
+  private nearestJoint(): number | null {
+    if (!this.builderOriginMm) return null;
+    const o = this.builderOriginMm;
+    let best: number | null = null;
+    let bestD = Infinity;
+    for (let i = 0; i < this.builder.branches.length; i += 1) {
+      const b = this.builder.branches[i]!;
+      if (b.pieces.length === 0) continue;
+      const end = this.builder.legStart({ extend: i }).at;
+      const d = Math.hypot(
+        this.at.x - (o.x + end.x) / MM,
+        this.at.y - (o.y + end.y) / MM,
+        this.at.z - (o.z + end.z) / MM,
+      ) * MM;
+      const reach = (b.roomMm ?? BUILDER_BORE_MM) * 1.75;
+      if (d < reach && d < bestD) {
+        best = i;
+        bestD = d;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * One press of the shovel, builder-style. The first press of a nestless
+   * island FOUNDS the nest where she stands; the first press of a floating
+   * guide locks it; every press takes an egg from the working face — and
+   * the press that finishes a leg commits it into the plan and saves.
+   */
+  private builderDig(): void {
+    if (!this.stream || !this.ready) return;
+    if (this.scoopCooldownS > 0 || !this.builder.canScoop) return;
+
+    if (!this.builder.pending) {
+      let source = this.peekLegSource();
+      if (source && this.builderOriginMm === null) {
+        // The founding scoop: the nest's origin is her feet, on the ground.
+        const xMm = this.at.x * MM;
+        const zMm = this.at.z * MM;
+        this.builderOriginMm = { x: xMm, y: this.renderedHeightAtMm(xMm, zMm), z: zMm };
+        this.activeBranch = 0;
+        source = { extend: 0 };
+      }
+      if (!source) return;
+      this.builder.startLeg(source, this.aimHeadingDeg(), this.aimPitchDeg());
+      if (!this.builder.pending) return;
+    }
+
+    const src = this.builder.pending.source;
+    const order = this.builder.scoop();
+    if (typeof order === 'string') return;
+    this.scoopCooldownS = 0.35;
+
+    const o = this.builderOriginMm!;
+    const centre = S_CENTER.set(
+      (o.x + order.centerMm.x) / MM,
+      (o.y + order.centerMm.y) / MM,
+      (o.z + order.centerMm.z) / MM,
+    );
+    const cut = this.stream.subtractEllipsoid(centre, order.along, {
+      deep: SCOOP_DEEP_MM / 2 / MM,
+      wide: SCOOP_WIDE_MM / 2 / MM,
+      tall: SCOOP_TALL_MM / 2 / MM,
+    });
+    if (cut.changedSamples > 0) this.enqueueBounds(cut.bounds);
+
+    if (order.legDone) {
+      this.activeBranch = 'extend' in src ? src.extend : this.builder.branches.length - 1;
+      /* The leg becomes PLAN — which is what survives streaming, scrolls
+       * and reload — and the ride is preserved: committing a leg while
+       * standing in your own tunnel must not drop you off a rail. */
+      this.applyPlan(this.builderMergedPlan(), { preserveRide: true });
+      this.saveNest();
+    }
+  }
+
+  /** Remesh every chunk a brush result touched — bite()'s own loop, shared. */
+  private enqueueBounds(b: {
+    minX: number; minY: number; minZ: number;
+    maxX: number; maxY: number; maxZ: number;
+  }): void {
+    const lo = (v: number) => Math.max(0, Math.floor((v - 1) / CH));
+    const hi = (v: number, max: number) => Math.min(max - 1, Math.floor((v + 1) / CH));
+    for (let cz = lo(b.minZ); cz <= hi(b.maxZ, CHUNKS_XZ); cz += 1) {
+      for (let cy = lo(b.minY); cy <= hi(b.maxY, CHUNKS_Y); cy += 1) {
+        for (let cx = lo(b.minX); cx <= hi(b.maxX, CHUNKS_XZ); cx += 1) {
+          this.enqueue(cx, cy, cz);
+        }
+      }
+    }
+  }
+
+  /**
+   * The MONORAIL GUIDE — the player's own word for it. A translucent tube
+   * showing exactly the leg the camera is describing, before anything
+   * commits: floating and amber while it follows the look, locked and
+   * green once the first scoop has fixed it.
+   */
+  private updateGuide(): void {
+    const show = this.digMode && this.ready && !this.designer?.isOpen;
+    if (!show) {
+      if (this.guide) this.guide.visible = false;
+      this.guideKey = '';
+      return;
+    }
+    let preview: LegPreview | null = null;
+    let locked = false;
+    if (this.builder.pending) {
+      preview = this.builder.pendingPreview();
+      locked = true;
+    } else {
+      const source = this.peekLegSource();
+      if (source) {
+        preview = this.builder.previewLeg(source, this.aimHeadingDeg(), this.aimPitchDeg());
+      }
+    }
+    if (!preview || preview.points.length < 2) {
+      if (this.guide) this.guide.visible = false;
+      this.guideKey = '';
+      return;
+    }
+    /* The origin the guide is drawn against: the nest's, or — before the
+     * founding scoop — her own feet, which is where that scoop would put it. */
+    const o = this.builderOriginMm ?? {
+      x: this.at.x * MM,
+      y: this.renderedHeightAtMm(this.at.x * MM, this.at.z * MM),
+      z: this.at.z * MM,
+    };
+    const head = preview.pieces[0]!;
+    const key = `${locked ? 'L' : 'F'}:${head.pitch}:${head.turn}`
+      + `:${o.x.toFixed(0)},${o.y.toFixed(0)},${o.z.toFixed(0)}`
+      + `:${preview.points[0]!.x.toFixed(1)},${preview.points[0]!.z.toFixed(1)}`;
+    if (key !== this.guideKey) {
+      this.guideKey = key;
+      const pts = preview.points.map((p) => new THREE.Vector3(
+        (o.x + p.x) / MM, (o.y + p.y) / MM, (o.z + p.z) / MM,
+      ));
+      const curve = new THREE.CatmullRomCurve3(pts);
+      const geometry = new THREE.TubeGeometry(
+        curve, Math.max(4, pts.length), BUILDER_BORE_MM / MM, 10, false,
+      );
+      if (!this.guide) {
+        this.guide = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+          color: 0xe9c36f, transparent: true, opacity: 0.35, depthWrite: false,
+        }));
+        this.guide.renderOrder = 7;
+        this.scene.add(this.guide);
+      } else {
+        this.guide.geometry.dispose();
+        this.guide.geometry = geometry;
+      }
+      (this.guide.material as THREE.MeshBasicMaterial).color.setHex(
+        locked ? 0x51e07a : 0xe9c36f,
+      );
+    }
+    this.guide!.visible = true;
+  }
+
+  /** The stamina meter IS the shovel: the button fills as she recovers.
+   *  And the joint chips: standing at a joint offers its kinds. */
+  private updateBuilderHud(): void {
+    if (this.scoopBtn) {
+      const pct = Math.round(this.builder.stamina);
+      this.scoopBtn.style.backgroundImage = 'linear-gradient(to top,'
+        + ` rgba(81, 224, 122, 0.45) ${pct}%, rgba(0, 0, 0, 0) ${pct}%)`;
+      this.scoopBtn.style.opacity = this.builder.canScoop ? '1' : '0.5';
+    }
+    const joint = this.digMode && !this.builder.pending ? this.nearestJoint() : null;
+    const want = joint ?? -1;
+    if (want !== this.jointRowFor) {
+      this.jointRowFor = want;
+      this.refreshJointRow();
+    }
+  }
+
+  /** Rebuild the chip row for the joint she stands at: Y, T, X, and the
+   *  room kinds — tap to make the joint that thing. */
+  private refreshJointRow(): void {
+    const row = this.jointRow;
+    if (!row) return;
+    row.textContent = '';
+    if (this.jointRowFor < 0) {
+      row.style.display = 'none';
+      return;
+    }
+    row.style.display = '';
+    const branch = this.jointRowFor;
+    const current = this.builder.jointKinds.get(branch);
+    const offer: JointKind[] = [...JUNCTION_KINDS, ...ROOM_KINDS];
+    for (const kind of offer) {
+      const chip = document.createElement('button');
+      chip.className = 'density-lab-button density-lab-mode';
+      chip.textContent = kind.length === 1 ? kind : kind.toUpperCase();
+      chip.classList.toggle('is-grip', current === kind);
+      chip.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.builder.setJointKind(branch, kind);
+        this.applyPlan(this.builderMergedPlan(), { preserveRide: true });
+        this.saveNest();
+        this.refreshJointRow();
+      });
+      row.appendChild(chip);
+    }
+  }
+
+  /**
+   * Builder tunnels shallower than the spline threshold are FREE-WALK
+   * country — the player's own hybrid: an invisible rail owns anything
+   * steeper than 70°, the floor owns the rest. Designer and probe tunnels
+   * keep the full rail, whose clearances they were built against.
+   */
+  private shallowBuilderEdge(i: number): boolean {
+    const e = this.rails[i];
+    if (!e) return false;
+    if (!IslandScene.isBuilderId(e.from) && !IslandScene.isBuilderId(e.to)) return false;
+    const len = e.b.clone().sub(e.a).length();
+    if (len < 1e-6) return false;
+    return Math.abs(e.b.y - e.a.y) / len < Math.sin((STEEP_DEG * Math.PI) / 180);
+  }
+
+  /* ----------------------------------------------------- the nest's save */
+
+  private saveNest(): void {
+    if (!this.builderOriginMm) return;
+    try {
+      localStorage.setItem(IslandScene.NEST_KEY, JSON.stringify({
+        builder: this.builder.toJSON(),
+        originMm: this.builderOriginMm,
+      }));
+    } catch {
+      // Storage denied is not a reason to lose the dig in hand.
+    }
+  }
+
+  /** Reload the saved nest BEFORE the first soil generate, so the island
+   *  is born with the tunnels in it rather than carving them after. */
+  private loadNest(): void {
+    try {
+      const raw = localStorage.getItem(IslandScene.NEST_KEY);
+      if (!raw) return;
+      const data = JSON.parse(raw) as {
+        builder?: unknown;
+        originMm?: { x: number; y: number; z: number };
+      };
+      const loaded = TunnelBuilder.fromJSON(data.builder);
+      const origin = data.originMm;
+      if (!loaded || !origin || typeof origin.x !== 'number'
+        || typeof origin.y !== 'number' || typeof origin.z !== 'number') return;
+      this.builder = loaded;
+      this.builderOriginMm = { x: origin.x, y: origin.y, z: origin.z };
+      this.activeBranch = Math.max(0, loaded.branches.length - 1);
+      if (loaded.hasTunnels && this.soil) {
+        this.soil.setPlan(this.builderMergedPlan());
+      }
+    } catch {
+      // A corrupt save loads as no save.
+    }
+  }
+
   /* ------------------------------------------------- the tunnel designer */
 
   /** The plan's graph IS the rail network — rebuilt whenever the plan is. */
@@ -2439,7 +2812,7 @@ export class IslandScene {
    * regenerate covers the union of the old and new reject boxes (a deleted
    * tunnel must refill) and everything else is rebuilt from the plan.
    */
-  private applyPlan(plan: NestPlan): void {
+  private applyPlan(plan: NestPlan, opts: { preserveRide?: boolean } = {}): void {
     if (!this.soil || !this.stream) return;
     const before = this.soil.reject;
     this.soil.setPlan(plan);
@@ -2470,15 +2843,20 @@ export class IslandScene {
     this.rebuildRails();
     /* Her rail may have been resized, moved or deleted: let go and let the
      * regrab find whatever bore is under her now. The room she stood in may
-     * be gone too — it re-derives from her position next frame. */
-    this.railEdge = -1;
-    this.railRev = false;
-    this.chamberId = null;
-    this.boreEngaged = false;
-    this.railGate = null;
-    this.enterDeclined = null;
-    this.surfaceDeclined = null;
-    this.hideGateAsk();
+     * be gone too — it re-derives from her position next frame. The tunnel
+     * builder asks for the ride to be PRESERVED instead: its plan only ever
+     * grows, and committing a leg mid-crawl must not drop her off a rail
+     * or un-declare a gate she just declined. */
+    if (!opts.preserveRide) {
+      this.railEdge = -1;
+      this.railRev = false;
+      this.chamberId = null;
+      this.boreEngaged = false;
+      this.railGate = null;
+      this.enterDeclined = null;
+      this.surfaceDeclined = null;
+      this.hideGateAsk();
+    }
     if (this.nestView) {
       this.nestView.dispose();
       this.scene.remove(this.nestView.root);
@@ -2705,6 +3083,10 @@ export class IslandScene {
     scoopBtn.className = 'density-lab-button density-lab-dig';
     scoopBtn.textContent = '🪏';
     scoopBtn.style.display = 'none';
+    /* The shovel doubles as the STAMINA METER: `updateBuilderHud` fills it
+     * from the bottom as she recovers, and dims it while a scoop is out of
+     * reach — the pace of digging, readable on the button that paces it. */
+    this.scoopBtn = scoopBtn;
     dig.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       this.digMode = !this.digMode;
@@ -2730,6 +3112,21 @@ export class IslandScene {
     scoopBtn.addEventListener('pointercancel', stopDig);
     scoopBtn.addEventListener('lostpointercapture', stopDig);
     actions.appendChild(scoopBtn);
+
+    /*
+     * THE JOINT CHIPS: stand at a committed joint with DIG armed and the
+     * row appears — Y, T, X and the room kinds, one tap each. The row is
+     * built by `refreshJointRow` for whichever joint she is at; here is
+     * only its (empty, hidden) container. Buttons keep their own pointer
+     * events — the HUD root swallows none (the untappable-prompt lesson).
+     */
+    const jointRow = document.createElement('div');
+    jointRow.className = 'density-lab-actions';
+    jointRow.style.display = 'none';
+    jointRow.style.flexWrap = 'wrap';
+    jointRow.style.justifyContent = 'center';
+    this.jointRow = jointRow;
+    actions.parentElement?.appendChild(jointRow) ?? actions.appendChild(jointRow);
 
     /*
      * The angle, where the thumb can see it.

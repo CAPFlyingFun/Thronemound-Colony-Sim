@@ -256,6 +256,113 @@ check('store is air AGAIN', roundtrip.storeAgain === false, `solidAtMm=${roundtr
 check('reconstruction still cost zero saved samples', roundtrip.edited === 0,
   `${roundtrip.edited} edits stored`);
 
+console.log('\nTHE TUNNEL BUILDER (camera-aimed legs, egg scoops, stamina)');
+/*
+ * The guided dig, end to end: arm DIG far from the probe nest, aim with the
+ * camera, hold the shovel. A monorail guide appears and snaps; scoops carve
+ * 9 x 6 x 3 mm eggs down it at a stamina pace; the finished leg commits into
+ * the plan; the next guide snaps to the new joint. Then the joint becomes a
+ * Y and the camera picks its 45° exits. Nothing here uses the freeform chew.
+ */
+const builder = await page.evaluate(() => {
+  const s = window.islandScene;
+  const bx = 26600;
+  const bz = 26600;
+  s.teleportMm(bx, bz);
+  s.drainQueueForTest();
+  s.setFacingForTest(0.4);
+  s.aimPitch = -0.6;
+  s.digMode = true;
+
+  // The floating guide: visible, and snapped to the track's own steps.
+  s.stepForTest(1 / 30, 2);
+  const guideUp = s.guide && s.guide.visible === true;
+  const floating = s.builder.pending === null;
+
+  // Hold the shovel: the founding scoop names the origin, eggs march.
+  s.input.dig = true;
+  let steps = 0;
+  const staminaDips = [];
+  while (s.builder.branches[0].pieces.length === 0 && steps < 2400) {
+    s.stepForTest(1 / 30, 1);
+    steps += 1;
+    if (steps % 30 === 0) staminaDips.push(s.builder.stamina);
+    if (steps % 120 === 0) s.drainQueueForTest();
+  }
+  s.input.dig = false;
+  s.drainQueueForTest();
+  const legSeconds = steps / 30;
+  const origin = s.builderOriginMm;
+  const paced = Math.min(...staminaDips) < 100;
+
+  // The carve is real: air along the first leg's line, inside the ground.
+  const midMm = {
+    x: origin.x + Math.sin(0.4) * 10 * Math.cos(0.6),
+    y: origin.y - Math.sin(0.6) * 10,
+    z: origin.z + Math.cos(0.4) * 10 * Math.cos(0.6),
+  };
+  const carvedMid = s.solidAtMm(midMm.x, midMm.y, midMm.z);
+
+  // The plan grew: an entrance and the leg's joints exist, and it SAVED.
+  // (planForTest strips kinds, so this reads the plan itself.)
+  const entrance = s.soil.plan.nodes.find((n) => n.id === 'b0-0');
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem('thronemound-island-nest-v1')); } catch { /* no */ }
+
+  // The next guide snaps to the END JOINT, not to her.
+  s.stepForTest(1 / 30, 2);
+  const nextStart = s.builder.legStart({ extend: 0 }).at;
+  const nextLen = Math.hypot(nextStart.x, nextStart.y, nextStart.z);
+
+  return {
+    guideUp, floating, legSeconds, paced,
+    origin: origin !== null,
+    carvedMid,
+    entrance: !!entrance && entrance.kind === 'entrance',
+    savedBranches: saved?.builder?.branches?.length ?? 0,
+    pieces: s.builder.branches[0].pieces.length,
+    nextLen,
+  };
+});
+check('the monorail guide shows before anything commits',
+  builder.guideUp && builder.floating);
+check('holding the shovel chews one whole leg', builder.pieces === 2,
+  `${builder.pieces} pieces after ${builder.legSeconds.toFixed(1)} s`);
+check('and the pace is stamina, not a firehose',
+  builder.paced && builder.legSeconds > 6 && builder.legSeconds < 45,
+  `${builder.legSeconds.toFixed(1)} s for 7 scoops`);
+check('the founding scoop set the nest origin', builder.origin);
+check('the eggs really carved the line', builder.carvedMid === false,
+  `solidAtMm mid-leg = ${builder.carvedMid}`);
+check('the leg committed into the plan as the entrance', builder.entrance);
+check('and the nest SAVED to the device', builder.savedBranches >= 1,
+  `${builder.savedBranches} branches stored`);
+check('the next leg snaps to the end joint, not to her',
+  Math.abs(builder.nextLen - 20) < 1.5, `${builder.nextLen.toFixed(1)} mm out`);
+
+const junction = await page.evaluate(() => {
+  const s = window.islandScene;
+  // Stand AT the new joint so the chips offer its kinds, and make it a Y.
+  const o = s.builderOriginMm;
+  const end = s.builder.legStart({ extend: 0 }).at;
+  s.teleportMm(o.x + end.x, o.z + end.z);
+  s.at.y = (o.y + end.y) / 5;
+  s.stepForTest(1 / 30, 3);
+  const nearJoint = s.nearestJoint();
+  const rowShown = s.jointRow && s.jointRow.style.display !== 'none';
+  s.builder.setJointKind(0, 'Y');
+  const exits = s.builder.exitsAvailable(0);
+  // The camera picks the arm: aim 45° left of the leg's own heading.
+  const arm = s.builder.pickExit(0, (0.4 * 180) / Math.PI + 45, 0);
+  s.digMode = false;
+  return { nearJoint, rowShown: !!rowShown, exits, arm };
+});
+check('standing at the joint offers the chips', junction.nearJoint === 0
+  && junction.rowShown);
+check('a Y forks two ways at 45', JSON.stringify(junction.exits)
+  === JSON.stringify(['left45', 'right45']), junction.exits.join(','));
+check('and the camera picks the arm it looks along', junction.arm === 'left45');
+
 console.log('\nA HAND-DIG: MOUTHFULS ONLY, AND THE BODY DECIDES');
 /*
  * The bargain this scene is built on, and it is deliberately a slow one: a
