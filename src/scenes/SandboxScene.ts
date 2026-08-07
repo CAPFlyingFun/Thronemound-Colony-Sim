@@ -28,7 +28,8 @@ import { QueenModel } from '../anim/QueenModel';
 import { FOOT_CLEARANCE_MM } from '../anim/legDrive';
 import {
   carryPose, carryVerdict, dragStandoffMm, grabPointFor, headAimFor,
-  HEAD_LIMITS, type GrabbableSpec, type GrabPoint, type SandboxCaste,
+  HEAD_LIMITS, STRENGTH, type GrabbableSpec, type GrabPoint,
+  type SandboxCaste,
 } from './mandibleReach';
 
 const WALK_SPEED = 12;
@@ -58,7 +59,19 @@ interface Prop {
   /** Bugs have hit points; everything else has none. */
   hp: number;
   alive: boolean;
+  /** Falling speed, mm/s — gravity owns every prop nobody is holding. */
+  vy: number;
 }
+
+/** Where a free prop's centre rests above the ground it sits on. */
+const restHeight = (spec: GrabbableSpec): number => {
+  if (spec.kind === 'leaf') return 0.35;
+  if (spec.kind === 'twig') return 0.55;
+  return spec.halfWideMm * 0.7;
+};
+
+/** Readable at ant scale — real g would snap things down in two frames. */
+const GRAVITY_MM_S2 = 320;
 
 export class SandboxScene {
   ready = false;
@@ -150,6 +163,13 @@ export class SandboxScene {
   private fpPitch = 0;
 
   private camPointer: number | null = null;
+
+  /** A second touch makes the camera drag a PINCH: zoom, not orbit. */
+  private pinchPointer: number | null = null;
+
+  private pinchLast = 0;
+
+  private readonly touchAt = new Map<number, { x: number; y: number }>();
 
   /* ---------------------------------------------------------- joystick */
 
@@ -287,7 +307,7 @@ export class SandboxScene {
     mesh.position.set(spec.x, spec.y, spec.z);
     mesh.rotation.y = spec.yawDeg * DEG;
     this.scene.add(mesh);
-    this.props.push({ spec, mesh, hp, alive: hp > 0 });
+    this.props.push({ spec, mesh, hp, alive: hp > 0, vy: 0 });
   }
 
   private spawnProps(): void {
@@ -451,12 +471,21 @@ export class SandboxScene {
   private release(): void {
     const p = this.engaged;
     if (p && this.hauling === 'carry') {
-      /* Set it DOWN ahead of her, on the ground, not dropped from the sky. */
+      /* Let go AHEAD of her, from jaw height — gravity takes it from
+       * there. The carried tilt comes OFF: a leaf lies back down flat,
+       * a twig keeps the heading it was held at (its spec learns the new
+       * axis so the next grab still lines up square). A felled beetle
+       * keeps its dead sprawl. */
       const x = this.antPos.x + Math.sin(this.facing) * 4;
       const z = this.antPos.z + Math.cos(this.facing) * 4;
       p.spec.x = x;
       p.spec.z = z;
-      p.spec.y = this.groundAt(x, z) + p.spec.halfWideMm * 0.7;
+      p.spec.y = Math.max(p.spec.y, this.groundAt(x, z) + restHeight(p.spec));
+      p.vy = 0;
+      if (p.spec.kind !== 'bug') {
+        p.mesh.rotation.set(0, p.mesh.rotation.y, 0);
+        p.spec.yawDeg = p.mesh.rotation.y / DEG;
+      }
       p.mesh.position.set(p.spec.x, p.spec.y, p.spec.z);
     }
     this.engaged = null;
@@ -628,6 +657,81 @@ export class SandboxScene {
     this.toast('THE BEETLE IS DOWN — now it is food');
   }
 
+  /* ------------------------------------------------------------- physics */
+
+  /**
+   * The cheap laws: everything falls to its rest height, nothing shares
+   * a footprint, and pushing a thing works exactly as well as this caste
+   * could drag it — a worker shoulders a seed aside and bounces off the
+   * boulder that a major shoves along. Circles in XZ, no torque, no
+   * stacking: sandbox physics, honest where the jaws need it.
+   */
+  private stepProps(dt: number): void {
+    const held = this.phase === 'hold' ? this.engaged : null;
+    for (const p of this.props) {
+      if (p === held) continue;
+      const rest = this.groundAt(p.spec.x, p.spec.z) + restHeight(p.spec);
+      if (p.spec.y > rest + 0.02) {
+        p.vy -= GRAVITY_MM_S2 * dt;
+        p.spec.y = Math.max(rest, p.spec.y + p.vy * dt);
+      } else {
+        p.spec.y = rest;
+        p.vy = 0;
+      }
+    }
+    /* Pairwise separation — thirteen props, the naive loop is nothing. */
+    for (let i = 0; i < this.props.length; i += 1) {
+      const a = this.props[i]!;
+      if (a === held) continue;
+      for (let j = i + 1; j < this.props.length; j += 1) {
+        const b = this.props[j]!;
+        if (b === held) continue;
+        const rr = a.spec.halfWideMm + b.spec.halfWideMm;
+        const dx = b.spec.x - a.spec.x;
+        const dz = b.spec.z - a.spec.z;
+        const d = Math.hypot(dx, dz);
+        if (d >= rr || d < 1e-4) continue;
+        const push = (rr - d) / 2;
+        const nx = dx / d;
+        const nz = dz / d;
+        /* The heavier one gives less ground. */
+        const wa = a.spec.weightMg;
+        const wb = b.spec.weightMg;
+        const shareA = wb / (wa + wb);
+        a.spec.x -= nx * push * 2 * shareA;
+        a.spec.z -= nz * push * 2 * shareA;
+        b.spec.x += nx * push * 2 * (1 - shareA);
+        b.spec.z += nz * push * 2 * (1 - shareA);
+      }
+    }
+    /* Her body against the clutter: light things get nudged along, heavy
+     * things stop her. Strength is the same dial the jaws use. */
+    const antR = 2.6;
+    for (const p of this.props) {
+      if (p === held) continue;
+      const dx = p.spec.x - this.antPos.x;
+      const dz = p.spec.z - this.antPos.z;
+      const rr = antR + p.spec.halfWideMm;
+      const d = Math.hypot(dx, dz);
+      if (d >= rr || d < 1e-4) continue;
+      const overlap = rr - d;
+      const nx = dx / d;
+      const nz = dz / d;
+      const canShove = p.spec.weightMg <= STRENGTH[this.caste].dragMg && !p.alive;
+      if (canShove) {
+        p.spec.x += nx * overlap;
+        p.spec.z += nz * overlap;
+      } else {
+        this.antPos.x -= nx * overlap;
+        this.antPos.z -= nz * overlap;
+      }
+    }
+    for (const p of this.props) {
+      if (p === held) continue;
+      p.mesh.position.set(p.spec.x, p.spec.y, p.spec.z);
+    }
+  }
+
   /* ------------------------------------------------------------ movement */
 
   private simulate(dt: number): void {
@@ -652,6 +756,7 @@ export class SandboxScene {
     this.antPos.y += (floor - this.antPos.y) * Math.min(1, dt * 12);
 
     if (busy || this.phase === 'hold') this.stepEngage(dt);
+    this.stepProps(dt);
     this.pickTarget();
     this.poseAnt(dt);
     this.aimCamera(dt);
@@ -705,6 +810,17 @@ export class SandboxScene {
         eye.z + fwd.z * Math.cos(pitch),
       );
       return;
+    }
+    /*
+     * LOCK-IN: while she walks and no thumb owns the view, the orbit
+     * eases back behind her — about 1.2 s to settle — so the camera ends
+     * up travelling the way she is going without ever being wrestled.
+     */
+    if (this.camPointer === null && Math.abs(this.moveWalk) > 0.12) {
+      let yaw = this.camYaw % (Math.PI * 2);
+      if (yaw > Math.PI) yaw -= Math.PI * 2;
+      if (yaw < -Math.PI) yaw += Math.PI * 2;
+      this.camYaw = yaw * (1 - Math.min(1, dt * 2.5));
     }
     const cp = Math.cos(this.camPitch);
     const desired = new THREE.Vector3(
@@ -930,10 +1046,35 @@ export class SandboxScene {
       }
       if (!leftHalf && this.camPointer === null) {
         this.camPointer = e.pointerId;
+        this.touchAt.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        el.setPointerCapture(e.pointerId);
+        return;
+      }
+      if (!leftHalf && this.pinchPointer === null) {
+        /* Second finger on the right half: the drag becomes a pinch. */
+        this.pinchPointer = e.pointerId;
+        this.touchAt.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        const a = this.touchAt.get(this.camPointer!);
+        if (a) this.pinchLast = Math.hypot(e.clientX - a.x, e.clientY - a.y);
         el.setPointerCapture(e.pointerId);
       }
     });
     el.addEventListener('pointermove', (e) => {
+      if (this.touchAt.has(e.pointerId)) {
+        this.touchAt.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      }
+      if (this.camPointer !== null && this.pinchPointer !== null) {
+        if (e.pointerId !== this.camPointer && e.pointerId !== this.pinchPointer) return;
+        const a = this.touchAt.get(this.camPointer);
+        const b = this.touchAt.get(this.pinchPointer);
+        if (!a || !b) return;
+        const now = Math.hypot(b.x - a.x, b.y - a.y);
+        if (this.pinchLast > 1) {
+          this.camDist = Math.min(140, Math.max(14, this.camDist * (this.pinchLast / now)));
+        }
+        this.pinchLast = now;
+        return;
+      }
       if (e.pointerId === this.stickPointer) {
         const dx = e.clientX - this.stickBase.x;
         const dy = e.clientY - this.stickBase.y;
@@ -967,6 +1108,13 @@ export class SandboxScene {
         if (this.knobEl) this.knobEl.style.transform = 'translate(-50%,-50%)';
       }
       if (e.pointerId === this.camPointer) this.camPointer = null;
+      if (e.pointerId === this.pinchPointer) this.pinchPointer = null;
+      this.touchAt.delete(e.pointerId);
+      /* One finger of a pinch lifting leaves the other as a plain drag. */
+      if (this.camPointer === null && this.pinchPointer !== null) {
+        this.camPointer = this.pinchPointer;
+        this.pinchPointer = null;
+      }
     };
     el.addEventListener('pointerup', done);
     el.addEventListener('pointercancel', done);
