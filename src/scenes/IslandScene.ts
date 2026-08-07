@@ -172,6 +172,18 @@ const BORE_HUG_WIDE = 2.4 / MM;
  *  walls, and a shell-sized fit perched her on every rim and pedestal. */
 const BODY_FIT_SCALE = 0.8;
 
+/*
+ * THE FOUNDING QUESTS — the prologue's spine, straight from the design
+ * brief: the queen finds a spot, digs an entrance, hollows her chamber,
+ * and the first worker emerges. Three beats, each read off what she has
+ * ACTUALLY done to the soil, never off a checkbox.
+ */
+/** Deep enough that the entrance counts as an entrance, in mm. */
+const QUEST_DEPTH_MM = 25;
+/** Soil samples carved OUT while deep — the chamber, measured in work.
+ *  Calibrated against the rig: ~10 s of held digging at depth. */
+const QUEST_CHAMBER_SAMPLES = 30000;
+
 /**
  * How far PAST HER NOSE the jaws close — not how far past her centre.
  *
@@ -483,6 +495,29 @@ export class IslandScene {
   /** Did the LAST bite actually remove soil? Surface engagement hangs on
    *  it — digging at open air must not grip her to the aim line. */
   private biteTouched = false;
+
+  /* ------------------------------------------------- the founding quests */
+
+  /** 0 dig the entrance · 1 hollow the chamber · 2 cinematic · 3 done. */
+  private questStage = 0;
+
+  /** Soil removed while deep — the chamber's progress, in samples. */
+  private deepCarved = 0;
+
+  private questEl: HTMLElement | null = null;
+
+  private cineEl: HTMLElement | null = null;
+
+  private cineUntil = 0;
+
+  /** The first worker — spawned when the chamber is made. */
+  private worker: QueenModel | null = null;
+
+  private workerReady = false;
+
+  private readonly workerAnchor = new THREE.Vector3();
+
+  private workerJig = 0;
 
   private showPlan = true;
 
@@ -1345,6 +1380,8 @@ export class IslandScene {
     this.underground = this.at.y + RIDE
       < this.walkGroundAt(this.at.x, this.at.z) - UNDER_MM / MM;
 
+    this.questTick(dt);
+
     /*
      * Which ROOM she is loose in, if any. It is DERIVED from where she is,
      * it is only ever asked below ground, and it decides exactly one
@@ -2158,6 +2195,8 @@ export class IslandScene {
     }
     this.biteTouched = touched > 0;
     if (touched === 0) return;
+    // Work done at depth is chamber-building, whatever she calls it.
+    if (this.depthMm() >= QUEST_DEPTH_MM * 0.7) this.deepCarved += touched;
 
     // One remesh for the whole face, not seven.
     const lo = (v: number) => Math.max(0, Math.floor((v - 1) / CH));
@@ -2929,6 +2968,121 @@ export class IslandScene {
 
   /* -------------------------------------------------------------- probes */
 
+  /* ------------------------------------------------- the founding quests */
+
+  /** How far below the ORIGINAL ground she is, in mm. Never negative. */
+  private depthMm(): number {
+    return Math.max(
+      0, (this.walkGroundAt(this.at.x, this.at.z) - this.at.y) * MM,
+    );
+  }
+
+  private questTick(dt: number): void {
+    if (!this.questEl) this.buildQuestHud();
+    if (this.questStage === 0 && this.depthMm() >= QUEST_DEPTH_MM) {
+      this.questStage = 1;
+    } else if (this.questStage === 1 && this.deepCarved >= QUEST_CHAMBER_SAMPLES) {
+      this.questStage = 2;
+      this.cineUntil = performance.now() + 5200;
+      if (this.cineEl) this.cineEl.classList.add('is-on');
+      this.spawnWorker();
+    } else if (this.questStage === 2 && performance.now() > this.cineUntil) {
+      this.questStage = 3;
+      if (this.cineEl) this.cineEl.classList.remove('is-on');
+    }
+    this.renderQuest();
+    this.poseWorker(dt);
+  }
+
+  private buildQuestHud(): void {
+    this.questEl = document.createElement('div');
+    this.questEl.className = 'density-lab-status rail-status';
+    this.questEl.style.left = '50%';
+    this.questEl.style.right = 'auto';
+    this.questEl.style.transform = 'translateX(-50%)';
+    this.hud.appendChild(this.questEl);
+
+    /*
+     * The founding cinematic, as the brief wrote it: a held black beat
+     * while the colony's story turns over. DOM, not canvas — it must sit
+     * over everything and cost nothing when off.
+     */
+    this.cineEl = document.createElement('div');
+    this.cineEl.style.cssText = 'position:absolute;inset:0;z-index:40;'
+      + 'display:flex;flex-direction:column;justify-content:center;'
+      + 'align-items:center;gap:14px;text-align:center;padding:0 9vw;'
+      + 'background:rgba(6,5,8,0.88);color:#e8dfc8;pointer-events:none;'
+      + 'opacity:0;transition:opacity 1.1s ease;'
+      + 'font-family:ui-monospace,monospace;';
+    this.cineEl.innerHTML = '<div style="font-size:19px;letter-spacing:0.4px">'
+      + 'The Queen has made this her home.</div>'
+      + '<div style="font-size:14px;opacity:0.8">Now she waits for her '
+      + 'first generation to emerge…</div>';
+    const style = document.createElement('style');
+    style.textContent = '.density-lab-hud > div.is-on { opacity: 1 !important; }';
+    document.head.appendChild(style);
+    this.hud.appendChild(this.cineEl);
+  }
+
+  private renderQuest(): void {
+    if (!this.questEl) return;
+    let text = '';
+    if (this.questStage === 0) {
+      text = `⛏ QUEST · dig the entrance · ${this.depthMm().toFixed(0)}/${QUEST_DEPTH_MM} mm down`;
+    } else if (this.questStage === 1) {
+      const pct = Math.min(
+        100, Math.round((this.deepCarved / QUEST_CHAMBER_SAMPLES) * 100),
+      );
+      text = `⛏ QUEST · hollow the queen's chamber · ${pct}%`;
+    } else if (this.questStage === 3) {
+      text = '🐜 the first worker is here · the colony begins';
+    }
+    if (this.questEl.textContent !== text) this.questEl.textContent = text;
+    this.questEl.style.display = text ? '' : 'none';
+  }
+
+  /**
+   * The first worker: hatched where the chamber quest completed, wearing
+   * the real worker rig, pottering a small patrol around her birthplace.
+   * She is the payoff — proof the colony is REAL — not yet a colonist
+   * with jobs; that part arrives with the sandbox mechanics.
+   */
+  private spawnWorker(): void {
+    if (this.worker) return;
+    this.workerAnchor.copy(this.at);
+    this.worker = new QueenModel('worker');
+    this.worker.root.visible = false;
+    this.scene.add(this.worker.root);
+    void this.worker.load().then((ok) => {
+      this.workerReady = ok;
+      if (this.worker) this.worker.root.visible = ok;
+    });
+  }
+
+  private poseWorker(dt: number): void {
+    if (!this.worker || !this.workerReady) return;
+    this.workerJig += dt;
+    const angle = this.workerJig * 0.55;
+    const r = 1.1;
+    const x = this.workerAnchor.x + Math.sin(angle) * r;
+    const z = this.workerAnchor.z + Math.cos(angle) * r;
+    const y = this.footingAt(x, z);
+    this.worker.root.position.set(x, y + RIDE * 0.5, z);
+    this.worker.root.rotation.set(0, angle + Math.PI / 2, 0);
+    this.worker.update(dt, {
+      speed: r * 0.55,
+      turn: 0.55,
+      digging: 0,
+      carrying: 0,
+      headYaw: 0,
+    });
+    this.worker.solveFeet(
+      (px, pz) => this.footingAt(px, pz),
+      FOOT_CLEARANCE_MM / MM,
+      RIDE * 2,
+    );
+  }
+
   setPausedForTest(on: boolean): void { this.paused = on; }
 
   stepForTest(dt: number, steps: number): void {
@@ -3029,6 +3183,10 @@ export class IslandScene {
       biteWidthMm: BITE_WIDTH_MM,
       biteDepthMm: BITE_DEPTH_MM,
       digMode: this.digMode ? 1 : 0,
+      questStage: this.questStage,
+      questDepthMm: +this.depthMm().toFixed(1),
+      deepCarved: this.deepCarved,
+      workerOut: this.worker && this.workerReady ? 1 : 0,
       asking: this.gateAsk ? 1 : 0,
       playerReady: this.playerReady ? 1 : 0,
       statsOpen: this.statsPanel.bodyVisible ? 1 : 0,
@@ -3068,6 +3226,7 @@ export class IslandScene {
     if (this.textures) for (const tex of Object.values(this.textures)) tex.dispose();
     this.nestView?.dispose();
     this.queen.dispose();
+    this.worker?.dispose();
     this.renderer.dispose();
     this.host.replaceChildren();
   }
