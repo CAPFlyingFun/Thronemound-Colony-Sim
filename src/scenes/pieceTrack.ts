@@ -182,9 +182,20 @@ export const PRESET_IDS: readonly PresetId[] = [
 
 /** The pieces a preset appends, given the track so far. */
 export function presetPieces(
-  pieces: readonly DigPiece[], id: PresetId, opts: AppendOptions,
+  pieces: readonly DigPiece[], id: PresetId,
+  opts: AppendOptions & {
+    /** The grade an EMPTY run should lead with — a branch hung off a
+     *  room's UP exit starts climbing, so its shaft and spirals must
+     *  climb too, not tunnel back down through the room. */
+    seedPitchDeg?: number;
+  },
 ): DigPiece[] {
-  const lastPitch = pieces.length ? pieces[pieces.length - 1]!.pitch : 0;
+  const seed = pieces.length === 0 ? opts.seedPitchDeg ?? 0 : undefined;
+  const lastPitch = pieces.length
+    ? pieces[pieces.length - 1]!.pitch : seed ?? 0;
+  // Presets dive by default (this is a nest); an UP-seeded branch flips
+  // them so the first move honors the exit it grows from.
+  const sign = seed !== undefined && seed >= 50 ? 1 : -1;
   const make = (pitch: number, turn: number): DigPiece => clampPiece({
     pitch,
     turn,
@@ -193,11 +204,20 @@ export function presetPieces(
   });
   switch (id) {
     case 'shaft':
-      return [make(-75, 0), make(-75, 0), make(-75, 0), make(-75, 0)];
+      return [
+        make(sign * 75, 0), make(sign * 75, 0),
+        make(sign * 75, 0), make(sign * 75, 0),
+      ];
     case 'spiralLeft':
-      return [make(-45, 45), make(-45, 45), make(-45, 45), make(-45, 45)];
+      return [
+        make(sign * 45, 45), make(sign * 45, 45),
+        make(sign * 45, 45), make(sign * 45, 45),
+      ];
     case 'spiralRight':
-      return [make(-45, -45), make(-45, -45), make(-45, -45), make(-45, -45)];
+      return [
+        make(sign * 45, -45), make(sign * 45, -45),
+        make(sign * 45, -45), make(sign * 45, -45),
+      ];
     case 'uturn':
       return [
         make(lastPitch, 45), make(lastPitch, 45),
@@ -206,6 +226,109 @@ export function presetPieces(
     default:
       return [];
   }
+}
+
+/* ------------------------------------------------------------ branching */
+
+/**
+ * A ROOM IS A HUB — the player's own spec: a room links up to seven
+ * connections. One is the tunnel you arrived by; the other six are the
+ * axis exits, named RELATIVE TO HOW YOU CAME IN, because that is the frame
+ * a player standing at the room actually thinks in. Dig a room straight
+ * down and the way back out is UP — so UP is spent, and down, left, right,
+ * forward and back are still open to branch from.
+ */
+export type ExitDir = 'forward' | 'back' | 'left' | 'right' | 'up' | 'down';
+
+export const EXIT_DIRS: readonly ExitDir[] = [
+  'forward', 'back', 'left', 'right', 'up', 'down',
+];
+
+/** One run of pieces. The first branch is the station line; every other
+ *  branch hangs off a parent branch's end room by one of its exits. */
+export interface TrackBranch {
+  pieces: readonly DigPiece[];
+  /** Radius of the room this branch ends in, or null for a bare end. */
+  roomMm: number | null;
+  parent: { branch: number; exit: ExitDir } | null;
+}
+
+/** The heading change an exit applies, relative to the arrival bearing. */
+const EXIT_YAW_DEG: Record<ExitDir, number> = {
+  forward: 0, back: 180, left: 90, right: -90, up: 0, down: 0,
+};
+
+/** The grade a branch STARTS at for each exit. Vertical exits lead with the
+ *  steepest grade the piece format allows; the flat four lead level. */
+export const EXIT_SEED_PITCH_DEG: Record<ExitDir, number> = {
+  forward: 0, back: 0, left: 0, right: 0,
+  up: PIECE_LIMITS.pitch.max, down: PIECE_LIMITS.pitch.min,
+};
+
+/**
+ * Which exit the ARRIVING tunnel spends. The way back out of the room is
+ * the reverse of the arrival direction: come in flat and BACK is spent;
+ * come in steeply down and the way out is UP.
+ */
+export function entryExitOf(arrivalPitchDeg: number): ExitDir {
+  if (arrivalPitchDeg <= -50) return 'up';
+  if (arrivalPitchDeg >= 50) return 'down';
+  return 'back';
+}
+
+export interface BranchStart {
+  at: Vec3Like;
+  forward: Vec3Like;
+  /** The grade the branch's FIRST piece should lead with. */
+  seedPitchDeg: number;
+  /** Arrival bearing at the hub, degrees — the frame the exits are named in. */
+  headingDeg: number;
+}
+
+const STATION_START: BranchStart = {
+  at: TRACK_START.at, forward: TRACK_START.forward,
+  seedPitchDeg: 0, headingDeg: 0,
+};
+
+/**
+ * Where a branch begins: the station for the first, the parent's end room
+ * for the rest, turned by the exit it hangs from. Walks parents recursively
+ * — trees here are a handful of branches, and a cycle (which the scene
+ * never writes) just bottoms out at the station rather than spinning.
+ */
+export function branchStartOf(
+  branches: readonly TrackBranch[], index: number, depth = 0,
+): BranchStart {
+  const branch = branches[index];
+  if (!branch || !branch.parent || depth > branches.length) return STATION_START;
+  const parentStart = branchStartOf(branches, branch.parent.branch, depth + 1);
+  const end = endStateOf(branches[branch.parent.branch]?.pieces ?? [], {
+    at: parentStart.at, forward: parentStart.forward,
+  });
+  const headingDeg = end.headingDeg + EXIT_YAW_DEG[branch.parent.exit];
+  const rad = (headingDeg * Math.PI) / 180;
+  return {
+    at: { x: end.x, y: end.y, z: end.z },
+    forward: { x: Math.sin(rad), y: 0, z: Math.cos(rad) },
+    seedPitchDeg: EXIT_SEED_PITCH_DEG[branch.parent.exit],
+    headingDeg,
+  };
+}
+
+/** The exits a branch's end room has already spent: the arrival, plus one
+ *  per child branch hanging off it. */
+export function takenExitsOf(
+  branches: readonly TrackBranch[], index: number,
+): Set<ExitDir> {
+  const start = branchStartOf(branches, index);
+  const end = endStateOf(branches[index]?.pieces ?? [], {
+    at: start.at, forward: start.forward,
+  });
+  const taken = new Set<ExitDir>([entryExitOf(end.pitchDeg)]);
+  branches.forEach((b) => {
+    if (b.parent?.branch === index) taken.add(b.parent.exit);
+  });
+  return taken;
 }
 
 export interface PlanOptions {
@@ -274,5 +397,92 @@ export function piecesToPlan(
     radiusMm: opts.boreRadiusMm,
     flow: 'both' as const,
   }));
+  return { nodes, edges };
+}
+
+export interface BranchPlanOptions {
+  originMm: Vec3Like;
+  boreRadiusMm: number;
+  entranceRadiusMm: number;
+  maxChordMm?: number;
+}
+
+/**
+ * The whole TREE as one nest plan — `piecesToPlan`'s job, generalized to
+ * branches. Every branch lays its nodes along its own rail; a child's first
+ * node is NOT laid at all, because it would sit exactly on the parent's end
+ * room — the child's first edge runs from the parent's room node instead,
+ * which is what makes the room a junction the carve and the walkers can
+ * actually use. One entrance, at the station, as ever.
+ */
+export function branchesToPlan(
+  branches: readonly TrackBranch[], opts: BranchPlanOptions,
+): NestPlan {
+  const maxChord = opts.maxChordMm ?? 3;
+  const nodes: NestPlan['nodes'] = [];
+  const edges: NestPlan['edges'] = [];
+  /** The node id of each branch's END, for children to hang edges from. */
+  const endNodeId: (string | null)[] = branches.map(() => null);
+
+  branches.forEach((branch, k) => {
+    if (branch.pieces.length === 0) return;
+    // A child of a branch that laid no track has nowhere to hang from;
+    // emitting it anyway would put a disconnected island in the plan.
+    if (branch.parent && endNodeId[branch.parent.branch] === null) return;
+    const start = branchStartOf(branches, k);
+    const rail = buildRail(branch.pieces, {
+      at: start.at, forward: start.forward,
+    });
+    const stops: number[] = [0];
+    let s = 0;
+    for (const piece of branch.pieces) {
+      const parts = piece.turn !== 0
+        ? Math.max(1, Math.ceil(piece.length / maxChord))
+        : 1;
+      for (let i = 1; i <= parts; i += 1) {
+        stops.push(s + (piece.length * i) / parts);
+      }
+      s += piece.length;
+    }
+    const parentEnd = branch.parent ? endNodeId[branch.parent.branch] : null;
+    stops.forEach((at, i) => {
+      const id = `b${k}-${i}`;
+      const last = i === stops.length - 1;
+      // A child's node 0 IS the parent's room; the room node already exists.
+      if (i === 0 && parentEnd) {
+        if (stops.length > 1) {
+          edges.push({
+            id: `b${k}-e0`,
+            from: parentEnd,
+            to: `b${k}-1`,
+            radiusMm: opts.boreRadiusMm,
+            flow: 'both',
+          });
+        }
+        return;
+      }
+      const frame = rail.sample(at, 0);
+      const room = last && branch.roomMm !== null;
+      nodes.push({
+        id,
+        kind: k === 0 && i === 0 ? 'entrance' : room ? 'chamber' : 'junction',
+        x: opts.originMm.x + (frame?.x ?? start.at.x),
+        y: opts.originMm.y + (frame?.y ?? start.at.y),
+        z: opts.originMm.z + (frame?.z ?? start.at.z),
+        radiusMm: k === 0 && i === 0 ? opts.entranceRadiusMm
+          : room ? branch.roomMm! : opts.boreRadiusMm,
+      });
+      if (i > 0 && !(i === 1 && parentEnd)) {
+        edges.push({
+          id: `b${k}-e${i - 1}`,
+          from: `b${k}-${i - 1}`,
+          to: id,
+          radiusMm: opts.boreRadiusMm,
+          flow: 'both',
+        });
+      }
+      if (last) endNodeId[k] = id;
+    });
+  });
   return { nodes, edges };
 }

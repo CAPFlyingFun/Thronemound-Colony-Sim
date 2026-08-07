@@ -26,8 +26,10 @@ import './DensityTerrainLabScene.css';
 import { RAIL_SMOOTH_MM, type TunnelRail } from './tunnelRail';
 import { PIECE_LIMITS, clampPiece, type DigPiece } from './digPlan';
 import {
-  PIECE_LENGTHS_MM, appendPiece, autoBankFor, buildRail, endStateOf, pieceLabel,
-  piecesToPlan, presetPieces, type PieceKind, type PresetId,
+  EXIT_DIRS, PIECE_LENGTHS_MM, appendPiece, autoBankFor, branchStartOf,
+  branchesToPlan, buildRail, endStateOf, entryExitOf, pieceLabel,
+  presetPieces, takenExitsOf, type BranchStart, type ExitDir,
+  type PieceKind, type PresetId,
 } from './pieceTrack';
 import { MIN_ENTRANCE_RADIUS_MM, validatePlan, type NestPlan } from '../nest/nestPlan';
 import { carvePlan } from '../nest/nestCarve';
@@ -61,13 +63,37 @@ const ENTRANCE_RADIUS_MM = MIN_ENTRANCE_RADIUS_MM;
  * Eleven millimetres of radius is the game's own "generous queen chamber
  * is 22 mm across"; the store is a tunnel-and-a-half. Carved as the
  * standard ant-room ellipsoid by `nestCarve`, so the proportions match
- * every other room in the project.
+ * every other room in the project. A room is also a HUB now — up to seven
+ * connections — so the chip reads as "add a room here".
  */
 const ROOMS = [
-  { label: 'ROOM OFF', radiusMm: null },
-  { label: 'ROOM STORE', radiusMm: 6 },
-  { label: 'ROOM QUEEN', radiusMm: 11 },
+  { label: '+ ROOM', radiusMm: null },
+  { label: 'ROOM ◦', radiusMm: 6 },
+  { label: 'ROOM ⬤', radiusMm: 11 },
 ] as const;
+
+/** A branch as the scene mutates it. Assignable to `TrackBranch`. */
+interface LiveBranch {
+  pieces: DigPiece[];
+  roomMm: number | null;
+  parent: { branch: number; exit: ExitDir } | null;
+}
+
+const freshBranch = (): LiveBranch => ({
+  pieces: [], roomMm: null, parent: null,
+});
+
+/** Where each hub spoke sits on the ring, and what it says. Labels over
+ *  positions: UP is on top and DOWN on the bottom because those two ARE
+ *  spatial; the flat four just take the remaining corners. */
+const HUB_SPOKES: readonly { exit: ExitDir; cls: string; label: string }[] = [
+  { exit: 'up', cls: 'rh-n', label: 'UP' },
+  { exit: 'down', cls: 'rh-s', label: 'DOWN' },
+  { exit: 'left', cls: 'rh-w', label: 'LEFT' },
+  { exit: 'right', cls: 'rh-e', label: 'RIGHT' },
+  { exit: 'forward', cls: 'rh-ne', label: 'FWD' },
+  { exit: 'back', cls: 'rh-nw', label: 'BACK' },
+];
 
 /**
  * THE SOIL: a block of ground under the station, surface at y = 0.
@@ -99,9 +125,36 @@ export class RailScene {
 
   private readonly camera: THREE.PerspectiveCamera;
 
-  private pieces: DigPiece[] = [];
+  /**
+   * THE TREE: branch 0 is the station line; every other branch hangs off a
+   * parent's end room by one of its exits. The palette, the wheel, the
+   * selection and the readout all speak about the ACTIVE branch — one
+   * working end at a time, chosen by tapping a room hub or a piece.
+   */
+  private branches: LiveBranch[] = [freshBranch()];
 
-  private rail: TunnelRail = buildRail([]);
+  private active = 0;
+
+  private branchRails: TunnelRail[] = [buildRail([])];
+
+  /** The active branch's pieces — the list every editing hand works on. */
+  private get pieces(): DigPiece[] {
+    return this.branches[this.active]!.pieces;
+  }
+
+  /** The active branch's rail — ghost, wheel and selection all ride it. */
+  private get rail(): TunnelRail {
+    return this.branchRails[this.active] ?? buildRail([]);
+  }
+
+  /** The station line's rail, which is the one the cart shuttles. */
+  private get mainRail(): TunnelRail {
+    return this.branchRails[0]!;
+  }
+
+  private startOfActive(): BranchStart {
+    return branchStartOf(this.branches, this.active);
+  }
 
   private autoBank = true;
 
@@ -199,10 +252,31 @@ export class RailScene {
 
   private tagsBtn: HTMLButtonElement | null = null;
 
-  /** Which ROOMS entry the tunnel currently ends in. */
-  private roomIdx = 0;
-
   private roomBtn: HTMLButtonElement | null = null;
+
+  /** Beam meshes by branch, for tap-to-select raycasts. */
+  private beamMeshes: { mesh: THREE.Mesh; branch: number }[] = [];
+
+  /** The room hub buttons, one per roomed branch, projected each frame. */
+  private hubLayer: HTMLElement | null = null;
+
+  private hubs: { root: HTMLElement; branch: number }[] = [];
+
+  /** Which branch's hub ring is open, or -1. */
+  private openHub = -1;
+
+  /** Where a canvas press started, to tell a tap from an orbit. */
+  private tapAt: { x: number; y: number; t: number } | null = null;
+
+  /** Utility chips fold away behind the ⋯ chip until asked for. */
+  private drawerChips: HTMLButtonElement[] = [];
+
+  private drawerOpen = false;
+
+  private moreBtn: HTMLButtonElement | null = null;
+
+  /** The readout is a one-line strip until tapped open. */
+  private readoutOpen = false;
 
   private carveMs = 0;
 
@@ -267,7 +341,7 @@ export class RailScene {
 
     this.loadPieces();
     // The ROOM chip was built before the save was read; catch it up.
-    if (this.roomBtn) this.roomBtn.textContent = ROOMS[this.roomIdx]!.label;
+    this.updateRoomBtn();
     this.rebuildTrack();
 
     (window as unknown as { railScene?: unknown }).railScene = this;
@@ -409,109 +483,87 @@ export class RailScene {
   private rebuildTrack(): void {
     // The track end moved, so the armed ghost re-derives from the new end.
     this.ghostPiece = null;
-    for (const child of [...this.trackGroup.children]) {
-      this.trackGroup.remove(child);
-      const mesh = child as THREE.Mesh;
-      mesh.geometry?.dispose();
-      if (mesh.material instanceof THREE.Material) mesh.material.dispose();
-    }
-    this.rail = buildRail(this.pieces);
-    const length = this.rail.lengthMm;
-    if (length <= 0) {
-      this.cartS = 0;
-      this.rebuildLabels();
-      this.rebuildGhost();
-      this.rebuildSelection();
-      this.recarve();
-      this.refreshReadout(true);
-      this.savePieces();
-      return;
-    }
+    RailScene.emptyGroup(this.trackGroup);
+    this.beamMeshes = [];
 
-    // The beam: a tube swept along the sampled frames.
-    const RING = 8;
-    const steps = Math.max(2, Math.ceil(length / DRAW_STEP_MM) + 1);
-    const positions = new Float32Array(steps * RING * 3);
+    this.branchRails = this.branches.map((branch, k) => {
+      const start = branchStartOf(this.branches, k);
+      return buildRail(branch.pieces, {
+        at: start.at, forward: start.forward,
+      });
+    });
+
     const right = new THREE.Vector3();
     const up = new THREE.Vector3();
-    let at = 0;
-    for (let i = 0; i < steps; i += 1) {
-      const s = (i / (steps - 1)) * length;
-      const f = this.rail.sample(s, this.sampleWindow)!;
-      up.set(f.ux, f.uy, f.uz);
-      right.set(
-        f.uy * f.fz - f.uz * f.fy,
-        f.uz * f.fx - f.ux * f.fz,
-        f.ux * f.fy - f.uy * f.fx,
-      );
-      for (let k = 0; k < RING; k += 1) {
-        const a = (k / RING) * Math.PI * 2;
-        const c = Math.cos(a) * BEAM_RADIUS;
-        const sn = Math.sin(a) * BEAM_RADIUS;
-        positions[at] = f.x + right.x * c + up.x * sn;
-        positions[at + 1] = f.y + right.y * c + up.y * sn;
-        positions[at + 2] = f.z + right.z * c + up.z * sn;
-        at += 3;
-      }
-    }
-    const index: number[] = [];
-    for (let i = 0; i + 1 < steps; i += 1) {
-      for (let k = 0; k < RING; k += 1) {
-        const a = i * RING + k;
-        const b = i * RING + ((k + 1) % RING);
-        const c = a + RING;
-        const d = b + RING;
-        index.push(a, c, b, b, c, d);
-      }
-    }
-    const beamGeometry = new THREE.BufferGeometry();
-    beamGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    beamGeometry.setIndex(index);
-    beamGeometry.computeVertexNormals();
-    const beam = new THREE.Mesh(
-      beamGeometry,
-      new THREE.MeshLambertMaterial({ color: 0x4a90c2 }),
-    );
-    this.trackGroup.add(beam);
-
-    // The sleepers: one oriented tie every few millimetres. The tie's tilt is
-    // the BANK made visible, which is most of why a monorail has them here.
-    const tieCount = Math.max(1, Math.floor(length / TIE_EVERY_MM));
-    const ties = new THREE.InstancedMesh(
-      new THREE.BoxGeometry(3.4, 0.35, 0.9),
-      new THREE.MeshLambertMaterial({ color: 0x6b5a44 }),
-      tieCount,
-    );
-    const pose = new THREE.Matrix4();
-    const basis = new THREE.Matrix4();
     const fwd = new THREE.Vector3();
-    const place = new THREE.Vector3();
-    for (let i = 0; i < tieCount; i += 1) {
-      const f = this.rail.sample((i + 0.5) * TIE_EVERY_MM, this.sampleWindow)!;
-      up.set(f.ux, f.uy, f.uz);
-      fwd.set(f.fx, f.fy, f.fz);
-      right.crossVectors(up, fwd).normalize();
-      basis.makeBasis(right, up, fwd);
-      place.set(f.x - up.x * 0.85, f.y - up.y * 0.85, f.z - up.z * 0.85);
-      pose.copy(basis).setPosition(place);
-      ties.setMatrixAt(i, pose);
-    }
-    ties.instanceMatrix.needsUpdate = true;
-    this.trackGroup.add(ties);
+    this.branches.forEach((branch, k) => {
+      const rail = this.branchRails[k]!;
+      const length = rail.lengthMm;
+      if (length <= 0) return;
 
-    // The buffers: where the line ends, so the eye finds it before the cart.
-    const endFrame = this.rail.sample(length, this.sampleWindow)!;
-    const buffer = new THREE.Mesh(
-      new THREE.SphereGeometry(1.1, 12, 10),
-      new THREE.MeshLambertMaterial({ color: 0xd8b23c }),
-    );
-    buffer.position.set(endFrame.x, endFrame.y, endFrame.z);
-    this.trackGroup.add(buffer);
+      // The beam: the same sweep the ghost and highlight use. The branch
+      // being built is a shade brighter, so the working line reads at a
+      // glance without a label.
+      const beamGeometry = this.sweepTube(rail, 0, length, BEAM_RADIUS);
+      if (beamGeometry) {
+        const beam = new THREE.Mesh(beamGeometry, new THREE.MeshLambertMaterial({
+          color: k === this.active ? 0x5fa8d8 : 0x4a90c2,
+        }));
+        this.trackGroup.add(beam);
+        this.beamMeshes.push({ mesh: beam, branch: k });
+      }
 
-    this.cartS = Math.min(this.cartS, length);
+      // The sleepers: one oriented tie every few millimetres. The tie's tilt
+      // is the BANK made visible.
+      const tieCount = Math.max(1, Math.floor(length / TIE_EVERY_MM));
+      const ties = new THREE.InstancedMesh(
+        new THREE.BoxGeometry(3.4, 0.35, 0.9),
+        new THREE.MeshLambertMaterial({ color: 0x6b5a44 }),
+        tieCount,
+      );
+      const pose = new THREE.Matrix4();
+      const basis = new THREE.Matrix4();
+      const place = new THREE.Vector3();
+      for (let i = 0; i < tieCount; i += 1) {
+        const f = rail.sample((i + 0.5) * TIE_EVERY_MM, this.sampleWindow)!;
+        up.set(f.ux, f.uy, f.uz);
+        fwd.set(f.fx, f.fy, f.fz);
+        right.crossVectors(up, fwd).normalize();
+        basis.makeBasis(right, up, fwd);
+        place.set(f.x - up.x * 0.85, f.y - up.y * 0.85, f.z - up.z * 0.85);
+        pose.copy(basis).setPosition(place);
+        ties.setMatrixAt(i, pose);
+      }
+      ties.instanceMatrix.needsUpdate = true;
+      this.trackGroup.add(ties);
+
+      // The end of the line: a room sphere if there is a room — the hub the
+      // player taps to branch — or a buffer knob if there is not.
+      const endFrame = rail.sample(length, this.sampleWindow)!;
+      if (branch.roomMm !== null) {
+        const room = new THREE.Mesh(
+          new THREE.SphereGeometry(branch.roomMm, 18, 14),
+          new THREE.MeshLambertMaterial({
+            color: 0xd8a04c, transparent: true, opacity: 0.28, depthWrite: false,
+          }),
+        );
+        room.position.set(endFrame.x, endFrame.y, endFrame.z);
+        this.trackGroup.add(room);
+      } else {
+        const buffer = new THREE.Mesh(
+          new THREE.SphereGeometry(1.1, 12, 10),
+          new THREE.MeshLambertMaterial({ color: 0xd8b23c }),
+        );
+        buffer.position.set(endFrame.x, endFrame.y, endFrame.z);
+        this.trackGroup.add(buffer);
+      }
+    });
+
+    this.cartS = Math.min(this.cartS, this.mainRail.lengthMm);
     this.rebuildLabels();
     this.rebuildGhost();
     this.rebuildSelection();
+    this.rebuildHubs();
     this.recarve();
     this.frameCamera();
     this.refreshReadout(true);
@@ -521,12 +573,10 @@ export class RailScene {
   /** The plan this track IS — one construction, shared by the carve, the
    *  readout and the probes, so they cannot disagree about radii. */
   private planOf(): NestPlan {
-    const room = ROOMS[this.roomIdx]!.radiusMm;
-    return piecesToPlan(this.pieces, {
+    return branchesToPlan(this.branches, {
       originMm: { x: 0, y: 0, z: 0 },
       boreRadiusMm: BORE_RADIUS_MM,
       entranceRadiusMm: ENTRANCE_RADIUS_MM,
-      ...(room !== null ? { endChamberMm: room } : {}),
     });
   }
 
@@ -600,40 +650,117 @@ export class RailScene {
 
   /* ------------------------------------------------------------ the edits */
 
-  private add(kind: PieceKind): void {
-    this.pieces.push(appendPiece(this.pieces, kind, {
+  /**
+   * The piece a palette button means ON THE ACTIVE BRANCH. Same arithmetic
+   * as ever, with one addition: a branch's FIRST piece leads with the grade
+   * its exit implies — a branch hung off a room's DOWN exit starts plunging,
+   * not level — and UP/DOWN step from that grade rather than from zero.
+   */
+  private nextPiece(kind: PieceKind): DigPiece {
+    const opts = {
       lengthMm: PIECE_LENGTHS_MM[this.lengthIdx]!,
       autoBank: this.autoBank,
-    }));
+    };
+    const piece = appendPiece(this.pieces, kind, opts);
+    if (this.pieces.length === 0) {
+      const seed = this.startOfActive().seedPitchDeg;
+      const step = kind === 'up' ? PIECE_LIMITS.pitch.step
+        : kind === 'down' ? -PIECE_LIMITS.pitch.step : 0;
+      return clampPiece({ ...piece, pitch: seed + step });
+    }
+    return piece;
+  }
+
+  private add(kind: PieceKind): void {
+    this.pieces.push(this.nextPiece(kind));
     this.rebuildTrack();
   }
 
-  /** A preset move: several pieces, one tap, one rebuild. */
+  /** A preset move: several pieces, one tap, one rebuild. On an empty
+   *  branch the preset honors the exit's grade — a shaft off an UP exit
+   *  climbs, it does not tunnel back down through the room. */
   private addPreset(id: PresetId): void {
     this.pieces.push(...presetPieces(this.pieces, id, {
       lengthMm: PIECE_LENGTHS_MM[this.lengthIdx]!,
       autoBank: this.autoBank,
+      seedPitchDeg: this.startOfActive().seedPitchDeg,
     }));
     this.rebuildTrack();
   }
 
-  private setRoom(idx: number): void {
-    this.roomIdx = ((idx % ROOMS.length) + ROOMS.length) % ROOMS.length;
-    if (this.roomBtn) this.roomBtn.textContent = ROOMS[this.roomIdx]!.label;
+  /** Do any branches hang off this one's end room? */
+  private hasChildren(index: number): boolean {
+    return this.branches.some((b) => b.parent?.branch === index);
+  }
+
+  /** Cycle the ACTIVE branch's end room. A track has to exist to end in a
+   *  room, and a room with branches hanging off it cannot be taken away. */
+  private cycleRoom(): void {
+    const branch = this.branches[this.active]!;
+    if (branch.pieces.length === 0) return;
+    const order: (number | null)[] = ROOMS.map((r) => r.radiusMm);
+    let idx = (order.indexOf(branch.roomMm) + 1) % order.length;
+    if (order[idx] === null && this.hasChildren(this.active)) {
+      idx = (idx + 1) % order.length; // skip OFF — the hub is load-bearing
+    }
+    branch.roomMm = order[idx]!;
+    this.updateRoomBtn();
     this.rebuildTrack();
   }
 
+  private updateRoomBtn(): void {
+    if (!this.roomBtn) return;
+    const roomMm = this.branches[this.active]!.roomMm;
+    this.roomBtn.textContent =
+      ROOMS.find((r) => r.radiusMm === roomMm)?.label ?? '+ ROOM';
+  }
+
+  /** Make a branch the working one: everything editable points at it. */
+  private activateBranch(index: number): void {
+    if (index < 0 || index >= this.branches.length) return;
+    if (this.armed) this.cancelArm();
+    this.active = index;
+    this.selIdx = -1;
+    this.openHub = -1;
+    this.updateRoomBtn();
+    this.rebuildTrack(); // re-tints the working line, re-anchors the ghost
+  }
+
+  /** Remove an EMPTY branch and re-point every parent index past it. */
+  private removeBranch(index: number): void {
+    const parent = this.branches[index]!.parent?.branch ?? 0;
+    this.branches.splice(index, 1);
+    for (const b of this.branches) {
+      if (b.parent && b.parent.branch > index) b.parent.branch -= 1;
+    }
+    this.active = parent > index ? parent - 1 : parent;
+    this.updateRoomBtn();
+  }
+
   private undo(): void {
-    if (this.pieces.length === 0) return;
-    this.pieces.pop();
+    const branch = this.branches[this.active]!;
+    if (branch.pieces.length === 0) {
+      // Undoing an empty branch takes the branch itself back off its room.
+      if (branch.parent) { this.removeBranch(this.active); this.rebuildTrack(); }
+      return;
+    }
+    if (branch.pieces.length === 1 && this.hasChildren(this.active)) {
+      return; // the room at the end still has branches to hold up
+    }
+    branch.pieces.pop();
+    if (branch.pieces.length === 0) branch.roomMm = null;
+    this.updateRoomBtn();
     this.rebuildTrack();
   }
 
   private clear(): void {
-    if (this.pieces.length === 0) return;
-    this.pieces = [];
+    this.branches = [freshBranch()];
+    this.active = 0;
+    this.openHub = -1;
+    this.selIdx = -1;
     this.cartS = 0;
     this.cartDir = 1;
+    this.updateRoomBtn();
     this.rebuildTrack();
   }
 
@@ -649,11 +776,13 @@ export class RailScene {
     };
     if ('piece' in this.armed) {
       if (!this.ghostPiece) {
-        this.ghostPiece = appendPiece(this.pieces, this.armed.piece, opts);
+        this.ghostPiece = this.nextPiece(this.armed.piece);
       }
       return [this.ghostPiece];
     }
-    return presetPieces(this.pieces, this.armed.preset, opts);
+    return presetPieces(this.pieces, this.armed.preset, {
+      ...opts, seedPitchDeg: this.startOfActive().seedPitchDeg,
+    });
   }
 
   /** First tap arms (chip lights, ghost appears); a tap on the ARMED chip
@@ -794,8 +923,10 @@ export class RailScene {
     RailScene.emptyGroup(this.ghostGroup);
     const ghost = this.armedPieces();
     if (ghost.length === 0) return;
-    const total = buildRail([...this.pieces, ...ghost]);
-    const from = buildRail(this.pieces).lengthMm;
+    const start = this.startOfActive();
+    const anchor = { at: start.at, forward: start.forward };
+    const total = buildRail([...this.pieces, ...ghost], anchor);
+    const from = buildRail(this.pieces, anchor).lengthMm;
     const geometry = this.sweepTube(total, from, total.lengthMm, BEAM_RADIUS * 1.15);
     if (!geometry) return;
     const mesh = new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({
@@ -835,7 +966,14 @@ export class RailScene {
 
   private destroySelected(): void {
     if (this.selIdx < 0 || this.selIdx >= this.pieces.length) return;
+    if (this.pieces.length === 1 && this.hasChildren(this.active)) {
+      return; // the last piece holds up a room with branches on it
+    }
     this.pieces.splice(this.selIdx, 1);
+    if (this.pieces.length === 0) {
+      this.branches[this.active]!.roomMm = null;
+      this.updateRoomBtn();
+    }
     if (this.selIdx >= this.pieces.length) this.selIdx = this.pieces.length - 1;
     this.rebuildTrack(); // clamps, redraws, and re-highlights
   }
@@ -867,7 +1005,7 @@ export class RailScene {
   private savePieces(): void {
     try {
       localStorage.setItem(SAVE_KEY, JSON.stringify({
-        v: 2, pieces: this.pieces, roomIdx: this.roomIdx,
+        v: 3, branches: this.branches, active: this.active,
       }));
     } catch { /* private mode, quota — the rig runs on regardless */ }
   }
@@ -877,17 +1015,73 @@ export class RailScene {
       const raw = localStorage.getItem(SAVE_KEY);
       if (!raw) return;
       const parsed = JSON.parse(raw) as
-        DigPiece[] | { v: number; pieces: DigPiece[]; roomIdx?: number };
-      // v1 saved the bare array; v2 wraps it to carry the room. Both load.
-      const pieces = Array.isArray(parsed) ? parsed : parsed.pieces;
-      if (Array.isArray(pieces)) {
-        this.pieces = pieces.filter((p) => Number.isFinite(p?.pitch)
+        DigPiece[]
+        | { v: 2; pieces: DigPiece[]; roomIdx?: number }
+        | { v: 3; branches: LiveBranch[]; active?: number };
+      const soundPieces = (list: unknown): DigPiece[] => (Array.isArray(list)
+        ? list.filter((p: DigPiece) => Number.isFinite(p?.pitch)
           && Number.isFinite(p?.turn) && Number.isFinite(p?.roll)
-          && Number.isFinite(p?.length) && p.length > 0);
+          && Number.isFinite(p?.length) && p.length > 0)
+        : []);
+      if (!Array.isArray(parsed) && parsed.v === 3
+        && Array.isArray(parsed.branches)) {
+        // Clamp every piece to the format's own limits, and only accept
+        // room radii the game can actually make — a save is a claim, not
+        // a fact, and the tree invariants get re-proven branch by branch.
+        const roomRadii: (number | null)[] = ROOMS.map((r) => r.radiusMm);
+        const raw = parsed.branches.map((b): LiveBranch => ({
+          pieces: soundPieces(b?.pieces).map((p) => clampPiece(p)),
+          roomMm: typeof b?.roomMm === 'number' && roomRadii.includes(b.roomMm)
+            ? b.roomMm : null,
+          parent: b?.parent && Number.isInteger(b.parent.branch)
+            && b.parent.branch >= 0 && EXIT_DIRS.includes(b.parent.exit)
+            ? { branch: b.parent.branch, exit: b.parent.exit } : null,
+        }));
+        // Keep a branch only if its whole ancestry holds: the first is the
+        // root, a parent comes earlier AND survived AND has a roomed track
+        // to hang from, and no two children share an exit. Dropping a bad
+        // branch drops its descendants with it.
+        const kept: LiveBranch[] = [];
+        const newIndex = new Map<number, number>();
+        raw.forEach((b, i) => {
+          if (i === 0) {
+            if (b.parent) return; // a rooted tree or nothing
+            newIndex.set(0, kept.length);
+            kept.push(b);
+            return;
+          }
+          if (!b.parent || b.parent.branch >= i) return;
+          const parentAt = newIndex.get(b.parent.branch);
+          const parent = parentAt !== undefined ? kept[parentAt] : undefined;
+          if (!parent || parent.roomMm === null
+            || parent.pieces.length === 0) return;
+          const exitTaken = kept.some((other) => other.parent
+            && newIndex.get(b.parent!.branch) === other.parent.branch
+            && other.parent.exit === b.parent!.exit);
+          if (exitTaken) return;
+          newIndex.set(i, kept.length);
+          kept.push({ ...b, parent: { branch: parentAt!, exit: b.parent.exit } });
+        });
+        if (kept.length > 0) {
+          this.branches = kept;
+          const active = Number.isInteger(parsed.active)
+            ? newIndex.get(parsed.active!) : undefined;
+          this.active = active ?? 0;
+        }
+        return;
       }
-      if (!Array.isArray(parsed) && Number.isInteger(parsed.roomIdx)) {
-        this.roomIdx = Math.min(ROOMS.length - 1, Math.max(0, parsed.roomIdx!));
-      }
+      // v1 saved the bare array; v2 wrapped it to carry the room. Both
+      // become the station line of a one-branch tree.
+      const pieces = soundPieces(Array.isArray(parsed) ? parsed
+        : parsed.v === 2 ? parsed.pieces : []);
+      const roomIdx = !Array.isArray(parsed) && parsed.v === 2
+        && Number.isInteger(parsed.roomIdx)
+        ? Math.min(ROOMS.length - 1, Math.max(0, parsed.roomIdx!)) : 0;
+      this.branches = [{
+        pieces,
+        roomMm: pieces.length > 0 ? ROOMS[roomIdx]!.radiusMm : null,
+        parent: null,
+      }];
     } catch { /* a bad save is an empty track, not a broken room */ }
   }
 
@@ -926,39 +1120,9 @@ export class RailScene {
     piece('◀', 'left');
     piece('▶', 'right');
 
-    /* The PRESET shelf — whole moves, named for nest architecture. */
-    const preset = (label: string, id: PresetId): void => {
-      const button = document.createElement('button');
-      button.className = 'density-lab-button density-lab-mode';
-      button.textContent = label;
-      button.addEventListener('pointerdown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.armOrPlace(button, { preset: id });
-      });
-      actions.appendChild(button);
-    };
-    preset('SHAFT', 'shaft');
-    preset('SPIRAL◀', 'spiralLeft');
-    preset('SPIRAL▶', 'spiralRight');
-    preset('U-TURN', 'uturn');
-
-    /* The Utilities panel, ant-sized: what the tunnel ENDS in. */
-    this.roomBtn = (() => {
-      const button = document.createElement('button');
-      button.className = 'density-lab-button density-lab-mode';
-      button.textContent = ROOMS[this.roomIdx]!.label;
-      button.addEventListener('pointerdown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.setRoom(this.roomIdx + 1);
-      });
-      actions.appendChild(button);
-      return button;
-    })();
-
     const chip = (
       label: string, onTap: (button: HTMLButtonElement) => void,
+      inDrawer = false,
     ): HTMLButtonElement => {
       const button = document.createElement('button');
       button.className = 'density-lab-button density-lab-mode';
@@ -969,59 +1133,99 @@ export class RailScene {
         onTap(button);
       });
       actions.appendChild(button);
+      if (inDrawer) {
+        button.style.display = 'none';
+        this.drawerChips.push(button);
+      }
       return button;
     };
+
+    /*
+     * THE SHELF, decluttered: what shows by default is what a first-time
+     * player needs — the five pieces, the room, undo — and everything else
+     * lives behind the ⋯ chip. A control a novice cannot misread beats a
+     * control an expert can reach one tap sooner.
+     */
+    this.roomBtn = chip(ROOMS[0]!.label, () => this.cycleRoom());
+    chip('UNDO', () => this.undo());
+    this.moreBtn = chip('⋯', (b) => {
+      this.drawerOpen = !this.drawerOpen;
+      b.classList.toggle('is-latched', this.drawerOpen);
+      for (const c of this.drawerChips) {
+        c.style.display = this.drawerOpen ? '' : 'none';
+      }
+    });
+
+    /* The drawer: presets first (they build), then the toggles. */
+    const preset = (label: string, id: PresetId): void => {
+      const button = chip(label, (b) => {
+        this.armOrPlace(b, { preset: id });
+      }, true);
+      void button;
+    };
+    preset('SHAFT', 'shaft');
+    preset('SPIRAL◀', 'spiralLeft');
+    preset('SPIRAL▶', 'spiralRight');
+    preset('U-TURN', 'uturn');
     this.lenBtn = chip(`LEN ${PIECE_LENGTHS_MM[this.lengthIdx]}`, (b) => {
       this.lengthIdx = (this.lengthIdx + 1) % PIECE_LENGTHS_MM.length;
       b.textContent = `LEN ${PIECE_LENGTHS_MM[this.lengthIdx]}`;
       this.ghostPiece = null; // re-derive: the ghost wears the new default
       this.rebuildGhost();
-    });
+    }, true);
     this.bankBtn = chip('BANK AUTO', (b) => {
       this.autoBank = !this.autoBank;
       b.textContent = this.autoBank ? 'BANK AUTO' : 'BANK OFF';
       this.ghostPiece = null;
       this.rebuildGhost();
-    });
+    }, true);
     this.smoothBtn = chip('SMOOTH OFF', (b) => {
       this.smooth = !this.smooth;
       b.textContent = this.smooth ? 'SMOOTH ON' : 'SMOOTH OFF';
       this.rebuildTrack();
-    });
+    }, true);
     this.rideBtn = chip('RIDE ON', (b) => {
       this.riding = !this.riding;
       b.textContent = this.riding ? 'RIDE ON' : 'RIDE OFF';
-    });
+    }, true);
     this.soilBtn = chip('SOIL XRAY', (b) => {
       this.soilMode = this.soilMode === 'xray' ? 'solid'
         : this.soilMode === 'solid' ? 'off' : 'xray';
       b.textContent = `SOIL ${this.soilMode.toUpperCase()}`;
       this.applySoilMode();
-    });
+    }, true);
     this.tagsBtn = chip('TAGS ON', (b) => {
       this.labelsOn = !this.labelsOn;
       b.textContent = this.labelsOn ? 'TAGS ON' : 'TAGS OFF';
       this.rebuildLabels();
-    });
-    chip('UNDO', () => this.undo());
-    chip('CLEAR', () => this.clear());
+    }, true);
+    chip('CLEAR', () => this.clear(), true);
 
     /* Standing down: shown only while a chip is armed. */
-    this.cancelBtn = chip('✕ AIM', () => this.cancelArm());
+    this.cancelBtn = chip('✕', () => this.cancelArm());
     this.cancelBtn.style.display = 'none';
 
-    /* Surgical removal, the mobile builders' way: walk a highlight along
-     * the track and DESTROY exactly the piece it sits on. */
-    chip('◀ PIECE', () => this.stepSelection(-1));
-    chip('PIECE ▶', () => this.stepSelection(1));
+    /* Removal: tap a piece on the track to select it, then DESTROY. */
     this.destroyBtn = chip('DESTROY', () => this.destroySelected());
     this.destroyBtn.classList.add('density-lab-danger');
     this.destroyBtn.style.display = 'none';
 
     this.buildWheel();
 
+    /* The hub layer: room buttons live here, projected every frame. */
+    this.hubLayer = document.createElement('div');
+    this.hubLayer.className = 'rail-hub-layer';
+    this.hud.appendChild(this.hubLayer);
+
     this.readout = document.createElement('div');
-    this.readout.className = 'density-lab-status';
+    this.readout.className = 'density-lab-status rail-status';
+    this.readout.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.readoutOpen = !this.readoutOpen;
+      this.readout?.classList.toggle('is-open', this.readoutOpen);
+      this.refreshReadout(true);
+    });
     this.hud.appendChild(this.readout);
 
     window.addEventListener('keydown', (e) => {
@@ -1127,41 +1331,210 @@ export class RailScene {
     }
   }
 
+  /* ------------------------------------------------------------ the hubs */
+
+  /**
+   * One button per room, floating on the room itself. Tap it and the six
+   * exits fan out around it: spent ones show WHERE the existing tunnels go
+   * (and tapping one switches to building that branch); free ones start a
+   * new branch that way. No instructions — the room IS the menu.
+   */
+  private rebuildHubs(): void {
+    const layer = this.hubLayer;
+    if (!layer) return;
+    layer.replaceChildren();
+    this.hubs = [];
+    if (this.openHub >= 0 && (this.openHub >= this.branches.length
+      || this.branches[this.openHub]!.roomMm === null)) {
+      this.openHub = -1;
+    }
+    this.branches.forEach((branch, k) => {
+      if (branch.roomMm === null || branch.pieces.length === 0) return;
+      const root = document.createElement('div');
+      root.className = 'rail-hub';
+      const center = document.createElement('button');
+      center.className = 'rail-hub-c';
+      center.textContent = '⌂';
+      center.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.openHub = this.openHub === k ? -1 : k;
+        this.rebuildHubs();
+      });
+      root.appendChild(center);
+      if (this.openHub === k) {
+        root.classList.add('is-open');
+        const taken = takenExitsOf(this.branches, k);
+        const entry = (() => {
+          const start = branchStartOf(this.branches, k);
+          const end = endStateOf(branch.pieces, {
+            at: start.at, forward: start.forward,
+          });
+          return entryExitOf(end.pitchDeg);
+        })();
+        for (const { exit, cls, label } of HUB_SPOKES) {
+          const child = this.branches.findIndex(
+            (b) => b.parent?.branch === k && b.parent.exit === exit,
+          );
+          const button = document.createElement('button');
+          button.className = `rail-hub-btn ${cls}`;
+          button.textContent = label;
+          if (exit === entry && child < 0) {
+            // The way you came in: not an exit, just the truth.
+            button.classList.add('is-entry');
+            button.disabled = true;
+          } else if (child >= 0) {
+            button.classList.add('is-taken');
+            if (child === this.active) button.classList.add('is-active');
+          }
+          button.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (child >= 0) this.activateBranch(child);
+            else this.branchOut(k, exit);
+          });
+          root.appendChild(button);
+        }
+      }
+      layer.appendChild(root);
+      this.hubs.push({ root, branch: k });
+    });
+  }
+
+  /** Start a NEW branch off a room's free exit, and make it the one being
+   *  built — the next piece tapped grows out of that room, that way. */
+  private branchOut(fromBranch: number, exit: ExitDir): void {
+    this.branches.push({
+      pieces: [], roomMm: null, parent: { branch: fromBranch, exit },
+    });
+    this.openHub = -1;
+    this.activateBranch(this.branches.length - 1);
+  }
+
+  /** Pin every hub button onto its room, every frame, through every orbit. */
+  private updateHubs(): void {
+    if (this.hubs.length === 0) return;
+    const w = this.host.clientWidth || 1;
+    const h = this.host.clientHeight || 1;
+    for (const hub of this.hubs) {
+      const rail = this.branchRails[hub.branch];
+      if (!rail || rail.lengthMm <= 0) { hub.root.style.display = 'none'; continue; }
+      const f = rail.sample(rail.lengthMm, this.sampleWindow);
+      if (!f) { hub.root.style.display = 'none'; continue; }
+      const v = new THREE.Vector3(f.x, f.y, f.z).project(this.camera);
+      if (v.z > 1) { hub.root.style.display = 'none'; continue; }
+      hub.root.style.display = '';
+      hub.root.style.left = `${(v.x * 0.5 + 0.5) * w}px`;
+      hub.root.style.top = `${(-v.y * 0.5 + 0.5) * h}px`;
+    }
+  }
+
+  /**
+   * A tap on the track picks the piece under the finger — any branch. Not
+   * a raycast: the beam is barely wider than the rail, and a fingertip is
+   * twenty pixels across. Every branch's rail is walked in SCREEN space
+   * instead, and the nearest sampled millimetre within a finger's radius
+   * wins — which is the tolerance a phone actually needs.
+   */
+  private tapTrack(clientX: number, clientY: number): void {
+    if (this.armed) return; // aiming has its own working end
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = clientX - rect.left;
+    const py = clientY - rect.top;
+    const w = rect.width || 1;
+    const h = rect.height || 1;
+    const FINGER_PX = 26;
+    let best: { branch: number; s: number; distPx: number } | null = null;
+    const v = new THREE.Vector3();
+    this.branchRails.forEach((rail, branch) => {
+      const length = rail.lengthMm;
+      if (length <= 0) return;
+      for (let s = 0; s <= length; s += 1.5) {
+        const f = rail.sample(Math.min(s, length), this.sampleWindow);
+        if (!f) continue;
+        v.set(f.x, f.y, f.z).project(this.camera);
+        if (v.z > 1) continue;
+        const dx = (v.x * 0.5 + 0.5) * w - px;
+        const dy = (-v.y * 0.5 + 0.5) * h - py;
+        const dist = Math.hypot(dx, dy);
+        if (dist < FINGER_PX && (!best || dist < best.distPx)) {
+          best = { branch, s: Math.min(s, length), distPx: dist };
+        }
+      }
+    });
+    if (!best) {
+      if (this.selIdx >= 0) {
+        this.selIdx = -1;
+        this.rebuildSelection();
+        this.refreshReadout(true);
+      }
+      return;
+    }
+    const { branch, s: hitS } = best as { branch: number; s: number };
+    if (branch !== this.active) this.activateBranch(branch);
+    let s = 0;
+    let idx = this.pieces.length - 1;
+    for (let i = 0; i < this.pieces.length; i += 1) {
+      s += this.pieces[i]!.length;
+      if (hitS <= s + 1e-6) { idx = i; break; }
+    }
+    this.selIdx = idx;
+    this.rebuildSelection();
+    this.refreshReadout(true);
+  }
+
+  /**
+   * The readout, shrunk to a strip: one line of the numbers that matter,
+   * and a tap opens the full engineering panel for whoever wants it. The
+   * strip does keep the ARMED/selected line — that is state the player is
+   * IN, not detail they asked for.
+   */
   private refreshReadout(force = false): void {
     if (!this.readout) return;
     const now = performance.now();
     if (!force && now - this.readoutAt < 150) return;
     this.readoutAt = now;
+    const start = this.startOfActive();
+    const anchor = { at: start.at, forward: start.forward };
+    const end = endStateOf(this.pieces, anchor);
+    const totalPieces = this.branches
+      .reduce((n, b) => n + b.pieces.length, 0);
+    const branchName = this.active === 0
+      ? 'main line' : `branch ${this.active}`;
+    const stateLabel = this.armed
+      ? ('piece' in this.armed
+        ? `AIMING ${this.armed.piece.toUpperCase()}${this.ghostPiece
+          ? ` · ${this.ghostPiece.pitch}° / ${this.ghostPiece.turn}°`
+            + ` / ${this.ghostPiece.length} mm`
+          : ''}`
+        : `AIMING ${this.armed.preset.toUpperCase()} — tap again to place`)
+      : this.selIdx >= 0 && this.pieces[this.selIdx]
+        ? `piece #${this.selIdx + 1} ${pieceLabel(this.pieces[this.selIdx]!)}`
+        : '';
+    const mini = `<b>${totalPieces}</b> pieces · ${end.lengthMm.toFixed(0)} mm
+      · ${branchName}${this.branches.length > 1
+  ? ` of ${this.branches.length}` : ''}
+      ${this.readoutOpen ? '▾' : '▸'}${stateLabel
+  ? `<br>${stateLabel}` : ''}`;
+    if (!this.readoutOpen) {
+      this.readout.innerHTML = mini;
+      return;
+    }
     const last = this.pieces[this.pieces.length - 1];
-    const end = endStateOf(this.pieces);
     const faults = validatePlan(this.planOf()).length;
-    const armedLabel = !this.armed ? 'tap a chip to AIM it'
-      : 'piece' in this.armed
-        ? `ARMED ${this.armed.piece.toUpperCase()}${this.ghostPiece
-          ? ` (pitch ${this.ghostPiece.pitch}° · turn ${this.ghostPiece.turn}°`
-            + ` · bank ${this.ghostPiece.roll}° · ${this.ghostPiece.length} mm)`
-          : ''} — wheel tunes it, ✓ or the chip places it`
-        : `ARMED ${this.armed.preset.toUpperCase()} — tap it again to place`;
-    const selLabel = this.selIdx >= 0 && this.pieces[this.selIdx]
-      ? ` · selected #${this.selIdx + 1} ${pieceLabel(this.pieces[this.selIdx]!)}`
-      : '';
-    this.readout.innerHTML = `
-      <b>monorail rig</b> · pieces ${this.pieces.length}
-      · track ${end.lengthMm.toFixed(0)} mm · plan faults ${faults}
-      · carve ${this.carveMs.toFixed(0)} ms<br>
+    const room = this.branches[this.active]!.roomMm;
+    this.readout.innerHTML = `${mini}<br>
+      plan faults ${faults} · carve ${this.carveMs.toFixed(0)} ms<br>
       last ${last
     ? `pitch ${last.pitch}° · turn ${last.turn > 0 ? '+' : ''}${last.turn}°`
         + ` · bank ${last.roll > 0 ? '+' : ''}${last.roll}° · ${last.length} mm`
     : '—'}<br>
       end (${end.x.toFixed(1)}, ${end.y.toFixed(1)}, ${end.z.toFixed(1)}) mm
       · heading ${end.headingDeg.toFixed(0)}° · grade ${end.pitchDeg.toFixed(0)}°<br>
-      cart ${this.cartS.toFixed(1)} / ${end.lengthMm.toFixed(0)} mm
-      · ends in ${ROOMS[this.roomIdx]!.radiusMm === null
-    ? 'a junction' : `a ${ROOMS[this.roomIdx]!.radiusMm} mm room`}<br>
-      ${armedLabel}${selLabel}<br>
-      space/─ straight · ▲▼ pitch ±15° · ◀▶ turn ±15° · L length · B bank
-      · M smooth · R ride · X soil · T tags · U undo · C clear
-      · esc stands down · [ ] select piece · del destroys · drag orbits
+      cart ${this.cartS.toFixed(1)} mm ·
+      ${branchName} ends in ${room === null ? 'a buffer' : `a ${room} mm room`}<br>
+      space/─ straight · ▲▼ pitch · ◀▶ turn · [ ] select · del destroys
+      · U undo · esc stands down · drag orbits
     `;
   }
 
@@ -1171,7 +1544,10 @@ export class RailScene {
     const canvas = this.renderer.domElement;
     canvas.addEventListener('pointerdown', (e) => {
       try { canvas.setPointerCapture(e.pointerId); } catch { /* fine */ }
-      if (this.dragPointer === null) this.dragPointer = e.pointerId;
+      if (this.dragPointer === null) {
+        this.dragPointer = e.pointerId;
+        this.tapAt = { x: e.clientX, y: e.clientY, t: performance.now() };
+      }
     });
     canvas.addEventListener('pointermove', (e) => {
       if (e.pointerId !== this.dragPointer) return;
@@ -1179,10 +1555,22 @@ export class RailScene {
       this.camPitch = Math.min(1.45, Math.max(0.05, this.camPitch + e.movementY * 0.004));
     });
     const release = (e: PointerEvent): void => {
-      if (e.pointerId === this.dragPointer) this.dragPointer = null;
+      if (e.pointerId !== this.dragPointer) return;
+      this.dragPointer = null;
+      // A press that never travelled is a TAP — the select gesture. The
+      // orbit keeps the drag; the tap picks the piece under the finger.
+      const tap = this.tapAt;
+      this.tapAt = null;
+      if (tap && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < 7
+        && performance.now() - tap.t < 450) {
+        this.tapTrack(e.clientX, e.clientY);
+      }
     };
     canvas.addEventListener('pointerup', release);
-    canvas.addEventListener('pointercancel', release);
+    canvas.addEventListener('pointercancel', (e) => {
+      if (e.pointerId === this.dragPointer) this.dragPointer = null;
+      this.tapAt = null;
+    });
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault();
       this.camDist = Math.min(500, Math.max(25, this.camDist * (1 + e.deltaY * 0.001)));
@@ -1203,7 +1591,7 @@ export class RailScene {
   /* ------------------------------------------------------------- the ride */
 
   private simulate(dt: number): void {
-    const length = this.rail.lengthMm;
+    const length = this.mainRail.lengthMm;
     if (this.cart) this.cart.visible = length > 0;
     if (this.riding && length > 0) {
       if (this.cartDwell > 0) {
@@ -1222,7 +1610,7 @@ export class RailScene {
       }
     }
     if (this.cart && length > 0) {
-      const f = this.rail.sample(this.cartS, this.sampleWindow);
+      const f = this.mainRail.sample(this.cartS, this.sampleWindow);
       if (f) {
         const up = new THREE.Vector3(f.ux, f.uy, f.uz);
         const fwd = new THREE.Vector3(f.fx, f.fy, f.fz)
@@ -1251,7 +1639,58 @@ export class RailScene {
 
   addPresetForTest(id: PresetId): void { this.addPreset(id); }
 
-  setRoomForTest(idx: number): void { this.setRoom(idx); }
+  setRoomForTest(radiusMm: number | null): void {
+    const branch = this.branches[this.active]!;
+    if (branch.pieces.length === 0) return;
+    if (radiusMm === null && this.hasChildren(this.active)) return;
+    branch.roomMm = radiusMm;
+    this.updateRoomBtn();
+    this.rebuildTrack();
+  }
+
+  cycleRoomForTest(): void { this.cycleRoom(); }
+
+  branchOutForTest(exit: ExitDir): void {
+    // From the ACTIVE branch's room, the way the hub buttons would.
+    this.branchOut(this.active, exit);
+  }
+
+  activateBranchForTest(index: number): void { this.activateBranch(index); }
+
+  branchesForTest(): {
+    pieces: number; roomMm: number | null;
+    parent: { branch: number; exit: ExitDir } | null;
+  }[] {
+    return this.branches.map((b) => ({
+      pieces: b.pieces.length,
+      roomMm: b.roomMm,
+      parent: b.parent ? { ...b.parent } : null,
+    }));
+  }
+
+  takenExitsForTest(branch: number): ExitDir[] {
+    return [...takenExitsOf(this.branches, branch)];
+  }
+
+  openHubForTest(branch: number): void {
+    this.openHub = branch;
+    this.rebuildHubs();
+  }
+
+  hubButtonsForTest(): { label: string; taken: boolean; entry: boolean }[] {
+    const open = this.hubs.find((h) => h.branch === this.openHub);
+    if (!open) return [];
+    return [...open.root.querySelectorAll<HTMLButtonElement>('.rail-hub-btn')]
+      .map((b) => ({
+        label: b.textContent ?? '',
+        taken: b.classList.contains('is-taken'),
+        entry: b.classList.contains('is-entry'),
+      }));
+  }
+
+  tapTrackForTest(clientX: number, clientY: number): void {
+    this.tapTrack(clientX, clientY);
+  }
 
   undoForTest(): void { this.undo(); }
 
@@ -1318,10 +1757,17 @@ export class RailScene {
   }
 
   statsForTest(): Record<string, number> {
-    const end = endStateOf(this.pieces);
+    const start = this.startOfActive();
+    const end = endStateOf(this.pieces, {
+      at: start.at, forward: start.forward,
+    });
     const plan = this.planOf();
     return {
       pieces: this.pieces.length,
+      totalPieces: this.branches.reduce((n, b) => n + b.pieces.length, 0),
+      branches: this.branches.length,
+      activeBranch: this.active,
+      hubs: this.hubs.length,
       lengthMm: end.lengthMm,
       endX: end.x,
       endY: end.y,
@@ -1338,8 +1784,7 @@ export class RailScene {
       carveMs: this.carveMs,
       labels: this.labelGroup.children.length,
       soilMode: this.soilMode === 'xray' ? 0 : this.soilMode === 'solid' ? 1 : 2,
-      roomIdx: this.roomIdx,
-      roomMm: ROOMS[this.roomIdx]!.radiusMm ?? 0,
+      roomMm: this.branches[this.active]!.roomMm ?? 0,
       planChambers: plan.nodes.filter((n) => n.kind === 'chamber').length,
       armed: this.armed ? 1 : 0,
       ghostMeshes: this.ghostGroup.children.length,
@@ -1370,6 +1815,7 @@ export class RailScene {
     this.previous = now;
     if (!this.paused) this.simulate(dt);
     this.updateWheel();
+    this.updateHubs();
     this.renderer.render(this.scene, this.camera);
     this.frame = requestAnimationFrame(this.animate);
   };

@@ -207,6 +207,109 @@
   font-size: 16px;
 }
 
+/*
+ * THE READOUT, coaster style: a one-line strip so the tunnel stays in
+ * view, opened to the full panel by a tap. It is a button now, in effect.
+ */
+.rail-status {
+  pointer-events: auto;
+  max-width: min(46vw, 340px);
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: rgba(20, 14, 8, 0.55);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.rail-status.is-open {
+  background: rgba(20, 14, 8, 0.78);
+}
+
+/*
+ * THE ROOM HUBS: one ⌂ button pinned on every room (left/top set from a
+ * 3D projection each frame). Open, the six exits fan out — UP on top,
+ * DOWN below, spent exits amber, the way you came in dimmed.
+ */
+.rail-hub-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+
+.rail-hub {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
+.rail-hub-c {
+  position: absolute;
+  left: -17px;
+  top: -17px;
+  width: 34px;
+  height: 34px;
+  border: 2px solid rgba(120, 84, 40, 0.9);
+  border-radius: 50%;
+  background: rgba(232, 190, 108, 0.95);
+  color: #3a2a14;
+  font: 700 15px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+  touch-action: manipulation;
+}
+
+.rail-hub.is-open .rail-hub-c {
+  background: #fff1c5;
+}
+
+.rail-hub-btn {
+  position: absolute;
+  width: 52px;
+  height: 34px;
+  margin: -17px 0 0 -26px;
+  border: none;
+  border-radius: 17px;
+  background: rgba(244, 236, 216, 0.94);
+  color: #2a241c;
+  font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  pointer-events: auto;
+  touch-action: manipulation;
+}
+
+.rail-hub-btn:active {
+  transform: scale(0.94);
+}
+
+/* A spent exit: a tunnel already goes that way — tap to go build it. */
+.rail-hub-btn.is-taken {
+  background: #e9c36f;
+}
+
+.rail-hub-btn.is-taken.is-active {
+  box-shadow: 0 0 0 3px #d97c2b, 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* The way you came in: shown, dimmed, not tappable. */
+.rail-hub-btn.is-entry {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.rh-n { left: 0; top: -58px; }
+.rh-s { left: 0; top: 58px; }
+.rh-w { left: -72px; top: 0; }
+.rh-e { left: 72px; top: 0; }
+.rh-ne { left: 56px; top: -40px; }
+.rh-nw { left: -56px; top: -40px; }
+
+/* The ⋯ chip while its drawer is out: latched, visibly so. */
+.density-lab-mode.is-latched {
+  background: #e9c36f;
+  box-shadow: 0 0 0 2px rgba(217, 124, 43, 0.8), 0 7px 20px rgba(0, 0, 0, 0.32);
+}
+
 /* The one chip that deletes something: unmistakably not a builder. */
 .density-lab-danger {
   background: #c86248 !important;
