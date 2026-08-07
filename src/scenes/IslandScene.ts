@@ -160,6 +160,15 @@ const SCOOP_STEP = 3 / MM;
 const SCOOP_STEPS = 3; // centres 0, 3, 6 mm past the face — 9 mm of reach
 
 /**
+ * Her half-WIDTH in a bore. The measured oval's 4.4 mm half-width is her
+ * LEG SPAN — wider than the whole 6 mm tube — but an ant in a tunnel walks
+ * with her feet ON the wall, legs flexed to its curve, not sticking out to
+ * her open-ground stance. So the tube fit uses a tucked body-core width;
+ * the open-ground oval keeps the full span.
+ */
+const BORE_HUG_WIDE = 2.4 / MM;
+
+/**
  * How far PAST HER NOSE the jaws close — not how far past her centre.
  *
  * This was 1.4 mm from her middle, on a body whose half-length is 4.5 mm,
@@ -466,6 +475,10 @@ export class IslandScene {
   private lastScrollAt = 0;
 
   private biteAt = 0;
+
+  /** Did the LAST bite actually remove soil? Surface engagement hangs on
+   *  it — digging at open air must not grip her to the aim line. */
+  private biteTouched = false;
 
   private showPlan = true;
 
@@ -1288,8 +1301,16 @@ export class IslandScene {
       dig: this.input.dig,
     });
     this.facing = bore.heading;
-    if (bore.digging) this.boreEngaged = true;
-    else if (!this.underground) this.boreEngaged = false;
+    /*
+     * Engagement needs SOIL. Underground, digging always grips her to the
+     * line; on the SURFACE it grips only while the jaws are actually
+     * meeting soil (`biteTouched`) — otherwise breaking out of the ground
+     * with the button held kept her "bored in" to open sky, and she flew
+     * 250 mm up her own aim line before anything let go.
+     */
+    if (bore.digging) {
+      this.boreEngaged = this.underground || this.biteTouched;
+    } else if (!this.underground) this.boreEngaged = false;
     const speed = this.input.walk * WALK_SPEED * (this.input.sprint ? SPRINT : 1);
     this.velocity.set(Math.sin(this.facing) * speed, 0, Math.cos(this.facing) * speed);
 
@@ -1913,19 +1934,43 @@ export class IslandScene {
   private bodyFits(at: THREE.Vector3): boolean {
     const stream = this.stream;
     if (!stream) return true;
+    /*
+     * TWO POSTURES, one oval.
+     *
+     * BORED IN, her body points ALONG the tube — an ant in a vertical shaft
+     * is vertical, which the model already shows by pitching with the bore.
+     * So the fit test aligns her long axis to the AIM: what has to pass the
+     * tunnel's cross-section is her 4.4 mm girth, not her 9 mm length. The
+     * old test kept the oval FLAT whatever the aim did, which demanded a
+     * body-length-wide shaft for every steep dig; the scoop never cut that
+     * wide, the margins came out sub-millimetre, and she wedged a stride in
+     * — measured 1 mm of descent in twelve seconds of digging, and no way
+     * back out of the fishbowl at all.
+     *
+     * ON THE SURFACE she stands on her legs, flat, and the oval rides the
+     * old way: horizontal, lifted so its belly clears the floor she is
+     * standing on (a belly probe level with her feet reads the floor as
+     * soil in the way, and she could never move at all).
+     */
+    const probe = S_TARGET;
+    if (this.boreEngaged) {
+      const fwd = S_FWD.copy(this.boreAim());
+      const right = S_RIGHT.set(Math.cos(this.facing), 0, -Math.sin(this.facing));
+      const up = S_UP.crossVectors(right, fwd).normalize();
+      const hugWide = Math.min(this.body.wide, BORE_HUG_WIDE);
+      for (let i = 0; i < BODY_SHELL.length; i += 1) {
+        const o = BODY_SHELL[i]!;
+        probe.copy(at)
+          .addScaledVector(fwd, o[0]! * this.body.len)
+          .addScaledVector(right, o[1]! * hugWide)
+          .addScaledVector(up, o[2]! * this.body.tall);
+        if (stream.solidAtWu(probe.x, probe.y, probe.z) === true) return false;
+      }
+      return true;
+    }
     const fwd = S_FWD.set(Math.sin(this.facing), 0, Math.cos(this.facing));
     const right = S_RIGHT.set(fwd.z, 0, -fwd.x);
-    /*
-     * Her oval is centred on her BODY, not on `at`, which is a point a ride
-     * height above whatever she is standing on. Without the lift its belly
-     * sits below her own feet, so the floor she is standing on counts as
-     * soil in the way and she can never move anywhere at all.
-     */
-    /* Strictly ABOVE her feet, not level with them: a belly probe sitting
-     * exactly on the floor samples the floor as soil in the way, and she
-     * could never move anywhere at all. */
     const lift = Math.max(0, this.body.tall - RIDE) + BODY_FLOOR_MARGIN;
-    const probe = S_TARGET;
     for (let i = 0; i < BODY_SHELL.length; i += 1) {
       const o = BODY_SHELL[i]!;
       probe.copy(at)
@@ -1953,25 +1998,6 @@ export class IslandScene {
     return Math.hypot(
       fwd * this.body.len, right * this.body.wide, dir.y * this.body.tall,
     );
-  }
-
-  /**
-   * The scoop must clear HER, not just itself. Her body lies flat whatever
-   * the aim does, so a shaft driven steeply down has to pass a body that is
-   * 9 mm LONG through its cross-section — and the fixed 6 mm bore could
-   * not, which is why she dug down fine for a while and then wedged. The
-   * radius is the widest half-extent of her oval measured PERPENDICULAR to
-   * the aim, plus clearance, floored at the scoop's own size.
-   */
-  private scoopRadius(aim: THREE.Vector3): number {
-    const fwd = Math.sin(this.facing) * aim.x + Math.cos(this.facing) * aim.z;
-    const right = aim.x * Math.cos(this.facing) - aim.z * Math.sin(this.facing);
-    const perp = Math.max(
-      this.body.len * Math.sqrt(Math.max(0, 1 - fwd * fwd)),
-      this.body.wide * Math.sqrt(Math.max(0, 1 - right * right)),
-      this.body.tall * Math.sqrt(Math.max(0, 1 - aim.y * aim.y)),
-    );
-    return Math.max(SCOOP_RADIUS, perp + 0.8 / MM);
   }
 
   /** The way she is pointed AND pitched — the line the bore cuts and, while
@@ -2058,8 +2084,22 @@ export class IslandScene {
      * aim — for the frames before her model has loaded.
      */
     const centre = new THREE.Vector3();
-    const hull = this.bodyReach(aim) + JAW_PAST_NOSE + BITE_SETBACK;
-    if (!this.queenReady || !this.queen.jawPosition(centre)) {
+    /* Bored in, her body points ALONG the tube (see bodyFits), so her nose
+     * — and the cut — sits a body LENGTH along the aim, not the flat
+     * oval's reach. Anchoring the scoop off the flat reach on a steep aim
+     * put it barely past her centre, inside space her aligned body already
+     * occupies, and the strokes removed almost nothing she needed gone. */
+    const nose = this.boreEngaged ? this.body.len : this.bodyReach(aim);
+    const hull = nose + JAW_PAST_NOSE + BITE_SETBACK;
+    /*
+     * BORED IN, the cut is centred on the LINE SHE TRAVELS — `at` along
+     * the aim — never on the jaw bone. The bone rides her visual model,
+     * which is offset from the travel line, so a bone-anchored scoop cuts
+     * a tube PARALLEL to her path a few millimetres aside; her own line
+     * stays soil at the nose probe, and she wedges on the first stride
+     * with the digging apparently working. Measured: zero advance in 25 s.
+     */
+    if (this.boreEngaged || !this.queenReady || !this.queen.jawPosition(centre)) {
       centre.copy(this.at).addScaledVector(aim, hull);
     } else {
       centre.addScaledVector(aim, BITE_SETBACK);
@@ -2079,12 +2119,24 @@ export class IslandScene {
     let touched = 0;
     let minX = Infinity; let minY = Infinity; let minZ = Infinity;
     let maxX = -Infinity; let maxY = -Infinity; let maxZ = -Infinity;
-    // The scoop: a capsule driven along the aim as three spheres, wide
-    // enough for the bore AND for her body to follow it down.
-    const r = this.scoopRadius(aim);
+    // The scoop: a 6 mm capsule driven along the aim as three spheres.
+    // Bored in it starts one step BEHIND the face — the first entry stroke
+    // otherwise left a plug of never-cut soil between her centre and her
+    // nose — and adds a TAIL sphere behind her centre, so the stretch of
+    // tube her own body occupies is always open. Without the tail sweep a
+    // sliver at her rear quarter (turns, rebases, the crater rim on the
+    // way out) could sit just outside every forward sphere and wedge her
+    // with the digging apparently working and nothing ahead but air.
+    const points: THREE.Vector3[] = [];
+    if (this.boreEngaged) {
+      points.push(this.at.clone().addScaledVector(aim, -this.body.len / 2));
+      points.push(this.at.clone().addScaledVector(aim, this.body.len / 2));
+    }
     for (let i = 0; i < SCOOP_STEPS; i += 1) {
-      const at = centre.clone().addScaledVector(aim, i * SCOOP_STEP);
-      const result = this.stream!.subtractSphere(at, r);
+      points.push(centre.clone().addScaledVector(aim, i * SCOOP_STEP));
+    }
+    for (const at of points) {
+      const result = this.stream!.subtractSphere(at, SCOOP_RADIUS);
       if (result.changedSamples === 0) continue;
       touched += result.changedSamples;
       const b = result.bounds;
@@ -2092,6 +2144,7 @@ export class IslandScene {
       minY = Math.min(minY, b.minY); maxY = Math.max(maxY, b.maxY);
       minZ = Math.min(minZ, b.minZ); maxZ = Math.max(maxZ, b.maxZ);
     }
+    this.biteTouched = touched > 0;
     if (touched === 0) return;
 
     // One remesh for the whole face, not seven.
@@ -2569,15 +2622,9 @@ export class IslandScene {
     });
     actions.appendChild(bodyChip);
 
-    /* The nest tools are still here; they are just no longer what DIG means. */
-    const tools = document.createElement('button');
-    tools.className = 'density-lab-button density-lab-mode';
-    tools.textContent = 'PLAN';
-    tools.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      this.openDesigner();
-    });
-    actions.appendChild(tools);
+    /* The PLAN button is gone: the shovel is how tunnels get made now.
+     * The designer code stays for the tests and for a possible return as
+     * a colony-scale tool, but the queen digs with her jaws, not a CAD. */
 
     /* GRIP / FREE — an indicator, not a switch: the tunnel takes her, the
      * room and the surface free her, all by themselves. It exists so the
