@@ -66,6 +66,13 @@ if (host) {
      * proves carries into the carved, jaws-executed version unchanged.
      */
     void import('./scenes/RailScene').then(({ RailScene }) => new RailScene(host));
+  } else if (scene === 'carry') {
+    /*
+     * The carry room: soil as a lattice of 2 mm blocks, and digging as
+     * picking one up. Crosshair on a block, CARRY takes it, DROP places it —
+     * a tunnel is exactly the blocks somebody carried out of it.
+     */
+    void import('./scenes/CarryScene').then(({ CarryScene }) => new CarryScene(host));
   } else {
     /*
      * Default and `?scene=island`: Beyond Extinction's Kauai at 1:1000,
