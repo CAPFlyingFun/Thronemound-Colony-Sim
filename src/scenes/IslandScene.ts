@@ -2211,14 +2211,24 @@ export class IslandScene {
     // way out) could sit just outside every forward sphere and wedge her
     // with the digging apparently working and nothing ahead but air.
     const points: THREE.Vector3[] = [];
+    /*
+     * The body-hugging spheres fire ONLY WHEN SHE IS WEDGED — that is
+     * what they are for. Firing them on every stroke was the "aimed
+     * straight ahead, still dug downward" bug: the centre sphere's 3 mm
+     * reach extends 1.7 mm below her belly, so each level stroke ground
+     * that much floor out from under her own feet and she sank through
+     * a tunnel she was aiming flat. Wedged, they carve her free (entry
+     * plugs, the flank seam, rear slivers — three spheres, the middle
+     * one closing the exact-3.0mm gap the fit probe used to fall into);
+     * unwedged, the tube ahead is the only thing the jaws touch.
+     */
     if (this.boreEngaged) {
-      /* Three, not two: with only the end spheres, the fit probe at her
-       * FLANK sat exactly on both their surfaces (√(1.8²+2.4²) = 3.0 mm
-       * against a 3.0 mm radius) and a wall grazing her middle wedged
-       * her — measured as a frozen climb out of a half-dug room. */
-      points.push(this.at.clone().addScaledVector(aim, -this.body.len / 2));
-      points.push(this.at.clone());
-      points.push(this.at.clone().addScaledVector(aim, this.body.len / 2));
+      const step = S_CENTER.copy(this.at).addScaledVector(aim, 0.12);
+      if (!this.bodyFits(step)) {
+        points.push(this.at.clone().addScaledVector(aim, -this.body.len / 2));
+        points.push(this.at.clone());
+        points.push(this.at.clone().addScaledVector(aim, this.body.len / 2));
+      }
     }
     for (let i = 0; i < SCOOP_STEPS; i += 1) {
       points.push(centre.clone().addScaledVector(aim, i * SCOOP_STEP));
