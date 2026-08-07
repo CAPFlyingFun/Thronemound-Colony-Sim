@@ -122,6 +122,9 @@ export class SandboxScene {
   /** 0..1 through the clamp, then through the spring-back. */
   private phaseT = 0;
 
+  /** Seconds since the engage began — approach gets a hard timeout. */
+  private engageT = 0;
+
   /** Carrying or dragging, per the verdict at clamp time. */
   private hauling: 'carry' | 'drag' | null = null;
 
@@ -463,6 +466,7 @@ export class SandboxScene {
     this.engaged = this.target;
     this.biting = bite && this.engaged.alive;
     this.grabPoint = grabPointFor(this.engaged.spec, this.antPos.x, this.antPos.z);
+    this.engageT = 0;
     this.phase = 'approach';
     this.targetRing.visible = false;
     this.refreshAction();
@@ -501,6 +505,19 @@ export class SandboxScene {
   private stepEngage(dt: number): void {
     const p = this.engaged;
     if (!p || !this.grabPoint) return;
+    this.engageT += dt;
+    /* Six seconds is a lost cause, whatever phase it died in — release
+     * rather than hold the player hostage to a chase that cannot end. */
+    if (this.phase !== 'hold' && this.engageT > 6) {
+      this.release();
+      return;
+    }
+    /* The grab point tracks the OBJECT, not the moment the button was
+     * pressed — a shoved twig used to leave her marching to where it
+     * had been, forever. */
+    if (this.phase === 'approach' || this.phase === 'align') {
+      this.grabPoint = grabPointFor(p.spec, this.antPos.x, this.antPos.z);
+    }
     const g = this.grabPoint;
     this.headAnchor(this.jawScratch);
     const dist = Math.hypot(g.x - this.jawScratch.x, g.z - this.jawScratch.z);
@@ -708,7 +725,9 @@ export class SandboxScene {
      * things stop her. Strength is the same dial the jaws use. */
     const antR = 2.6;
     for (const p of this.props) {
-      if (p === held) continue;
+      /* Never body-shove the thing the jaws are working on — the approach
+       * used to punt its own target across the sand, forever chasing it. */
+      if (p === held || p === this.engaged) continue;
       const dx = p.spec.x - this.antPos.x;
       const dz = p.spec.z - this.antPos.z;
       const rr = antR + p.spec.halfWideMm;
@@ -923,6 +942,10 @@ export class SandboxScene {
       this.release();
       return;
     }
+    if (this.phase === 'approach' || this.phase === 'align' || this.phase === 'clamp') {
+      this.release(); // CANCEL — the player is never locked out of the button
+      return;
+    }
     if (this.phase === 'roam' && this.target) {
       if (this.target.alive && this.biteCooldown <= 0) this.beginEngage(true);
       else if (!this.target.alive) this.beginEngage(false);
@@ -958,7 +981,8 @@ export class SandboxScene {
         enabled = verdict.mode !== 'immobile';
       }
     } else if (this.phase !== 'roam') {
-      label = '…';
+      label = 'CANCEL';
+      enabled = true;
     }
     this.actBtn.textContent = label;
     this.actBtn.style.opacity = enabled || this.phase === 'hold' ? '' : '0.45';

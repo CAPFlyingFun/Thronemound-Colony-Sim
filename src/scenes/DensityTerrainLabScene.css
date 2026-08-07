@@ -4,6 +4,20 @@
   height: 100%;
   overflow: hidden;
   background: #8db4d6;
+  /* No double-tap zoom: a quick second tap is GAMEPLAY (dig, grab, walk),
+   * not a request to magnify the page. `manipulation` keeps taps and pans
+   * working while telling the browser to stop guessing at gestures. */
+  touch-action: manipulation;
+}
+
+.density-lab-host canvas {
+  /* The canvas owns its drags entirely — joysticks, orbits, pinches are
+   * ours, and the browser gets none of them. */
+  touch-action: none;
+}
+
+.density-lab-host button {
+  touch-action: manipulation;
 }
 
 .density-lab-hud {
