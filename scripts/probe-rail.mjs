@@ -1,11 +1,9 @@
 /*
- * THE MONORAIL ROOM, judged: pieces append with exact angles, the rail's
- * arithmetic holds end to end, auto-bank leans into turns, the plan compiles
- * clean, and the cart actually rides.
+ * THE MONORAIL ROOM, judged — the you-are-the-ant edition.
  *
- * Self-judging on purpose — every check sets the exit code, so a CI wrapper
- * or a bare `npm run probe:rail` sees red on failure instead of a table of
- * numbers a human has to read.
+ * Hold DIG and the tube grows along the aim in exact steps; the ant rides
+ * to the face; rooms toggle at the end; the soil carves around all of it;
+ * both cameras hold their posts. Every check sets the exit code.
  *
  * Run against the DEV server (`npm run dev`) like every other probe here —
  * `vite preview` resolves the config as `serve`, whose base is `/`, so a
@@ -38,132 +36,142 @@ await page.waitForFunction(() => window.railScene?.ready, null, { timeout: 60000
 
 // A saved track from an earlier session would make every count below wrong.
 await page.evaluate(() => {
-  window.railScene.setPausedForTest(true);
-  window.railScene.clearForTest();
-  window.railScene.setAutoBankForTest(true);
+  const s = window.railScene;
+  s.setPausedForTest(true);
+  s.clearForTest();
+  s.setAutoBankForTest(true);
+  s.setModeForTest('tubes');
 });
 
-// Build S, U, U, L, R, D — six 6 mm pieces exercising every button.
-const stats = await page.evaluate(() => {
+// HOLD TO GROW: aim level, hold DIG, step three seconds of sim.
+const grown = await page.evaluate(() => {
   const s = window.railScene;
-  for (const kind of ['straight', 'up', 'up', 'left', 'right', 'down']) {
-    s.addPieceForTest(kind);
-  }
-  return s.statsForTest();
+  s.setAimForTest(0, 0);
+  s.setDigForTest(true);
+  s.stepForTest(1 / 30, 90); // 3 s at GROW_RATE 5 mm/s = 15 mm = 2 full pieces
+  s.setDigForTest(false);
+  const stats = s.statsForTest();
+  return { ...stats, antS: s.antForTest().s };
 });
+check('a held DIG grows the tube', grown.pieces === 2, `${grown.pieces} pieces`);
+check('growth is piece-quantised', Math.abs(grown.lengthMm - 12) < 0.05,
+  `${grown.lengthMm.toFixed(1)} mm`);
+check('the ant rides to the face she dug', Math.abs(grown.antS - grown.lengthMm) < 0.05,
+  `ant at ${grown.antS.toFixed(1)} mm`);
+check('level aim digs level', Math.abs(grown.endPitchDeg) < 1,
+  `${grown.endPitchDeg.toFixed(1)} deg`);
 
-check('six pieces on the track', stats.pieces === 6, `pieces ${stats.pieces}`);
-check('track length is the sum of the pieces', Math.abs(stats.lengthMm - 36) < 0.05,
-  `${stats.lengthMm.toFixed(2)} mm`);
-check('turns cancel: end heading back on the start bearing',
-  Math.abs(stats.endHeadingDeg) < 1, `${stats.endHeadingDeg.toFixed(2)} deg`);
-check('grade ends one DOWN below two UPs', Math.abs(stats.endPitchDeg - 15) < 1,
-  `${stats.endPitchDeg.toFixed(2)} deg`);
-check('the climb went somewhere: track ends above the station', stats.endY > 3,
-  `${stats.endY.toFixed(2)} mm up`);
-check('plan compiles with no faults', stats.planFaults === 0,
-  `${stats.planFaults} faults over ${stats.planNodes} nodes / ${stats.planEdges} edges`);
-check('curved pieces subdivide in the plan', stats.planEdges > stats.pieces,
-  `${stats.planEdges} edges for ${stats.pieces} pieces`);
-
-const pieces = await page.evaluate(() => window.railScene.piecesForTest());
-check('exact angles: pitches walk 0,15,30,30,30,15',
-  JSON.stringify(pieces.map(p => p.pitch)) === JSON.stringify([0, 15, 30, 30, 30, 15]),
-  pieces.map(p => p.pitch).join(','));
-check('auto-bank leans the LEFT piece left', pieces[3].roll > 0,
-  `roll ${pieces[3].roll} deg`);
-check('auto-bank leans the RIGHT piece right', pieces[4].roll < 0,
-  `roll ${pieces[4].roll} deg`);
-check('straight pieces carry no bank', pieces[0].roll === 0 && pieces[5].roll === 0);
-
-// The ride: step deterministically and require the cart to have travelled.
-const ride = await page.evaluate(() => {
+// AIM STEERS: look down-right and keep digging — exact snapped angles.
+const steered = await page.evaluate(() => {
   const s = window.railScene;
-  s.setRidingForTest(true);
+  s.setAimForTest(40, -50);
+  s.setDigForTest(true);
+  s.stepForTest(1 / 30, 90);
+  s.setDigForTest(false);
+  return { pieces: s.piecesForTest(), labels: s.labelsForTest() };
+});
+check('aim snaps the pitch to 15° steps',
+  steered.pieces[steered.pieces.length - 1].pitch === -45,
+  `pitch ${steered.pieces[steered.pieces.length - 1].pitch}`);
+check('aim turns toward the look, snapped',
+  steered.pieces[2].turn === 45, `turn ${steered.pieces[2].turn}`);
+check('later pieces run straight once aligned',
+  steered.pieces[steered.pieces.length - 1].turn === 0);
+check('every piece wears a tag', steered.labels.length === steered.pieces.length,
+  `${steered.labels.length} tags for ${steered.pieces.length} pieces`);
+
+// RELEASED means released: no growth without the button.
+const idle = await page.evaluate(() => {
+  const s = window.railScene;
+  const before = s.statsForTest().pieces;
   s.stepForTest(1 / 30, 60);
-  return s.statsForTest();
+  return { before, after: s.statsForTest().pieces };
 });
-check('the cart rides', ride.cartS > 5, `cart at ${ride.cartS.toFixed(1)} mm after 2 s`);
+check('no digging with DIG released', idle.before === idle.after);
 
-// Undo is an undo: one piece gone, length shorter by that piece.
-const undone = await page.evaluate(() => {
-  window.railScene.undoForTest();
-  return window.railScene.statsForTest();
-});
-check('undo removes exactly the last piece',
-  undone.pieces === 5 && Math.abs(undone.lengthMm - 30) < 0.05,
-  `${undone.pieces} pieces, ${undone.lengthMm.toFixed(1)} mm`);
-
-// Smoothing changes the view, not the track: same pieces, same plan.
-const smoothed = await page.evaluate(() => {
-  window.railScene.setSmoothForTest(true);
-  return window.railScene.statsForTest();
-});
-check('smoothing leaves the pieces and the plan alone',
-  smoothed.pieces === 5 && smoothed.planFaults === 0 && smoothed.smooth === 1);
-
-// The tags: one label per piece, wearing the exact angles.
-const labels = await page.evaluate(() => window.railScene.labelsForTest());
-check('one tag per piece', labels.length === 5, labels.join(' | '));
-check('tags carry pitch and yaw', labels[0] === '+0°' && labels[3] === '+30° L15°',
-  `${labels[0]} … ${labels[3]}`);
-check('tag sprites are in the scene',
-  await page.evaluate(() => window.railScene.labelSpritesForTest()) === 5);
-
-// THE DIRT COMES OUT: dive a fresh track underground and ask the field.
-const dig = await page.evaluate(() => {
+// ROOMS MODE: a tap puts the chamber at the end; the plan stays clean.
+const room = await page.evaluate(() => {
   const s = window.railScene;
-  s.clearForTest();
-  for (const kind of ['down', 'down', 'down', 'straight', 'straight', 'straight']) {
-    s.addPieceForTest(kind);
-  }
-  const stats = s.statsForTest();
-  // The last straight runs at -45 deg from roughly (0, -17, 24) onward; ask
-  // three spots: inside the bore, beside it, and the mound over the station.
-  const end = { x: stats.endX, y: stats.endY, z: stats.endZ };
-  const mid = { x: end.x / 2, y: end.y / 2, z: (end.z + 12) / 2 };
-  return {
-    carveMs: stats.carveMs,
-    endY: stats.endY,
-    inBore: s.solidAtMm(mid.x, mid.y, mid.z),
-    besideBore: s.solidAtMm(mid.x + 15, mid.y, mid.z),
-    // Outside the 8 mm vent, inside the mound's 25 mm spread.
-    mound: s.solidAtMm(11, 1.5, 0),
-  };
-});
-check('the dive went underground', dig.endY < -15, `end ${dig.endY.toFixed(1)} mm`);
-check('the bore is open air', dig.inBore === false, `solidAtMm ${dig.inBore}`);
-check('the soil beside the bore holds', dig.besideBore === true);
-check('the entrance mound is heaped over the station', dig.mound === true);
-check('a carve is a moment, not a hang', dig.carveMs < 2500, `${dig.carveMs.toFixed(0)} ms`);
-
-// PRESETS AND THE ROOM: whole nest moves in one tap, ended in a chamber.
-const nest = await page.evaluate(() => {
-  const s = window.railScene;
-  s.clearForTest();
-  s.addPresetForTest('shaft');
-  s.addPresetForTest('spiralLeft');
-  s.setRoomForTest(2); // the queen room
+  s.setModeForTest('rooms');
+  s.toggleRoomForTest();
   const stats = s.statsForTest();
   return {
-    pieces: stats.pieces,
-    endY: stats.endY,
-    heading: stats.endHeadingDeg,
     chambers: stats.planChambers,
     faults: stats.planFaults,
+    roomMm: stats.roomMm,
     roomAir: s.solidAtMm(stats.endX + 9, stats.endY, stats.endZ),
-    labels: s.labelsForTest().length,
   };
 });
-check('presets append whole moves', nest.pieces === 8, `${nest.pieces} pieces`);
-check('shaft + spiral dig deep', nest.endY < -35, `${nest.endY.toFixed(1)} mm`);
-check('the spiral came half round',
-  Math.abs(Math.abs(nest.heading) - 180) < 2, `${nest.heading.toFixed(0)} deg`);
-check('the tunnel ends in exactly one chamber, plan clean',
-  nest.chambers === 1 && nest.faults === 0,
-  `${nest.chambers} chambers, ${nest.faults} faults`);
-check('the queen room is carved wider than the bore', nest.roomAir === false);
-check('preset pieces wear tags too', nest.labels === 8, `${nest.labels} tags`);
+check('the tunnel ends in one chamber, plan clean',
+  room.chambers === 1 && room.faults === 0,
+  `${room.chambers} chambers, ${room.faults} faults`);
+check('the default room is the queen chamber', room.roomMm === 11);
+check('the room is carved wider than the bore', room.roomAir === false);
+
+// THE SOIL: air in the bore, soil beside it, the mound over the station.
+const dig = await page.evaluate(() => {
+  const s = window.railScene;
+  const stats = s.statsForTest();
+  const mid = { x: stats.endX / 2, y: stats.endY / 2, z: (stats.endZ + 12) / 2 };
+  return {
+    inBore: s.solidAtMm(mid.x, mid.y, mid.z),
+    besideBore: s.solidAtMm(mid.x + 15, mid.y, mid.z),
+    mound: s.solidAtMm(11, 1.5, 0),
+    carveMs: stats.carveMs,
+  };
+});
+check('the bore is open air', dig.inBore === false);
+check('the soil beside the bore holds', dig.besideBore === true);
+check('the entrance mound is heaped over the station', dig.mound === true);
+check('a carve is a moment, not a hang', dig.carveMs < 2500,
+  `${dig.carveMs.toFixed(0)} ms`);
+
+// THE ANT: her model loads, she rides with W/S, both cameras hold post.
+await page.waitForFunction(
+  () => window.railScene.antForTest().queen === 1, null, { timeout: 60000 },
+).catch(() => { /* judged below */ });
+const ant = await page.evaluate(() => {
+  const s = window.railScene;
+  const start = s.antForTest();
+  s.setWalkForTest(-1);
+  s.stepForTest(1 / 30, 30); // one second back down the tube
+  s.setWalkForTest(0);
+  const walked = s.antForTest();
+  s.setViewForTest(true);
+  s.stepForTest(1 / 30, 5);
+  const first = s.antForTest();
+  s.setViewForTest(false);
+  s.stepForTest(1 / 30, 120);
+  const third = s.antForTest();
+  const eye = Math.hypot(first.camX - first.x, first.camY - first.y, first.camZ - first.z);
+  const shoulder = Math.hypot(third.camX - third.x, third.camY - third.y, third.camZ - third.z);
+  return {
+    queen: start.queen, sBefore: start.s, sAfter: walked.s, eye, shoulder,
+  };
+});
+check('the queen model is riding, not the cart', ant.queen === 1);
+check('W/S rides her along the tube', ant.sBefore - ant.sAfter > 8,
+  `${ant.sBefore.toFixed(1)} → ${ant.sAfter.toFixed(1)} mm`);
+check('first person sits in her eyes', ant.eye < 8, `${ant.eye.toFixed(1)} mm off`);
+check('third person stands back from her', ant.shoulder > 15,
+  `${ant.shoulder.toFixed(1)} mm back`);
+
+// UNDO still undoes a piece; smoothing still changes only the view.
+const tidy = await page.evaluate(() => {
+  const s = window.railScene;
+  const before = s.statsForTest();
+  s.undoForTest();
+  const undone = s.statsForTest();
+  s.setSmoothForTest(true);
+  const smoothed = s.statsForTest();
+  return { before, undone, smoothed };
+});
+check('undo removes exactly the last piece',
+  tidy.undone.pieces === tidy.before.pieces - 1
+  && Math.abs(tidy.undone.lengthMm - (tidy.before.lengthMm - 6)) < 0.05);
+check('smoothing leaves the pieces and the plan alone',
+  tidy.smoothed.pieces === tidy.undone.pieces
+  && tidy.smoothed.planFaults === 0 && tidy.smoothed.smooth === 1);
 
 check('no page errors', errs.length === 0, errs.join(' | '));
 
