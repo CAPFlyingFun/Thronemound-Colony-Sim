@@ -67,6 +67,13 @@ if (host) {
      * proves carries into the carved, jaws-executed version unchanged.
      */
     void import('./scenes/RailScene').then(({ RailScene }) => new RailScene(host));
+  } else if (scene === 'pipes') {
+    /*
+     * The pipes room: tunnels as plumbing. Arm a pipe piece, rotate it in
+     * 45° racks, tap again to place — it snaps to the open end, carves
+     * instantly, and the network's centerlines are where ants can travel.
+     */
+    void import('./scenes/PipesScene').then(({ PipesScene }) => new PipesScene(host));
   } else if (scene === 'sandbox') {
     /*
      * The ant mechanics sandbox: worker and major, and the head-and-jaws
