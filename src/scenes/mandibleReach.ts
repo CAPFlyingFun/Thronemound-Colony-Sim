@@ -162,10 +162,53 @@ export function headAimFor(
     yawDeg: yawClamped,
     pitchDeg: pitchClamped,
     rollDeg: roll,
-    withinLimits: Math.abs(overflow) < 1e-6
-      && Math.abs(pitch - pitchClamped) < 10,
+    /*
+     * YAW ONLY. Pitch never blocks a grab: a target at her feet wants
+     * -60° of neck that anatomy caps at -30°, and the rest is what
+     * legs, a lowered stance and open jaws are for — gating on it froze
+     * every ground-level bite in an align that could never settle.
+     */
+    withinLimits: Math.abs(overflow) < 1e-6,
     bodyTurnDeg: overflow,
   };
+}
+
+export interface CarryPose {
+  /** How far ahead of the jaw tip the object's CENTRE rides, mm. */
+  fwdMm: number;
+  /** Lift above the jaw tip, mm. */
+  upMm: number;
+  /** Tilt while carried, degrees — a leaf rides up like a sail. */
+  pitchDeg: number;
+}
+
+/**
+ * Where a held thing sits relative to the jaws, per kind — the fix for
+ * cargo riding INSIDE her head. The jaws grip an EDGE, so the object's
+ * centre must sit its own half-extent ahead of them; the pose says how
+ * far, given each shape's preferred grip.
+ */
+export function carryPose(spec: GrabbableSpec): CarryPose {
+  switch (spec.kind) {
+    case 'twig':
+      /* Gripped across its middle — the stick's centre is right at the
+       * jaws, its length swinging clear either side. */
+      return { fwdMm: 0.5, upMm: 0.35, pitchDeg: 0 };
+    case 'leaf':
+      /* Held by the rim, blade tipped up over her back — the classic
+       * leaf-cutter sail, and the reason it no longer slices her head. */
+      return { fwdMm: spec.halfWideMm * 0.75, upMm: 1.2, pitchDeg: 58 };
+    case 'bug':
+      return { fwdMm: spec.halfWideMm * 0.9, upMm: 0.5, pitchDeg: 0 };
+    default:
+      /* Seeds and crumbs: centre a touch past the jaws. */
+      return { fwdMm: spec.halfWideMm * 0.8, upMm: 0.3, pitchDeg: 0 };
+  }
+}
+
+/** Dragged loads trail at their own radius plus a little daylight. */
+export function dragStandoffMm(spec: GrabbableSpec): number {
+  return spec.halfWideMm * 0.95 + 0.4;
 }
 
 export type CarryMode = 'carry' | 'drag' | 'immobile';

@@ -27,8 +27,8 @@ import './DensityTerrainLabScene.css';
 import { QueenModel } from '../anim/QueenModel';
 import { FOOT_CLEARANCE_MM } from '../anim/legDrive';
 import {
-  carryVerdict, grabPointFor, headAimFor, HEAD_LIMITS,
-  type GrabbableSpec, type GrabPoint, type SandboxCaste,
+  carryPose, carryVerdict, dragStandoffMm, grabPointFor, headAimFor,
+  HEAD_LIMITS, type GrabbableSpec, type GrabPoint, type SandboxCaste,
 } from './mandibleReach';
 
 const WALK_SPEED = 12;
@@ -92,6 +92,11 @@ export class SandboxScene {
 
   private turnInput = 0;
 
+  /** Keys and stick combined, −1..1, refreshed each frame. */
+  private moveWalk = 0;
+
+  private moveTurn = 0;
+
   /* ------------------------------------------------------- the invisible */
 
   private phase: Phase = 'roam';
@@ -141,7 +146,25 @@ export class SandboxScene {
 
   private camDist = 60;
 
-  private dragPointer: number | null = null;
+  /** First-person look pitch, radians — the right-half drag sets it. */
+  private fpPitch = 0;
+
+  private camPointer: number | null = null;
+
+  /* ---------------------------------------------------------- joystick */
+
+  private stickPointer: number | null = null;
+
+  private stickBase = { x: 0, y: 0 };
+
+  private stickEl: HTMLElement | null = null;
+
+  private knobEl: HTMLElement | null = null;
+
+  /** Analog −1..1 from the stick; keys write ±1 into the same pair. */
+  private stickWalk = 0;
+
+  private stickTurn = 0;
 
   /* ----------------------------------------------------------------- HUD */
 
@@ -382,10 +405,14 @@ export class SandboxScene {
       const dz = p.spec.z - this.antPos.z;
       const d = Math.hypot(dx, dz);
       if (d >= bestD) continue;
-      const heading = Math.atan2(dx, dz);
-      let off = (heading - this.facing) / DEG;
-      off = ((off + 540) % 360) - 180;
-      if (Math.abs(off) > 80) continue;
+      /* The facing cone only matters at range — anything she is basically
+       * standing on is grabbable from any angle; she'll shuffle herself. */
+      if (d > 8) {
+        const heading = Math.atan2(dx, dz);
+        let off = (heading - this.facing) / DEG;
+        off = ((off + 540) % 360) - 180;
+        if (Math.abs(off) > 80) continue;
+      }
       best = p;
       bestD = d;
     }
@@ -448,6 +475,10 @@ export class SandboxScene {
     const g = this.grabPoint;
     this.headAnchor(this.jawScratch);
     const dist = Math.hypot(g.x - this.jawScratch.x, g.z - this.jawScratch.z);
+    /* The beetle's grab point is its CENTRE — the jaws stop at its shell,
+     * not inside it. Everything else closes to the usual jaw gap. */
+    const closeMm = p.spec.kind === 'bug'
+      ? p.spec.halfWideMm + 0.8 : CLOSE_MM;
 
     if (this.phase === 'approach' || this.phase === 'align') {
       /* BODY: turn toward the approach heading and close the distance.
@@ -457,10 +488,30 @@ export class SandboxScene {
         this.facing / DEG,
         g.x, g.y, g.z, g.rollDeg,
       );
-      const wantFacing = Math.atan2(g.x - this.antPos.x, g.z - this.antPos.z);
-      let err = wantFacing - this.facing;
-      while (err > Math.PI) err -= 2 * Math.PI;
-      while (err < -Math.PI) err += 2 * Math.PI;
+      /*
+       * Where is the grab point in HER frame? `ahead` is signed — and that
+       * sign is the fix for "standing over it and helpless": a point at or
+       * behind her jaws walks her BACKWARD until the jaws are over it, so
+       * grabbing works right at the object instead of only after a manual
+       * three-point turn.
+       */
+      const relX = g.x - this.antPos.x;
+      const relZ = g.z - this.antPos.z;
+      const flat = Math.hypot(relX, relZ);
+      const ahead = relX * Math.sin(this.facing) + relZ * Math.cos(this.facing);
+      const side = relX * Math.cos(this.facing) - relZ * Math.sin(this.facing);
+      /* Only steer the body when the point is meaningfully off-centre —
+       * atan2 under her feet is noise, and she'd pirouette on it. */
+      let err = 0;
+      if (flat > 2.2) {
+        err = Math.atan2(relX, relZ) - this.facing;
+        while (err > Math.PI) err -= 2 * Math.PI;
+        while (err < -Math.PI) err += 2 * Math.PI;
+        /* A point BEHIND her is reached by backing up, not spinning. */
+        if (ahead < -0.5 && Math.abs(err) > Math.PI / 2) {
+          err = err > 0 ? err - Math.PI : err + Math.PI;
+        }
+      }
       const bodyTurn = Math.max(-TURN_RATE, Math.min(TURN_RATE, err * 4));
       this.facing += bodyTurn * dt;
       this.headYaw += (aim.yawDeg * DEG - this.headYaw) * Math.min(1, dt * 8);
@@ -468,18 +519,25 @@ export class SandboxScene {
       this.jawSpread += (1 - this.jawSpread) * Math.min(1, dt * 6);
 
       if (this.phase === 'approach') {
-        const walk = Math.min(WALK_SPEED, Math.max(2, (dist - CLOSE_MM) * 3));
-        if (dist > CLOSE_MM) {
+        /* Drive the JAWS onto the point: forward when it is out front,
+         * backward when it is under or behind her. */
+        const jawAhead = (g.x - this.jawScratch.x) * Math.sin(this.facing)
+          + (g.z - this.jawScratch.z) * Math.cos(this.facing);
+        const advance = jawAhead + dist * 0.25 - closeMm * 0.55;
+        if (Math.abs(advance) > 0.45) {
+          const walk = Math.max(
+            -WALK_SPEED * 0.6, Math.min(WALK_SPEED, advance * 3),
+          );
           this.antPos.x += Math.sin(this.facing) * walk * dt;
           this.antPos.z += Math.cos(this.facing) * walk * dt;
-        } else if (Math.abs(err) < 18 * DEG) {
+        } else if (Math.abs(side) < 1.6 || flat <= 2.2) {
           this.phase = 'align';
           this.phaseT = 0;
         }
       } else {
         /* ALIGN: settle until the head is on it, then commit the clamp. */
         this.phaseT += dt;
-        const settled = aim.withinLimits && dist < CLOSE_MM * 1.25;
+        const settled = (aim.withinLimits || flat < 2.4) && dist < closeMm * 1.4;
         if (settled && this.phaseT > 0.15) {
           this.phase = 'clamp';
           this.phaseT = 0;
@@ -529,15 +587,21 @@ export class SandboxScene {
     this.headPitch *= 1 - Math.min(1, dt * 6) * spring;
     this.jawSpread = 0.6;
     if (this.hauling === 'carry') {
-      p.spec.x = this.jawScratch.x + Math.sin(this.facing) * 0.6;
-      p.spec.z = this.jawScratch.z + Math.cos(this.facing) * 0.6;
-      p.spec.y = this.jawScratch.y + 0.2;
+      /* The load's CENTRE rides its own half-extent past the jaws — the
+       * fix for rocks and leaves phasing through her head. */
+      const pose = carryPose(p.spec);
+      p.spec.x = this.jawScratch.x + Math.sin(this.facing) * pose.fwdMm;
+      p.spec.z = this.jawScratch.z + Math.cos(this.facing) * pose.fwdMm;
+      p.spec.y = this.jawScratch.y + pose.upMm;
       p.mesh.position.set(p.spec.x, p.spec.y, p.spec.z);
-      p.mesh.rotation.y = this.facing + g.rollDeg * DEG;
+      p.mesh.rotation.set(
+        -pose.pitchDeg * DEG, this.facing + g.rollDeg * DEG, 0, 'YXZ',
+      );
     } else {
-      /* DRAG: it stays on the ground and trails the jaws. */
-      const tx = this.jawScratch.x + Math.sin(this.facing) * 0.4;
-      const tz = this.jawScratch.z + Math.cos(this.facing) * 0.4;
+      /* DRAG: on the ground, trailing at its own radius plus daylight. */
+      const standoff = dragStandoffMm(p.spec);
+      const tx = this.jawScratch.x + Math.sin(this.facing) * standoff;
+      const tz = this.jawScratch.z + Math.cos(this.facing) * standoff;
       const lag = Math.min(1, dt * 7);
       p.spec.x += (tx - p.spec.x) * lag;
       p.spec.z += (tz - p.spec.z) * lag;
@@ -571,9 +635,11 @@ export class SandboxScene {
 
     const busy = this.phase === 'approach' || this.phase === 'align'
       || this.phase === 'clamp';
+    this.moveWalk = Math.max(-1, Math.min(1, this.walkInput + this.stickWalk));
+    this.moveTurn = Math.max(-1, Math.min(1, this.turnInput + this.stickTurn));
     if (!busy) {
-      this.facing += this.turnInput * TURN_RATE * dt;
-      const speed = this.walkInput * WALK_SPEED
+      this.facing += this.moveTurn * TURN_RATE * dt;
+      const speed = this.moveWalk * WALK_SPEED
         * (this.hauling ? this.haulFactor : 1);
       this.antPos.x += Math.sin(this.facing) * speed * dt;
       this.antPos.z += Math.cos(this.facing) * speed * dt;
@@ -604,9 +670,10 @@ export class SandboxScene {
     ant.root.rotation.set(0, this.facing, 0);
     const busy = this.phase !== 'roam';
     ant.update(dt, {
-      speed: (this.walkInput !== 0 || this.phase === 'approach'
-        ? WALK_SPEED * (this.hauling ? this.haulFactor : 1) : 0) / MODEL_SCALE,
-      turn: this.turnInput * TURN_RATE,
+      speed: (Math.abs(this.moveWalk) > 0.05 || this.phase === 'approach'
+        ? WALK_SPEED * Math.max(0.4, Math.abs(this.moveWalk))
+          * (this.hauling ? this.haulFactor : 1) : 0) / MODEL_SCALE,
+      turn: this.moveTurn * TURN_RATE,
       digging: 0,
       carrying: Math.max(this.jawSpread, this.hauling ? 0.7 : 0),
       headYaw: busy ? this.headYaw : 0,
@@ -629,7 +696,9 @@ export class SandboxScene {
         .addScaledVector(fwd, 2.4);
       this.camera.position.copy(eye);
       this.camera.up.set(0, 1, 0);
-      const pitch = this.headPitch;
+      /* The right-half drag owns the look; a grab in progress borrows the
+       * eyes so you watch the jaws do the work. */
+      const pitch = this.phase === 'roam' ? this.fpPitch : this.headPitch;
       this.camera.lookAt(
         eye.x + fwd.x * Math.cos(pitch),
         eye.y + Math.sin(pitch),
@@ -667,41 +736,22 @@ export class SandboxScene {
     });
     right.appendChild(this.actBtn);
 
-    const left = document.createElement('div');
-    left.className = 'density-lab-actions';
-    left.style.left = 'max(16px, env(safe-area-inset-left))';
-    left.style.right = 'auto';
-    left.style.alignItems = 'flex-start';
-    this.hud.appendChild(left);
-
-    const hold = (
-      label: string, set: (on: boolean) => void, parent: HTMLElement,
-    ): void => {
-      const button = document.createElement('button');
-      button.className = 'density-lab-button density-lab-dig';
-      button.style.width = '58px';
-      button.style.height = '58px';
-      button.textContent = label;
-      button.addEventListener('pointerdown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        button.setPointerCapture(e.pointerId);
-        set(true);
-      });
-      const stop = (): void => set(false);
-      button.addEventListener('pointerup', stop);
-      button.addEventListener('pointercancel', stop);
-      button.addEventListener('lostpointercapture', stop);
-      parent.appendChild(button);
-    };
-    hold('⇧', (on) => { this.walkInput = on ? 1 : 0; }, left);
-    hold('⇩', (on) => { this.walkInput = on ? -1 : 0; }, left);
-    const turnRow = document.createElement('div');
-    turnRow.style.display = 'flex';
-    turnRow.style.gap = '11px';
-    left.appendChild(turnRow);
-    hold('◀', (on) => { this.turnInput = on ? 1 : 0; }, turnRow);
-    hold('▶', (on) => { this.turnInput = on ? -1 : 0; }, turnRow);
+    /* The joystick: touch anywhere on the LEFT half and it appears under
+     * the thumb — a real stick, analog in both axes, not four buttons. */
+    const stick = document.createElement('div');
+    stick.style.cssText = 'position:absolute;width:104px;height:104px;'
+      + 'border-radius:50%;border:2px solid rgba(255,248,230,0.7);'
+      + 'background:rgba(60,50,36,0.25);display:none;pointer-events:none;'
+      + 'transform:translate(-50%,-50%);';
+    const knob = document.createElement('div');
+    knob.style.cssText = 'position:absolute;left:50%;top:50%;width:46px;'
+      + 'height:46px;border-radius:50%;background:rgba(233,195,111,0.95);'
+      + 'box-shadow:0 3px 10px rgba(0,0,0,0.3);'
+      + 'transform:translate(-50%,-50%);';
+    stick.appendChild(knob);
+    this.hud.appendChild(stick);
+    this.stickEl = stick;
+    this.knobEl = knob;
 
     const top = document.createElement('div');
     top.style.position = 'absolute';
@@ -857,20 +907,66 @@ export class SandboxScene {
     });
   }
 
+  /**
+   * The screen in two halves: LEFT is the joystick, RIGHT pans the view —
+   * in third person it orbits her, in first person it turns her head and
+   * body, in both cases with the same thumb.
+   */
   private bindOrbit(): void {
     const el = this.renderer.domElement;
+    const STICK_RANGE = 46;
     el.addEventListener('pointerdown', (e) => {
-      if (this.dragPointer !== null) return;
-      this.dragPointer = e.pointerId;
-      el.setPointerCapture(e.pointerId);
+      const leftHalf = e.clientX < window.innerWidth / 2;
+      if (leftHalf && this.stickPointer === null) {
+        this.stickPointer = e.pointerId;
+        this.stickBase = { x: e.clientX, y: e.clientY };
+        if (this.stickEl) {
+          this.stickEl.style.left = `${e.clientX}px`;
+          this.stickEl.style.top = `${e.clientY}px`;
+          this.stickEl.style.display = '';
+        }
+        el.setPointerCapture(e.pointerId);
+        return;
+      }
+      if (!leftHalf && this.camPointer === null) {
+        this.camPointer = e.pointerId;
+        el.setPointerCapture(e.pointerId);
+      }
     });
     el.addEventListener('pointermove', (e) => {
-      if (e.pointerId !== this.dragPointer) return;
-      this.camYaw -= e.movementX * 0.006;
-      this.camPitch = Math.min(1.35, Math.max(0.08, this.camPitch + e.movementY * 0.005));
+      if (e.pointerId === this.stickPointer) {
+        const dx = e.clientX - this.stickBase.x;
+        const dy = e.clientY - this.stickBase.y;
+        const len = Math.hypot(dx, dy);
+        const cap = Math.min(1, len / STICK_RANGE);
+        const nx = len > 1e-3 ? (dx / len) * cap : 0;
+        const ny = len > 1e-3 ? (dy / len) * cap : 0;
+        if (this.knobEl) {
+          this.knobEl.style.transform = 'translate(-50%,-50%) '
+            + `translate(${nx * STICK_RANGE}px, ${ny * STICK_RANGE}px)`;
+        }
+        this.stickWalk = -ny;
+        this.stickTurn = -nx;
+        return;
+      }
+      if (e.pointerId !== this.camPointer) return;
+      if (this.firstPerson) {
+        this.facing -= e.movementX * 0.005;
+        this.fpPitch = Math.min(1.1, Math.max(-1.1, this.fpPitch - e.movementY * 0.004));
+      } else {
+        this.camYaw -= e.movementX * 0.006;
+        this.camPitch = Math.min(1.35, Math.max(0.08, this.camPitch + e.movementY * 0.005));
+      }
     });
     const done = (e: PointerEvent): void => {
-      if (e.pointerId === this.dragPointer) this.dragPointer = null;
+      if (e.pointerId === this.stickPointer) {
+        this.stickPointer = null;
+        this.stickWalk = 0;
+        this.stickTurn = 0;
+        if (this.stickEl) this.stickEl.style.display = 'none';
+        if (this.knobEl) this.knobEl.style.transform = 'translate(-50%,-50%)';
+      }
+      if (e.pointerId === this.camPointer) this.camPointer = null;
     };
     el.addEventListener('pointerup', done);
     el.addEventListener('pointercancel', done);
