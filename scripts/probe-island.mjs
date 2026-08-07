@@ -256,13 +256,13 @@ check('store is air AGAIN', roundtrip.storeAgain === false, `solidAtMm=${roundtr
 check('reconstruction still cost zero saved samples', roundtrip.edited === 0,
   `${roundtrip.edited} edits stored`);
 
-console.log('\nTHE TUNNEL BUILDER (camera-aimed legs, egg scoops, stamina)');
+console.log('\nTHE TUNNEL BUILDER (a palette of pieces, laid as you play)');
 /*
- * The guided dig, end to end: arm DIG far from the probe nest, aim with the
- * camera, hold the shovel. A monorail guide appears and snaps; scoops carve
- * 9 x 6 x 3 mm eggs down it at a stamina pace; the finished leg commits into
- * the plan; the next guide snaps to the new joint. Then the joint becomes a
- * Y and the camera picks its 45° exits. Nothing here uses the freeform chew.
+ * The guided dig, end to end, and it is a coaster builder now rather than a
+ * chew: the FIRST tap on a nestless island sinks the opening and aims her
+ * straight down, and every tap after that lays the armed piece on the
+ * growing end. Each one is instant and each one costs stamina, so the pace
+ * is recovery. Then the end joint becomes a Y and its 45° arms open.
  */
 const builder = await page.evaluate(() => {
   const s = window.islandScene;
@@ -271,78 +271,82 @@ const builder = await page.evaluate(() => {
   s.teleportMm(bx, bz);
   s.drainQueueForTest();
   s.setFacingForTest(0.4);
-  s.aimPitch = -0.6;
+  s.aimPitch = 0;
   s.digMode = true;
-
-  // The floating guide: visible, and snapped to the track's own steps.
   s.stepForTest(1 / 30, 2);
-  const guideUp = s.guide && s.guide.visible === true;
-  const floating = s.builder.pending === null;
 
-  // Hold the shovel: the founding scoop names the origin, eggs march.
-  s.input.dig = true;
-  let steps = 0;
-  const staminaDips = [];
-  while (s.builder.branches[0].pieces.length === 0 && steps < 2400) {
-    s.stepForTest(1 / 30, 1);
-    steps += 1;
-    if (steps % 30 === 0) staminaDips.push(s.builder.stamina);
-    if (steps % 120 === 0) s.drainQueueForTest();
-  }
-  s.input.dig = false;
+  // The ghost is up before anything is dug, showing the shaft to come.
+  const ghostFirst = s.guide && s.guide.visible === true;
+  const nestless = s.builderOriginMm === null;
+
+  // THE OPENING: one tap, and she is aimed down her own heading.
+  s.digPiece('straight');
   s.drainQueueForTest();
-  const legSeconds = steps / 30;
-  const origin = s.builderOriginMm;
-  const paced = Math.min(...staminaDips) < 100;
-
-  // The carve is real: air along the first leg's line, inside the ground.
-  const midMm = {
-    x: origin.x + Math.sin(0.4) * 10 * Math.cos(0.6),
-    y: origin.y - Math.sin(0.6) * 10,
-    z: origin.z + Math.cos(0.4) * 10 * Math.cos(0.6),
-  };
-  const carvedMid = s.solidAtMm(midMm.x, midMm.y, midMm.z);
-
-  // The plan grew: an entrance and the leg's joints exist, and it SAVED.
-  // (planForTest strips kinds, so this reads the plan itself.)
+  const founded = s.builderOriginMm !== null;
+  const aimedDown = s.aimPitch;
+  const openingPieces = s.builder.branches[0].pieces.length;
   const entrance = s.soil.plan.nodes.find((n) => n.id === 'b0-0');
-  let saved = null;
-  try { saved = JSON.parse(localStorage.getItem('thronemound-island-nest-v1')); } catch { /* no */ }
 
-  // The next guide snaps to the END JOINT, not to her.
-  s.stepForTest(1 / 30, 2);
-  const nextStart = s.builder.legStart({ extend: 0 }).at;
-  const nextLen = Math.hypot(nextStart.x, nextStart.y, nextStart.z);
+  // The shaft is really air, a piece-length under the mouth.
+  const o = s.builderOriginMm;
+  const shaftAir = s.solidAtMm(o.x, o.y - 12, o.z);
+
+  // STAMINA paces it: the next tap is refused until she recovers.
+  s.builder.stamina = 0;
+  s.digPiece('straight');
+  const refused = s.builder.branches[0].pieces.length === openingPieces;
+  s.builder.stamina = 100;
+  s.digPiece('straight');
+  s.drainQueueForTest();
+  const grew = s.builder.branches[0].pieces.length > openingPieces;
+
+  // A turn on the plumb shaft is REFUSED — there is no heading to turn.
+  s.builder.stamina = 100;
+  const onShaft = s.builder.addPiece({ extend: 0 }, 'left90');
+  // Level out of the shaft first (UP 90 is relative), THEN the turn bites.
+  s.builder.stamina = 100;
+  s.digPiece('up90');
+  s.drainQueueForTest();
+  const levelled = Math.abs(s.builder.pitchAt({ extend: 0 }));
+  const headBefore = s.builder.legStart({ extend: 0 }).headingDeg;
+  s.builder.stamina = 100;
+  s.digPiece('left90');
+  s.drainQueueForTest();
+  let turned = s.builder.legStart({ extend: 0 }).headingDeg - headBefore;
+  while (turned > 180) turned -= 360;
+  while (turned < -180) turned += 360;
+
+  // And nothing was SAVED, because saving is off while debugging.
+  let stored = null;
+  try { stored = localStorage.getItem('thronemound-island-nest-v1'); } catch { /* none */ }
 
   return {
-    guideUp, floating, legSeconds, paced,
-    origin: origin !== null,
-    carvedMid,
+    ghostFirst, nestless, founded, aimedDown, openingPieces, grew, refused,
     entrance: !!entrance && entrance.kind === 'entrance',
-    savedBranches: saved?.builder?.branches?.length ?? 0,
-    pieces: s.builder.branches[0].pieces.length,
-    nextLen,
+    shaftAir, turned, stored, onShaft, levelled,
   };
 });
-check('the monorail guide shows before anything commits',
-  builder.guideUp && builder.floating);
-check('holding the shovel chews one whole leg', builder.pieces === 2,
-  `${builder.pieces} pieces after ${builder.legSeconds.toFixed(1)} s`);
-check('and the pace is stamina, not a firehose',
-  builder.paced && builder.legSeconds > 6 && builder.legSeconds < 45,
-  `${builder.legSeconds.toFixed(1)} s for 7 scoops`);
-check('the founding scoop set the nest origin', builder.origin);
-check('the eggs really carved the line', builder.carvedMid === false,
-  `solidAtMm mid-leg = ${builder.carvedMid}`);
-check('the leg committed into the plan as the entrance', builder.entrance);
-check('and the nest SAVED to the device', builder.savedBranches >= 1,
-  `${builder.savedBranches} branches stored`);
-check('the next leg snaps to the end joint, not to her',
-  Math.abs(builder.nextLen - 20) < 1.5, `${builder.nextLen.toFixed(1)} mm out`);
+check('the ghost is up before the first piece', builder.ghostFirst && builder.nestless);
+check('one tap sinks the OPENING', builder.founded && builder.openingPieces === 2,
+  `${builder.openingPieces} pieces`);
+check('and drops her aim to straight down',
+  Math.abs(builder.aimedDown + Math.PI / 2) < 0.01,
+  `${((builder.aimedDown * 180) / Math.PI).toFixed(0)}°`);
+check('the mouth is a real entrance in the plan', builder.entrance);
+check('and the shaft under it is air', builder.shaftAir === false,
+  `solidAtMm = ${builder.shaftAir}`);
+check('stamina refuses a piece she cannot afford', builder.refused);
+check('and recovery lets the tunnel grow again', builder.grew);
+check('a turn on the plumb shaft is refused, not silently wasted',
+  builder.onShaft === 'no-turn', `addPiece said ${builder.onShaft}`);
+check('UP 90 levels her out of the shaft', builder.levelled < 1,
+  `${builder.levelled.toFixed(0)}° grade`);
+check('and THEN a LEFT 90 turns the line ninety degrees',
+  Math.abs(Math.abs(builder.turned) - 90) < 1, `${builder.turned.toFixed(0)}°`);
+check('nothing was saved — debugging, by request', builder.stored === null);
 
 const junction = await page.evaluate(() => {
   const s = window.islandScene;
-  // Stand AT the new joint so the chips offer its kinds, and make it a Y.
   const o = s.builderOriginMm;
   const end = s.builder.legStart({ extend: 0 }).at;
   s.teleportMm(o.x + end.x, o.z + end.z);
@@ -350,10 +354,11 @@ const junction = await page.evaluate(() => {
   s.stepForTest(1 / 30, 3);
   const nearJoint = s.nearestJoint();
   const rowShown = s.jointRow && s.jointRow.style.display !== 'none';
-  s.builder.setJointKind(0, 'Y');
+  s.builder.stamina = 100;
+  s.digJoint('Y');
+  s.drainQueueForTest();
   const exits = s.builder.exitsAvailable(0);
-  // The camera picks the arm: aim 45° left of the leg's own heading.
-  const arm = s.builder.pickExit(0, (0.4 * 180) / Math.PI + 45, 0);
+  const arm = s.builder.pickExit(0, s.builder.legStart({ extend: 0 }).headingDeg + 45, 0);
   s.digMode = false;
   return { nearJoint, rowShown: !!rowShown, exits, arm };
 });

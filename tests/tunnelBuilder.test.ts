@@ -1,180 +1,226 @@
 /**
  * The island's guided dig, as arithmetic.
  *
- * These pin the PLAYER's spec, not the constants behind it: a leg snaps to
- * the camera and lands 20 mm along; a scoop is one egg and one bite of
- * stamina; a finished leg becomes the next joint; Y forks at 45°, T at 90°,
- * X three ways; the compiled plan is a valid nest anchored at the origin.
- * The rail geometry is `railFromPlan`'s and the branching `pieceTrack`'s —
- * both already covered; nothing here re-derives them.
+ * These pin the PLAYER's spec, not the constants behind it: a palette of
+ * ninety-degree pieces laid on the end of what is already there, each one
+ * instant and each one costing a bite of stamina; joints that become rooms
+ * or splits, with a Y forking at 45° and a T at 90°; and a compiled plan
+ * that is an ordinary valid nest. The rail geometry is `railFromPlan`'s and
+ * the branching `pieceTrack`'s — both already covered; nothing re-derives
+ * them here.
  */
 
 import { describe, expect, it } from 'vitest';
 import {
-  BORE_RADIUS_MM, HUB_RADIUS_MM, LEG_MM, ROOM_RADIUS_MM,
-  SCOOP_DEEP_MM, SCOOP_STAMINA, STAMINA_MAX, STAMINA_REGEN,
-  TunnelBuilder,
+  BORE_RADIUS_MM, HUB_RADIUS_MM, PIECE_MM, PIECE_STAMINA, ROOM_RADIUS_MM,
+  STAMINA_MAX, STAMINA_REGEN, TunnelBuilder, pieceIsUseful, piecesFor,
 } from '../src/scenes/tunnelBuilder';
 import { validatePlan } from '../src/nest/nestPlan';
 
 const ORIGIN = { x: 0, y: 0, z: 0 };
 
-/** Chew a whole leg through, feeding stamina between scoops. */
-function digLeg(b: TunnelBuilder, aimHeadingDeg: number, aimPitchDeg: number,
-  source: Parameters<TunnelBuilder['startLeg']>[0] = { extend: 0 }): void {
-  b.startLeg(source, aimHeadingDeg, aimPitchDeg);
-  for (let i = 0; i < 40 && b.pending; i += 1) {
-    b.stamina = STAMINA_MAX;
-    const order = b.scoop();
-    expect(order).not.toBe('no-stamina');
-    expect(order).not.toBe('no-leg');
-  }
-  expect(b.pending).toBeNull();
+/** Lay a piece with the strength for it, and insist it landed. */
+function lay(b: TunnelBuilder, kind: Parameters<TunnelBuilder['addPiece']>[1],
+  source: Parameters<TunnelBuilder['addPiece']>[0] = { extend: 0 }): number {
+  b.stamina = STAMINA_MAX;
+  const landed = b.addPiece(source, kind);
+  if (typeof landed === 'string') throw new Error(landed);
+  return landed;
 }
 
-describe('the guide', () => {
-  it('a leg aimed on the cardinal lands one leg-length out', () => {
+describe('the palette', () => {
+  it('a straight runs one piece-length dead ahead', () => {
     const b = new TunnelBuilder();
-    const leg = b.previewLeg({ extend: 0 }, 0, 0);
-    expect(leg.lengthMm).toBeCloseTo(LEG_MM, 0);
+    const leg = b.previewPiece({ extend: 0 }, 'straight');
+    expect(leg.lengthMm).toBeCloseTo(PIECE_MM, 0);
     const end = leg.points[leg.points.length - 1]!;
-    expect(end.z).toBeCloseTo(LEG_MM, 0);
+    expect(end.z).toBeCloseTo(PIECE_MM, 0);
     expect(Math.abs(end.x)).toBeLessThan(0.5);
   });
 
-  it('the aim snaps: 40° of camera becomes a 45° leg', () => {
-    const b = new TunnelBuilder();
-    const leg = b.previewLeg({ extend: 0 }, 40, 0);
-    expect(leg.pieces[0]!.turn).toBe(45);
-    expect(leg.pieces[1]!.turn).toBe(0);
+  it('a bend is two 45s, so the carve stays round', () => {
+    expect(piecesFor('left90', 0).map((p) => p.turn)).toEqual([45, 45]);
+    expect(piecesFor('right90', 0).map((p) => p.turn)).toEqual([-45, -45]);
   });
 
-  it('a straight-down aim is a true shaft', () => {
+  it('and it really turns ninety degrees', () => {
     const b = new TunnelBuilder();
-    const leg = b.previewLeg({ extend: 0 }, 0, -90);
-    const end = leg.points[leg.points.length - 1]!;
-    expect(end.y).toBeCloseTo(-LEG_MM, 0);
+    lay(b, 'left90');
+    // Heading is absolute: a left 90 from due +Z ends pointing along +X.
+    const next = b.legStart({ extend: 0 });
+    expect(next.headingDeg).toBeCloseTo(90, 0);
+  });
+
+  it('UP and DOWN are RELATIVE, so a shaft can be levelled out of', () => {
+    expect(piecesFor('up90', 0).map((p) => p.pitch)).toEqual([45, 90]);
+    expect(piecesFor('down90', 0).map((p) => p.pitch)).toEqual([-45, -90]);
+    // The one that matters: plumb down, UP 90 comes back to level. An
+    // absolute reading would send her straight up instead, and there would
+    // be no button at all for the drift every nest needs.
+    expect(piecesFor('up90', -90).map((p) => p.pitch)).toEqual([-45, 0]);
+    // And past the limit it parks rather than folding over.
+    expect(piecesFor('down90', -90).map((p) => p.pitch)).toEqual([-90, -90]);
+  });
+
+  it('a turn on a plumb shaft is refused, not silently wasted', () => {
+    const b = new TunnelBuilder();
+    lay(b, 'down90');
+    expect(pieceIsUseful('left90', -90)).toBe(false);
+    expect(pieceIsUseful('straight', -90)).toBe(true);
+    b.stamina = STAMINA_MAX;
+    expect(b.addPiece({ extend: 0 }, 'left90')).toBe('no-turn');
+    expect(b.stamina).toBe(STAMINA_MAX);   // and it cost her nothing
+  });
+
+  it('level out first, and the turn works', () => {
+    const b = new TunnelBuilder();
+    lay(b, 'down90');
+    lay(b, 'up90');                        // back to level
+    const before = b.legStart({ extend: 0 }).headingDeg;
+    lay(b, 'left90');
+    let turned = b.legStart({ extend: 0 }).headingDeg - before;
+    while (turned > 180) turned -= 360;
+    expect(Math.abs(turned)).toBeCloseTo(90, 0);
+  });
+
+  it('a DOWN 90 from the surface really goes down', () => {
+    const b = new TunnelBuilder();
+    lay(b, 'down90');
+    const end = b.legStart({ extend: 0 }).at;
+    expect(end.y).toBeLessThan(-10);
+    expect(Math.hypot(end.x, end.z)).toBeLessThan(PIECE_MM);
+  });
+
+  it('the ghost is exactly what the button digs', () => {
+    const b = new TunnelBuilder();
+    const ghost = b.previewPiece({ extend: 0 }, 'left90');
+    lay(b, 'left90');
+    expect(b.branches[0]!.pieces).toEqual(ghost.pieces);
   });
 });
 
-describe('the scoop', () => {
-  it('costs stamina, and stamina gates it', () => {
+describe('stamina', () => {
+  it('paces the digging without ever stopping it', () => {
     const b = new TunnelBuilder();
-    b.startLeg({ extend: 0 }, 0, 0);
-    expect(b.scoop()).not.toBe('no-stamina');       // 100 -> 60
-    expect(b.scoop()).not.toBe('no-stamina');       // 60 -> 20
-    expect(b.scoop()).toBe('no-stamina');           // 20 < 40
-    b.tick(SCOOP_STAMINA / STAMINA_REGEN + 0.01);   // a breath
-    expect(b.scoop()).not.toBe('no-stamina');
+    expect(b.addPiece({ extend: 0 }, 'straight')).not.toBe('no-stamina'); // 100 -> 60
+    expect(b.addPiece({ extend: 0 }, 'straight')).not.toBe('no-stamina'); // 60 -> 20
+    expect(b.addPiece({ extend: 0 }, 'straight')).toBe('no-stamina');     // 20 < 40
+    b.tick(PIECE_STAMINA / STAMINA_REGEN + 0.01);
+    expect(b.addPiece({ extend: 0 }, 'straight')).not.toBe('no-stamina');
   });
 
-  it('without a leg there is nothing to dig', () => {
+  it('a refused piece costs nothing', () => {
     const b = new TunnelBuilder();
-    expect(b.scoop()).toBe('no-leg');
+    b.stamina = 0;
+    b.addPiece({ extend: 0 }, 'straight');
+    expect(b.stamina).toBe(0);
+    expect(b.branches[0]!.pieces.length).toBe(0);
   });
 
-  it('the eggs march down the guide and the last one finishes the leg', () => {
+  it('never banks past full', () => {
     const b = new TunnelBuilder();
-    b.startLeg({ extend: 0 }, 0, 0);
-    let scoops = 0;
-    let lastZ = -1;
-    while (b.pending) {
-      b.stamina = STAMINA_MAX;
-      const order = b.scoop();
-      if (typeof order === 'string') throw new Error(order);
-      expect(order.centerMm.z).toBeGreaterThan(lastZ);
-      lastZ = order.centerMm.z;
-      const len = Math.hypot(order.along.x, order.along.y, order.along.z);
-      expect(len).toBeCloseTo(1, 3);
-      scoops += 1;
-      if (order.legDone) break;
-    }
-    expect(scoops).toBe(Math.ceil(LEG_MM / SCOOP_DEEP_MM));
-    expect(b.branches[0]!.pieces.length).toBe(2);
-  });
-
-  it('the next leg starts where the last one ended', () => {
-    const b = new TunnelBuilder();
-    digLeg(b, 0, 0);
-    const start = b.legStart({ extend: 0 });
-    expect(start.at.z).toBeCloseTo(LEG_MM, 0);
-    expect(start.headingDeg).toBeCloseTo(0, 5);
+    b.tick(100);
+    expect(b.stamina).toBe(STAMINA_MAX);
   });
 });
 
 describe('joints', () => {
-  function withLeg(): TunnelBuilder {
+  function withPiece(): TunnelBuilder {
     const b = new TunnelBuilder();
-    digLeg(b, 0, 0);
+    lay(b, 'straight');
     return b;
   }
 
   it('a Y forks two ways at 45', () => {
-    const b = withLeg();
-    b.setJointKind(0, 'Y');
+    const b = withPiece();
+    b.stamina = STAMINA_MAX;
+    expect(b.digJoint(0, 'Y')).toBe(true);
     expect(b.branches[0]!.roomMm).toBe(HUB_RADIUS_MM);
     expect(b.exitsAvailable(0)).toEqual(['left45', 'right45']);
     expect(b.pickExit(0, 45, 0)).toBe('left45');
     expect(b.pickExit(0, -45, 0)).toBe('right45');
   });
 
-  it('a T crosses at 90, an X adds straight-through', () => {
-    const b = withLeg();
-    b.setJointKind(0, 'T');
+  it('a T branches at 90, an X adds straight-through', () => {
+    const b = withPiece();
+    b.stamina = STAMINA_MAX;
+    b.digJoint(0, 'T');
     expect(b.exitsAvailable(0)).toEqual(['left', 'right']);
-    b.setJointKind(0, 'X');
+    b.stamina = STAMINA_MAX;
+    b.digJoint(0, 'X');
     expect(b.exitsAvailable(0)).toEqual(['forward', 'left', 'right']);
     expect(b.pickExit(0, 0, 0)).toBe('forward');
     expect(b.pickExit(0, 90, 0)).toBe('left');
   });
 
-  it('a dug branch spends its exit', () => {
-    const b = withLeg();
-    b.setJointKind(0, 'X');
-    digLeg(b, 90, 0, { branch: 0, exit: 'left' });
+  it('a room is bigger than a hub, and closes its branch', () => {
+    const b = withPiece();
+    b.stamina = STAMINA_MAX;
+    b.digJoint(0, 'queen');
+    expect(b.branches[0]!.roomMm).toBe(ROOM_RADIUS_MM);
+    expect(b.canExtend({ extend: 0 })).toBe(false);
+    expect(b.addPiece({ extend: 0 }, 'straight')).toBe('closed');
+  });
+
+  it('a joint costs stamina like anything else dug', () => {
+    const b = withPiece();
+    b.stamina = 0;
+    expect(b.digJoint(0, 'T')).toBe(false);
+    expect(b.branches[0]!.roomMm).toBeNull();
+  });
+
+  it('a branch off an exit spends it', () => {
+    const b = withPiece();
+    b.stamina = STAMINA_MAX;
+    b.digJoint(0, 'X');
+    lay(b, 'straight', { branch: 0, exit: 'left' });
     expect(b.exitsAvailable(0)).toEqual(['forward', 'right']);
-    // And the new branch really runs east from the joint.
-    const start = b.legStart({ extend: 1 });
-    expect(start.at.x).toBeGreaterThan(LEG_MM - 1);
+    const arm = b.legStart({ extend: 1 });
+    expect(arm.at.x).toBeGreaterThan(PIECE_MM - 1);
   });
 
   it('aiming at the wall of a Y picks nothing', () => {
-    const b = withLeg();
-    b.setJointKind(0, 'Y');
+    const b = withPiece();
+    b.stamina = STAMINA_MAX;
+    b.digJoint(0, 'Y');
     expect(b.pickExit(0, 180, 0)).toBeNull();
-  });
-
-  it('a room closes its branch to bare extension', () => {
-    const b = withLeg();
-    b.setJointKind(0, 'queen');
-    expect(b.branches[0]!.roomMm).toBe(ROOM_RADIUS_MM);
-    b.startLeg({ extend: 0 }, 0, 0);
-    expect(b.pending).toBeNull();
   });
 });
 
 describe('the plan', () => {
-  it('compiles to a valid nest with the egg-sized bore', () => {
+  it('compiles to a valid nest with a round bore', () => {
     const b = new TunnelBuilder();
-    digLeg(b, 0, -45);
-    b.setJointKind(0, 'Y');
-    digLeg(b, 45, 0, { branch: 0, exit: 'left45' });
+    lay(b, 'down90');
+    lay(b, 'straight');
+    b.stamina = STAMINA_MAX;
+    b.digJoint(0, 'Y');
+    lay(b, 'straight', { branch: 0, exit: 'left45' });
     const plan = b.plan({ x: 28000, y: 1300, z: 28000 });
     expect(validatePlan(plan)).toEqual([]);
     expect(plan.nodes[0]!.kind).toBe('entrance');
     expect(plan.nodes[0]!.x).toBeCloseTo(28000, 5);
     expect(plan.edges.every((e) => e.radiusMm === BORE_RADIUS_MM)).toBe(true);
+    /* Round, deliberately: an oval tube she cannot roll all the way around
+     * is the one thing the 360° crawl rules out. */
+    expect(plan.edges.every((e) => e.squashY === undefined)).toBe(true);
     expect(plan.nodes.some((n) => n.kind === 'chamber' && n.radiusMm === HUB_RADIUS_MM))
       .toBe(true);
+  });
+
+  it('an untouched builder has nothing to carve', () => {
+    const b = new TunnelBuilder();
+    expect(b.hasTunnels).toBe(false);
+    expect(b.plan(ORIGIN).nodes).toEqual([]);
   });
 });
 
 describe('the save', () => {
   it('round-trips branches and joint kinds', () => {
     const b = new TunnelBuilder();
-    digLeg(b, 15, -15);
-    b.setJointKind(0, 'T');
-    digLeg(b, 90, 0, { branch: 0, exit: 'left' });
+    lay(b, 'down90');
+    b.stamina = STAMINA_MAX;
+    b.digJoint(0, 'T');
+    lay(b, 'straight', { branch: 0, exit: 'left' });
     const copy = TunnelBuilder.fromJSON(JSON.parse(JSON.stringify(b.toJSON())));
     expect(copy).not.toBeNull();
     expect(copy!.branches.length).toBe(b.branches.length);

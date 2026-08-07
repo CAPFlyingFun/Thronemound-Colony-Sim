@@ -52,9 +52,9 @@ import {
 import { DebugStatsPanel } from './DebugStatsPanel';
 import { LoadingOverlay } from './LoadingOverlay';
 import {
-  JUNCTION_KINDS, ROOM_KINDS, SCOOP_DEEP_MM, SCOOP_TALL_MM, SCOOP_WIDE_MM,
-  STEEP_DEG, TunnelBuilder, BORE_RADIUS_MM as BUILDER_BORE_MM,
-  type JointKind, type LegPreview, type LegSource,
+  JUNCTION_KINDS, PIECE_BUTTONS, PIECE_LABELS, ROOM_KINDS, ROOM_LABELS,
+  STEEP_DEG, TunnelBuilder, pieceIsUseful, BORE_RADIUS_MM as BUILDER_BORE_MM,
+  type JointKind, type LegPreview, type LegSource, type PieceButton,
 } from './tunnelBuilder';
 import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
@@ -385,13 +385,18 @@ export class IslandScene {
   /** The branch the next bare leg extends — the growing tip. */
   private activeBranch = 0;
 
-  /** Refractory between scoops, so a held shovel is a pace, not a hose.
-   *  SIMULATED seconds, not wall-clock: probes step time far faster than
-   *  it passes, and a real-time gate throttled a simulated dig to the test
-   *  machine's own speed — measured as a 12-second leg taking 64. */
-  private scoopCooldownS = 0;
+  /** Which palette piece the next dig lays. The ghost shows THIS. */
+  private armedPiece: PieceButton = 'straight';
 
-  /** The monorail guide: the leg the camera is currently describing. */
+  /** The palette's buttons, so the stamina fill can reach all of them —
+   *  they spend one pool, so they fill and dim together. */
+  private readonly pieceBtns = new Map<PieceButton, HTMLButtonElement>();
+
+  private staminaShown = -1;
+
+  private staminaReadyShown = false;
+
+  /** The monorail guide: the piece the palette is currently offering. */
   private guide: THREE.Mesh | null = null;
 
   private guideKey = '';
@@ -407,7 +412,9 @@ export class IslandScene {
 
   private switchRowKey = '';
 
-  private scoopBtn: HTMLButtonElement | null = null;
+  /** The palette row, shown only while DIG is armed. */
+  private pieceRow: HTMLDivElement | null = null;
+
 
   private readonly keysDown = new Set<string>();
 
@@ -1570,8 +1577,8 @@ export class IslandScene {
       // Soil leaves at the bottom of the stroke, not on the button.
       if (bore.bite) this.bite();
 
-      // The builder's dig: held shovel, scoops as stamina allows.
-      if (this.digMode && this.input.dig) this.builderDig();
+      /* The builder digs on a BUTTON, not on a frame: `digPiece` is called
+       * straight from the palette's chips. Nothing to do per-frame here. */
 
       const lead = Math.min(LEAD_MAX, Math.abs(speed) * LEAD_S);
       const now = performance.now();
@@ -1616,7 +1623,6 @@ export class IslandScene {
         * (1 - Math.exp(-SENSE_EASE * dt));
     }
     this.builder.tick(dt);
-    this.scoopCooldownS = Math.max(0, this.scoopCooldownS - dt);
     this.updateSwitch();
     this.refreshSwitchRow();
     this.updateGuide();
@@ -2460,6 +2466,17 @@ export class IslandScene {
 
   private static readonly NEST_KEY = 'thronemound-island-nest-v1';
 
+  /**
+   * SAVING IS OFF WHILE THE BUILDER IS BEING DEBUGGED — by request, and it
+   * is the right call: a persisted nest means every run starts from
+   * whatever the last broken build left behind, so you are never testing
+   * the change you just made, you are testing it plus a fossil. Both halves
+   * go together deliberately. Loading alone would resurrect old nests;
+   * saving alone would quietly accumulate them against the day this flips
+   * back. Set it true and both return, unchanged.
+   */
+  private static readonly NEST_SAVING = false;
+
   /** Builder ids are `b{k}-{i}` and `b{k}-e{i}` — how its half of a merged
    *  plan is told apart from anything the designer or a probe authored. */
   private static isBuilderId(id: string): boolean {
@@ -2531,56 +2548,68 @@ export class IslandScene {
   }
 
   /**
-   * One press of the shovel, builder-style. The first press of a nestless
-   * island FOUNDS the nest where she stands; the first press of a floating
-   * guide locks it; every press takes an egg from the working face — and
-   * the press that finishes a leg commits it into the plan and saves.
+   * THE OPENING — always the first thing dug, and it is dug for you.
+   *
+   * A nest starts as a mouth and a shaft, so the first press does not ask
+   * which piece: it plants the entrance at her feet and drops a DOWN 90
+   * under it. Whatever way she was facing is the shaft's heading, so the
+   * nest is aligned to how she stood when she chose the spot.
    */
-  private builderDig(): void {
+  private foundOpening(): boolean {
+    if (this.builderOriginMm !== null || !this.builder.canDig) return false;
+    const xMm = this.at.x * MM;
+    const zMm = this.at.z * MM;
+    this.builderOriginMm = { x: xMm, y: this.renderedHeightAtMm(xMm, zMm), z: zMm };
+    this.activeBranch = 0;
+    const made = this.builder.addPiece({ extend: 0 }, 'down90');
+    if (typeof made === 'string') {
+      this.builderOriginMm = null;
+      return false;
+    }
+    this.applyPlan(this.builderMergedPlan(), { preserveRide: true });
+    this.saveNest();
+    /*
+     * ...and she is aimed straight down on her own heading, per the spec.
+     * Setting the aim rather than moving her: the mouth is at her feet, so
+     * walking in is a step, and being teleported into a hole you have just
+     * this second dug is the "it teleports me underground" report again.
+     */
+    this.aimPitch = -Math.PI / 2;
+    this.fpPitch = this.aimPitch;
+    return true;
+  }
+
+  /**
+   * Dig one piece off the palette, instantly, for one bite of stamina —
+   * the RCT grammar the player asked for. The piece lands on the growing
+   * tip, or out of a joint's exit when she is standing at one.
+   */
+  digPiece(kind: PieceButton): void {
     if (!this.stream || !this.ready) return;
-    if (this.scoopCooldownS > 0 || !this.builder.canScoop) return;
+    if (this.builderOriginMm === null) { this.foundOpening(); return; }
+    const source = this.peekLegSource();
+    if (!source) return;
+    const landed = this.builder.addPiece(source, kind);
+    if (typeof landed === 'string') return;
+    this.activeBranch = landed;
+    /* The tunnel becomes PLAN — which is what the soil is carved from, what
+     * the rails are, and what survives a scroll — and the ride is preserved,
+     * because adding a piece while standing in your own tunnel must not drop
+     * you off a rail halfway along it. */
+    this.applyPlan(this.builderMergedPlan(), { preserveRide: true });
+    this.saveNest();
+    this.refreshPalette();
+  }
 
-    if (!this.builder.pending) {
-      let source = this.peekLegSource();
-      if (source && this.builderOriginMm === null) {
-        // The founding scoop: the nest's origin is her feet, on the ground.
-        const xMm = this.at.x * MM;
-        const zMm = this.at.z * MM;
-        this.builderOriginMm = { x: xMm, y: this.renderedHeightAtMm(xMm, zMm), z: zMm };
-        this.activeBranch = 0;
-        source = { extend: 0 };
-      }
-      if (!source) return;
-      this.builder.startLeg(source, this.aimHeadingDeg(), this.aimPitchDeg());
-      if (!this.builder.pending) return;
-    }
-
-    const src = this.builder.pending.source;
-    const order = this.builder.scoop();
-    if (typeof order === 'string') return;
-    this.scoopCooldownS = 0.35;
-
-    const o = this.builderOriginMm!;
-    const centre = S_CENTER.set(
-      (o.x + order.centerMm.x) / MM,
-      (o.y + order.centerMm.y) / MM,
-      (o.z + order.centerMm.z) / MM,
-    );
-    const cut = this.stream.subtractEllipsoid(centre, order.along, {
-      deep: SCOOP_DEEP_MM / 2 / MM,
-      wide: SCOOP_WIDE_MM / 2 / MM,
-      tall: SCOOP_TALL_MM / 2 / MM,
-    });
-    if (cut.changedSamples > 0) this.enqueueBounds(cut.bounds);
-
-    if (order.legDone) {
-      this.activeBranch = 'extend' in src ? src.extend : this.builder.branches.length - 1;
-      /* The leg becomes PLAN — which is what survives streaming, scrolls
-       * and reload — and the ride is preserved: committing a leg while
-       * standing in your own tunnel must not drop you off a rail. */
-      this.applyPlan(this.builderMergedPlan(), { preserveRide: true });
-      this.saveNest();
-    }
+  /** Turn the joint she is standing at into a room or a split. */
+  digJoint(kind: JointKind): void {
+    const branch = this.nearestJoint();
+    if (branch === null) return;
+    if (!this.builder.digJoint(branch, kind)) return;
+    this.applyPlan(this.builderMergedPlan(), { preserveRide: true });
+    this.saveNest();
+    this.refreshJointRow();
+    this.refreshPalette();
   }
 
   /** Remesh every chunk a brush result touched — bite()'s own loop, shared. */
@@ -2612,16 +2641,15 @@ export class IslandScene {
       this.guideKey = '';
       return;
     }
+    /* Before the opening exists there is nothing to preview but the shaft
+     * the founding press will sink — so that is what it shows. */
     let preview: LegPreview | null = null;
-    let locked = false;
-    if (this.builder.pending) {
-      preview = this.builder.pendingPreview();
-      locked = true;
+    const locked = false;
+    if (this.builderOriginMm === null) {
+      preview = this.builder.previewPiece({ extend: 0 }, 'down90');
     } else {
       const source = this.peekLegSource();
-      if (source) {
-        preview = this.builder.previewLeg(source, this.aimHeadingDeg(), this.aimPitchDeg());
-      }
+      if (source) preview = this.builder.previewPiece(source, this.armedPiece);
     }
     if (!preview || preview.points.length < 2) {
       if (this.guide) this.guide.visible = false;
@@ -2636,9 +2664,10 @@ export class IslandScene {
       z: this.at.z * MM,
     };
     const head = preview.pieces[0]!;
-    const key = `${locked ? 'L' : 'F'}:${head.pitch}:${head.turn}`
+    const key = `${this.armedPiece}:${head.pitch}:${head.turn}`
       + `:${o.x.toFixed(0)},${o.y.toFixed(0)},${o.z.toFixed(0)}`
-      + `:${preview.points[0]!.x.toFixed(1)},${preview.points[0]!.z.toFixed(1)}`;
+      + `:${preview.points[0]!.x.toFixed(1)},${preview.points[0]!.z.toFixed(1)}`
+      + `:${preview.points[preview.points.length - 1]!.y.toFixed(1)}`;
     if (key !== this.guideKey) {
       this.guideKey = key;
       const pts = preview.points.map((p) => new THREE.Vector3(
@@ -2665,20 +2694,43 @@ export class IslandScene {
     this.guide!.visible = true;
   }
 
-  /** The stamina meter IS the shovel: the button fills as she recovers.
-   *  And the joint chips: standing at a joint offers its kinds. */
+  /** Stamina reads on every piece button at once — they all spend the same
+   *  pool, so they all fill together and all dim together. */
   private updateBuilderHud(): void {
-    if (this.scoopBtn) {
-      const pct = Math.round(this.builder.stamina);
-      this.scoopBtn.style.backgroundImage = 'linear-gradient(to top,'
+    const pct = Math.round(this.builder.stamina);
+    const ready = this.builder.canDig;
+    if (pct !== this.staminaShown || ready !== this.staminaReadyShown) {
+      this.staminaShown = pct;
+      this.staminaReadyShown = ready;
+      const fill = 'linear-gradient(to top,'
         + ` rgba(81, 224, 122, 0.45) ${pct}%, rgba(0, 0, 0, 0) ${pct}%)`;
-      this.scoopBtn.style.opacity = this.builder.canScoop ? '1' : '0.5';
+      for (const btn of this.pieceBtns.values()) {
+        btn.style.backgroundImage = fill;
+        btn.style.opacity = ready ? '1' : '0.5';
+      }
     }
-    const joint = this.digMode && !this.builder.pending ? this.nearestJoint() : null;
+    const joint = this.digMode ? this.nearestJoint() : null;
     const want = joint ?? -1;
     if (want !== this.jointRowFor) {
       this.jointRowFor = want;
       this.refreshJointRow();
+    }
+  }
+
+  /**
+   * Which piece the next press digs, which chip is lit for it, and which
+   * chips are struck through because they would do nothing from here — a
+   * turn laid on a plumb shaft being the case that matters, since it costs
+   * stamina and moves the tunnel not at all.
+   */
+  private refreshPalette(): void {
+    const source = this.builderOriginMm === null ? null : this.peekLegSource();
+    const pitch = source ? this.builder.pitchAt(source) : 0;
+    for (const [kind, btn] of this.pieceBtns.entries()) {
+      btn.classList.toggle('is-grip', kind === this.armedPiece);
+      const useless = source !== null && !pieceIsUseful(kind, pitch);
+      btn.style.textDecoration = useless ? 'line-through' : '';
+      btn.dataset.useless = useless ? '1' : '';
     }
   }
 
@@ -2699,15 +2751,13 @@ export class IslandScene {
     for (const kind of offer) {
       const chip = document.createElement('button');
       chip.className = 'density-lab-button density-lab-mode';
-      chip.textContent = kind.length === 1 ? kind : kind.toUpperCase();
+      chip.textContent = (JUNCTION_KINDS as readonly string[]).includes(kind)
+        ? `${kind}-SPLIT` : ROOM_LABELS[kind as keyof typeof ROOM_LABELS];
       chip.classList.toggle('is-grip', current === kind);
       chip.addEventListener('pointerdown', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        this.builder.setJointKind(branch, kind);
-        this.applyPlan(this.builderMergedPlan(), { preserveRide: true });
-        this.saveNest();
-        this.refreshJointRow();
+        this.digJoint(kind);
       });
       row.appendChild(chip);
     }
@@ -2731,7 +2781,7 @@ export class IslandScene {
   /* ----------------------------------------------------- the nest's save */
 
   private saveNest(): void {
-    if (!this.builderOriginMm) return;
+    if (!IslandScene.NEST_SAVING || !this.builderOriginMm) return;
     try {
       localStorage.setItem(IslandScene.NEST_KEY, JSON.stringify({
         builder: this.builder.toJSON(),
@@ -2745,6 +2795,7 @@ export class IslandScene {
   /** Reload the saved nest BEFORE the first soil generate, so the island
    *  is born with the tunnels in it rather than carving them after. */
   private loadNest(): void {
+    if (!IslandScene.NEST_SAVING) return;
     try {
       const raw = localStorage.getItem(IslandScene.NEST_KEY);
       if (!raw) return;
@@ -3182,30 +3233,20 @@ export class IslandScene {
     this.hud.appendChild(actions);
 
     /*
-     * DIG IS A MODE: tap DIG to arm it, and the 🪏 appears. HOLDING the 🪏
-     * is what strokes — each stroke carves the 6 x 9 mm scoop along the aim
-     * (the camera's own angle in first person) and she can walk forward
-     * into exactly as much room as she has made. A tunnel is wherever she
-     * dug — no plan to lay out first, nothing authored to be locked into.
-     * The two-step is deliberate: a lone held button carved tunnels out of
-     * pocket-brushes and mis-taps, and a scoop this size deserves intent.
+     * DIG IS A MODE: tap DIG to arm it, and the PALETTE appears. From there
+     * it is a coaster builder — a row of pieces, one tap each, laid on the
+     * end of what is already there. The two-step survives from the chewing
+     * era for the same reason it was introduced: a palette that is always
+     * on screen is a palette that gets dug into by a mis-tap.
      */
     const dig = document.createElement('button');
     dig.className = 'density-lab-button density-lab-dig';
     dig.textContent = 'DIG';
-    const scoopBtn = document.createElement('button');
-    scoopBtn.className = 'density-lab-button density-lab-dig';
-    scoopBtn.textContent = '🪏';
-    scoopBtn.style.display = 'none';
-    /* The shovel doubles as the STAMINA METER: `updateBuilderHud` fills it
-     * from the bottom as she recovers, and dims it while a scoop is out of
-     * reach — the pace of digging, readable on the button that paces it. */
-    this.scoopBtn = scoopBtn;
     dig.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       this.digMode = !this.digMode;
       dig.classList.toggle('is-grip', this.digMode);
-      scoopBtn.style.display = this.digMode ? '' : 'none';
+      this.pieceRow!.style.display = this.digMode ? '' : 'none';
       if (!this.digMode) this.input.dig = false;
       /* Digging is aiming, and aiming is done down her own eyes: arming
        * DIG drops into first person with a wide 100° field so the tunnel
@@ -3216,16 +3257,40 @@ export class IslandScene {
       this.camera.updateProjectionMatrix();
     });
     actions.appendChild(dig);
-    scoopBtn.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      scoopBtn.setPointerCapture(e.pointerId);
-      this.input.dig = true;
-    });
-    const stopDig = () => { this.input.dig = false; };
-    scoopBtn.addEventListener('pointerup', stopDig);
-    scoopBtn.addEventListener('pointercancel', stopDig);
-    scoopBtn.addEventListener('lostpointercapture', stopDig);
-    actions.appendChild(scoopBtn);
+
+    /*
+     * THE PALETTE — RCT's own grammar, at ninety degrees. The FIRST tap on
+     * a nestless island digs the OPENING whichever piece is armed, because
+     * a nest begins as a mouth and a shaft and there is nothing else it
+     * could sensibly be; every tap after that lays the armed piece on the
+     * growing end. One tap arms and previews, a second on the same chip
+     * digs it — so the ghost is always a question before it is an answer.
+     */
+    const pieceRow = document.createElement('div');
+    pieceRow.className = 'density-lab-actions';
+    pieceRow.style.display = 'none';
+    pieceRow.style.flexWrap = 'wrap';
+    pieceRow.style.justifyContent = 'center';
+    this.pieceRow = pieceRow;
+    for (const kind of PIECE_BUTTONS) {
+      const btn = document.createElement('button');
+      btn.className = 'density-lab-button density-lab-mode';
+      btn.textContent = PIECE_LABELS[kind];
+      btn.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (this.armedPiece === kind || this.builderOriginMm === null) {
+          this.digPiece(kind);
+        } else {
+          this.armedPiece = kind;
+          this.refreshPalette();
+        }
+      });
+      this.pieceBtns.set(kind, btn);
+      pieceRow.appendChild(btn);
+    }
+    actions.parentElement?.appendChild(pieceRow) ?? actions.appendChild(pieceRow);
+    this.refreshPalette();
 
     /*
      * THE JOINT CHIPS: stand at a committed joint with DIG armed and the
