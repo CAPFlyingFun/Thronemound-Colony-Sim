@@ -303,6 +303,51 @@ export function entryExitOf(arrivalPitchDeg: number): ExitDir {
   return 'back';
 }
 
+/** The way an exit LEAVES the room, as an aim — heading in the arrival
+ *  frame, pitch from the seed table. What a rider compares her look to. */
+export function exitAimOf(
+  arrivalHeadingDeg: number, exit: ExitDir,
+): { headingDeg: number; pitchDeg: number } {
+  return {
+    headingDeg: arrivalHeadingDeg + EXIT_YAW_DEG[exit],
+    pitchDeg: EXIT_SEED_PITCH_DEG[exit],
+  };
+}
+
+/**
+ * Which of a room's exits the rider MEANS, judged by her look direction —
+ * the whole of steering through a hub. Vectors, not angle differences,
+ * because UP and DOWN have no meaningful heading and a dot product does
+ * not care. Null when nothing is within `minDot` of the look: aiming at a
+ * blank wall is a stop, not a lottery between the tunnels she is not
+ * looking at.
+ */
+export function bestExitToward(
+  aimHeadingDeg: number, aimPitchDeg: number,
+  arrivalHeadingDeg: number, exits: readonly ExitDir[],
+  minDot = 0.25,
+): ExitDir | null {
+  const DEG = Math.PI / 180;
+  const vec = (headingDeg: number, pitchDeg: number): [number, number, number] => {
+    const cp = Math.cos(pitchDeg * DEG);
+    return [
+      Math.sin(headingDeg * DEG) * cp,
+      Math.sin(pitchDeg * DEG),
+      Math.cos(headingDeg * DEG) * cp,
+    ];
+  };
+  const look = vec(aimHeadingDeg, aimPitchDeg);
+  let best: ExitDir | null = null;
+  let bestDot = minDot;
+  for (const exit of exits) {
+    const aim = exitAimOf(arrivalHeadingDeg, exit);
+    const dir = vec(aim.headingDeg, aim.pitchDeg);
+    const dot = look[0] * dir[0] + look[1] * dir[1] + look[2] * dir[2];
+    if (dot > bestDot) { best = exit; bestDot = dot; }
+  }
+  return best;
+}
+
 export interface BranchStart {
   at: Vec3Like;
   forward: Vec3Like;

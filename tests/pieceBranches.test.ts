@@ -4,8 +4,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  branchStartOf, branchesToPlan, buildRail, endStateOf, entryExitOf,
-  presetPieces, takenExitsOf, type TrackBranch,
+  bestExitToward, branchStartOf, branchesToPlan, buildRail, endStateOf,
+  entryExitOf, exitAimOf, presetPieces, takenExitsOf, type TrackBranch,
 } from '../src/scenes/pieceTrack';
 import { validatePlan } from '../src/nest/nestPlan';
 
@@ -174,5 +174,36 @@ describe('presetPieces on a seeded branch', () => {
     const withSeed = presetPieces(track, 'shaft', { ...opts, seedPitchDeg: 75 });
     const without = presetPieces(track, 'shaft', opts);
     expect(withSeed).toEqual(without);
+  });
+});
+
+describe('steering through a hub by looking', () => {
+  it('names each exit in the arrival frame', () => {
+    expect(exitAimOf(30, 'left').headingDeg).toBe(120);
+    expect(exitAimOf(30, 'right').headingDeg).toBe(-60);
+    expect(exitAimOf(30, 'back').headingDeg).toBe(210);
+    expect(exitAimOf(0, 'up').pitchDeg).toBe(75);
+    expect(exitAimOf(0, 'down').pitchDeg).toBe(-75);
+  });
+
+  it('a plunging look picks the DOWN exit over a level one', () => {
+    expect(bestExitToward(0, -75, 0, ['forward', 'down'])).toBe('down');
+    expect(bestExitToward(0, 0, 0, ['forward', 'down'])).toBe('forward');
+  });
+
+  it('a sideways look picks the matching hand', () => {
+    expect(bestExitToward(85, 0, 0, ['left', 'right'])).toBe('left');
+    expect(bestExitToward(-85, 0, 0, ['left', 'right'])).toBe('right');
+  });
+
+  it('looking away from every tunnel is a stop, not a lottery', () => {
+    expect(bestExitToward(180, 0, 0, ['forward'])).toBeNull();
+    expect(bestExitToward(0, 75, 0, ['down'])).toBeNull();
+  });
+
+  it('judges in the arrival frame, wrapped across the seam', () => {
+    // Arrived heading 170; its LEFT exit points at -100 (260). A look of
+    // -95 is within a few degrees of that.
+    expect(bestExitToward(-95, 0, 170, ['left', 'back'])).toBe('left');
   });
 });

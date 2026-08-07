@@ -158,6 +158,52 @@ check('first person sits in her eyes', ant.eye < 8, `${ant.eye.toFixed(1)} mm of
 check('third person stands back from her', ant.shoulder > 15,
   `${ant.shoulder.toFixed(1)} mm back`);
 
+// RIDING THROUGH HUBS: back off the branch onto the parent line, then
+// forward through the room again by LOOKING down the branch's exit.
+const through = await page.evaluate(() => {
+  const s = window.railScene;
+  s.activateBranchForTest(1); // the DOWN branch; she stands at its face
+  const parentLen = (() => {
+    s.activateBranchForTest(0);
+    const l = s.statsForTest().lengthMm;
+    s.activateBranchForTest(1);
+    return l;
+  })();
+  s.setWalkForTest(-1); // ride back: branch → room → parent line
+  s.stepForTest(1 / 30, 45); // 1.5 s = 18 mm against a 6 mm branch
+  s.setWalkForTest(0);
+  const back = { branch: s.antForTest().activeBranch, s: s.antForTest().s };
+  // Now forward again: look down the DOWN exit and walk through the hub.
+  s.setAimForTest(0, -75);
+  s.setWalkForTest(1);
+  s.stepForTest(1 / 30, 60); // 2 s = 24 mm, enough to re-enter the branch
+  s.setWalkForTest(0);
+  const fwd = { branch: s.antForTest().activeBranch, s: s.antForTest().s };
+  return { parentLen, back, fwd };
+});
+check('riding back through the room lands her on the parent line',
+  through.back.branch === 0, `on branch ${through.back.branch}`);
+check('and she keeps going toward the station without a seam',
+  through.back.s < through.parentLen - 8,
+  `${through.back.s.toFixed(1)} of ${through.parentLen.toFixed(1)} mm`);
+check('looking down the DOWN exit rides her forward into that branch',
+  through.fwd.branch === 1, `on branch ${through.fwd.branch}`);
+check('with the spill carried into the branch, not dropped at the door',
+  through.fwd.s > 0.5, `${through.fwd.s.toFixed(1)} mm in`);
+
+// FEET ON THE WALL: riding the line, the solver's pre-solve penetration
+// stays small — the gait is finding the tube, not a phantom flat floor.
+const feet = await page.evaluate(() => {
+  const s = window.railScene;
+  s.setWalkForTest(-1);
+  s.stepForTest(1 / 30, 30);
+  s.setWalkForTest(0);
+  return s.antForTest();
+});
+check('the foot solver runs against the tunnel wall',
+  Number.isFinite(feet.footPenMm) && feet.footPenMm < 2.5,
+  `worst pre-solve penetration ${feet.footPenMm.toFixed(2)} mm`);
+
 // GHOST AND WHEEL: arm a piece, tune it, place what the ghost shows.
 const ghost = await page.evaluate(() => {
   const s = window.railScene;

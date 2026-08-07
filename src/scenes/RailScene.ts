@@ -26,10 +26,10 @@ import './DensityTerrainLabScene.css';
 import { RAIL_SMOOTH_MM, type TunnelRail } from './tunnelRail';
 import { PIECE_LIMITS, clampPiece, type DigPiece } from './digPlan';
 import {
-  EXIT_DIRS, PIECE_LENGTHS_MM, aimPiece, appendPiece, autoBankFor, branchStartOf,
-  branchesToPlan, buildRail, endStateOf, entryExitOf, pieceLabel,
-  presetPieces, takenExitsOf, type BranchStart, type ExitDir,
-  type PieceKind, type PresetId,
+  EXIT_DIRS, PIECE_LENGTHS_MM, aimPiece, appendPiece, autoBankFor,
+  bestExitToward, branchStartOf, branchesToPlan, buildRail, endStateOf,
+  entryExitOf, pieceLabel, presetPieces, takenExitsOf, type BranchStart,
+  type ExitDir, type PieceKind, type PresetId,
 } from './pieceTrack';
 import { MIN_ENTRANCE_RADIUS_MM, validatePlan, type NestPlan } from '../nest/nestPlan';
 import { carvePlan } from '../nest/nestCarve';
@@ -215,6 +215,9 @@ export class RailScene {
   private readonly antFwd = new THREE.Vector3(0, 0, 1);
 
   private readonly crosshair = document.createElement('div');
+
+  /** Worst foot penetration before the last solve, mm — a health number. */
+  private footPenMm = 0;
 
   private trackGroup = new THREE.Group();
 
@@ -1805,24 +1808,114 @@ export class RailScene {
         headYaw: 0,
       });
       /*
-       * Feet against the tunnel floor, approximated as the plane she is
-       * standing on: elevation along her up of the floor point under her.
-       * Locally exact on the floor line of the bore; wall-gripping feet
-       * arrive with the contact work in the audit's Phase 1.
+       * FEET ON THE TUNNEL WALL, not on a flat stand-in.
+       *
+       * The bore is a tube of BORE_RADIUS around the rail. For a query
+       * point, take its radial offset r from the nearest centerline frame
+       * (tangential part removed) and drop along her up u to the wall:
+       * |r − t·u| = R gives t = r·u + √((r·u)² − (|r|² − R²)), the positive
+       * root, because the frame's up is already perpendicular to the
+       * tangent. A point outside the tube (the mouth, a room) falls back
+       * to the plane under her body, so a foot never solves against a wall
+       * that is not there.
        */
-      const floorElev = this.antPos.x * this.antUp.x
-        + this.antPos.y * this.antUp.y + this.antPos.z * this.antUp.z;
-      this.queen.solveFeet(
+      const rail = this.rail;
+      const window = this.sampleWindow;
+      const upX = this.antUp.x;
+      const upY = this.antUp.y;
+      const upZ = this.antUp.z;
+      const floorElev = this.antPos.x * upX + this.antPos.y * upY
+        + this.antPos.z * upZ;
+      const wall = (x: number, y: number, z: number): number => {
+        const near = rail.nearest({ x, y, z });
+        if (!near) return floorElev;
+        const f = rail.sample(near.s, window);
+        if (!f) return floorElev;
+        let rx = x - f.x;
+        let ry = y - f.y;
+        let rz = z - f.z;
+        const t = rx * f.fx + ry * f.fy + rz * f.fz;
+        rx -= f.fx * t;
+        ry -= f.fy * t;
+        rz -= f.fz * t;
+        const k = rx * upX + ry * upY + rz * upZ;
+        const disc = k * k - (rx * rx + ry * ry + rz * rz
+          - BORE_RADIUS_MM * BORE_RADIUS_MM);
+        if (disc <= 0) return floorElev;
+        return (x * upX + y * upY + z * upZ) - (k + Math.sqrt(disc));
+      };
+      this.footPenMm = this.queen.solveFeet(
         () => 0,
         FOOT_CLEARANCE_MM,
         RIDE_MM * 2,
         undefined,
-        {
-          up: [this.antUp.x, this.antUp.y, this.antUp.z],
-          surface: () => floorElev,
-        },
+        { up: [upX, upY, upZ], surface: wall },
       );
     }
+  }
+
+  /**
+   * A RIDE TRANSFER: the working line follows her through a hub, WITHOUT
+   * the full edit rebuild — no recarve, no track rebuild, because nothing
+   * about the track changed, only which line she is on. Editing state that
+   * pointed at the old line (arm, selection, open hub) stands down; her AIM
+   * is deliberately left alone, because the aim is how she steered here.
+   */
+  private setActiveForRide(index: number, atS: number): void {
+    if (this.armed) this.cancelArm();
+    this.active = index;
+    this.selIdx = -1;
+    this.openHub = -1;
+    this.rebuildSelection();
+    this.rebuildHubs();
+    this.updateRoomBtn();
+    this.retintBeams();
+    this.rebuildLabels();
+    this.antS = Math.min(atS, this.rail.lengthMm);
+    this.refreshReadout(true);
+  }
+
+  private retintBeams(): void {
+    for (const { mesh, branch } of this.beamMeshes) {
+      (mesh.material as THREE.MeshLambertMaterial).color.setHex(
+        branch === this.active ? 0x5fa8d8 : 0x4a90c2,
+      );
+    }
+  }
+
+  /**
+   * Walking FORWARD off the end of a roomed line: the room is a junction,
+   * and her LOOK picks the tunnel — the child exit whose direction best
+   * matches her aim. Looking at a blank wall (or a room with no children)
+   * is a stop at the working face, which is where digging continues.
+   */
+  private rideForward(spillMm: number): boolean {
+    if (this.branches[this.active]!.roomMm === null) return false;
+    const children = this.branches
+      .map((b, i) => ({ b, i }))
+      .filter(({ b }) => b.parent?.branch === this.active);
+    if (children.length === 0) return false;
+    const start = this.startOfActive();
+    const end = endStateOf(this.pieces, { at: start.at, forward: start.forward });
+    const exit = bestExitToward(
+      this.aimHeadingDeg, this.aimPitchDeg, end.headingDeg,
+      children.map(({ b }) => b.parent!.exit),
+    );
+    if (!exit) return false;
+    const child = children.find(({ b }) => b.parent!.exit === exit);
+    if (!child) return false;
+    this.setActiveForRide(child.i, spillMm);
+    return true;
+  }
+
+  /** Walking BACKWARD past a branch's root: out through the room onto the
+   *  parent line, the way she came. Unambiguous — a branch has one parent. */
+  private rideBackward(spillMm: number): boolean {
+    const parent = this.branches[this.active]!.parent;
+    if (!parent) return false;
+    const parentLength = this.branchRails[parent.branch]?.lengthMm ?? 0;
+    this.setActiveForRide(parent.branch, Math.max(0, parentLength - spillMm));
+    return true;
   }
 
   private simulate(dt: number): void {
@@ -1837,8 +1930,16 @@ export class RailScene {
 
     if (this.walkInput !== 0 && this.rail.lengthMm > 0) {
       this.facingDir = this.walkInput > 0 ? 1 : -1;
-      this.antS = Math.min(this.rail.lengthMm,
-        Math.max(0, this.antS + this.walkInput * WALK_SPEED * dt));
+      const next = this.antS + this.walkInput * WALK_SPEED * dt;
+      if (next > this.rail.lengthMm) {
+        if (!this.rideForward(next - this.rail.lengthMm)) {
+          this.antS = this.rail.lengthMm;
+        }
+      } else if (next < 0) {
+        if (!this.rideBackward(-next)) this.antS = 0;
+      } else {
+        this.antS = next;
+      }
     }
 
     this.poseRider(dt);
@@ -1975,6 +2076,8 @@ export class RailScene {
       camX: this.camera.position.x,
       camY: this.camera.position.y,
       camZ: this.camera.position.z,
+      footPenMm: this.footPenMm,
+      activeBranch: this.active,
     };
   }
 
