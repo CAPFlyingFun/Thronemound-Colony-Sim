@@ -66,6 +66,13 @@ if (host) {
      * proves carries into the carved, jaws-executed version unchanged.
      */
     void import('./scenes/RailScene').then(({ RailScene }) => new RailScene(host));
+  } else if (scene === 'sandbox') {
+    /*
+     * The ant mechanics sandbox: worker and major, and the head-and-jaws
+     * interaction grammar — approach, aim, clamp, carry or drag or bite —
+     * proved on a bare field before it meets the island.
+     */
+    void import('./scenes/SandboxScene').then(({ SandboxScene }) => new SandboxScene(host));
   } else if (scene === 'carry') {
     /*
      * The carry room: soil as a lattice of 2 mm blocks, and digging as
