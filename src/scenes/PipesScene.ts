@@ -70,17 +70,10 @@ const PALETTE: readonly { kind: PipeKind; label: string }[] = [
 
 const HUBS: ReadonlySet<PipeKind> = new Set(['tee', 'wye', 'cross']);
 
-/**
- * The rotate racks: what the two rotate buttons cycle through.
- *
- * Vertical tops out at ±75°, not ±90°, and that is the piece FORMAT's
- * limit, not a whim: a truly vertical tube has no heading — the math
- * that orients every joint and junction degenerates (the same reason
- * the hubs' UP/DOWN exits lead at 75°). The chip says "steep" so the
- * number reads as the ceiling it is.
- */
+/** The rotate racks: 45° steps, and vertical means VERTICAL — the tube
+ *  frame carries its heading through a 90° run now. */
 const YAW_RACK = [0, 45, 90, -45, -90] as const;
-const PITCH_RACK = [0, 45, 75, -45, -75] as const;
+const PITCH_RACK = [0, 45, 90, -45, -90] as const;
 
 export class PipesScene {
   ready = false;
@@ -420,7 +413,7 @@ export class PipesScene {
           ? branch.pieces[branch.pieces.length - 1]!.pitch : 0;
         return [
           clampPiece({ pitch: last + 45 * sign, turn: 0, roll: 0, length: 8 }),
-          clampPiece({ pitch: last + 75 * sign, turn: 0, roll: 0, length: 8 }),
+          clampPiece({ pitch: last + 90 * sign, turn: 0, roll: 0, length: 8 }),
         ];
       }
       const sign = yaw >= 0 ? 1 : -1;
@@ -760,11 +753,17 @@ export class PipesScene {
            * axis, eased — an ant hugs the inside of a bend; only a train
            * stays bolt upright through one.
            */
-          const heading = Math.atan2(f.fx, f.fz);
-          let dh = heading - this.lastHeading;
-          while (dh > Math.PI) dh -= Math.PI * 2;
-          while (dh < -Math.PI) dh += Math.PI * 2;
-          this.lastHeading = heading;
+          /* In a VERTICAL run the heading is meaningless — hold the
+           * last one and let the bank breathe out instead of spiking. */
+          const flat = Math.hypot(f.fx, f.fz);
+          let dh = 0;
+          if (flat > 0.05) {
+            const heading = Math.atan2(f.fx, f.fz);
+            dh = heading - this.lastHeading;
+            while (dh > Math.PI) dh -= Math.PI * 2;
+            while (dh < -Math.PI) dh += Math.PI * 2;
+            this.lastHeading = heading;
+          }
           const wantBank = Math.max(-0.55, Math.min(0.55, (dh / Math.max(dt, 1e-3)) * 0.22));
           this.bank += (wantBank - this.bank) * Math.min(1, dt * 5);
           const right = new THREE.Vector3().crossVectors(up, fwd).normalize();
@@ -904,9 +903,7 @@ export class PipesScene {
       this.rotHBtn.textContent = `ROT ↔ ${YAW_RACK[this.armedYawIx]}°`;
     }
     if (this.rotVBtn) {
-      const p = PITCH_RACK[this.armedPitchIx]!;
-      this.rotVBtn.textContent = Math.abs(p) === 75
-        ? `ROT ↕ ${p}° steep` : `ROT ↕ ${p}°`;
+      this.rotVBtn.textContent = `ROT ↕ ${PITCH_RACK[this.armedPitchIx]}°`;
     }
     const anchor = this.buildAnchor();
     const buildHub = 'hub' in anchor ? anchor.hub : -1;

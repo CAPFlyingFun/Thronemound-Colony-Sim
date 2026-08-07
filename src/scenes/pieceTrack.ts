@@ -148,9 +148,23 @@ export function endStateOf(
       lengthMm: 0,
     };
   }
+  /*
+   * A VERTICAL end has no heading of its own — atan2(0,0) would invent
+   * one and the next piece would kink. Walk back down the rail to the
+   * last frame with a horizontal component and carry ITS heading; a
+   * track vertical from its very first millimetre carries the start's.
+   */
+  let headingDeg = (Math.atan2(start.forward.x, start.forward.z) * 180) / Math.PI;
+  for (let back = rail.lengthMm; back >= 0; back -= 1) {
+    const f = rail.sample(back, 0);
+    if (f && Math.hypot(f.fx, f.fz) > 1e-3) {
+      headingDeg = (Math.atan2(f.fx, f.fz) * 180) / Math.PI;
+      break;
+    }
+  }
   return {
     x: frame.x, y: frame.y, z: frame.z,
-    headingDeg: (Math.atan2(frame.fx, frame.fz) * 180) / Math.PI,
+    headingDeg,
     pitchDeg: (Math.asin(Math.max(-1, Math.min(1, frame.fy))) * 180) / Math.PI,
     lengthMm: rail.lengthMm,
   };
@@ -190,11 +204,10 @@ export function aimPiece(
  * panel offers a whole shape. Named for what an ant digs, not what a
  * coaster rides:
  *
- *  SHAFT      a plunge at the piece format's own steepest grade. −75°, not
- *             −90: pitch is capped there by `PIECE_LIMITS`, and the rail's
- *             frame degenerates at true plumb (up has nothing to be
- *             perpendicular to) — a real vertical needs that fixed first,
- *             and −75 already reads as a shaft.
+ *  SHAFT      a plunge at the piece format's own steepest grade — TRUE
+ *             plumb now: the rail carries its heading through vertical
+ *             runs and the up-frame takes the heading line as its limit,
+ *             so ±90° is a real shaft, not an apology for one.
  *  SPIRAL     the classic nest helix: down at −45° while turning 180°,
  *             handed left or right.
  *  U-TURN     a switchback at the CURRENT grade — 180° of turn and no
@@ -230,11 +243,13 @@ export function presetPieces(
     length: opts.lengthMm,
   });
   switch (id) {
-    case 'shaft':
+    case 'shaft': {
+      const plumb = PIECE_LIMITS.pitch.max;
       return [
-        make(sign * 75, 0), make(sign * 75, 0),
-        make(sign * 75, 0), make(sign * 75, 0),
+        make(sign * plumb, 0), make(sign * plumb, 0),
+        make(sign * plumb, 0), make(sign * plumb, 0),
       ];
+    }
     case 'spiralLeft':
       return [
         make(sign * 45, 45), make(sign * 45, 45),

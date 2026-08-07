@@ -62,7 +62,8 @@ describe('branchStartOf', () => {
       { pieces: [diving()], roomMm: null, parent: { branch: 0, exit: 'down' } },
     ];
     const start = branchStartOf(branches, 1);
-    expect(start.seedPitchDeg).toBe(-75);
+    // DOWN leads at the format's steepest grade — true vertical now.
+    expect(start.seedPitchDeg).toBe(-90);
     // The branch's rail actually descends from the room.
     const rail = buildRail(branches[1]!.pieces, {
       at: start.at, forward: start.forward,
@@ -155,11 +156,11 @@ describe('presetPieces on a seeded branch', () => {
 
   it('a shaft off an UP exit climbs instead of diving', () => {
     const up = presetPieces([], 'shaft', { ...opts, seedPitchDeg: 75 });
-    expect(up.every((p) => p.pitch === 75)).toBe(true);
+    expect(up.every((p) => p.pitch === 90)).toBe(true);
     const down = presetPieces([], 'shaft', { ...opts, seedPitchDeg: -75 });
-    expect(down.every((p) => p.pitch === -75)).toBe(true);
+    expect(down.every((p) => p.pitch === -90)).toBe(true);
     const flat = presetPieces([], 'shaft', { ...opts, seedPitchDeg: 0 });
-    expect(flat.every((p) => p.pitch === -75)).toBe(true); // nests dive
+    expect(flat.every((p) => p.pitch === -90)).toBe(true); // nests dive
   });
 
   it('spirals follow the seed too, and the u-turn holds the seeded grade', () => {
@@ -182,8 +183,9 @@ describe('steering through a hub by looking', () => {
     expect(exitAimOf(30, 'left').headingDeg).toBe(120);
     expect(exitAimOf(30, 'right').headingDeg).toBe(-60);
     expect(exitAimOf(30, 'back').headingDeg).toBe(210);
-    expect(exitAimOf(0, 'up').pitchDeg).toBe(75);
-    expect(exitAimOf(0, 'down').pitchDeg).toBe(-75);
+    // UP and DOWN lead at the format's steepest grade — true plumb now.
+    expect(exitAimOf(0, 'up').pitchDeg).toBe(90);
+    expect(exitAimOf(0, 'down').pitchDeg).toBe(-90);
   });
 
   it('a plunging look picks the DOWN exit over a level one', () => {
