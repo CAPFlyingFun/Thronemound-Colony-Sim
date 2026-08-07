@@ -121,17 +121,27 @@ export class PipesScene {
 
   private carveMs = 0;
 
-  /* -------------------------------------------------------------- the ride */
+  /* -------------------------------------------------------- the crawler */
 
   private readonly queen = new QueenModel('queen');
 
   private queenReady = false;
 
+  /** Where she stands, mm — free movement now; the pipes only CONTAIN. */
+  private readonly antPos = new THREE.Vector3(0, 1.4, -14);
+
+  private facing = 0;
+
+  private walkInput = 0;
+
+  private turnInput = 0;
+
+  private fallV = 0;
+
+  /** Her position projected onto the network — feeds the build anchor. */
   private rideBranch = 0;
 
   private rideS = 0;
-
-  private rideInput = 0;
 
   /* ------------------------------------------------------------- cameras */
 
@@ -144,6 +154,9 @@ export class PipesScene {
   private camDist = 90;
 
   private camPointer: number | null = null;
+
+  /** First-person look pitch — the right-half drag sets it. */
+  private fpPitch = 0;
 
   private stickPointer: number | null = null;
 
@@ -651,163 +664,199 @@ export class PipesScene {
     this.rideS = rail ? rail.lengthMm : 0;
   }
 
-  /** Where the player is LOOKING — the steering signal for everything. */
-  private lookDir(into: THREE.Vector3): THREE.Vector3 {
-    return this.camera.getWorldDirection(into);
+  /* ------------------------------------------------------ free crawling */
+
+  /** Solid soil at a world point? The carved pipes are the only air. */
+  private solidAt(x: number, y: number, z: number): boolean {
+    if (!this.soilField) return false;
+    return this.soilField.sample(
+      x - FIELD_ORIGIN.x, y - FIELD_ORIGIN.y, z - FIELD_ORIGIN.z,
+    ) > 0;
   }
 
-  /** A line's outgoing direction where it meets a hub. */
-  private lineDirAt(index: number, atStart: boolean): THREE.Vector3 | null {
-    const rail = this.rideRail(index);
-    if (!rail) return null;
-    const f = rail.sample(atStart ? 0 : rail.lengthMm, 0);
-    if (!f) return null;
-    const v = new THREE.Vector3(f.fx, f.fy, f.fz).normalize();
-    return atStart ? v : v.negate();
-  }
-
-  /**
-   * THE HANDOFF. Ride off either end of a line and the junction there
-   * offers every connected line; the one whose direction best matches
-   * where the CAMERA is looking wins — you steer through a T by looking
-   * down the arm you want, in either view. Nothing aligned enough to be
-   * meant (dot < 0.15) parks her at the junction instead of guessing.
-   */
-  private tryHandoff(atStart: boolean): boolean {
-    const here = this.rideBranch;
-    const branch = this.branches[here]!;
-    /** Which branch owns the hub we just arrived at? */
-    const hub = atStart
-      ? (branch.parent ? branch.parent.branch : -1)
-      : (branch.roomMm !== null ? here : -1);
-    if (hub < 0) return false;
-    const look = this.lookDir(new THREE.Vector3());
-    let best: { branch: number; entryS: number; dot: number } | null = null;
-    const consider = (index: number, atItsStart: boolean): void => {
-      if (index === here && (atItsStart === atStart)) return; // the way we came
-      const dir = this.lineDirAt(index, atItsStart);
-      if (!dir) return;
-      const rail = this.rideRail(index)!;
-      const dot = dir.dot(look);
-      if (!best || dot > best.dot) {
-        best = { branch: index, entryS: atItsStart ? 0.5 : rail.lengthMm - 0.5, dot };
+  /** The first standable surface at or below `fromY`, or null. */
+  private floorBelow(x: number, z: number, fromY: number): number | null {
+    const solid = (y: number): boolean => this.solidAt(x, y, z);
+    let y = fromY;
+    if (solid(y)) {
+      /* BURIED — a mound heaped over her feet by a fresh carve, or an
+       * edit under her. The standable surface is UP: find air and stand
+       * on the boundary. Returning null here was an infinite fall
+       * through solid ground the moment the entrance mound grew. */
+      for (; y < fromY + 30; y += 0.5) {
+        if (!solid(y)) break;
       }
-    };
-    /* The hub's own line arrives at its END; children leave from their
-     * STARTs. Both are connectors, minus the one we came in on. */
-    if (!(here === hub && !atStart)) consider(hub, false);
-    this.branches.forEach((b, i) => {
-      if (b.parent?.branch === hub) consider(i, true);
-    });
-    if (!best) return false;
-    const chosen = best as { branch: number; entryS: number; dot: number };
-    if (chosen.dot < 0.15) return false;
-    this.rideBranch = chosen.branch;
-    this.rideS = chosen.entryS;
-    return true;
+      if (solid(y)) return null;
+    }
+    for (let d = y; d > fromY - 40; d -= 0.5) {
+      if (solid(d - 0.5)) {
+        let lo = d - 0.5;
+        let hi = d;
+        for (let i = 0; i < 4; i += 1) {
+          const mid = (lo + hi) / 2;
+          if (solid(mid)) lo = mid;
+          else hi = mid;
+        }
+        return hi;
+      }
+    }
+    return null;
   }
 
-  /* Smoothed presentation: the rail is exact, the BODY is an animal. */
+  /** Keep the build anchor fed: project her position onto the network. */
+  private projectOntoNetwork(): void {
+    let bestBranch = this.rideBranch;
+    let bestS = this.rideS;
+    let bestD = Infinity;
+    this.branches.forEach((b, i) => {
+      if (b.pieces.length === 0) return;
+      const rail = this.rideRail(i);
+      const hit = rail?.nearest(this.antPos);
+      if (hit && hit.distMm < bestD) {
+        bestD = hit.distMm;
+        bestBranch = i;
+        bestS = hit.s;
+      }
+    });
+    this.rideBranch = bestBranch;
+    this.rideS = bestS;
+  }
+
+  /* Smoothed presentation: the field is exact, the BODY is an animal. */
   private readonly smoothPos = new THREE.Vector3();
 
   private readonly smoothQuat = new THREE.Quaternion();
 
   private smoothSeeded = false;
 
-  private lastHeading = 0;
-
   private bank = 0;
 
   private simulate(dt: number): void {
-    const rail = this.rideRail();
-    if (rail) {
-      /*
-       * The stick means GO WHERE I AM LOOKING: its sign is measured
-       * against the camera, so pushing up always advances toward the
-       * view and pulling back retreats from it, whichever way the line
-       * happens to run underneath her.
-       */
-      const f0 = rail.sample(Math.min(this.rideS, rail.lengthMm), 0);
-      const look = this.lookDir(new THREE.Vector3());
-      const alignment = f0
-        ? Math.sign(look.x * f0.fx + look.y * f0.fy + look.z * f0.fz) || 1
-        : 1;
-      let next = this.rideS + this.rideInput * alignment * RIDE_SPEED * dt;
-      if (next > rail.lengthMm && this.tryHandoff(false)) {
-        next = this.rideS;
-      } else if (next < 0 && this.tryHandoff(true)) {
-        next = this.rideS;
+    /*
+     * FREE MOVEMENT IN THE PIPES — the experiment this room now runs.
+     * No rail: she walks wherever the carved air lets her. Floors are
+     * read straight from the density field, one small step up is a
+     * stair, a wall with headroom is climbed slowly (the island's own
+     * wall-press rule), a hole ahead is walked into and gravity does
+     * the rest — which is exactly how you enter the nest through the
+     * mound's vent.
+     */
+    const WALK = 14;
+    const TURN = 2.6;
+    const STEP_UP = 2.2;
+    const CLIMB = 9;
+    const GRAV = 220;
+    this.facing += this.turnInput * TURN * dt;
+    const speed = this.walkInput * WALK;
+    if (Math.abs(speed) > 0.05) {
+      const dir = speed >= 0 ? 1 : -1;
+      const nx = this.antPos.x + Math.sin(this.facing) * speed * dt;
+      const nz = this.antPos.z + Math.cos(this.facing) * speed * dt;
+      const ahead = this.floorBelow(nx, nz, this.antPos.y + STEP_UP);
+      if (ahead !== null) {
+        // A stair up, level ground, a slope down, or a hole to drop into
+        // -- all walkable; the y follows below.
+        this.antPos.x = nx;
+        this.antPos.z = nz;
+      } else if (dir > 0
+        && !this.solidAt(this.antPos.x, this.antPos.y + 3, this.antPos.z)) {
+        // Pressed against a wall with open air above: climb it slowly.
+        this.antPos.y += CLIMB * dt;
       }
-      const nowRail = this.rideRail();
-      if (nowRail) {
-        this.rideS = Math.max(0, Math.min(nowRail.lengthMm, next));
-        const f = nowRail.sample(this.rideS, 0);
-        if (f && this.queenReady) {
-          this.queen.root.visible = !this.firstPerson;
-          const fwd = new THREE.Vector3(f.fx, f.fy, f.fz).normalize();
-          const up = new THREE.Vector3(f.ux, f.uy, f.uz).normalize();
-          const drop = BORE_RADIUS_MM - RIDE_MM;
-          const at = new THREE.Vector3(f.x, f.y, f.z).addScaledVector(up, -drop);
-          /*
-           * BANK INTO CORNERS. Heading rate becomes a lean about her own
-           * axis, eased — an ant hugs the inside of a bend; only a train
-           * stays bolt upright through one.
-           */
-          /* In a VERTICAL run the heading is meaningless — hold the
-           * last one and let the bank breathe out instead of spiking. */
-          const flat = Math.hypot(f.fx, f.fz);
-          let dh = 0;
-          if (flat > 0.05) {
-            const heading = Math.atan2(f.fx, f.fz);
-            dh = heading - this.lastHeading;
-            while (dh > Math.PI) dh -= Math.PI * 2;
-            while (dh < -Math.PI) dh += Math.PI * 2;
-            this.lastHeading = heading;
-          }
-          const wantBank = Math.max(-0.55, Math.min(0.55, (dh / Math.max(dt, 1e-3)) * 0.22));
-          this.bank += (wantBank - this.bank) * Math.min(1, dt * 5);
-          const right = new THREE.Vector3().crossVectors(up, fwd).normalize();
-          const target = new THREE.Quaternion().setFromRotationMatrix(
-            new THREE.Matrix4().makeBasis(right, up, fwd),
-          );
-          target.premultiply(new THREE.Quaternion().setFromAxisAngle(fwd, -this.bank));
-          /* Lerp the body onto the line: junction transfers and sharp
-           * frames read as her turning, never teleporting. */
-          if (!this.smoothSeeded) {
-            this.smoothPos.copy(at);
-            this.smoothQuat.copy(target);
-            this.smoothSeeded = true;
-          }
-          this.smoothPos.lerp(at, Math.min(1, dt * 9));
-          this.smoothQuat.slerp(target, Math.min(1, dt * 7));
-          this.queen.root.position.copy(this.smoothPos);
-          this.queen.root.quaternion.copy(this.smoothQuat);
-          this.queen.update(dt, {
-            speed: (Math.abs(this.rideInput) * RIDE_SPEED) / MODEL_SCALE,
-            turn: 0,
-            digging: 0,
-            carrying: 0,
-            headYaw: 0,
-          });
-          this.queen.solveFeet(
-            () => this.smoothPos.y - RIDE_MM, FOOT_CLEARANCE_MM, RIDE_MM * 2,
-          );
-          this.aimCamera(dt, this.smoothPos, fwd);
-        }
-      }
-    } else if (this.queenReady) {
-      this.queen.root.visible = false;
-      this.aimCamera(dt, new THREE.Vector3(0, 2, 0), new THREE.Vector3(0, 0, 1));
     }
+    const floor = this.floorBelow(this.antPos.x, this.antPos.z, this.antPos.y + 0.6);
+    if (floor !== null && this.antPos.y <= floor + RIDE_MM + 0.5) {
+      this.fallV = 0;
+      const want = floor + RIDE_MM;
+      this.antPos.y += (want - this.antPos.y) * Math.min(1, dt * 12);
+    } else {
+      this.fallV = Math.min(80, this.fallV + GRAV * dt);
+      this.antPos.y -= this.fallV * dt;
+      if (floor !== null && this.antPos.y < floor + RIDE_MM) {
+        this.antPos.y = floor + RIDE_MM;
+        this.fallV = 0;
+      }
+    }
+
+    this.projectOntoNetwork();
+    this.poseQueen(dt);
     this.updateReadout();
+  }
+
+  private poseQueen(dt: number): void {
+    const fwdFlat = new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
+    if (this.queenReady) {
+      this.queen.root.visible = !this.firstPerson;
+      /* Up follows the floor she stands on, probed around her stance. */
+      const probe = 1.4;
+      const hC = this.floorBelow(this.antPos.x, this.antPos.z, this.antPos.y + 1)
+        ?? this.antPos.y - RIDE_MM;
+      const hF = this.floorBelow(
+        this.antPos.x + fwdFlat.x * probe, this.antPos.z + fwdFlat.z * probe,
+        this.antPos.y + 1.5,
+      ) ?? hC;
+      const hR = this.floorBelow(
+        this.antPos.x + fwdFlat.z * probe, this.antPos.z - fwdFlat.x * probe,
+        this.antPos.y + 1.5,
+      ) ?? hC;
+      const up = new THREE.Vector3(-(hR - hC) * 0, hC * 0 + 1, 0);
+      up.set(
+        -((hR - hC) / probe) * 0.0 - fwdFlat.z * ((hR - hC) / probe) * 0,
+        1, 0,
+      );
+      /* Slope from the two probes, expressed as a tilt of world up. */
+      const gradF = (hF - hC) / probe;
+      const gradR = (hR - hC) / probe;
+      up.set(0, 1, 0)
+        .addScaledVector(fwdFlat, -gradF * 0.6)
+        .addScaledVector(new THREE.Vector3(fwdFlat.z, 0, -fwdFlat.x), -gradR * 0.6)
+        .normalize();
+      const fwd = fwdFlat.clone().addScaledVector(up, -fwdFlat.dot(up)).normalize();
+      const wantBank = Math.max(-0.5, Math.min(0.5, this.turnInput * 0.3));
+      this.bank += (wantBank - this.bank) * Math.min(1, dt * 5);
+      const right = new THREE.Vector3().crossVectors(up, fwd).normalize();
+      const target = new THREE.Quaternion().setFromRotationMatrix(
+        new THREE.Matrix4().makeBasis(right, up, fwd),
+      );
+      target.premultiply(new THREE.Quaternion().setFromAxisAngle(fwd, -this.bank));
+      if (!this.smoothSeeded) {
+        this.smoothPos.copy(this.antPos);
+        this.smoothQuat.copy(target);
+        this.smoothSeeded = true;
+      }
+      this.smoothPos.lerp(this.antPos, Math.min(1, dt * 10));
+      this.smoothQuat.slerp(target, Math.min(1, dt * 8));
+      this.queen.root.position.copy(this.smoothPos);
+      this.queen.root.position.y = this.smoothPos.y - RIDE_MM;
+      this.queen.root.quaternion.copy(this.smoothQuat);
+      this.queen.update(dt, {
+        speed: (Math.abs(this.walkInput) * 14) / MODEL_SCALE,
+        turn: this.turnInput * 2.6,
+        digging: 0,
+        carrying: 0,
+        headYaw: 0,
+      });
+      this.queen.solveFeet(
+        (x, z) => this.floorBelow(x, z, this.antPos.y + 1.5)
+          ?? this.antPos.y - RIDE_MM,
+        FOOT_CLEARANCE_MM,
+        RIDE_MM * 2,
+      );
+    }
+    this.aimCamera(dt, this.smoothSeeded ? this.smoothPos : this.antPos, fwdFlat);
   }
 
   private aimCamera(dt: number, at: THREE.Vector3, fwd: THREE.Vector3): void {
     if (this.firstPerson) {
-      const eye = at.clone().addScaledVector(fwd, 1.2).add(new THREE.Vector3(0, 1.4, 0));
+      const eye = at.clone().addScaledVector(fwd, 1.2).add(new THREE.Vector3(0, 0.9, 0));
       this.camera.position.copy(eye);
       this.camera.up.set(0, 1, 0);
-      this.camera.lookAt(eye.clone().add(fwd));
+      const p = this.fpPitch;
+      this.camera.lookAt(
+        eye.x + fwd.x * Math.cos(p),
+        eye.y + Math.sin(p),
+        eye.z + fwd.z * Math.cos(p),
+      );
       return;
     }
     const cp = Math.cos(this.camPitch);
@@ -875,6 +924,16 @@ export class PipesScene {
     });
     this.chip('VIEW', right, () => { this.firstPerson = !this.firstPerson; });
 
+    /* The nest as a SAVE: top-left, away from the build hand. */
+    const files = document.createElement('div');
+    files.style.cssText = 'position:absolute;top:max(14px, env(safe-area-inset-top));'
+      + 'left:max(16px, env(safe-area-inset-left));display:flex;gap:8px;'
+      + 'pointer-events:auto;';
+    this.hud.appendChild(files);
+    this.chip('SAVE', files, () => this.saveNest());
+    this.chip('LOAD', files, () => this.loadNest());
+    this.chip('NEW', files, () => this.newNest());
+
     /* The joystick, left half — riding the network. */
     const stick = document.createElement('div');
     stick.style.cssText = 'position:absolute;width:104px;height:104px;'
@@ -923,6 +982,9 @@ export class PipesScene {
   private lastHub = -2;
 
   private updateReadout(): void {
+    if (this.flashEl && this.flashUntil < performance.now()) {
+      this.flashEl.style.display = 'none';
+    }
     const hub = this.hubHere();
     if (hub !== this.lastHub) {
       this.lastHub = hub;
@@ -962,23 +1024,34 @@ export class PipesScene {
     });
     el.addEventListener('pointermove', (e) => {
       if (e.pointerId === this.stickPointer) {
+        const dx = e.clientX - this.stickBase.x;
         const dy = e.clientY - this.stickBase.y;
-        const cap = Math.max(-1, Math.min(1, -dy / RANGE));
-        this.rideInput = cap;
+        const len = Math.hypot(dx, dy);
+        const cap = Math.min(1, len / RANGE);
+        const nx = len > 1e-3 ? (dx / len) * cap : 0;
+        const ny = len > 1e-3 ? (dy / len) * cap : 0;
+        this.walkInput = -ny;
+        this.turnInput = -nx;
         if (this.knobEl) {
           this.knobEl.style.transform = 'translate(-50%,-50%) '
-            + `translate(0px, ${-cap * RANGE}px)`;
+            + `translate(${nx * RANGE}px, ${ny * RANGE}px)`;
         }
         return;
       }
       if (e.pointerId !== this.camPointer) return;
-      this.camYaw -= e.movementX * 0.006;
-      this.camPitch = Math.min(1.4, Math.max(-0.4, this.camPitch + e.movementY * 0.005));
+      if (this.firstPerson) {
+        this.facing -= e.movementX * 0.005;
+        this.fpPitch = Math.min(1.1, Math.max(-1.1, this.fpPitch - e.movementY * 0.004));
+      } else {
+        this.camYaw -= e.movementX * 0.006;
+        this.camPitch = Math.min(1.4, Math.max(-0.4, this.camPitch + e.movementY * 0.005));
+      }
     });
     const done = (e: PointerEvent): void => {
       if (e.pointerId === this.stickPointer) {
         this.stickPointer = null;
-        this.rideInput = 0;
+        this.walkInput = 0;
+        this.turnInput = 0;
         if (this.stickEl) this.stickEl.style.display = 'none';
         if (this.knobEl) this.knobEl.style.transform = 'translate(-50%,-50%)';
       }
@@ -992,17 +1065,95 @@ export class PipesScene {
   }
 
   private bindKeys(): void {
+    const keys = new Set<string>();
+    const apply = (): void => {
+      this.walkInput = (keys.has('w') ? 1 : 0) + (keys.has('s') ? -1 : 0);
+      this.turnInput = (keys.has('a') ? 1 : 0) + (keys.has('d') ? -1 : 0);
+    };
     window.addEventListener('keydown', (e) => {
       const key = e.key.toLowerCase();
-      if (key === 'w') this.rideInput = 1;
-      if (key === 's') this.rideInput = -1;
       if (key === 'v') this.firstPerson = !this.firstPerson;
       if (key === 'z') this.undo();
+      keys.add(key);
+      apply();
     });
     window.addEventListener('keyup', (e) => {
-      const key = e.key.toLowerCase();
-      if (key === 'w' || key === 's') this.rideInput = 0;
+      keys.delete(e.key.toLowerCase());
+      apply();
     });
+  }
+
+  /* ------------------------------------------------------- save / load */
+
+  private static readonly SAVE_KEY = 'thronemound-pipes-nest-v1';
+
+  private saveNest(): void {
+    try {
+      localStorage.setItem(PipesScene.SAVE_KEY, JSON.stringify({
+        branches: this.branches,
+        rooms: [...this.roomKind.entries()],
+      }));
+      this.flash('nest saved');
+    } catch {
+      this.flash('save refused (storage)');
+    }
+  }
+
+  private loadNest(): void {
+    try {
+      const raw = localStorage.getItem(PipesScene.SAVE_KEY);
+      if (!raw) {
+        this.flash('no saved nest yet');
+        return;
+      }
+      const data = JSON.parse(raw) as {
+        branches: TrackBranch[];
+        rooms: [number, string][];
+      };
+      if (!Array.isArray(data.branches) || data.branches.length === 0) {
+        this.flash('save was unreadable');
+        return;
+      }
+      this.branches = data.branches;
+      this.roomKind.clear();
+      for (const [k, v] of data.rooms ?? []) this.roomKind.set(k, v);
+      this.active = 0;
+      this.armedKind = null;
+      this.clearGhost();
+      this.recarve();
+      this.flash('nest loaded');
+    } catch {
+      this.flash('save was unreadable');
+    }
+  }
+
+  private newNest(): void {
+    this.branches = [{ pieces: [], roomMm: null, parent: null }];
+    this.roomKind.clear();
+    this.active = 0;
+    this.armedKind = null;
+    this.clearGhost();
+    this.recarve();
+    this.antPos.set(0, 1.4, -14);
+    this.facing = 0;
+    this.smoothSeeded = false;
+    this.flash('fresh ground');
+  }
+
+  private flashUntil = 0;
+
+  private flashEl: HTMLElement | null = null;
+
+  private flash(text: string): void {
+    if (!this.flashEl) {
+      this.flashEl = document.createElement('div');
+      this.flashEl.className = 'density-lab-status rail-status';
+      this.flashEl.style.top = '58px';
+      this.hud.appendChild(this.flashEl);
+    }
+    this.flashEl.textContent = text;
+    this.flashEl.style.display = '';
+    this.flashUntil = performance.now() + 2000;
   }
 
   /* -------------------------------------------------------------- probes */
@@ -1029,7 +1180,16 @@ export class PipesScene {
 
   cycleRoomForTest(): void { this.cycleRoom(); }
 
-  setRideForTest(dir: -1 | 0 | 1): void { this.rideInput = dir; }
+  setWalkForTest(walk: number, turn: number): void {
+    this.walkInput = walk;
+    this.turnInput = turn;
+  }
+
+  teleportMm(x: number, y: number, z: number, facingDeg: number): void {
+    this.antPos.set(x, y, z);
+    this.facing = (facingDeg * Math.PI) / 180;
+    this.smoothSeeded = false;
+  }
 
   setOrbitForTest(yaw: number, pitch: number): void {
     this.camYaw = yaw;
