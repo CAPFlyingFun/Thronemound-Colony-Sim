@@ -11,8 +11,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   BANK_MAX_DEG, PIECE_LENGTHS_MM, PITCH_STEP_DEG, TURN_STEP_DEG,
-  appendPiece, autoBankFor, buildRail, endStateOf, pieceLabel, piecesToPlan,
-  presetPieces,
+  aimPiece, appendPiece, autoBankFor, buildRail, endStateOf, pieceLabel,
+  piecesToPlan, presetPieces,
 } from '../src/scenes/pieceTrack';
 import { PIECE_LIMITS, type DigPiece } from '../src/scenes/digPlan';
 import { validatePlan } from '../src/nest/nestPlan';
@@ -205,6 +205,38 @@ describe('piecesToPlan', () => {
     expect(plan.nodes.length).toBe(1);
     expect(plan.edges.length).toBe(0);
     expect(validatePlan(plan)).toEqual([]);
+  });
+});
+
+describe('aimPiece — the first-person look, snapped to the track', () => {
+  const OPT = { lengthMm: 6, autoBank: true };
+
+  it('snaps the pitch to the step, whichever side is nearer', () => {
+    expect(aimPiece(0, 0, -50, OPT).pitch).toBe(-45);
+    expect(aimPiece(0, 0, -70, OPT).pitch).toBe(-75);
+    expect(aimPiece(0, 0, 8, OPT).pitch).toBe(15);
+    expect(aimPiece(0, 0, 7, OPT).pitch).toBe(0);
+  });
+
+  it('turns by the snapped difference from the track end heading', () => {
+    expect(aimPiece(0, 40, 0, OPT).turn).toBe(45);
+    expect(aimPiece(30, 30, 0, OPT).turn).toBe(0);
+    expect(aimPiece(0, -22, 0, OPT).turn).toBe(-15);
+  });
+
+  it('wraps across the ±180 seam and turns the short way', () => {
+    expect(aimPiece(170, -170, 0, OPT).turn).toBe(15);
+    expect(aimPiece(-170, 170, 0, OPT).turn).toBe(-15);
+  });
+
+  it('clamps a wild swing to the piece limit, and banks the survivor', () => {
+    const wild = aimPiece(0, 150, 0, OPT);
+    expect(wild.turn).toBe(PIECE_LIMITS.turn.max);
+    expect(wild.roll).toBe(autoBankFor(PIECE_LIMITS.turn.max, 6));
+  });
+
+  it('banks only when asked', () => {
+    expect(aimPiece(0, 40, 0, { lengthMm: 6, autoBank: false }).roll).toBe(0);
   });
 });
 

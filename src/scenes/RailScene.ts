@@ -26,7 +26,7 @@ import './DensityTerrainLabScene.css';
 import { RAIL_SMOOTH_MM, type TunnelRail } from './tunnelRail';
 import { PIECE_LIMITS, clampPiece, type DigPiece } from './digPlan';
 import {
-  EXIT_DIRS, PIECE_LENGTHS_MM, appendPiece, autoBankFor, branchStartOf,
+  EXIT_DIRS, PIECE_LENGTHS_MM, aimPiece, appendPiece, autoBankFor, branchStartOf,
   branchesToPlan, buildRail, endStateOf, entryExitOf, pieceLabel,
   presetPieces, takenExitsOf, type BranchStart, type ExitDir,
   type PieceKind, type PresetId,
@@ -35,12 +35,19 @@ import { MIN_ENTRANCE_RADIUS_MM, validatePlan, type NestPlan } from '../nest/nes
 import { carvePlan } from '../nest/nestCarve';
 import { DensityField } from '../density/DensityField';
 import { buildSurfaceNets } from '../density/SurfaceNets';
+import { QueenModel } from '../anim/QueenModel';
+import { FOOT_CLEARANCE_MM } from '../anim/legDrive';
 
-/** How fast the cart shuttles, in mm/s. A monorail, not a coaster drop. */
-const CART_SPEED = 12;
+/** How fast she rides the tube, and how fast a held DIG grows it, mm/s.
+ *  Growth is slower than walking — she is digging, not strolling. */
+const WALK_SPEED = 12;
+const GROW_RATE = 5;
 
-/** Seconds the cart waits at each buffer before shuttling back. */
-const CART_DWELL = 0.7;
+/** The mm-unit room's scale against the queen's 5 mm-unit model. */
+const MODEL_SCALE = 5;
+
+/** How far above the tunnel floor she rides — leg height, roughly. */
+const RIDE_MM = 1.2;
 
 /** The beam's radius and how often a sleeper is laid under it, in mm. */
 const BEAM_RADIUS = 0.7;
@@ -170,15 +177,44 @@ export class RailScene {
 
   private lengthIdx = 1; // 6 mm
 
-  private riding = true;
+  /* ----------------------------------------------------------------- ant */
 
-  private cartS = 0;
+  /** She rides the ACTIVE branch — the working end is where the ant is. */
+  private readonly queen = new QueenModel('queen');
 
-  private cartDir: 1 | -1 = 1;
+  private queenReady = false;
 
-  private cartDwell = 0;
-
+  /** The stand-in box until (or unless) her model arrives. */
   private cart: THREE.Group | null = null;
+
+  /** Where she is along the active branch's rail, in mm. */
+  private antS = 0;
+
+  /** -1, 0, 1 — W/S, or the on-screen ride buttons, held. */
+  private walkInput = 0;
+
+  /** Which way she faces along the rail: 1 toward the working end. */
+  private facingDir: 1 | -1 = 1;
+
+  /** Where she is LOOKING — the aim a held DIG grows along. Degrees. */
+  private aimHeadingDeg = 0;
+
+  private aimPitchDeg = 0;
+
+  private firstPerson = false;
+
+  private digHeld = false;
+
+  /** Millimetres of tube owed by the held DIG, spent in piece quanta. */
+  private growAccum = 0;
+
+  private readonly antPos = new THREE.Vector3();
+
+  private readonly antUp = new THREE.Vector3(0, 1, 0);
+
+  private readonly antFwd = new THREE.Vector3(0, 0, 1);
+
+  private readonly crosshair = document.createElement('div');
 
   private trackGroup = new THREE.Group();
 
@@ -300,8 +336,6 @@ export class RailScene {
 
   private smoothBtn: HTMLButtonElement | null = null;
 
-  private rideBtn: HTMLButtonElement | null = null;
-
   private paused = false;
 
   private previous = performance.now();
@@ -333,6 +367,15 @@ export class RailScene {
     this.buildSoil();
     this.buildCart();
 
+    /* Her model, at the room's scale. Until it settles the cart stands in,
+     * so the rig works offline and in a probe that outruns the fetch. */
+    this.queen.root.scale.setScalar(MODEL_SCALE);
+    this.scene.add(this.queen.root);
+    this.queen.root.visible = false;
+    void this.queen.load().then((ok) => {
+      this.queenReady = ok;
+    });
+
     this.hud = document.createElement('div');
     this.hud.className = 'density-lab-hud';
     host.appendChild(this.hud);
@@ -343,6 +386,8 @@ export class RailScene {
     // The ROOM chip was built before the save was read; catch it up.
     this.updateRoomBtn();
     this.rebuildTrack();
+    this.antS = this.rail.lengthMm;
+    this.seedAim();
 
     (window as unknown as { railScene?: unknown }).railScene = this;
     new ResizeObserver(() => this.resize()).observe(host);
@@ -559,7 +604,7 @@ export class RailScene {
       }
     });
 
-    this.cartS = Math.min(this.cartS, this.mainRail.lengthMm);
+    this.antS = Math.min(this.antS, this.rail.lengthMm);
     this.rebuildLabels();
     this.rebuildGhost();
     this.rebuildSelection();
@@ -688,6 +733,37 @@ export class RailScene {
     this.rebuildTrack();
   }
 
+  /**
+   * One quantum of held-DIG growth: a piece along her aim, on the ACTIVE
+   * branch, in the branch's own frame — and she advances to the face she
+   * just cut, because digging is where the ant is.
+   */
+  private growTube(): void {
+    const start = this.startOfActive();
+    const end = endStateOf(this.pieces, { at: start.at, forward: start.forward });
+    this.pieces.push(aimPiece(
+      end.headingDeg, this.aimHeadingDeg, this.aimPitchDeg,
+      { lengthMm: PIECE_LENGTHS_MM[this.lengthIdx]!, autoBank: this.autoBank },
+    ));
+    this.rebuildTrack();
+    this.antS = this.rail.lengthMm;
+    this.facingDir = 1;
+  }
+
+  /** Point her look along the working end, so a held DIG continues it. An
+   *  empty branch aims the way its exit implies — DOWN starts plunging. */
+  private seedAim(): void {
+    const start = this.startOfActive();
+    if (this.pieces.length === 0) {
+      this.aimHeadingDeg = start.headingDeg;
+      this.aimPitchDeg = start.seedPitchDeg;
+      return;
+    }
+    const end = endStateOf(this.pieces, { at: start.at, forward: start.forward });
+    this.aimHeadingDeg = end.headingDeg;
+    this.aimPitchDeg = end.pitchDeg;
+  }
+
   /** Do any branches hang off this one's end room? */
   private hasChildren(index: number): boolean {
     return this.branches.some((b) => b.parent?.branch === index);
@@ -715,7 +791,8 @@ export class RailScene {
       ROOMS.find((r) => r.radiusMm === roomMm)?.label ?? '+ ROOM';
   }
 
-  /** Make a branch the working one: everything editable points at it. */
+  /** Make a branch the working one: everything editable points at it —
+   *  including the ant, who walks the working line. */
   private activateBranch(index: number): void {
     if (index < 0 || index >= this.branches.length) return;
     if (this.armed) this.cancelArm();
@@ -724,6 +801,9 @@ export class RailScene {
     this.openHub = -1;
     this.updateRoomBtn();
     this.rebuildTrack(); // re-tints the working line, re-anchors the ghost
+    this.antS = this.rail.lengthMm;
+    this.facingDir = 1;
+    this.seedAim();
   }
 
   /** Remove an EMPTY branch and re-point every parent index past it. */
@@ -758,8 +838,8 @@ export class RailScene {
     this.active = 0;
     this.openHub = -1;
     this.selIdx = -1;
-    this.cartS = 0;
-    this.cartDir = 1;
+    this.antS = 0;
+    this.facingDir = 1;
     this.updateRoomBtn();
     this.rebuildTrack();
   }
@@ -1099,6 +1179,55 @@ export class RailScene {
     actions.style.maxWidth = '340px';
     this.hud.appendChild(actions);
 
+    /*
+     * THE LEFT HAND: dig and ride. The big DIG is HELD — the tube grows
+     * along her aim for as long as the thumb is down — and the two ride
+     * buttons walk her along the working line. The right hand keeps the
+     * whole piece-editing shelf; the left hand is the ant.
+     */
+    const left = document.createElement('div');
+    left.className = 'density-lab-actions';
+    left.style.left = 'max(16px, env(safe-area-inset-left))';
+    left.style.right = 'auto';
+    left.style.alignItems = 'flex-start';
+    this.hud.appendChild(left);
+
+    const dig = document.createElement('button');
+    dig.className = 'density-lab-button density-lab-dig';
+    dig.textContent = 'DIG';
+    dig.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dig.setPointerCapture(e.pointerId);
+      this.digHeld = true;
+    });
+    const stopDig = (): void => { this.digHeld = false; this.growAccum = 0; };
+    dig.addEventListener('pointerup', stopDig);
+    dig.addEventListener('pointercancel', stopDig);
+    dig.addEventListener('lostpointercapture', stopDig);
+    left.appendChild(dig);
+
+    const ride = (label: string, dir: 1 | -1): void => {
+      const button = document.createElement('button');
+      button.className = 'density-lab-button density-lab-dig';
+      button.style.width = '58px';
+      button.style.height = '58px';
+      button.textContent = label;
+      button.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        button.setPointerCapture(e.pointerId);
+        this.walkInput = dir;
+      });
+      const stop = (): void => { if (this.walkInput === dir) this.walkInput = 0; };
+      button.addEventListener('pointerup', stop);
+      button.addEventListener('pointercancel', stop);
+      button.addEventListener('lostpointercapture', stop);
+      left.appendChild(button);
+    };
+    ride('⇧', 1);
+    ride('⇩', -1);
+
     const piece = (label: string, kind: PieceKind): void => {
       const button = document.createElement('button');
       button.className = 'density-lab-button density-lab-dig';
@@ -1147,6 +1276,7 @@ export class RailScene {
      * control an expert can reach one tap sooner.
      */
     this.roomBtn = chip(ROOMS[0]!.label, () => this.cycleRoom());
+    chip('VIEW', () => { this.firstPerson = !this.firstPerson; });
     chip('UNDO', () => this.undo());
     this.moreBtn = chip('⋯', (b) => {
       this.drawerOpen = !this.drawerOpen;
@@ -1183,10 +1313,6 @@ export class RailScene {
       this.smooth = !this.smooth;
       b.textContent = this.smooth ? 'SMOOTH ON' : 'SMOOTH OFF';
       this.rebuildTrack();
-    }, true);
-    this.rideBtn = chip('RIDE ON', (b) => {
-      this.riding = !this.riding;
-      b.textContent = this.riding ? 'RIDE ON' : 'RIDE OFF';
     }, true);
     this.soilBtn = chip('SOIL XRAY', (b) => {
       this.soilMode = this.soilMode === 'xray' ? 'solid'
@@ -1228,16 +1354,26 @@ export class RailScene {
     });
     this.hud.appendChild(this.readout);
 
+    this.crosshair.className = 'density-lab-crosshair';
+    this.crosshair.style.display = 'none';
+    this.crosshair.style.pointerEvents = 'none';
+    this.hud.appendChild(this.crosshair);
+
     window.addEventListener('keydown', (e) => {
-      if (e.repeat) return;
       const key = e.key.toLowerCase();
-      if (key === ' ') { e.preventDefault(); this.add('straight'); }
-      if (key === 'arrowup' || key === 'w') this.add('up');
-      if (key === 'arrowdown' || key === 's') this.add('down');
-      if (key === 'arrowleft' || key === 'a') this.add('left');
-      if (key === 'arrowright' || key === 'd') this.add('right');
+      /* The HELD keys: space is the jaws, W/S ride her. They bypass the
+       * repeat guard because holding them is the whole point. */
+      if (key === ' ') { e.preventDefault(); this.digHeld = true; return; }
+      if (key === 'w') { this.walkInput = 1; return; }
+      if (key === 's') { this.walkInput = -1; return; }
+      if (e.repeat) return;
+      if (key === 'arrowup') this.add('up');
+      if (key === 'arrowdown') this.add('down');
+      if (key === 'arrowleft') this.add('left');
+      if (key === 'arrowright') this.add('right');
       if (key === 'u') this.undo();
       if (key === 'c') this.clear();
+      if (key === 'v') this.firstPerson = !this.firstPerson;
       if (key === 'escape') this.cancelArm();
       if (key === '[') this.stepSelection(-1);
       if (key === ']') this.stepSelection(1);
@@ -1246,8 +1382,18 @@ export class RailScene {
       if (key === 't') this.tagsBtn?.dispatchEvent(new PointerEvent('pointerdown'));
       if (key === 'b') this.bankBtn?.dispatchEvent(new PointerEvent('pointerdown'));
       if (key === 'm') this.smoothBtn?.dispatchEvent(new PointerEvent('pointerdown'));
-      if (key === 'r') this.rideBtn?.dispatchEvent(new PointerEvent('pointerdown'));
       if (key === 'l') this.lenBtn?.dispatchEvent(new PointerEvent('pointerdown'));
+    });
+    window.addEventListener('keyup', (e) => {
+      const key = e.key.toLowerCase();
+      if (key === ' ') { this.digHeld = false; this.growAccum = 0; }
+      if ((key === 'w' && this.walkInput === 1)
+        || (key === 's' && this.walkInput === -1)) this.walkInput = 0;
+    });
+    window.addEventListener('blur', () => {
+      this.digHeld = false;
+      this.growAccum = 0;
+      this.walkInput = 0;
     });
   }
 
@@ -1531,7 +1677,7 @@ export class RailScene {
     : '—'}<br>
       end (${end.x.toFixed(1)}, ${end.y.toFixed(1)}, ${end.z.toFixed(1)}) mm
       · heading ${end.headingDeg.toFixed(0)}° · grade ${end.pitchDeg.toFixed(0)}°<br>
-      cart ${this.cartS.toFixed(1)} mm ·
+      ant ${this.antS.toFixed(1)} mm ·
       ${branchName} ends in ${room === null ? 'a buffer' : `a ${room} mm room`}<br>
       space/─ straight · ▲▼ pitch · ◀▶ turn · [ ] select · del destroys
       · U undo · esc stands down · drag orbits
@@ -1551,6 +1697,14 @@ export class RailScene {
     });
     canvas.addEventListener('pointermove', (e) => {
       if (e.pointerId !== this.dragPointer) return;
+      if (this.firstPerson) {
+        /* In her eyes the drag IS the aim — one number for the view and
+         * the dig, so they can never disagree (the island's hard rule). */
+        this.aimHeadingDeg -= e.movementX * 0.25;
+        this.aimPitchDeg = Math.min(85, Math.max(-85,
+          this.aimPitchDeg - e.movementY * 0.25));
+        return;
+      }
       this.camYaw -= e.movementX * 0.005;
       this.camPitch = Math.min(1.45, Math.max(0.05, this.camPitch + e.movementY * 0.004));
     });
@@ -1559,9 +1713,11 @@ export class RailScene {
       this.dragPointer = null;
       // A press that never travelled is a TAP — the select gesture. The
       // orbit keeps the drag; the tap picks the piece under the finger.
+      // In first person a tap means nothing: her eyes have no cursor.
       const tap = this.tapAt;
       this.tapAt = null;
-      if (tap && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < 7
+      if (!this.firstPerson && tap
+        && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < 7
         && performance.now() - tap.t < 450) {
         this.tapTrack(e.clientX, e.clientY);
       }
@@ -1578,6 +1734,26 @@ export class RailScene {
   }
 
   private aimCamera(): void {
+    this.crosshair.style.display = this.firstPerson ? '' : 'none';
+    if (this.firstPerson) {
+      /* Her own eyes, looking along the AIM — the same number a held DIG
+       * grows the tube along, so the view and the dig cannot disagree. */
+      const DEG = Math.PI / 180;
+      const heading = this.aimHeadingDeg * DEG;
+      const pitch = this.aimPitchDeg * DEG;
+      const look = new THREE.Vector3(
+        Math.sin(heading) * Math.cos(pitch),
+        Math.sin(pitch),
+        Math.cos(heading) * Math.cos(pitch),
+      );
+      const eye = this.antPos.clone()
+        .addScaledVector(this.antUp, 2.6)
+        .addScaledVector(this.antFwd, 1.2);
+      this.camera.position.copy(eye);
+      this.camera.up.copy(this.antUp);
+      this.camera.lookAt(eye.x + look.x, eye.y + look.y, eye.z + look.z);
+      return;
+    }
     const cp = Math.cos(this.camPitch);
     this.camera.position.set(
       this.camTarget.x + Math.sin(this.camYaw) * this.camDist * cp,
@@ -1590,39 +1766,82 @@ export class RailScene {
 
   /* ------------------------------------------------------------- the ride */
 
+  /** Put her on the tunnel floor at `antS`, facing the way she is going. */
+  private poseRider(dt: number): void {
+    const rail = this.rail;
+    const length = rail.lengthMm;
+    if (length <= 0) {
+      const start = this.startOfActive();
+      this.antPos.set(start.at.x, start.at.y, start.at.z);
+      this.antUp.set(0, 1, 0);
+      this.antFwd.set(start.forward.x, 0, start.forward.z).normalize();
+    } else {
+      const f = rail.sample(Math.min(this.antS, length), this.sampleWindow)!;
+      const up = this.antUp.set(f.ux, f.uy, f.uz);
+      const fwd = this.antFwd.set(f.fx, f.fy, f.fz).multiplyScalar(this.facingDir);
+      fwd.addScaledVector(up, -fwd.dot(up)).normalize();
+      // Down the banked floor by the bore's radius, less her leg height.
+      this.antPos.set(f.x, f.y, f.z)
+        .addScaledVector(up, -Math.max(0, BORE_RADIUS_MM - RIDE_MM));
+    }
+
+    const body = this.queenReady ? this.queen.root : this.cart;
+    if (this.cart) this.cart.visible = !this.queenReady && !this.firstPerson;
+    if (!body) return;
+    if (this.queenReady) this.queen.root.visible = !this.firstPerson;
+    const right = new THREE.Vector3().crossVectors(this.antUp, this.antFwd).normalize();
+    const trueFwd = new THREE.Vector3().crossVectors(right, this.antUp).normalize();
+    body.position.copy(this.antPos);
+    body.quaternion.setFromRotationMatrix(
+      new THREE.Matrix4().makeBasis(right, this.antUp, trueFwd),
+    );
+
+    if (this.queenReady) {
+      this.queen.update(dt, {
+        speed: (this.walkInput !== 0 ? WALK_SPEED : 0) / MODEL_SCALE,
+        turn: 0,
+        digging: this.digHeld ? 1 : 0,
+        carrying: 0,
+        headYaw: 0,
+      });
+      /*
+       * Feet against the tunnel floor, approximated as the plane she is
+       * standing on: elevation along her up of the floor point under her.
+       * Locally exact on the floor line of the bore; wall-gripping feet
+       * arrive with the contact work in the audit's Phase 1.
+       */
+      const floorElev = this.antPos.x * this.antUp.x
+        + this.antPos.y * this.antUp.y + this.antPos.z * this.antUp.z;
+      this.queen.solveFeet(
+        () => 0,
+        FOOT_CLEARANCE_MM,
+        RIDE_MM * 2,
+        undefined,
+        {
+          up: [this.antUp.x, this.antUp.y, this.antUp.z],
+          surface: () => floorElev,
+        },
+      );
+    }
+  }
+
   private simulate(dt: number): void {
-    const length = this.mainRail.lengthMm;
-    if (this.cart) this.cart.visible = length > 0;
-    if (this.riding && length > 0) {
-      if (this.cartDwell > 0) {
-        this.cartDwell -= dt;
-      } else {
-        this.cartS += CART_SPEED * this.cartDir * dt;
-        if (this.cartS >= length) {
-          this.cartS = length;
-          this.cartDir = -1;
-          this.cartDwell = CART_DWELL;
-        } else if (this.cartS <= 0) {
-          this.cartS = 0;
-          this.cartDir = 1;
-          this.cartDwell = CART_DWELL;
-        }
+    if (this.digHeld) {
+      this.growAccum += GROW_RATE * dt;
+      const quantum = PIECE_LENGTHS_MM[this.lengthIdx]!;
+      while (this.growAccum >= quantum) {
+        this.growAccum -= quantum;
+        this.growTube();
       }
     }
-    if (this.cart && length > 0) {
-      const f = this.mainRail.sample(this.cartS, this.sampleWindow);
-      if (f) {
-        const up = new THREE.Vector3(f.ux, f.uy, f.uz);
-        const fwd = new THREE.Vector3(f.fx, f.fy, f.fz)
-          .multiplyScalar(this.cartDir);
-        const right = new THREE.Vector3().crossVectors(up, fwd).normalize();
-        fwd.crossVectors(right, up).normalize();
-        this.cart.position.set(f.x, f.y, f.z);
-        this.cart.quaternion.setFromRotationMatrix(
-          new THREE.Matrix4().makeBasis(right, up, fwd),
-        );
-      }
+
+    if (this.walkInput !== 0 && this.rail.lengthMm > 0) {
+      this.facingDir = this.walkInput > 0 ? 1 : -1;
+      this.antS = Math.min(this.rail.lengthMm,
+        Math.max(0, this.antS + this.walkInput * WALK_SPEED * dt));
     }
+
+    this.poseRider(dt);
     this.refreshReadout();
     this.aimCamera();
   }
@@ -1731,9 +1950,32 @@ export class RailScene {
     this.rebuildTrack();
   }
 
-  setRidingForTest(on: boolean): void {
-    this.riding = on;
-    if (this.rideBtn) this.rideBtn.textContent = on ? 'RIDE ON' : 'RIDE OFF';
+  setAimForTest(headingDeg: number, pitchDeg: number): void {
+    this.aimHeadingDeg = headingDeg;
+    this.aimPitchDeg = pitchDeg;
+  }
+
+  setDigForTest(held: boolean): void {
+    this.digHeld = held;
+    if (!held) this.growAccum = 0;
+  }
+
+  setWalkForTest(dir: -1 | 0 | 1): void { this.walkInput = dir; }
+
+  setViewForTest(first: boolean): void { this.firstPerson = first; }
+
+  antForTest(): Record<string, number> {
+    return {
+      s: this.antS,
+      x: this.antPos.x,
+      y: this.antPos.y,
+      z: this.antPos.z,
+      queen: this.queenReady ? 1 : 0,
+      firstPerson: this.firstPerson ? 1 : 0,
+      camX: this.camera.position.x,
+      camY: this.camera.position.y,
+      camZ: this.camera.position.z,
+    };
   }
 
   piecesForTest(): DigPiece[] {
@@ -1774,8 +2016,7 @@ export class RailScene {
       endZ: end.z,
       endHeadingDeg: end.headingDeg,
       endPitchDeg: end.pitchDeg,
-      cartS: this.cartS,
-      riding: this.riding ? 1 : 0,
+      cartS: this.antS,
       smooth: this.smooth ? 1 : 0,
       autoBank: this.autoBank ? 1 : 0,
       planNodes: plan.nodes.length,

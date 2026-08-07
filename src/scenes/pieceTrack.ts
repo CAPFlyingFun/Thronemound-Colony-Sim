@@ -156,6 +156,33 @@ export function endStateOf(
   };
 }
 
+/**
+ * THE AIMED PIECE — first person's whole grammar in one function.
+ *
+ * You look somewhere; the tube grows that way. The look is continuous and
+ * the track speaks 15° steps, so the aim is SNAPPED — to the pitch step
+ * absolutely, and to the turn step relative to the way the track already
+ * ends (wrapped, so aiming across the ±180 seam turns the short way).
+ * `clampPiece` then parks anything past the limits, and the bank is
+ * computed from the turn that SURVIVED clamping, so a wild swing of the
+ * view banks like the 90° bend it becomes, not the 300° it asked for.
+ */
+export function aimPiece(
+  endHeadingDeg: number, aimHeadingDeg: number, aimPitchDeg: number,
+  opts: AppendOptions,
+): DigPiece {
+  const snap = (v: number, step: number): number => Math.round(v / step) * step;
+  let turn = snap(aimHeadingDeg - endHeadingDeg, TURN_STEP_DEG);
+  while (turn > 180) turn -= 360;
+  while (turn < -180) turn += 360;
+  const pitch = snap(aimPitchDeg, PITCH_STEP_DEG);
+  const clamped = clampPiece({ pitch, turn, roll: 0, length: opts.lengthMm });
+  return {
+    ...clamped,
+    roll: opts.autoBank ? autoBankFor(clamped.turn, clamped.length) : 0,
+  };
+}
+
 /* ------------------------------------------------------------- presets */
 
 /**
