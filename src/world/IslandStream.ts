@@ -310,6 +310,24 @@ export class IslandStream {
     return result;
   }
 
+  /** The oriented egg scoop, at an absolute WORLD position — see
+   *  `DensityField.subtractEllipsoid`. Direction needs no translation. */
+  subtractEllipsoid(
+    worldCenter: Vec3Like, along: Vec3Like,
+    semis: { deep: number; wide: number; tall: number }, rightHint?: Vec3Like,
+  ): BrushResult {
+    const result = this.field.subtractEllipsoid(
+      {
+        x: worldCenter.x - this.originWorldX,
+        y: worldCenter.y - this.bandFloorWu,
+        z: worldCenter.z - this.originWorldZ,
+      },
+      along, semis, rightHint,
+    );
+    if (result.changedSamples > 0) this.remember(result.bounds);
+    return result;
+  }
+
   /**
    * Record samples in the box that differ from the BASE soil — which
    * includes the nest plan, so re-opening a planned tunnel stores nothing.

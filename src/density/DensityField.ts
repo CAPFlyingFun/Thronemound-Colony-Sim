@@ -190,4 +190,98 @@ export class DensityField {
       bounds: { minX, minY, minZ, maxX, maxY, maxZ },
     };
   }
+
+  /**
+   * Subtracts an ORIENTED ellipsoid brush — the island builder's egg scoop.
+   *
+   * A mouthful is not a ball: the spec is 9 mm across, 6 mm tall and only
+   * 3 mm deep, lying with its wide face toward the ant. A sphere with any
+   * one of those measurements gets the other two wrong by up to a factor
+   * of three, which is the difference between a scoop and a crater.
+   *
+   * `along` is the dig direction (normalized inside); `rightHint` names the
+   * scoop's width axis when `along` is vertical and the cross product has
+   * nothing to say. Distance uses the standard first-order ellipsoid bound
+   * k0·(k0−1)/k1 — exact on the surface, a touch soft far away, and far
+   * away is exactly where a brush is not cutting.
+   */
+  subtractEllipsoid(
+    center: Vec3Like, along: Vec3Like, semis: { deep: number; wide: number; tall: number },
+    rightHint?: Vec3Like,
+  ): BrushResult {
+    const { deep, wide, tall } = semis;
+    if (![deep, wide, tall].every((s) => Number.isFinite(s) && s > 0)) {
+      throw new Error('Brush semi-axes must be positive');
+    }
+
+    // The scoop's frame: forward along the dig, right across the width,
+    // up over the top. Vertical digs take the hint, or +X as a last resort.
+    const fl = Math.hypot(along.x, along.y, along.z) || 1;
+    const fx = along.x / fl;
+    const fy = along.y / fl;
+    const fz = along.z / fl;
+    let rx = fz;
+    let ry = 0;
+    let rz = -fx;
+    const rl = Math.hypot(rx, ry, rz);
+    if (rl < 1e-4) {
+      rx = rightHint?.x ?? 1;
+      ry = rightHint?.y ?? 0;
+      rz = rightHint?.z ?? 0;
+      const hl = Math.hypot(rx, ry, rz) || 1;
+      rx /= hl; ry /= hl; rz /= hl;
+    } else {
+      rx /= rl; rz /= rl;
+    }
+    const ux = ry * fz - rz * fy;
+    const uy = rz * fx - rx * fz;
+    const uz = rx * fy - ry * fx;
+
+    const reach = Math.max(deep, wide, tall);
+    const padding = this.cellSize;
+    const minX = clamp(Math.floor((center.x - reach - padding) / this.cellSize), 0, this.samplesX - 1);
+    const minY = clamp(Math.floor((center.y - reach - padding) / this.cellSize), 0, this.samplesY - 1);
+    const minZ = clamp(Math.floor((center.z - reach - padding) / this.cellSize), 0, this.samplesZ - 1);
+    const maxX = clamp(Math.ceil((center.x + reach + padding) / this.cellSize), 0, this.samplesX - 1);
+    const maxY = clamp(Math.ceil((center.y + reach + padding) / this.cellSize), 0, this.samplesY - 1);
+    const maxZ = clamp(Math.ceil((center.z + reach + padding) / this.cellSize), 0, this.samplesZ - 1);
+
+    let removedVolume = 0;
+    let changedSamples = 0;
+    const sampleVolume = this.cellSize ** 3;
+    const transitionWidth = this.cellSize;
+    const occupancy = (density: number): number =>
+      clamp(0.5 + density / (2 * transitionWidth), 0, 1);
+
+    for (let z = minZ; z <= maxZ; z += 1) {
+      const wz = z * this.cellSize - center.z;
+      for (let y = minY; y <= maxY; y += 1) {
+        const wy = y * this.cellSize - center.y;
+        for (let x = minX; x <= maxX; x += 1) {
+          const wx = x * this.cellSize - center.x;
+          // Into the scoop's frame…
+          const pa = wx * fx + wy * fy + wz * fz;
+          const pr = wx * rx + wy * ry + wz * rz;
+          const pu = wx * ux + wy * uy + wz * uz;
+          // …and the ellipsoid bound.
+          const k0 = Math.hypot(pa / deep, pr / wide, pu / tall);
+          const k1 = Math.hypot(pa / (deep * deep), pr / (wide * wide), pu / (tall * tall));
+          const brushOutsideDistance = k1 > 1e-9 ? (k0 * (k0 - 1)) / k1 : -Math.min(deep, wide, tall);
+          const oldDensity = this.get(x, y, z);
+          const newDensity = Math.min(oldDensity, brushOutsideDistance);
+          if (newDensity >= oldDensity - 1e-7) continue;
+
+          this.set(x, y, z, newDensity);
+          changedSamples += 1;
+          removedVolume += Math.max(0, occupancy(oldDensity) - occupancy(newDensity)) * sampleVolume;
+        }
+      }
+    }
+
+    return {
+      removedVolume,
+      changedSamples,
+      bounds: { minX, minY, minZ, maxX, maxY, maxZ },
+    };
+  }
 }

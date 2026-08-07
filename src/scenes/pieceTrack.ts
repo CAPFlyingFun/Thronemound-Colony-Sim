@@ -280,10 +280,19 @@ export function presetPieces(
  * down and the way back out is UP — so UP is spent, and down, left, right,
  * forward and back are still open to branch from.
  */
-export type ExitDir = 'forward' | 'back' | 'left' | 'right' | 'up' | 'down';
+export type ExitDir = 'forward' | 'back' | 'left' | 'right' | 'up' | 'down'
+  | 'left45' | 'right45';
 
+/*
+ * The half-turn pair exists for the island's Y-junction: the player's spec
+ * says a Y branches two ways at 45°, a T at 90° — so a Y's arms are their
+ * own exits, not a `left` that some caller remembers to halve. They sit at
+ * the END of the scan order on purpose: `nextFreeExit`-style linear scans
+ * (the pipes room) keep offering the classic six first, and nothing that
+ * predates the Y ever sees a 45 unless it asks for one by name.
+ */
 export const EXIT_DIRS: readonly ExitDir[] = [
-  'forward', 'back', 'left', 'right', 'up', 'down',
+  'forward', 'back', 'left', 'right', 'up', 'down', 'left45', 'right45',
 ];
 
 /** One run of pieces. The first branch is the station line; every other
@@ -298,6 +307,7 @@ export interface TrackBranch {
 /** The heading change an exit applies, relative to the arrival bearing. */
 const EXIT_YAW_DEG: Record<ExitDir, number> = {
   forward: 0, back: 180, left: 90, right: -90, up: 0, down: 0,
+  left45: 45, right45: -45,
 };
 
 /** The grade a branch STARTS at for each exit. Vertical exits lead with the
@@ -305,6 +315,7 @@ const EXIT_YAW_DEG: Record<ExitDir, number> = {
 export const EXIT_SEED_PITCH_DEG: Record<ExitDir, number> = {
   forward: 0, back: 0, left: 0, right: 0,
   up: PIECE_LIMITS.pitch.max, down: PIECE_LIMITS.pitch.min,
+  left45: 0, right45: 0,
 };
 
 /**
