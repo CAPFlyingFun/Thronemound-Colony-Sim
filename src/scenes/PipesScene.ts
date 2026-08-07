@@ -164,6 +164,8 @@ export class PipesScene {
 
   private exitBtn: HTMLButtonElement | null = null;
 
+  private roomBtn: HTMLButtonElement | null = null;
+
   private readout: HTMLElement | null = null;
 
   private paused = false;
@@ -254,6 +256,8 @@ export class PipesScene {
       FIELD_ORIGIN.x + lx, FIELD_ORIGIN.y + ly, FIELD_ORIGIN.z + lz,
     ));
     this.carveMs = performance.now() - started;
+    this.invalidateRails();
+    this.refreshRoomMarkers();
     if (this.soilMesh) {
       this.scene.remove(this.soilMesh);
       this.soilMesh.geometry.dispose();
@@ -281,6 +285,87 @@ export class PipesScene {
     this.soilMaterial.opacity = xray ? 0.45 : 1;
     this.soilMaterial.depthWrite = !xray;
     this.soilMaterial.needsUpdate = true;
+  }
+
+  /* ------------------------------------------------------------- rooms */
+
+  /** What each hub IS, by branch index. Junction until assigned. */
+  private readonly roomKind = new Map<number, string>();
+
+  private roomMarkers: THREE.Group | null = null;
+
+  private static readonly ROOM_KINDS = [
+    'junction', 'nursery', 'storage', 'food', 'queen',
+  ] as const;
+
+  private static readonly ROOM_COLORS: Record<string, number> = {
+    junction: 0xb8ad96, nursery: 0x7fc9e0, storage: 0xc9a24f,
+    food: 0x8fc06a, queen: 0xc77fd6,
+  };
+
+  /** A ring at every hub, wearing its room's colour. */
+  private refreshRoomMarkers(): void {
+    if (this.roomMarkers) {
+      this.scene.remove(this.roomMarkers);
+      this.roomMarkers.traverse((node) => {
+        const mesh = node as THREE.Mesh;
+        if (mesh.geometry) mesh.geometry.dispose();
+      });
+    }
+    this.roomMarkers = new THREE.Group();
+    this.branches.forEach((branch, i) => {
+      if (branch.roomMm === null || branch.pieces.length === 0) return;
+      const start = branchStartOf(this.branches, i);
+      const end = endStateOf(branch.pieces, { at: start.at, forward: start.forward });
+      const kind = this.roomKind.get(i) ?? 'junction';
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(branch.roomMm + 1.5, 0.45, 8, 26),
+        new THREE.MeshBasicMaterial({
+          color: PipesScene.ROOM_COLORS[kind] ?? 0xb8ad96,
+          transparent: true, opacity: 0.8, depthTest: false,
+        }),
+      );
+      ring.rotation.x = Math.PI / 2;
+      ring.position.set(end.x, end.y, end.z);
+      ring.renderOrder = 6;
+      this.roomMarkers!.add(ring);
+    });
+    this.scene.add(this.roomMarkers);
+  }
+
+  /**
+   * WHERE SHE STANDS IS WHERE YOU BUILD. At a hub (either the end of its
+   * own line, or the mouth of any line hanging off it) the palette grows
+   * new branches out of that hub's exits; anywhere else it extends the
+   * end of the line she is riding. Walking back to a junction to add an
+   * arm is the whole grammar — no hidden "active branch" to lose.
+   */
+  private buildAnchor(): { hub: number } | { line: number } {
+    const zone = this.hubZone();
+    if (zone >= 0) return { hub: zone };
+    const branch = this.branches[this.rideBranch];
+    /* A line that ends in a room is CLOSED — its only open ends are the
+     * hub's exits, so building anywhere on it builds from the hub. The
+     * old rule appended pieces THROUGH the room instead. */
+    if (branch && branch.roomMm !== null) return { hub: this.rideBranch };
+    return { line: this.rideBranch };
+  }
+
+  /** The hub whose ROOM she is physically standing in, or -1. A room's
+   *  whole radius counts — a 2.5 mm sweet spot was impossible to stop
+   *  inside on a phone. */
+  private hubZone(): number {
+    const branch = this.branches[this.rideBranch];
+    const rail = this.rideRail();
+    if (branch && rail) {
+      if (branch.roomMm !== null && this.rideS > rail.lengthMm - ROOM_RADIUS_MM) {
+        return this.rideBranch;
+      }
+      if (branch.parent && this.rideS < ROOM_RADIUS_MM) {
+        return branch.parent.branch;
+      }
+    }
+    return -1;
   }
 
   /* --------------------------------------------------- arming and placing */
@@ -331,6 +416,8 @@ export class PipesScene {
       this.place();
       return;
     }
+    const anchor = this.buildAnchor();
+    this.active = 'hub' in anchor ? anchor.hub : anchor.line;
     this.armedKind = kind;
     this.armedYawIx = 0;
     this.armedPitchIx = 0;
@@ -341,24 +428,26 @@ export class PipesScene {
   private place(): void {
     const kind = this.armedKind;
     if (!kind) return;
+    const anchor = this.buildAnchor();
+    this.active = 'hub' in anchor ? anchor.hub : anchor.line;
     const branch = this.branches[this.active]!;
     if (HUBS.has(kind)) {
-      /* A junction hub: the branch ends in a room, and the working end
-       * becomes one of its exits. T, Y and ✚ differ only in how many
-       * exits you intend to spend — the room serves them all. */
-      if (branch.pieces.length === 0) return;
+      /* A junction hub: the line she is on ends in a room, and the
+       * working end becomes one of its exits. T, Y and ✚ differ only in
+       * how many exits you intend to spend — the room serves them all. */
+      if (branch.pieces.length === 0 || branch.roomMm !== null) return;
       this.branches[this.active] = { ...branch, roomMm: ROOM_RADIUS_MM };
       this.workingExit = this.nextFreeExit();
     } else {
       const add = this.armedPieces();
       if (!add || add.length === 0) return;
-      if (branch.roomMm !== null) {
-        /* Building on from a hub: the piece starts a CHILD branch out of
-         * the working exit. */
+      if ('hub' in anchor) {
+        /* Building from a hub: the piece starts a CHILD branch out of
+         * the working exit — come back any time for another arm. */
         this.branches.push({
           pieces: add,
           roomMm: null,
-          parent: { branch: this.active, exit: this.workingExit },
+          parent: { branch: anchor.hub, exit: this.workingExit },
         });
         this.active = this.branches.length - 1;
       } else {
@@ -371,6 +460,22 @@ export class PipesScene {
     this.clearGhost();
     this.recarve();
     this.snapRideToEnd();
+    this.refreshChips();
+  }
+
+  /** The hub she is standing at (room radius counts), or -1. */
+  private hubHere(): number {
+    return this.hubZone();
+  }
+
+  private cycleRoom(): void {
+    const hub = this.hubHere();
+    if (hub < 0) return;
+    const kinds = PipesScene.ROOM_KINDS;
+    const now = this.roomKind.get(hub) ?? 'junction';
+    const next = kinds[(kinds.indexOf(now as typeof kinds[number]) + 1) % kinds.length]!;
+    this.roomKind.set(hub, next);
+    this.refreshRoomMarkers();
     this.refreshChips();
   }
 
@@ -398,7 +503,9 @@ export class PipesScene {
   }
 
   private nextFreeExit(): ExitDir {
-    const taken = takenExitsOf(this.branches, this.active);
+    const anchor = this.buildAnchor();
+    const hub = 'hub' in anchor ? anchor.hub : this.active;
+    const taken = takenExitsOf(this.branches, hub);
     for (const dir of EXIT_DIRS) {
       if (!taken.has(dir)) return dir;
     }
@@ -406,7 +513,11 @@ export class PipesScene {
   }
 
   private cycleExit(): void {
-    const taken = takenExitsOf(this.branches, this.active);
+    const anchor = this.buildAnchor();
+    if (!('hub' in anchor)) return;
+    const hub = anchor.hub;
+    this.active = hub;
+    const taken = takenExitsOf(this.branches, hub);
     const free = EXIT_DIRS.filter((d) => !taken.has(d));
     if (free.length === 0) return;
     const at = free.indexOf(this.workingExit);
@@ -500,12 +611,20 @@ export class PipesScene {
 
   /* ---------------------------------------------------------------- ride */
 
-  private rideRail() {
-    const branch = this.branches[this.rideBranch];
+  private railCache = new Map<number, ReturnType<typeof buildRail>>();
+
+  private rideRail(index = this.rideBranch) {
+    const branch = this.branches[index];
     if (!branch || branch.pieces.length === 0) return null;
-    const start = branchStartOf(this.branches, this.rideBranch);
-    return buildRail(branch.pieces, { at: start.at, forward: start.forward });
+    const hit = this.railCache.get(index);
+    if (hit) return hit;
+    const start = branchStartOf(this.branches, index);
+    const rail = buildRail(branch.pieces, { at: start.at, forward: start.forward });
+    this.railCache.set(index, rail);
+    return rail;
   }
+
+  private invalidateRails(): void { this.railCache.clear(); }
 
   private snapRideToEnd(): void {
     this.rideBranch = this.active;
@@ -513,36 +632,143 @@ export class PipesScene {
     this.rideS = rail ? rail.lengthMm : 0;
   }
 
+  /** Where the player is LOOKING — the steering signal for everything. */
+  private lookDir(into: THREE.Vector3): THREE.Vector3 {
+    return this.camera.getWorldDirection(into);
+  }
+
+  /** A line's outgoing direction where it meets a hub. */
+  private lineDirAt(index: number, atStart: boolean): THREE.Vector3 | null {
+    const rail = this.rideRail(index);
+    if (!rail) return null;
+    const f = rail.sample(atStart ? 0 : rail.lengthMm, 0);
+    if (!f) return null;
+    const v = new THREE.Vector3(f.fx, f.fy, f.fz).normalize();
+    return atStart ? v : v.negate();
+  }
+
+  /**
+   * THE HANDOFF. Ride off either end of a line and the junction there
+   * offers every connected line; the one whose direction best matches
+   * where the CAMERA is looking wins — you steer through a T by looking
+   * down the arm you want, in either view. Nothing aligned enough to be
+   * meant (dot < 0.15) parks her at the junction instead of guessing.
+   */
+  private tryHandoff(atStart: boolean): boolean {
+    const here = this.rideBranch;
+    const branch = this.branches[here]!;
+    /** Which branch owns the hub we just arrived at? */
+    const hub = atStart
+      ? (branch.parent ? branch.parent.branch : -1)
+      : (branch.roomMm !== null ? here : -1);
+    if (hub < 0) return false;
+    const look = this.lookDir(new THREE.Vector3());
+    let best: { branch: number; entryS: number; dot: number } | null = null;
+    const consider = (index: number, atItsStart: boolean): void => {
+      if (index === here && (atItsStart === atStart)) return; // the way we came
+      const dir = this.lineDirAt(index, atItsStart);
+      if (!dir) return;
+      const rail = this.rideRail(index)!;
+      const dot = dir.dot(look);
+      if (!best || dot > best.dot) {
+        best = { branch: index, entryS: atItsStart ? 0.5 : rail.lengthMm - 0.5, dot };
+      }
+    };
+    /* The hub's own line arrives at its END; children leave from their
+     * STARTs. Both are connectors, minus the one we came in on. */
+    if (!(here === hub && !atStart)) consider(hub, false);
+    this.branches.forEach((b, i) => {
+      if (b.parent?.branch === hub) consider(i, true);
+    });
+    if (!best) return false;
+    const chosen = best as { branch: number; entryS: number; dot: number };
+    if (chosen.dot < 0.15) return false;
+    this.rideBranch = chosen.branch;
+    this.rideS = chosen.entryS;
+    return true;
+  }
+
+  /* Smoothed presentation: the rail is exact, the BODY is an animal. */
+  private readonly smoothPos = new THREE.Vector3();
+
+  private readonly smoothQuat = new THREE.Quaternion();
+
+  private smoothSeeded = false;
+
+  private lastHeading = 0;
+
+  private bank = 0;
+
   private simulate(dt: number): void {
     const rail = this.rideRail();
     if (rail) {
-      this.rideS = Math.max(
-        0, Math.min(rail.lengthMm, this.rideS + this.rideInput * RIDE_SPEED * dt),
-      );
-      const f = rail.sample(this.rideS, 0);
-      if (f && this.queenReady) {
-        this.queen.root.visible = !this.firstPerson;
-        const fwd = new THREE.Vector3(f.fx, f.fy, f.fz).normalize();
-        const up = new THREE.Vector3(f.ux, f.uy, f.uz).normalize();
-        /* She stands on the pipe's FLOOR, not its axis. */
-        const drop = BORE_RADIUS_MM - RIDE_MM;
-        const at = new THREE.Vector3(f.x, f.y, f.z).addScaledVector(up, -drop);
-        this.queen.root.position.copy(at);
-        const right = new THREE.Vector3().crossVectors(up, fwd).normalize();
-        this.queen.root.quaternion.setFromRotationMatrix(
-          new THREE.Matrix4().makeBasis(right, up, fwd),
-        );
-        this.queen.update(dt, {
-          speed: (Math.abs(this.rideInput) * RIDE_SPEED) / MODEL_SCALE,
-          turn: 0,
-          digging: 0,
-          carrying: 0,
-          headYaw: 0,
-        });
-        this.queen.solveFeet(
-          () => at.y - RIDE_MM, FOOT_CLEARANCE_MM, RIDE_MM * 2,
-        );
-        this.aimCamera(dt, at, fwd);
+      /*
+       * The stick means GO WHERE I AM LOOKING: its sign is measured
+       * against the camera, so pushing up always advances toward the
+       * view and pulling back retreats from it, whichever way the line
+       * happens to run underneath her.
+       */
+      const f0 = rail.sample(Math.min(this.rideS, rail.lengthMm), 0);
+      const look = this.lookDir(new THREE.Vector3());
+      const alignment = f0
+        ? Math.sign(look.x * f0.fx + look.y * f0.fy + look.z * f0.fz) || 1
+        : 1;
+      let next = this.rideS + this.rideInput * alignment * RIDE_SPEED * dt;
+      if (next > rail.lengthMm && this.tryHandoff(false)) {
+        next = this.rideS;
+      } else if (next < 0 && this.tryHandoff(true)) {
+        next = this.rideS;
+      }
+      const nowRail = this.rideRail();
+      if (nowRail) {
+        this.rideS = Math.max(0, Math.min(nowRail.lengthMm, next));
+        const f = nowRail.sample(this.rideS, 0);
+        if (f && this.queenReady) {
+          this.queen.root.visible = !this.firstPerson;
+          const fwd = new THREE.Vector3(f.fx, f.fy, f.fz).normalize();
+          const up = new THREE.Vector3(f.ux, f.uy, f.uz).normalize();
+          const drop = BORE_RADIUS_MM - RIDE_MM;
+          const at = new THREE.Vector3(f.x, f.y, f.z).addScaledVector(up, -drop);
+          /*
+           * BANK INTO CORNERS. Heading rate becomes a lean about her own
+           * axis, eased — an ant hugs the inside of a bend; only a train
+           * stays bolt upright through one.
+           */
+          const heading = Math.atan2(f.fx, f.fz);
+          let dh = heading - this.lastHeading;
+          while (dh > Math.PI) dh -= Math.PI * 2;
+          while (dh < -Math.PI) dh += Math.PI * 2;
+          this.lastHeading = heading;
+          const wantBank = Math.max(-0.55, Math.min(0.55, (dh / Math.max(dt, 1e-3)) * 0.22));
+          this.bank += (wantBank - this.bank) * Math.min(1, dt * 5);
+          const right = new THREE.Vector3().crossVectors(up, fwd).normalize();
+          const target = new THREE.Quaternion().setFromRotationMatrix(
+            new THREE.Matrix4().makeBasis(right, up, fwd),
+          );
+          target.premultiply(new THREE.Quaternion().setFromAxisAngle(fwd, -this.bank));
+          /* Lerp the body onto the line: junction transfers and sharp
+           * frames read as her turning, never teleporting. */
+          if (!this.smoothSeeded) {
+            this.smoothPos.copy(at);
+            this.smoothQuat.copy(target);
+            this.smoothSeeded = true;
+          }
+          this.smoothPos.lerp(at, Math.min(1, dt * 9));
+          this.smoothQuat.slerp(target, Math.min(1, dt * 7));
+          this.queen.root.position.copy(this.smoothPos);
+          this.queen.root.quaternion.copy(this.smoothQuat);
+          this.queen.update(dt, {
+            speed: (Math.abs(this.rideInput) * RIDE_SPEED) / MODEL_SCALE,
+            turn: 0,
+            digging: 0,
+            carrying: 0,
+            headYaw: 0,
+          });
+          this.queen.solveFeet(
+            () => this.smoothPos.y - RIDE_MM, FOOT_CLEARANCE_MM, RIDE_MM * 2,
+          );
+          this.aimCamera(dt, this.smoothPos, fwd);
+        }
       }
     } else if (this.queenReady) {
       this.queen.root.visible = false;
@@ -615,6 +841,7 @@ export class PipesScene {
       this.refreshChips();
     });
     this.exitBtn = this.chip('EXIT →', right, () => this.cycleExit());
+    this.roomBtn = this.chip('ROOM', right, () => this.cycleRoom());
     this.chip('UNDO', right, () => this.undo());
     this.chip('SOIL', right, () => {
       this.soilMode = this.soilMode === 'xray' ? 'solid'
@@ -653,14 +880,29 @@ export class PipesScene {
     if (this.rotVBtn) {
       this.rotVBtn.textContent = `ROT ↕ ${PITCH_RACK[this.armedPitchIx]}°`;
     }
+    const anchor = this.buildAnchor();
+    const buildHub = 'hub' in anchor ? anchor.hub : -1;
+    const hereHub = this.hubZone();
     if (this.exitBtn) {
-      const hub = this.branches[this.active]!.roomMm !== null;
-      this.exitBtn.style.display = hub ? '' : 'none';
+      this.exitBtn.style.display = buildHub >= 0 ? '' : 'none';
       this.exitBtn.textContent = `EXIT ${this.workingExit.toUpperCase()}`;
+    }
+    if (this.roomBtn) {
+      this.roomBtn.style.display = hereHub >= 0 ? '' : 'none';
+      this.roomBtn.textContent = hereHub >= 0
+        ? `ROOM ${(this.roomKind.get(hereHub) ?? 'junction').toUpperCase()}`
+        : 'ROOM';
     }
   }
 
+  private lastHub = -2;
+
   private updateReadout(): void {
+    const hub = this.hubHere();
+    if (hub !== this.lastHub) {
+      this.lastHub = hub;
+      this.refreshChips();
+    }
     if (!this.readout) return;
     const pieces = this.branches.reduce((n, b) => n + b.pieces.length, 0);
     const hubs = this.branches.filter((b) => b.roomMm !== null).length;
@@ -760,7 +1002,14 @@ export class PipesScene {
 
   cycleExitForTest(): void { this.cycleExit(); }
 
+  cycleRoomForTest(): void { this.cycleRoom(); }
+
   setRideForTest(dir: -1 | 0 | 1): void { this.rideInput = dir; }
+
+  setOrbitForTest(yaw: number, pitch: number): void {
+    this.camYaw = yaw;
+    this.camPitch = pitch;
+  }
 
   solidAtMm(x: number, y: number, z: number): boolean | null {
     if (!this.soilField) return null;
@@ -783,6 +1032,10 @@ export class PipesScene {
       ghost: this.ghost ? 1 : 0,
       carveMs: +this.carveMs.toFixed(0),
       rideS: +this.rideS.toFixed(1),
+      rideBranch: this.rideBranch,
+      hubHere: this.hubHere(),
+      roomHere: this.hubHere() >= 0
+        ? (this.roomKind.get(this.hubHere()) ?? 'junction') : 'none',
       railLen: rail ? +rail.lengthMm.toFixed(1) : 0,
       queen: this.queenReady ? 1 : 0,
       queenX: +this.queen.root.position.x.toFixed(1),
