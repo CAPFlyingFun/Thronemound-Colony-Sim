@@ -538,6 +538,10 @@ export class IslandScene {
    */
   private aimPitch = 0;
 
+  /** The last bearing the aim line actually had — held through plumb, where
+   *  a bearing stops meaning anything. */
+  private aimBearing = 0;
+
   private underground = false;
 
   /** The room camera's share of the underground view, eased 0..1. */
@@ -1838,9 +1842,16 @@ export class IslandScene {
   /** The angle she is pointed, in degrees, live. */
   private refreshAim(): void {
     if (this.digMode && this.headingReadout && this.depthReadout) {
-      /* A compass bearing: +Z is north and it runs clockwise, so it reads
-       * the way a bearing reads rather than the way `atan2` returns. */
-      const hdg = Math.round(((this.facing * 180) / Math.PI + 360) % 360);
+      /*
+       * The bearing of the AIM, not of her body. On a trunk her nose points
+       * at the sky and has no bearing worth printing; the line she is about
+       * to cut along still does, right up until it goes plumb, and then it
+       * holds rather than spinning on rounding.
+       */
+      const line = this.boreAim();
+      const flat = Math.hypot(line.x, line.z);
+      if (flat > 0.15) this.aimBearing = Math.atan2(line.x, line.z);
+      const hdg = Math.round(((this.aimBearing * 180) / Math.PI + 360) % 360);
       const bearing = `${String(hdg).padStart(3, '0')}\u00b0`;
       if (this.headingReadout.textContent !== bearing) {
         this.headingReadout.textContent = bearing;
@@ -1853,7 +1864,17 @@ export class IslandScene {
       }
     }
     if (!this.aimReadout) return;
-    const deg = Math.round((this.aimPitch * 180) / Math.PI);
+    /*
+     * THE ANGLE IS READ AGAINST THE WORLD, whatever frame the stick works
+     * in. `aimPitch` is her own pitch — nought means along her nose — and
+     * printing that would have the dial say nought while she points at the
+     * sky up a trunk. The rise of the actual aim line is the number an
+     * altimeter would agree with.
+     */
+    const line = this.boreAim();
+    const deg = Math.round(
+      (Math.asin(Math.max(-1, Math.min(1, line.y))) * 180) / Math.PI,
+    );
     const text = `${deg > 0 ? '+' : ''}${deg}°`;
     if (this.aimReadout.textContent !== text) this.aimReadout.textContent = text;
     this.aimReadout.classList.toggle('is-steep', deg <= -45);
@@ -1938,25 +1959,25 @@ export class IslandScene {
      * "into the floor".
      */
     /*
-     * PITCHED AGAINST THE WORLD, not against the ground under her.
+     * PITCHED IN HER OWN FRAME — and READ against the world.
      *
-     * It was her own frame for a while, which has an honest argument behind
-     * it — on a wall, "up ten degrees" plausibly means ten off the wall.
-     * Played, it is wrong, and the reason is the gauge: the number beside
-     * the shovel is a DEPTH instrument, and a depth read against whatever
-     * slope she happens to be on tells you nothing. Minus ninety has to
-     * mean straight down at the centre of the earth from anywhere, the way
-     * an altimeter reads height above sea level and not above the ground it
-     * is passing over.
+     * Both halves matter, and putting both in the same frame is what went
+     * wrong. The gauge has to be world-referenced: it is a depth
+     * instrument, and a depth measured against whatever slope she happens
+     * to be on tells you nothing. But the CONTROL cannot be, because the
+     * camera looks down this line: build it from a compass bearing and she
+     * is clinging to a vertical trunk with a bearing that has been frozen
+     * since the last time she was upright, so the view unhooks from her
+     * body and panning turns something that is not the ant.
      *
-     * So the aim is a compass bearing and a rise, both in world axes. Her
-     * body may be at any attitude; where she is POINTING is a thing the map
-     * can answer.
+     * So the aim is a rotation between her nose and her back, which the
+     * view can ride, and `refreshAim` reports the world angle OF that line.
+     * Nose-first up a trunk then reads +90 on the dial, which is exactly
+     * what was asked for — the number is world, the stick is hers.
      */
     const cp = Math.cos(this.aimPitch);
-    return new THREE.Vector3(
-      Math.sin(this.facing) * cp, Math.sin(this.aimPitch), Math.cos(this.facing) * cp,
-    );
+    return new THREE.Vector3().copy(this.fwd).multiplyScalar(cp)
+      .addScaledVector(this.up, Math.sin(this.aimPitch));
   }
 
   /**
@@ -2602,12 +2623,18 @@ export class IslandScene {
        * different ray, and the two disagreed by more the further out you
        * looked.
        */
-      /* The eye's frame is the WORLD's too, so the horizon stays level
-       * whatever she is clinging to. A view that rolled with her body while
-       * the aim it draws is measured against the map would have the
-       * crosshair and the gauge disagreeing about which way is down. */
-      const fwd = S_FWD.set(Math.sin(this.facing), 0, Math.cos(this.facing));
-      const upv = S_UP.set(0, 1, 0);
+      /*
+       * HER FRAME, because the eye is IN HER HEAD.
+       *
+       * A world frame here rolls the whole view ninety degrees the moment
+       * she is on a trunk — her up is horizontal and the lens insists on
+       * the sky's, so the bark ends up down one side of the screen and a
+       * left-right pan swings around an axis that is nothing to do with
+       * her. Reported exactly that way. The dial still reads against the
+       * world; only the picture rides her body.
+       */
+      const fwd = S_FWD.copy(this.fwd);
+      const upv = S_UP.copy(this.up);
       const dir = this.boreAim();
       /*
        * Forward of her centre so her own back does not fill the frame —
@@ -2621,7 +2648,7 @@ export class IslandScene {
        * out of her chest. On a ceiling that rise points at the floor, which
        * is where the top of her head actually is.
        */
-      const base = S_CENTER.copy(this.at).addScaledVector(this.up, EYE_RISE);
+      const base = S_CENTER.copy(this.at).addScaledVector(upv, EYE_RISE);
       const eye = base.clone();
       for (let t = 1; t > 0.001; t -= 0.2) {
         const px = base.x + dir.x * EYE_FORWARD * t;
