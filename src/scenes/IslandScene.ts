@@ -355,18 +355,16 @@ export class IslandScene {
   /** The shovel, revealed once DIG is armed. */
   private scoopBtn: HTMLButtonElement | null = null;
 
-  /** What the shovel does: cut soil, or shave the bumps off what is cut. */
-  private tool: 'dig' | 'smooth' = 'dig';
-
-  private toolBtn: HTMLButtonElement | null = null;
-
   private brushRow: HTMLDivElement | null = null;
 
   /** The smoothing brush's radius, in millimetres — the slider's value. */
   private brushMm = SMOOTH_RADIUS_DEFAULT_MM;
 
-  /** Where the next press will act, drawn before it acts. */
+  /** Where the next press will act, drawn before it acts: the cut, and
+   *  the halo the same stroke shaves around it. */
   private toolGhost: THREE.Mesh | null = null;
+
+  private smoothGhost: THREE.Mesh | null = null;
 
 
   private readonly keysDown = new Set<string>();
@@ -1177,10 +1175,7 @@ export class IslandScene {
     if (this.stream) {
       // Soil leaves at the bottom of the stroke, not on the button — and
       // which stroke it is depends on which tool the shovel is holding.
-      if (bore.bite) {
-        if (this.tool === 'smooth') this.smoothAt();
-        else this.bite();
-      }
+      if (bore.bite) this.bite();
 
       /* The builder digs on a BUTTON, not on a frame: `digPiece` is called
        * straight from the palette's chips. Nothing to do per-frame here. */
@@ -1444,6 +1439,22 @@ export class IslandScene {
     }
     this.biteTouched = touched > 0;
     if (touched === 0) return;
+    /*
+     * AND SHAVE WHAT WAS JUST CUT, in the same stroke.
+     *
+     * This ran automatically once before and had to be pulled out,
+     * because the brush could fill as well as shave and it brought roofs
+     * down on tunnels barely wider than she is. One-way, it cannot: soil
+     * is only ever removed, so the worst a stroke can do is open the hole
+     * slightly wider than intended, which is the failure you want. So the
+     * two are one action again — cut, then round off what the cut left.
+     */
+    const relaxed = this.smoothAround(centre);
+    if (relaxed) {
+      minX = Math.min(minX, relaxed.minX); maxX = Math.max(maxX, relaxed.maxX);
+      minY = Math.min(minY, relaxed.minY); maxY = Math.max(maxY, relaxed.maxY);
+      minZ = Math.min(minZ, relaxed.minZ); maxZ = Math.max(maxZ, relaxed.maxZ);
+    }
     // Work done at depth is chamber-building, whatever she calls it.
     if (this.depthMm() >= QUEST_DEPTH_MM * 0.7) this.deepCarved += touched;
 
@@ -1466,28 +1477,26 @@ export class IslandScene {
   }
 
   /**
-   * THE SMOOTHING TOOL: shave the bumps, and only ever outward.
+   * Shave the bumps around a point, and only ever OUTWARD.
    *
-   * It used to run itself after every cut, and it took the roof down on
-   * tunnels barely wider than she is — because a blur moves a surface
-   * BOTH ways, shaving the ridges that poke in and filling the hollows,
-   * and the filling is how a passage narrows. So it is a tool you choose
-   * now, and it is one-way: soil may be shaved and never added, which
-   * makes narrowing arithmetically impossible rather than merely rare.
+   * A blur moves a surface both ways: it takes off the ridges that poke
+   * into a tunnel, and it fills the hollows — and the filling is how a
+   * roof comes down on a passage barely wider than the animal in it.
+   * One-way, soil may be removed and never added, so narrowing is not
+   * unlikely but arithmetically impossible. That is what lets this run on
+   * every stroke instead of being a tool you have to remember to use.
    */
-  private smoothAt(): void {
-    if (!this.stream) return;
-    const aim = this.boreAim();
-    const centre = S_CENTER.copy(this.at)
-      .addScaledVector(aim, NOSE_REACH + JAW_PAST_NOSE + this.brushMm / 2 / MM);
+  private smoothAround(centre: THREE.Vector3): { minX: number; minY: number;
+    minZ: number; maxX: number; maxY: number; maxZ: number } | null {
+    if (!this.stream) return null;
     const box = this.stream.boxAround(centre, this.brushMm / MM);
-    let touched: typeof box | null = null;
+    let touched = null;
     for (let pass = 0; pass < SMOOTH_PASSES; pass += 1) {
       const done = this.stream.smoothBox(box, SMOOTH_STRENGTH, SMOOTH_MAX_SHIFT, true);
       if (!done) break;
       touched = done;
     }
-    if (touched) this.enqueueBounds(touched);
+    return touched;
   }
 
   /**
@@ -1499,48 +1508,54 @@ export class IslandScene {
    * so the slider has something to be a slider FOR.
    */
   private updateToolGhost(): void {
-    if (!this.digMode || !this.ready) {
+    const show = this.digMode && this.ready;
+    if (!show) {
       if (this.toolGhost) this.toolGhost.visible = false;
+      if (this.smoothGhost) this.smoothGhost.visible = false;
       return;
     }
-    if (!this.toolGhost) {
-      this.toolGhost = new THREE.Mesh(
+    const make = (colour: number, opacity: number): THREE.Mesh => {
+      const mesh = new THREE.Mesh(
         new THREE.SphereGeometry(1, 20, 14),
         new THREE.MeshBasicMaterial({
-          color: 0xe9c36f, wireframe: true, transparent: true, opacity: 0.5,
+          color: colour, wireframe: true, transparent: true, opacity,
           depthTest: false,
         }),
       );
-      this.toolGhost.renderOrder = 9;
-      this.scene.add(this.toolGhost);
-    }
-    const ghost = this.toolGhost;
-    ghost.visible = true;
+      mesh.renderOrder = 9;
+      this.scene.add(mesh);
+      return mesh;
+    };
+    if (!this.toolGhost) this.toolGhost = make(0xe9c36f, 0.5);
+    if (!this.smoothGhost) this.smoothGhost = make(0x6fc8e9, 0.22);
+
     const aim = this.boreAim();
-    const material = ghost.material as THREE.MeshBasicMaterial;
-    if (this.tool === 'smooth') {
-      material.color.setHex(0x6fc8e9);
-      ghost.quaternion.identity();
-      const r = this.brushMm / MM;
-      ghost.scale.setScalar(r);
-      ghost.position.copy(this.at)
-        .addScaledVector(aim, NOSE_REACH + JAW_PAST_NOSE + r);
-      return;
-    }
-    /* The dig ghost is the two scoops themselves, as one oriented oval:
-     * her mouthful is wide and low, so a round marker would promise a
-     * hole of the wrong shape entirely. */
-    material.color.setHex(0xe9c36f);
     const hull = NOSE_REACH + JAW_PAST_NOSE;
+
+    /* The CUT, as the pair of scoops it actually removes — wide and low,
+     * her real mouthful shape, because a round marker would promise a
+     * hole of entirely the wrong proportions. */
     const span = (SCOOP_DEEP_MM * 2) / MM;
     S_FWD.copy(aim);
     S_RIGHT.set(S_FWD.z, 0, -S_FWD.x);
     if (S_RIGHT.lengthSq() < 1e-6) S_RIGHT.set(1, 0, 0);
     S_RIGHT.normalize();
     S_UP.crossVectors(S_RIGHT, S_FWD).normalize();
-    ghost.quaternion.setFromRotationMatrix(S_MAT.makeBasis(S_RIGHT, S_UP, S_FWD));
-    ghost.scale.set(SCOOP_WIDE_MM / 2 / MM, SCOOP_TALL_MM / 2 / MM, span / 2);
-    ghost.position.copy(this.at).addScaledVector(aim, hull + span / 2 - SCOOP_DEEP_MM / 2 / MM);
+    const cut = this.toolGhost;
+    cut.visible = true;
+    cut.quaternion.setFromRotationMatrix(S_MAT.makeBasis(S_RIGHT, S_UP, S_FWD));
+    cut.scale.set(SCOOP_WIDE_MM / 2 / MM, SCOOP_TALL_MM / 2 / MM, span / 2);
+    cut.position.copy(this.at)
+      .addScaledVector(aim, hull + span / 2 - SCOOP_DEEP_MM / 2 / MM);
+
+    /* And the SHAVE around it, which is what the slider sizes. Fainter,
+     * because it only rounds off what the cut leaves — it is the halo of
+     * the stroke, not the stroke. */
+    const halo = this.smoothGhost;
+    halo.visible = true;
+    halo.quaternion.identity();
+    halo.scale.setScalar(this.brushMm / MM);
+    halo.position.copy(this.at).addScaledVector(aim, hull);
   }
 
   /** Remesh every chunk a brush result touched — bite()'s own loop, shared. */
@@ -2014,8 +2029,7 @@ export class IslandScene {
       this.digMode = !this.digMode;
       dig.classList.toggle('is-grip', this.digMode);
       this.scoopBtn!.style.display = this.digMode ? '' : 'none';
-      this.toolBtn!.style.display = this.digMode ? '' : 'none';
-      this.brushRow!.style.display = this.digMode && this.tool === 'smooth' ? '' : 'none';
+      this.brushRow!.style.display = this.digMode ? '' : 'none';
       if (!this.digMode) this.input.dig = false;
       /* Digging is aiming, and aiming is done down her own eyes: arming
        * DIG drops into first person with a wide 100° field so the tunnel
@@ -2048,25 +2062,6 @@ export class IslandScene {
     scoopBtn.addEventListener('lostpointercapture', stopDig);
     actions.appendChild(scoopBtn);
 
-    /*
-     * ONE BUTTON, TWO TOOLS. The shovel cuts or it shaves, and this says
-     * which — the ghost changes shape and colour with it, so there is no
-     * way to be holding the wrong one without seeing it.
-     */
-    const tool = document.createElement('button');
-    tool.className = 'density-lab-button density-lab-mode';
-    tool.textContent = 'CUT';
-    tool.style.display = 'none';
-    this.toolBtn = tool;
-    tool.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      this.tool = this.tool === 'dig' ? 'smooth' : 'dig';
-      tool.textContent = this.tool === 'dig' ? 'CUT' : 'SMOOTH';
-      tool.classList.toggle('is-grip', this.tool === 'smooth');
-      this.brushRow!.style.display = this.tool === 'smooth' ? '' : 'none';
-    });
-    actions.appendChild(tool);
 
     /*
      * HOW BIG THE SHAVE IS, on a slider, because the right answer depends
