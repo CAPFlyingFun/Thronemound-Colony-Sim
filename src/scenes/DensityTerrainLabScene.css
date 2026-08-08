@@ -1385,3 +1385,13 @@
 .density-lab-subrow .density-lab-button[data-useless="1"] {
   text-decoration: line-through;
 }
+
+/* The brush-size slider. Wide enough for a thumb, and it keeps its own
+ * touches — the look-drag lives on the same screen and would otherwise
+ * swallow every adjustment as a camera pan. */
+.density-lab-brush {
+  width: 132px;
+  accent-color: #6fc8e9;
+  touch-action: none;
+  pointer-events: auto;
+}

@@ -312,10 +312,24 @@ export class IslandStream {
 
   /** Relax the field over a LOCAL sample box — the smoothing brush. The
    *  box is what a brush just returned, so no conversion is needed. */
+  /** The same box, from a WORLD-space sphere: centre and radius in world
+   *  units, which is how a hand-aimed brush thinks. */
+  boxAround(centre: Vec3Like, radius: number): BrushResult['bounds'] {
+    const lx = (centre.x - this.originWorldX) / CELL_SIZE;
+    const ly = (centre.y - this.bandFloorWu) / CELL_SIZE;
+    const lz = (centre.z - this.originWorldZ) / CELL_SIZE;
+    const r = radius / CELL_SIZE;
+    return {
+      minX: Math.floor(lx - r), minY: Math.floor(ly - r), minZ: Math.floor(lz - r),
+      maxX: Math.ceil(lx + r), maxY: Math.ceil(ly + r), maxZ: Math.ceil(lz + r),
+    };
+  }
+
   smoothBox(
     bounds: BrushResult['bounds'], strength?: number, maxShift?: number,
+    onlyCarve?: boolean,
   ): BrushResult['bounds'] | null {
-    const result = this.field.smoothBox(bounds, strength, maxShift);
+    const result = this.field.smoothBox(bounds, strength, maxShift, onlyCarve);
     if (result.changedSamples === 0) return null;
     this.remember(result.bounds);
     return result.bounds;

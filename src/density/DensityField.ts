@@ -215,6 +215,7 @@ export class DensityField {
    */
   smoothBox(
     bounds: BrushResult['bounds'], strength = 0.5, maxShift = Infinity,
+    onlyCarve = false,
   ): { changedSamples: number; bounds: BrushResult['bounds'] } {
     const minX = clamp(Math.floor(bounds.minX), 0, this.samplesX - 1);
     const minY = clamp(Math.floor(bounds.minY), 0, this.samplesY - 1);
@@ -257,6 +258,18 @@ export class DensityField {
            * cap; a roof one sample thick is a huge one and is refused.
            */
           let next = here + (sum / n - here) * k;
+          /*
+           * ONE-WAY: a smoothing brush may SHAVE soil and never add it.
+           *
+           * This is what stops it shrinking a tunnel. A blur moves a
+           * surface both ways — it shaves the ridges that poke in, and it
+           * FILLS the hollows, and filling is how a roof comes down on a
+           * passage barely wider than the animal in it. Refusing the fill
+           * direction keeps every bump-removal and makes narrowing
+           * arithmetically impossible: no sample ever becomes more solid
+           * than it already was.
+           */
+          if (onlyCarve && next > here) continue;
           const shift = next - here;
           if (shift > maxShift) next = here + maxShift;
           else if (shift < -maxShift) next = here - maxShift;
