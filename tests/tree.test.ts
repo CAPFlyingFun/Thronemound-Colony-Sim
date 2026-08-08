@@ -7,6 +7,7 @@
  * any of it — which is the property that stops an LOD swap reading as a pop.
  */
 
+import { existsSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { BARKS, buildTree, growTree, TreeSolid, type TreeSpec } from '../src/world/tree';
@@ -72,9 +73,23 @@ describe('the tree', () => {
     }
   });
 
-  it('offers exactly the four barks that ship with it', () => {
-    expect(BARKS.length).toBe(4);
-    expect(new Set(BARKS).size).toBe(4);
+  it('offers only barks that actually ship, with no duplicates', () => {
+    expect(BARKS.length).toBeGreaterThan(0);
+    expect(new Set(BARKS).size).toBe(BARKS.length);
+    /* The two withdrawn for carrying a seller's watermark must not creep
+     * back by being re-listed — the files are gone, so a name without a
+     * file is a tree with no bark at all. */
+    expect(BARKS).not.toContain('bark-pale');
+    expect(BARKS).not.toContain('bark-oak');
+  });
+
+  it('has a file on disk for every bark it lists', () => {
+    /* The list and the folder are two places that have to agree, and they
+     * are edited separately — a name with no file loads nothing and the
+     * tree quietly arrives untextured. Cheaper to fail here. */
+    for (const bark of BARKS) {
+      expect(existsSync(`public/tree-tex/${bark}.jpg`), `${bark}.jpg`).toBe(true);
+    }
   });
 
   it('scales with the spec rather than baking in one size', () => {

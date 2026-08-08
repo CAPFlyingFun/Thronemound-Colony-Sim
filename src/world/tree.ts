@@ -23,8 +23,24 @@
 
 import * as THREE from 'three';
 
-/** The four barks that ship with the game. One is picked per tree. */
-export const BARKS = ['bark-grey', 'bark-lichen', 'bark-pale', 'bark-oak'] as const;
+/**
+ * The barks that ship with the game. One is picked per tree.
+ *
+ * There were four. Two of them — a pale ridged one and a warm brown one —
+ * were stock photographs with the seller's watermark still on them, tiled
+ * across the image at low opacity. They rendered: the mark went onto the
+ * trunk with everything else, and at half a millimetre a texel it is
+ * legible. Withdrawn, files and all.
+ *
+ * ADDING ONE: drop a square JPEG into `public/tree-tex/` and put its name
+ * here. Nothing else needs to change — the scene picks from this list by
+ * seed, and the mesh derives its tiling from the trunk's own girth. About
+ * 1024 square is right; the wrap tiles it several times round, so a bigger
+ * image buys less than it costs. It does not need to be seamless top to
+ * bottom (the wrap is mirrored, which hides that join) but the LEFT and
+ * RIGHT edges do meet, so a seamless-horizontal tile is worth having.
+ */
+export const BARKS = ['bark-grey', 'bark-lichen'] as const;
 
 export type BarkName = (typeof BARKS)[number];
 
