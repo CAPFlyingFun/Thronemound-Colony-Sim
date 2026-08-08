@@ -59,6 +59,10 @@ if (host) {
   } else if (scene === 'dig') {
     // The original dig room remains available explicitly as a reference rig.
     void import('./scenes/DigScene').then(({ DigScene }) => new DigScene(host));
+  } else if (scene === 'ant-sandbox') {
+  void import('./scenes/sandbox/AntMechanicsSandbox').then(
+    ({ AntMechanicsSandbox }) => new AntMechanicsSandbox(host),
+  );
   } else {
     /*
      * Default and `?scene=island`: Beyond Extinction's Kauai at 1:1000,
