@@ -95,6 +95,31 @@ const SEC_VERTS = (MESH_N - 1) / SECTIONS + 1;
 const WALK_SPEED = 1.5;
 const SPRINT = 3;
 const TURN_RATE = 2.4;
+
+/**
+ * THE STICK'S RESPONSE, which is not the same thing as her top speed.
+ *
+ * The throw is 48 px — about half an inch of thumb — and the reading was
+ * LINEAR past a 12% dead zone, so a quarter of that throw was already a
+ * quarter of full pelt. Measured: 12 px out ran her at 1.87 mm/s, which is
+ * a fifth of her body length every second from the smallest deliberate
+ * nudge a thumb can make. Fine positioning — lining a dig up, stepping onto
+ * a trunk — was all in the first few pixels.
+ *
+ * Squaring the deflection past the dead zone spends the throw where it is
+ * wanted: the bottom half of the stick gets a quarter of the speed it used
+ * to, the top of the stick is untouched, and the curve is smooth so there
+ * is no step to feel. Keys are unaffected — a key is already all or
+ * nothing, and squaring one is squaring one.
+ */
+function stickCurve(raw: number): number {
+  const size = Math.abs(raw);
+  if (size < 0.12) return 0;
+  /* Re-based off the dead zone, so the first pixel PAST it is a crawl and
+   * not a jump to 12% — a dead zone that does not rebase is a step. */
+  const t = Math.min(1, (size - 0.12) / (1 - 0.12));
+  return Math.sign(raw) * t * t;
+}
 const RIDE = 1.3 / MM;
 
 /* Scratch space for the per-frame hot paths (rail, pose, camera) —
@@ -471,6 +496,11 @@ export class IslandScene {
   private readonly velocity = new THREE.Vector3();
 
   readonly input = { walk: 0, yaw: 0, dig: false, sprint: false };
+
+  /** The WALK/RUN latch, which is the only sprint a thumb has. */
+  private running = false;
+
+  private paceChip: HTMLButtonElement | null = null;
 
   /**
    * THE BORE — the dig room's control, brought over whole rather than
@@ -3196,6 +3226,29 @@ export class IslandScene {
     actions.appendChild(view);
 
     /*
+     * WALK / RUN — and on a touch screen it is the ONLY sprint there is.
+     *
+     * Shift has always doubled her pace for the PC hand; a thumb had no
+     * equivalent, so a phone was locked to 7.5 mm/s whatever it did. The
+     * chip is a latch rather than a held button because there is nowhere
+     * left on a phone to hold a second finger down: the left half of the
+     * screen is the stick and the right half is the look-drag.
+     */
+    this.paceChip = document.createElement('button');
+    this.paceChip.className = 'density-lab-button density-lab-mode';
+    this.paceChip.textContent = 'WALK';
+    this.paceChip.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      this.running = !this.running;
+      this.paceChip!.textContent = this.running ? 'RUN' : 'WALK';
+      /* Written HERE as well as in `applyKeys`, because that only runs on a
+       * key event — on a phone there are none, so the latch would have sat
+       * there doing nothing until someone plugged a keyboard in. */
+      this.input.sprint = this.running;
+    });
+    actions.appendChild(this.paceChip);
+
+    /*
      * WASD for the PC hand (playtest: "I was having trouble moving"):
      * W/S walk, A/D turn, Shift sprint, Space DIGS (hold), B opens the nest
      * tools, V swaps the view. There is no aim key: she digs where the view
@@ -3219,7 +3272,9 @@ export class IslandScene {
         this.input.walk = forward;
         this.input.yaw = turn;
       }
-      this.input.sprint = k.has('shift');
+      /* Shift OR the latch — the key is a hold and the chip is a toggle,
+       * and either one asking for a run is a run. */
+      this.input.sprint = k.has('shift') || this.running;
       /* Space is the shovel, and it is HELD — but only once DIG is armed. */
       const space = k.has(' ');
       if (space !== this.spaceWasDown) {
@@ -3279,8 +3334,8 @@ export class IslandScene {
       if (e.pointerId === this.stickPointer) {
         const dx = Math.max(-48, Math.min(48, e.clientX - this.stickOrigin.x));
         const dy = Math.max(-48, Math.min(48, e.clientY - this.stickOrigin.y));
-        this.input.yaw = Math.abs(dx / 48) < 0.12 ? 0 : dx / 48;
-        this.input.walk = Math.abs(dy / 48) < 0.12 ? 0 : -dy / 48;
+        this.input.yaw = stickCurve(dx / 48);
+        this.input.walk = stickCurve(-dy / 48);
         this.stickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
       } else if (e.pointerId === this.lookPointer) {
         if (this.firstPerson) {
