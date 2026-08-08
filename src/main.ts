@@ -60,6 +60,10 @@ if (host) {
   } else if (scene === 'dig') {
     // The original dig room remains available explicitly as a reference rig.
     void import('./scenes/DigScene').then(({ DigScene }) => new DigScene(host));
+  } else if (scene === 'ant-sandbox') {
+  void import('./scenes/sandbox/AntMechanicsSandbox').then(
+    ({ AntMechanicsSandbox }) => new AntMechanicsSandbox(host),
+  );
   } else if (scene === 'rail') {
     /*
      * The monorail room: the coaster-style tunnel builder on its own, with a
