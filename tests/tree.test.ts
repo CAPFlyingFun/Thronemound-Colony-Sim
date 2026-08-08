@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { BARKS, growTree, TreeSolid, type TreeSpec } from '../src/world/tree';
+import { BARKS, buildTree, growTree, TreeSolid, type TreeSpec } from '../src/world/tree';
 
 const SPEC: TreeSpec = { girth: 200, height: 5200, seed: 12345 };
 
@@ -157,5 +157,50 @@ describe('the tree you can climb', () => {
     const mid = low.a.clone().lerp(low.b, 0.5);
     expect(solid.solidAt(mid.x, mid.y, mid.z)).toBe(false);
     expect(solid.solidAt(mid.x + origin.x, mid.y + origin.y, mid.z + origin.z)).toBe(true);
+  });
+});
+
+/**
+ * WHICH WAY THE SKIN FACES.
+ *
+ * The tree's material is single-sided, so a backwards winding does not draw
+ * a slightly-wrong tree — it culls the near wall and leaves you looking at
+ * the INSIDE of the far one. A solid metre-thick trunk then reads as a
+ * hollow funnel you are standing in, which is exactly how it was reported.
+ *
+ * Nothing else in the scene would have caught it: the terrain's material is
+ * double-sided, so it has never cared which way its triangles face. This is
+ * the check that would have.
+ */
+describe('the tree is skinned outward', () => {
+  it('winds every triangle to face out of the wood', () => {
+    const built = buildTree(SPEC, new THREE.Texture(), 'bark-grey');
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+    const face = new THREE.Vector3();
+    const vertex = new THREE.Vector3();
+
+    for (const level of built.root.levels) {
+      const mesh = (level.object as THREE.Group).children[0] as THREE.Mesh;
+      const pos = mesh.geometry.getAttribute('position');
+      const nrm = mesh.geometry.getAttribute('normal');
+      const idx = mesh.geometry.getIndex()!;
+      let inward = 0;
+      for (let i = 0; i < idx.count; i += 3) {
+        a.fromBufferAttribute(pos, idx.getX(i));
+        b.fromBufferAttribute(pos, idx.getX(i + 1));
+        c.fromBufferAttribute(pos, idx.getX(i + 2));
+        face.crossVectors(b.sub(a), c.sub(a));
+        if (face.lengthSq() < 1e-18) continue;
+        vertex.fromBufferAttribute(nrm, idx.getX(i));
+        /* The geometric winding and the shading normal must agree: a
+         * triangle whose cross product opposes its own vertex normal is one
+         * the renderer will cull from outside. */
+        if (face.dot(vertex) <= 0) inward += 1;
+      }
+      expect(inward).toBe(0);
+    }
+    built.dispose();
   });
 });

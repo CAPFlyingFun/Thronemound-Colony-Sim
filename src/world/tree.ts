@@ -288,8 +288,21 @@ function skin(limbs: readonly Limb[], d: Detail, barkTile: number): THREE.Buffer
       const a1 = ring0 + s + 1;
       const b0 = ring0 + stride + s;
       const b1 = ring0 + stride + s + 1;
-      idx[f] = a0; idx[f + 1] = b0; idx[f + 2] = a1;
-      idx[f + 3] = a1; idx[f + 4] = b0; idx[f + 5] = b1;
+      /*
+       * WOUND OUTWARD. This was `(a0, b0, a1)` and `(a1, b0, b1)`, which is
+       * the mirror of it — every one of the seven thousand triangles faced
+       * INTO the tree. The terrain's material is double-sided so nothing
+       * else in the scene had ever noticed a backwards winding; the tree's
+       * is not, so its near wall was culled and what you saw through the
+       * gap was the inside of the far wall. A solid trunk that reads as a
+       * hollow funnel you are standing inside.
+       *
+       * Around the limb is +v and along it is +axis, and `cross(v, axis)`
+       * is the outward normal by construction — so a triangle that steps
+       * AROUND first and ALONG second faces out.
+       */
+      idx[f] = a0; idx[f + 1] = a1; idx[f + 2] = b0;
+      idx[f + 3] = a1; idx[f + 4] = b1; idx[f + 5] = b0;
       f += 6;
     }
   }
