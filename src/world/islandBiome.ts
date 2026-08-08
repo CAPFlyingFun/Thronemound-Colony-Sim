@@ -59,6 +59,24 @@ export function makeBiomeMaterial(
   tex: BiomeTextureSet,
   clip?: { value: THREE.Vector4 },
   soilSlope = false,
+  /**
+   * The TOP of the streamed soil's depth band, in world units.
+   *
+   * The band is a fixed 256 mm of samples anchored under the ground at the
+   * window's centre, which leaves about 80 mm of headroom overhead — plenty
+   * on a plain and not nearly enough on Kauai, where a 192 mm window can
+   * hold hundreds of millimetres of relief. Where the hillside climbs past
+   * that ceiling the field has nowhere to put it, so the column caps and
+   * the mesher lays a FLAT LID at the ceiling: the flat shelf in the
+   * screenshot, painted as excavation because its top reads far below the
+   * original ground.
+   *
+   * Both variants need to know where that lid is. The soil throws its own
+   * lid away, and the island — which is otherwise cut out wherever the
+   * window covers — keeps drawing above it, so what shows through is the
+   * real hillside instead of a hole.
+   */
+  ceiling?: { value: number },
 ): THREE.MeshStandardMaterial {
   const mat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
@@ -74,7 +92,7 @@ export function makeBiomeMaterial(
    * program silently REUSED by the others, whose own injections never ran.
    */
   mat.customProgramCacheKey = () =>
-    `biome${clip ? '-clip' : ''}${soilSlope ? '-soil' : ''}`;
+    `biome${clip ? '-clip' : ''}${soilSlope ? '-soil' : ''}${ceiling ? '-cap' : ''}`;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.tSand = { value: tex.sand };
     shader.uniforms.tGrass = { value: tex.grass };
@@ -84,6 +102,7 @@ export function makeBiomeMaterial(
     shader.uniforms.tSnow = { value: tex.snow };
     shader.uniforms.tReef = { value: tex.reef };
     if (clip) shader.uniforms.uClip = clip;
+    if (ceiling) shader.uniforms.uCeil = ceiling;
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
@@ -111,6 +130,7 @@ varying vec3 vBiomeW;
 varying vec3 vBiomeN;
 uniform sampler2D tSand, tGrass, tJungle, tRock, tMtn, tSnow, tReef;
 ${clip ? 'uniform vec4 uClip;' : ''}
+${ceiling ? 'uniform float uCeil;' : ''}
 float gWet = 0.0; // shoreline wetness (set in map_fragment, used for roughness)
 // three uploads sRGB textures with an sRGB internal format on WebGL2, so
 // texture2D already returns LINEAR — no manual decode needed.
@@ -152,9 +172,19 @@ vec3 triplanar(sampler2D tex, vec3 wp, vec3 n, float scale) {
       .replace(
         '#include <clipping_planes_fragment>',
         (clip
+          /* Cut out for the fine soil only where the fine soil actually
+           * REACHES: below the band's ceiling. Above it the window holds
+           * nothing but its own flat lid, and cutting the island away there
+           * was what replaced a hillside with a shelf. */
           ? 'if (vBiomeW.x > uClip.x && vBiomeW.x < uClip.z\n'
-            + '  && vBiomeW.z > uClip.y && vBiomeW.z < uClip.w) discard;\n'
-          : '')
+            + '  && vBiomeW.z > uClip.y && vBiomeW.z < uClip.w\n'
+            + (ceiling ? '  && vBiomeW.y < uCeil\n' : '')
+            + ') discard;\n'
+          /* And the soil never draws its lid. A capped column is not ground,
+           * it is the band running out of room, so the one surface it can
+           * offer up there is a lie — thrown away, and the island sheet
+           * behind it is the truth. */
+          : (ceiling ? 'if (vBiomeW.y > uCeil) discard;\n' : ''))
         + '#include <clipping_planes_fragment>',
       )
       .replace(

@@ -168,3 +168,47 @@ describe('the stroke', () => {
     expect(Math.abs(biteAt - peakAt)).toBeLessThan(0.02);
   });
 });
+
+/**
+ * A TAP THAT LANDS IN THE TAIL OF THE LAST STROKE.
+ *
+ * Releasing mid-lunge lets the stroke finish, which is right. What was
+ * wrong is that a press arriving during that tail was dropped on the floor,
+ * so tapping faster than about twice a second silently ate presses.
+ */
+describe('every press earns a bite', () => {
+  const dt = 1 / 60;
+
+  /** Tap once: press for a frame, release, and run on for `tail` seconds.
+   *  Returns how many bites landed. */
+  const tap = (rig: BoreRig, tail: number): number => {
+    let bites = 0;
+    if (rig.step(dt, { yaw: 0, forward: 0, dig: true }).bite) bites += 1;
+    for (let t = 0; t < tail; t += dt) {
+      if (rig.step(dt, { yaw: 0, forward: 0, dig: false }).bite) bites += 1;
+    }
+    return bites;
+  };
+
+  it('bites once for a tap from rest', () => {
+    expect(tap(new BoreRig(), 0.6)).toBe(1);
+  });
+
+  it('bites again for a tap landing while the last stroke recovers', () => {
+    const rig = new BoreRig();
+    // First tap, then only long enough for the strike to have passed —
+    // the stroke is still running its recovery out.
+    expect(tap(rig, 0.12)).toBe(1);
+    expect(tap(rig, 0.6)).toBe(1);
+  });
+
+  it('does not double up when the press lands before the strike', () => {
+    const rig = new BoreRig();
+    // Press and hold across a single strike: exactly one bite per stroke.
+    let bites = 0;
+    for (let t = 0; t < STROKE_SECONDS * 0.9; t += dt) {
+      if (rig.step(dt, { yaw: 0, forward: 0, dig: true }).bite) bites += 1;
+    }
+    expect(bites).toBe(1);
+  });
+});

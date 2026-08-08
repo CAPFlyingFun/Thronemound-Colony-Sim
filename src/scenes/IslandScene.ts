@@ -308,6 +308,11 @@ export class IslandScene {
   /** The fine window's rectangle, in world units. Island fragments inside die. */
   private readonly clip = { value: new THREE.Vector4(0, 0, 0, 0) };
 
+  /** The top of the streamed soil's depth band, in world units — see
+   *  `refreshBandTop`. Out of reach until the stream exists, so until then
+   *  the island cuts out as before and no soil is thrown away. */
+  private readonly bandTop = { value: 1e9 };
+
   private readonly chunkMeshes = new Map<string, THREE.Mesh>();
 
   private readonly queue: { cx: number; cy: number; cz: number }[] = [];
@@ -620,8 +625,8 @@ export class IslandScene {
     /* BOTH surfaces band by the stride-1 data slope (aGroundNy): the
      * island's LOD rings and the soil window then agree on where rock
      * meets sand, instead of each mesh reading its own normals. */
-    this.islandMaterial = makeBiomeMaterial(textures, this.clip, true);
-    this.soilMaterial = makeBiomeMaterial(textures, undefined, true);
+    this.islandMaterial = makeBiomeMaterial(textures, this.clip, true, this.bandTop);
+    this.soilMaterial = makeBiomeMaterial(textures, undefined, true, this.bandTop);
     /* The soil window's rim lies coplanar with the island surface it
      * replaces — polygon offset pulls the soil forward a hair so the
      * seam is a line, not a z-fight shimmer. */
@@ -1123,7 +1128,21 @@ export class IslandScene {
     this.clipToWindow();
   }
 
+  /**
+   * Where the streamed band's ceiling currently sits, for both shaders.
+   *
+   * The band moves — it re-anchors under whatever the window's centre is
+   * standing on — so this has to be refreshed with it, or the island keeps
+   * its cut-out at the old altitude and a strip of hill goes missing.
+   */
+  private refreshBandTop(): void {
+    if (!this.stream) return;
+    this.bandTop.value = this.stream.bandFloorWu
+      + (CELLS_Y - CAP_PLANES - 1) * CELL_SIZE;
+  }
+
   private clipToWindow(): void {
+    this.refreshBandTop();
     this.meshedRect.x0 = 0;
     this.meshedRect.z0 = 0;
     this.meshedRect.x1 = WINDOW_CELLS;
@@ -1456,7 +1475,7 @@ export class IslandScene {
     if (this.queenReady && this.queen.jawPosition(centre)) {
       hull = Math.max(hull, centre.sub(this.at).dot(aim));
     }
-    centre.copy(this.at).addScaledVector(aim, hull);
+    centre.copy(this.at).addScaledVector(aim, this.biteSeat(aim, hull));
 
     let touched = 0;
     let minX = Infinity; let minY = Infinity; let minZ = Infinity;
@@ -1512,6 +1531,39 @@ export class IslandScene {
         }
       }
     }
+  }
+
+  /**
+   * HOW FAR ALONG THE AIM THE SCOOP SITS — where it MEETS SOIL, not at a
+   * fixed arm's length.
+   *
+   * Her jaws are about five millimetres out and the scoop is three deep, so
+   * an anchor pinned to her reach is entirely INSIDE the hill the moment
+   * she is closer to a face than that. It still carves: it opens a bubble a
+   * few millimetres in, sealed behind an unbroken wall, so nothing appears
+   * to happen — and stepping BACK until the scoop straddles the surface is
+   * what made it work again. Reported exactly that way: right up against
+   * dirt it will not dig, back up and it will.
+   *
+   * So the ray is walked out from her centre to the first soil it meets and
+   * the scoop is seated a half-depth past that, which puts its near lip in
+   * the air on this side of every face however close she is. Finding no
+   * soil inside her reach means she is aiming at open sky, and the arm's
+   * length is the honest answer again — that is the stroke that misses, and
+   * it should.
+   *
+   * The preview draws from this same number, so what the ghost promises is
+   * what the stroke takes.
+   */
+  private biteSeat(aim: THREE.Vector3, reach: number): number {
+    const step = CELL_SIZE * 0.5;
+    const far = reach + SCOOP_DEEP_MM / MM;
+    for (let d = 0; d <= far; d += step) {
+      if (this.soilDensityAt(
+        this.at.x + aim.x * d, this.at.y + aim.y * d, this.at.z + aim.z * d,
+      ) > 0) return Math.max(0, d + SCOOP_DEEP_MM / 2 / MM);
+    }
+    return reach;
   }
 
   /** Builder ids are `b{k}-{i}` and `b{k}-e{i}` — how its half of a merged
@@ -1574,15 +1626,21 @@ export class IslandScene {
     if (!this.smoothGhost) this.smoothGhost = make(0x6fc8e9, 0.22);
 
     const aim = this.boreAim();
-    const hull = NOSE_REACH + JAW_PAST_NOSE;
+    /* The same seat the stroke uses, so the ghost cannot promise a hole
+     * somewhere the cut will not make one. */
+    const hull = this.biteSeat(aim, NOSE_REACH + JAW_PAST_NOSE);
 
     /* The CUT, as the pair of scoops it actually removes — wide and low,
      * her real mouthful shape, because a round marker would promise a
      * hole of entirely the wrong proportions. */
     const span = (SCOOP_DEEP_MM * 2) / MM;
     S_FWD.copy(aim);
-    S_RIGHT.set(S_FWD.z, 0, -S_FWD.x);
-    if (S_RIGHT.lengthSq() < 1e-6) S_RIGHT.set(1, 0, 0);
+    /* Across her, in HER frame. A right vector built out of world Y —
+     * `(aim.z, 0, -aim.x)` — is the ghost lying flat against the horizon
+     * while the wide scoop it stands for is lying flat against the wall
+     * she is on, and it degenerates outright on a plumb aim. */
+    S_RIGHT.crossVectors(S_FWD, this.up);
+    if (S_RIGHT.lengthSq() < 1e-8) S_RIGHT.set(S_FWD.z, S_FWD.x, S_FWD.y);
     S_RIGHT.normalize();
     S_UP.crossVectors(S_RIGHT, S_FWD).normalize();
     const cut = this.toolGhost;
