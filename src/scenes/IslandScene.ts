@@ -144,6 +144,17 @@ const SMOOTH_STRENGTH = 0.5;
 const SMOOTH_PASSES = 2;
 
 /**
+ * The most any one sample may move per pass, in field units.
+ *
+ * A blur cannot tell the tunnel's air from the sky's, so a slab of soil
+ * between the two averages with the OUTSIDE and thins — near the surface
+ * it thinned right through, and the roof came down. A third of a cell
+ * still relaxes the shallow ridges a foot catches on, and refuses the
+ * large correction that a one-sample roof would need to collapse.
+ */
+const SMOOTH_MAX_SHIFT = CELL_SIZE / 3;
+
+/**
  * How far OUTSIDE the cut the relaxation reaches, in samples.
  *
  * The ridge that matters is not inside this stroke's hole — it is the
@@ -157,6 +168,9 @@ const SMOOTH_GROW = 2;
  *  wall — the near plane is tiny, but a camera INSIDE soil renders the
  *  whole world inside-out. */
 const EYE_SKIN = 0.5 / MM;
+
+/** How far forward of her centre the eye rides, along the AIM. */
+const EYE_FORWARD = 1.3 / MM;
 
 /** How far past her centre the jaws reach when the model has not loaded. */
 const NOSE_REACH = 4.5 / MM;
@@ -1263,10 +1277,24 @@ export class IslandScene {
      * rather than let an embedded frame escape — one embedded frame is a
      * see-through world.
      */
-    if (this.stream?.solidAtWu(this.at.x, this.at.y, this.at.z) === true) {
-      // Three CONSECUTIVE solid frames means truly embedded. One frame is
-      // usually the 1 mm rounding flickering while she hugs a curved wall —
-      // snapping on it yanked her off the shaft wall mid-climb, every climb.
+    const here = this.stream?.solidAtWu(this.at.x, this.at.y, this.at.z);
+    /*
+     * ...and the VOID is as bad as the soil.
+     *
+     * `solidAtWu` answers null off the modelled window — neither dirt nor
+     * a tunnel, just nowhere. She could end up there under the ground and
+     * be stranded in black with nothing to stand on and nothing to dig
+     * (reported, and escaped only by chewing up and down until real soil
+     * arrived). Her side of every surface is the TEXTURED one, so being
+     * off the model is a rescue case exactly like being inside a wall,
+     * and it uses the same last-known-good position.
+     */
+    const adrift = here === null
+      && this.at.y + RIDE < this.walkGroundAt(this.at.x, this.at.z);
+    if (here === true || adrift) {
+      // Three CONSECUTIVE bad frames means it is real. One is usually the
+      // 1 mm rounding flickering while she hugs a curved wall — snapping on
+      // that yanked her off the shaft wall mid-climb, every climb.
       this.embedFrames += 1;
       if (this.embedFrames >= 3 && this.hasSafe) {
         this.at.copy(this.lastSafe);
@@ -1313,17 +1341,28 @@ export class IslandScene {
      * gave her one; the fallback is a nose-length along the aim, so the
      * first frames of a session dig where every frame after them does.
      */
+    /*
+     * ON THE AIM LINE THROUGH HER CENTRE — never on the jaw BONE.
+     *
+     * The bone is the obvious anchor and it is the wrong one, twice over.
+     * It rides the visual model, which sits above her centre-line and
+     * lags her by a frame of easing, so the cut opened ABOVE where the
+     * crosshair pointed — reported as aiming high, and settling onto the
+     * crosshair only once the model had bedded into the tunnel and its
+     * jaw had come down to the line. And the same offset means a bone-
+     * anchored tunnel runs parallel to her path a few millimetres aside,
+     * which is its own old bug.
+     *
+     * So the bone is allowed to say how FAR along the aim her jaws are,
+     * and nothing else. The cut is centred on the ray the camera looks
+     * down, so what the crosshair covers is what disappears.
+     */
     const centre = new THREE.Vector3();
-    const hull = NOSE_REACH + JAW_PAST_NOSE;
-    if (!this.queenReady || !this.queen.jawPosition(centre)) {
-      centre.copy(this.at).addScaledVector(aim, hull);
-    } else {
-      /* Never behind her own face: the bone rides the visual model, which
-       * lags and sways, and a cut landing short opens a pocket she is
-       * already standing in and removes nothing she needed gone. */
-      const along = centre.clone().sub(this.at).dot(aim);
-      if (along < hull) centre.addScaledVector(aim, hull - along);
+    let hull = NOSE_REACH + JAW_PAST_NOSE;
+    if (this.queenReady && this.queen.jawPosition(centre)) {
+      hull = Math.max(hull, centre.sub(this.at).dot(aim));
     }
+    centre.copy(this.at).addScaledVector(aim, hull);
 
     let touched = 0;
     let minX = Infinity; let minY = Infinity; let minZ = Infinity;
@@ -1363,7 +1402,7 @@ export class IslandScene {
       const smoothed = this.stream!.smoothBox({
         minX: minX - SMOOTH_GROW, minY: minY - SMOOTH_GROW, minZ: minZ - SMOOTH_GROW,
         maxX: maxX + SMOOTH_GROW, maxY: maxY + SMOOTH_GROW, maxZ: maxZ + SMOOTH_GROW,
-      }, SMOOTH_STRENGTH);
+      }, SMOOTH_STRENGTH, SMOOTH_MAX_SHIFT);
       if (!smoothed) break;
       minX = Math.min(minX, smoothed.minX); maxX = Math.max(maxX, smoothed.maxX);
       minY = Math.min(minY, smoothed.minY); maxY = Math.max(maxY, smoothed.maxY);
@@ -1630,49 +1669,48 @@ export class IslandScene {
        * right-half drag) turns HER, and pitch is a look, not an orbit. On
        * the rail the eyes follow the BORE's axis — looking up a vertical
        * shaft means looking up it, not at its wall. */
+      /*
+       * THE EYE LOOKS DOWN THE CUT'S OWN RAY.
+       *
+       * `boreAim` is the line the shovel works along, so the camera takes
+       * it whole — same origin, same direction — and the crosshair then
+       * covers exactly what the next stroke removes. The eye used to sit
+       * a little above and ahead of her on her FACING instead, which is a
+       * different ray, and the two disagreed by more the further out you
+       * looked.
+       */
       const fwd = new THREE.Vector3(
         Math.sin(this.facing), 0, Math.cos(this.facing),
       );
       const upv = new THREE.Vector3(0, 1, 0);
-      /* The eye rides ON her centre-line, not above it: the cut is taken
-       * along the line through `at`, so any eye height above that line
-       * makes every tunnel land visibly BELOW the crosshair that aimed it.
-       * A trace of lift stays so level ground doesn't fill half the frame. */
+      const dir = this.boreAim();
       /*
-       * ...and never THROUGH the wall. The eye sits forward of her centre
-       * so the crosshair and the cut agree, but forward is exactly where
-       * the working face is, so in a tight tunnel that offset put the lens
-       * inside soil and the world rendered inside-out. The offset is
-       * walked back until the eye is in air with a little to spare; her
-       * centre is always air, so there is always somewhere to retreat to.
+       * Forward of her centre so her own back does not fill the frame —
+       * but ALONG THE AIM, so the eye stays on the cut's line. And never
+       * through the wall: the offset walks back until the lens is in air
+       * with a little to spare, and her centre is always air, so there is
+       * always somewhere to retreat to.
        */
       const eye = this.at.clone();
-      const reach = S_FWD.copy(fwd).multiplyScalar(0.26).addScaledVector(upv, 0.06);
       for (let t = 1; t > 0.001; t -= 0.2) {
-        const px = this.at.x + reach.x * t;
-        const py = this.at.y + reach.y * t;
-        const pz = this.at.z + reach.z * t;
+        const px = this.at.x + dir.x * EYE_FORWARD * t;
+        const py = this.at.y + dir.y * EYE_FORWARD * t;
+        const pz = this.at.z + dir.z * EYE_FORWARD * t;
         const blocked = this.stream?.solidAtWu(px, py, pz) === true
-          || this.stream?.solidAtWu(px + fwd.x * EYE_SKIN, py + fwd.y * EYE_SKIN,
-            pz + fwd.z * EYE_SKIN) === true;
+          || this.stream?.solidAtWu(px + dir.x * EYE_SKIN, py + dir.y * EYE_SKIN,
+            pz + dir.z * EYE_SKIN) === true;
         if (!blocked) { eye.set(px, py, pz); break; }
       }
       this.camera.position.copy(eye);
-      const dir = fwd.clone().multiplyScalar(Math.cos(this.fpPitch))
-        .addScaledVector(upv, Math.sin(this.fpPitch));
       /*
        * THE EYE'S OWN UP, TURNED WITH THE PITCH — not the world's.
        *
        * Handing `lookAt` a fixed up and a look parallel to it leaves the
        * roll undefined, and three.js picks whatever falls out of a
        * degenerate cross product. Straight down is exactly that case, and
-       * digging aims her straight down all the time: measured, the eye's
-       * right held (-1, 0, 0) to -89° and snapped at -90°, which reads as
-       * the view sitting ninety degrees off the ant.
-       *
-       * Rotating the up by the same pitch keeps it perpendicular to the
-       * look by construction — their dot is `-cos·sin + sin·cos`, zero at
-       * every angle — so there is no singularity left to land on.
+       * digging aims her straight down all the time. Rotating the up by
+       * the same pitch keeps it perpendicular to the look by construction
+       * — their dot is `-cos*sin + sin*cos`, zero at every angle.
        */
       this.camera.up.copy(fwd).multiplyScalar(-Math.sin(this.fpPitch))
         .addScaledVector(upv, Math.cos(this.fpPitch));

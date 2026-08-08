@@ -214,7 +214,7 @@ export class DensityField {
    * above a half will eat a thin wall, so callers should stay well under.
    */
   smoothBox(
-    bounds: BrushResult['bounds'], strength = 0.5,
+    bounds: BrushResult['bounds'], strength = 0.5, maxShift = Infinity,
   ): { changedSamples: number; bounds: BrushResult['bounds'] } {
     const minX = clamp(Math.floor(bounds.minX), 0, this.samplesX - 1);
     const minY = clamp(Math.floor(bounds.minY), 0, this.samplesY - 1);
@@ -246,7 +246,20 @@ export class DensityField {
             const v = at(x + dx, y + dy, z + dz);
             if (Number.isFinite(v)) { sum += v; n += 1; }
           }
-          const next = here + (sum / n - here) * k;
+          /*
+           * CAPPED, and that is what keeps a thin roof standing.
+           *
+           * A blur cannot tell the tunnel's air from the sky's. A sample
+           * in a slab between the two averages with the OUTSIDE and goes
+           * negative, so the roof thins, and near the surface it thinned
+           * straight through — reported as the smoothing pulling the roof
+           * down. A shallow ridge is a small correction and survives the
+           * cap; a roof one sample thick is a huge one and is refused.
+           */
+          let next = here + (sum / n - here) * k;
+          const shift = next - here;
+          if (shift > maxShift) next = here + maxShift;
+          else if (shift < -maxShift) next = here - maxShift;
           if (Math.abs(next - here) < 1e-7) continue;
           this.values[this.index(x, y, z)] = next;
           changedSamples += 1;

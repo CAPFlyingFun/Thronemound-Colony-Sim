@@ -312,8 +312,10 @@ export class IslandStream {
 
   /** Relax the field over a LOCAL sample box — the smoothing brush. The
    *  box is what a brush just returned, so no conversion is needed. */
-  smoothBox(bounds: BrushResult['bounds'], strength?: number): BrushResult['bounds'] | null {
-    const result = this.field.smoothBox(bounds, strength);
+  smoothBox(
+    bounds: BrushResult['bounds'], strength?: number, maxShift?: number,
+  ): BrushResult['bounds'] | null {
+    const result = this.field.smoothBox(bounds, strength, maxShift);
     if (result.changedSamples === 0) return null;
     this.remember(result.bounds);
     return result.bounds;
