@@ -35,7 +35,9 @@ import * as THREE from 'three';
 import './DensityTerrainLabScene.css';
 import { buildSurfaceNets } from '../density/SurfaceNets';
 import { QueenModel } from '../anim/QueenModel';
-import { FOOT_CLEARANCE_MM } from '../anim/legDrive';
+import {
+  FOOT_CLEARANCE_MM, LegDrive, type DriveReport, type LegSetup,
+} from '../anim/legDrive';
 import { CASTE_LENGTH_MM, stanceRadius } from '../anim/hexapod';
 import { buildNestView, type NestView } from '../nest/nestView';
 import { NestDesigner } from '../nest/NestDesigner';
@@ -540,6 +542,42 @@ export class IslandScene {
 
   private readonly wasAt = new THREE.Vector3();
 
+  /**
+   * THE LEGS, DRIVING.
+   *
+   * The island had the foot solver but not this, and the difference is the
+   * whole of the reported skating. `solveFeet` can only move a foot up and
+   * down — the gait owns where it sits fore and aft — so with nothing
+   * telling it where a foot IS in the world from one frame to the next,
+   * nothing could hold one still. The drive plants a stance foot on a world
+   * point and puts it back there every frame, which makes its ground speed
+   * exactly zero however fast the cycle runs. It also means the LEGS move
+   * her: the stick proposes, the planted feet refuse what they cannot
+   * reach, and what survives is her displacement.
+   */
+  private drive: LegDrive | null = null;
+
+  private driveReport: DriveReport | null = null;
+
+  /** How high her body rides, taken from her own rig once it has loaded. */
+  private legRide = RIDE;
+
+  /**
+   * What the legs may ask of the world: the nearest solid to a point,
+   * searched down her own up and then back along it. Null is a real answer
+   * and means nothing to stand on here, which is how a foot knows to stay
+   * up rather than reach into space.
+   */
+  private readonly groundForLegs = {
+    nearest: (at: THREE.Vector3, up: THREE.Vector3, down: number, rise: number) => {
+      const walker = this.walker;
+      if (!walker) return null;
+      const from = S_RAD.copy(at).addScaledVector(up, rise);
+      const dir = S_SPOT.copy(up).negate();
+      return walker.cast(from, dir, rise + down);
+    },
+  };
+
   /** How far the third-person camera is swung off her tail by a drag; it
    *  decays back to zero, which is how the view returns behind her. */
   private camYaw = 0;
@@ -859,6 +897,7 @@ export class IslandScene {
     void this.queen.load().then((ok) => {
       this.queen.root.visible = ok;
       this.queenReady = ok;
+      if (ok) this.buildLegDrive();
     }).finally(() => {
       this.queenSettled = true;
       this.playerReady = true;
@@ -976,6 +1015,50 @@ export class IslandScene {
     this.growForest();
   }
 
+
+  /**
+   * Hand her legs the job of moving her.
+   *
+   * Only once her rig is loaded, because the drive is built out of where
+   * her feet actually rest — `legPlan` is read off the model, not guessed.
+   * Until then the walker steps her along her nose as it always did, which
+   * is what the first second of a session looks like either way.
+   */
+  private buildLegDrive(): void {
+    const setup: LegSetup[] = this.queen.legPlan().map((leg) => ({
+      slot: leg.slot,
+      home: new THREE.Vector3(leg.home[0], leg.home[1], leg.home[2]),
+      reach: leg.reach,
+    }));
+    if (setup.length === 0) return;
+    /*
+     * SEAT HER AT THE HEIGHT HER OWN LEGS IMPLY.
+     *
+     * Measured: her rig rests its feet 0.26 mm ABOVE her body origin, and
+     * the island was seating that origin 1.3 mm above the contact — so her
+     * feet hovered 1.56 mm off the ground, against a downward reach of 1.1
+     * to 1.8 mm, with the search starting higher still. All six legs came
+     * back groping: nothing to stand on, every frame. A leg that never
+     * plants is never anchored, and a foot that is never anchored is free
+     * to slide, which is the skating.
+     *
+     * The ride the legs want is minus their own rest height — her origin a
+     * hair BELOW the contact, because that is where this rig puts the sole
+     * plane. Handing that to the walker makes the body height and the leg
+     * geometry one number instead of two that have to be hoped into
+     * agreement.
+     */
+    const meanFootY = setup.reduce((sum, leg) => sum + leg.home.y, 0) / setup.length;
+    this.legRide = -meanFootY;
+    if (this.walker) {
+      this.at.addScaledVector(this.up, this.legRide - this.walker.tune.ride);
+      (this.walker.tune as { ride: number }).ride = this.legRide;
+    }
+    this.drive = new LegDrive(setup);
+    this.drive.plantAll(
+      { at: this.at, up: this.up, forward: this.fwd }, this.groundForLegs,
+    );
+  }
 
   /* -------------------------------------------------------- the forest */
 
@@ -1933,10 +2016,34 @@ export class IslandScene {
     if (!walker) return;
     const span = SPAN_MM / MM;
 
-    /* The step is along her NOSE, which is already square to her up — so on
-     * a wall it runs up the wall and on a ceiling it runs along the ceiling,
-     * with no component trying to push her through either. */
-    this.at.addScaledVector(this.fwd, speed * dt);
+    /*
+     * THE LEGS MOVE HER, once she has any.
+     *
+     * The stick proposes a shove and a spin; the planted feet refuse what
+     * they cannot reach; what survives is her displacement. That is what
+     * makes the gait match the ground — the cycle and the travel come out
+     * of the same step rather than being two numbers hoped into agreement,
+     * which is what the skating was. Sliding her along her nose is the
+     * fallback for the first second, before her model has loaded.
+     */
+    if (this.drive) {
+      this.driveReport = this.drive.step(
+        dt,
+        { at: this.at, up: this.up, forward: this.fwd },
+        {
+          walk: this.input.walk,
+          yaw: -this.input.yaw,
+          speed: WALK_SPEED * (this.input.sprint ? SPRINT : 1),
+          yawRate: TURN_RATE,
+          /* The walker seats her: two systems both deciding how high she
+           * rides do not average out, they fight. */
+          settle: false,
+        },
+        this.groundForLegs,
+      );
+    } else {
+      this.at.addScaledVector(this.fwd, speed * dt);
+    }
     this.at.x = Math.min(span - 2, Math.max(2, this.at.x));
     this.at.z = Math.min(span - 2, Math.max(2, this.at.z));
 
@@ -1961,7 +2068,20 @@ export class IslandScene {
      * being inside soil, which the walker's own embedded case handles first
      * and this only backs up.
      */
-    if (this.soilDensityAt(this.at.x, this.at.y, this.at.z) > 0) {
+    /*
+     * Tested a little ABOVE her origin, because her origin is not the
+     * lowest part of her — the rig puts its sole plane through it, so a
+     * correctly seated ant has her root a fraction inside the surface and
+     * testing exactly there calls every properly planted step a burial.
+     * Half a millimetre up is clear of the soles and still deep inside
+     * anything that has actually swallowed her.
+     */
+    const probeUp = 0.5 / MM;
+    if (this.soilDensityAt(
+      this.at.x + this.up.x * probeUp,
+      this.at.y + this.up.y * probeUp,
+      this.at.z + this.up.z * probeUp,
+    ) > 0) {
       // Three CONSECUTIVE bad frames means it is real. One is usually the
       // rounding flickering while she hugs a curved wall — snapping on that
       // yanked her off the shaft wall mid-climb, every climb.
@@ -2518,11 +2638,14 @@ export class IslandScene {
      * measure every foot as a height above sea level, which on a wall asks
      * a question the wall has no answer to. `boreFrame` casts along her own
      * up, so a foot on a ceiling is planted on the ceiling. */
+    /* ANCHORED. Without this the solver may only raise and lower a foot,
+     * and nothing in the pipeline knows where one IS from frame to frame —
+     * so nothing can hold one still, and every planted foot skates. */
     this.queen.solveFeet(
       (x, z, y) => this.footingFrom(x, z, y),
       FOOT_CLEARANCE_MM / MM,
       RIDE * 2,
-      undefined,
+      this.drive ? (slot) => this.drive!.anchorFor(slot) : undefined,
       this.boreFrame(),
     );
     /*
@@ -3399,6 +3522,11 @@ export class IslandScene {
       this.walker.fallSpeed = 0;
       this.walker.squareForward({ at: this.at, up: this.up, forward: this.fwd });
     }
+    /* Her feet are anchored to world points; a teleport leaves them behind
+     * on ground she is no longer standing on. */
+    this.drive?.plantAll(
+      { at: this.at, up: this.up, forward: this.fwd }, this.groundForLegs,
+    );
     if (this.stream) {
       const scroll = this.stream.recentreOn(this.at.x, this.at.z);
       if (scroll) this.onScroll(scroll);
