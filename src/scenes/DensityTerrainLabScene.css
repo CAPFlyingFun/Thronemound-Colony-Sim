@@ -1333,3 +1333,50 @@
   background: rgba(90, 30, 15, 0.82);
   color: #ffd0a8;
 }
+
+/*
+ * THE BUILDER'S ROWS — palette, joint chips, points.
+ *
+ * They live INSIDE `.density-lab-actions`, as ordinary flex children, and
+ * that is the whole fix for the screenshot where Y-SPLIT sat on top of DIG
+ * and DOWN sat behind FOOD: `.density-lab-actions` is absolutely positioned
+ * against the same corner, so every row given that class landed in exactly
+ * the same place. One positioned container, many rows in its column.
+ *
+ * Right-aligned to match the column they hang under, wrapping rather than
+ * running off the edge — seven joint chips will not fit a phone's width in
+ * one line and must not try.
+ */
+.density-lab-subrow {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  align-items: center;
+  max-width: min(58vw, 460px);
+  pointer-events: auto;
+}
+
+/*
+ * Compact chips in the builder's rows.
+ *
+ * The right-hand column is bottom-anchored and grows UPWARD, so at full
+ * height — joint chips, palette, points, and the standing buttons — it ran
+ * into the quest banner across the top of the screen. These are chosen by
+ * tapping rather than held under a thumb mid-crawl, so they can afford to
+ * be smaller than the mode buttons below them.
+ */
+.density-lab-subrow .density-lab-button {
+  padding: 7px 11px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+/* A struck-through chip is one that would cost stamina and change nothing —
+ * a turn laid on a plumb shaft. Only the strike lives here; the DIMMING is
+ * an inline style, because stamina drives it frame by frame and an inline
+ * style would win over this rule anyway. One owner per property. */
+.density-lab-subrow .density-lab-button[data-useless="1"] {
+  text-decoration: line-through;
+}

@@ -1916,25 +1916,30 @@ export class IslandScene {
     const len = tan.length();
     tan.divideScalar(len);
     /*
-     * WHICH WAY SHE TRAVELS IS OWNED, NOT READ OFF THE CAMERA.
+     * BACK IS AN ABOUT-TURN, NOT A JOURNEY — and that is the whole rule.
      *
-     * This line used to be `if (|align| > 0.35) railDir = align >= 0 ? 1 :
-     * -1` — her direction along the tube re-derived every frame from
-     * `facing`, which is the number the look-drag writes. Pan the view far
-     * enough off the tube's axis and she reversed, and because the model's
-     * forward is `tangent × railDir` the body span round with it. That is
-     * the "body angle is not the direction" report, and no threshold fixes
-     * it: while the look owns direction the two can never settle.
+     * `railDir` is which way she FACES along the tube. Forward walks her
+     * that way. Back does not walk her anywhere at all: it turns her
+     * round, once, and she stays where she is for it. Then forward walks
+     * her the new way. So the stick always means the same two things —
+     * "go the way I am pointed" and "point the other way" — and neither
+     * can drift out of step with the other.
      *
-     * So direction is state now. It changes when she is DRIVEN backwards,
-     * and at a junction when the points are thrown — never because of
-     * where the camera happens to point. Reversing still turns her round
-     * once per press, which is the one place a stick may set it.
+     * Three designs got here. The first read direction off `facing`, so
+     * panning the camera reversed her. The second latched on a back-press
+     * AND travelled on the same press, which left her walking forward
+     * while the stick was held back, and forward meaning "up" ever after —
+     * "the stick and movement is like one move delayed". The third made
+     * the stick's sign pick the direction outright, which is stable but
+     * still moves her on the press that should only be turning her round.
+     * The reported want is exact: switch direction, and do not move for
+     * the first change of the joystick.
      */
-    const reversing = speed < -1e-6;
-    if (reversing && !this.railRev) this.railDir = this.railDir === 1 ? -1 : 1;
-    this.railRev = reversing;
-    const drive = Math.abs(speed);
+    const backNow = speed < -1e-6;
+    if (backNow && !this.railRev) this.railDir = this.railDir === 1 ? -1 : 1;
+    this.railRev = backNow;
+    /* Only forward is travel. An about-turn costs a press, not a metre. */
+    const drive = backNow ? 0 : Math.max(0, speed);
     this.railT += (drive * this.railDir * dt) / len;
 
     if (this.railT > 1 || this.railT < 0) {
@@ -1964,12 +1969,10 @@ export class IslandScene {
       if (taken) {
         this.railEdge = taken.edge;
         this.railT = taken.startT;
-        /* `dir` is the parameter direction that carries her ONWARD down
-         * the chosen road. Riding backwards keeps that meaning — she is
-         * still going the way she is going — so the reverse latch does not
-         * flip again here; it already turned her round when it was pressed. */
+        /* `taken.dir` carries her ONWARD down the chosen road, and onward
+         * is the only way she can arrive here — back is an about-turn and
+         * never travels — so it is simply her new facing. */
         this.railDir = taken.dir;
-        this.railRev = reversing;
       } else {
         this.railT = Math.min(1, Math.max(0, this.railT)); // dead end
       }
@@ -2019,6 +2022,9 @@ export class IslandScene {
      * a tap turns that into daylight. Distance is measured from her point
      * ON the centerline, not her body, which rides offset toward the floor
      * by nearly the bore radius and would never read as "3 mm close". */
+    /* Her travel along the edge parameter — zero while she is turning
+     * round. Everything below that asks "which way is she going" reads
+     * THIS, so there is one answer to that question. */
     const step = drive * this.railDir;
     let gateId: string | null = null;
     let gateP: THREE.Vector3 | null = null;
@@ -2057,20 +2063,15 @@ export class IslandScene {
     const target = S_TARGET.copy(center).addScaledVector(rad, Math.max(0, e.r - RIDE));
     this.at.lerp(target, Math.min(1, dt * 12));
     /*
-     * BODY ANGLE *IS* DIRECTION, and now it is so by construction.
+     * BODY ANGLE *IS* DIRECTION, by construction and at all times.
      *
-     * `railDir` is the only thing that says which way she goes, so her
-     * forward is simply the tangent along it — there is no second opinion
-     * left to disagree with. Pulling back throws the direction once (the
-     * reverse latch) and she turns to face the new way, on a level drift
-     * exactly as in a plumb shaft; the two used to have separate rules and
-     * the level one read its direction off the camera.
-     *
-     * Held only while she is actually moving, because a tangent scaled by
-     * a zero speed is a zero-length forward, and a zero-length forward is
-     * a model that snaps to some arbitrary axis the moment she stops.
+     * Set unconditionally, not only while she moves — the about-turn is a
+     * frame in which she changes which way she points and travels nowhere,
+     * so a facing that only updated with motion would leave her pointed
+     * the old way with the turn already spent. There is no zero-length
+     * risk: `tan` is a unit vector and `railDir` is ±1.
      */
-    if (drive > 1e-6) this.railForward.copy(tan).multiplyScalar(this.railDir);
+    this.railForward.copy(tan).multiplyScalar(this.railDir);
     this.railUp.copy(rad).multiplyScalar(-1);
     this.hasSafe = true;
     this.lastSafe.copy(this.at);
@@ -2706,7 +2707,10 @@ export class IslandScene {
         + ` rgba(81, 224, 122, 0.45) ${pct}%, rgba(0, 0, 0, 0) ${pct}%)`;
       for (const btn of this.pieceBtns.values()) {
         btn.style.backgroundImage = fill;
-        btn.style.opacity = ready ? '1' : '0.5';
+        /* Dim for either reason — no strength, or a piece that would do
+         * nothing from here — so one look at a chip says whether tapping
+         * it will achieve anything. */
+        btn.style.opacity = ready && btn.dataset.useless !== '1' ? '1' : '0.5';
       }
     }
     const joint = this.digMode ? this.nearestJoint() : null;
@@ -2729,9 +2733,10 @@ export class IslandScene {
     for (const [kind, btn] of this.pieceBtns.entries()) {
       btn.classList.toggle('is-grip', kind === this.armedPiece);
       const useless = source !== null && !pieceIsUseful(kind, pitch);
-      btn.style.textDecoration = useless ? 'line-through' : '';
       btn.dataset.useless = useless ? '1' : '';
     }
+    // The dimming reads the flag just set, so force it to re-run.
+    this.staminaShown = -1;
   }
 
   /** Rebuild the chip row for the joint she stands at: Y, T, X, and the
@@ -2752,7 +2757,7 @@ export class IslandScene {
       const chip = document.createElement('button');
       chip.className = 'density-lab-button density-lab-mode';
       chip.textContent = (JUNCTION_KINDS as readonly string[]).includes(kind)
-        ? `${kind}-SPLIT` : ROOM_LABELS[kind as keyof typeof ROOM_LABELS];
+        ? kind : ROOM_LABELS[kind as keyof typeof ROOM_LABELS];
       chip.classList.toggle('is-grip', current === kind);
       chip.addEventListener('pointerdown', (e) => {
         e.preventDefault();
@@ -3267,10 +3272,8 @@ export class IslandScene {
      * digs it — so the ghost is always a question before it is an answer.
      */
     const pieceRow = document.createElement('div');
-    pieceRow.className = 'density-lab-actions';
+    pieceRow.className = 'density-lab-subrow';
     pieceRow.style.display = 'none';
-    pieceRow.style.flexWrap = 'wrap';
-    pieceRow.style.justifyContent = 'center';
     this.pieceRow = pieceRow;
     for (const kind of PIECE_BUTTONS) {
       const btn = document.createElement('button');
@@ -3289,7 +3292,7 @@ export class IslandScene {
       this.pieceBtns.set(kind, btn);
       pieceRow.appendChild(btn);
     }
-    actions.parentElement?.appendChild(pieceRow) ?? actions.appendChild(pieceRow);
+    actions.insertBefore(pieceRow, actions.firstChild);
     this.refreshPalette();
 
     /*
@@ -3300,12 +3303,10 @@ export class IslandScene {
      * events — the HUD root swallows none (the untappable-prompt lesson).
      */
     const jointRow = document.createElement('div');
-    jointRow.className = 'density-lab-actions';
+    jointRow.className = 'density-lab-subrow';
     jointRow.style.display = 'none';
-    jointRow.style.flexWrap = 'wrap';
-    jointRow.style.justifyContent = 'center';
     this.jointRow = jointRow;
-    actions.parentElement?.appendChild(jointRow) ?? actions.appendChild(jointRow);
+    actions.insertBefore(jointRow, actions.firstChild);
 
     /*
      * THE POINTS: a chooser that appears only where there is a choice —
@@ -3314,12 +3315,10 @@ export class IslandScene {
      * set to, whatever the camera is doing.
      */
     const switchRow = document.createElement('div');
-    switchRow.className = 'density-lab-actions';
+    switchRow.className = 'density-lab-subrow';
     switchRow.style.display = 'none';
-    switchRow.style.flexWrap = 'wrap';
-    switchRow.style.justifyContent = 'center';
     this.switchRow = switchRow;
-    actions.parentElement?.appendChild(switchRow) ?? actions.appendChild(switchRow);
+    actions.insertBefore(switchRow, actions.firstChild);
 
     /*
      * The angle, where the thumb can see it.

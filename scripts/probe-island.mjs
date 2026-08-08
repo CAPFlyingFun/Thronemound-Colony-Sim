@@ -766,7 +766,43 @@ const points = await page.evaluate(() => {
   const zAfter = s.at.z;
   const keptGoing = (zMid - zBefore) > 0 && (zAfter - zMid) > 0;
 
-  /* The chooser: ride up to the T and see what it offers. */
+  /*
+   * BACK IS AN ABOUT-TURN. The reported want, exactly: "should switch
+   * direction and not move the first change of the joystick, then forward
+   * would be straight up if from straight down". So on a shaft — forward
+   * carries her down; back turns her to face up and travels NOWHERE;
+   * forward then carries her up. Two earlier designs failed here, one by
+   * reversing when the camera panned and one by leaving forward meaning
+   * "up" ever after a single back-press, so all three legs are measured.
+   */
+  const stick = (() => {
+    s.teleportMm(ex, ez);
+    s.at.y = (deep + 20) / 5;
+    s.setFacingForTest(0);
+    for (let i = 0; i < 120 && s.statsForTest().railBound !== 1; i += 1) s.stepForTest(1 / 30, 1);
+    if (s.statsForTest().railBound !== 1) return null;
+    const run = (walk, frames) => {
+      s.input.walk = walk;
+      const y0 = s.at.y;
+      for (let i = 0; i < frames; i += 1) s.stepForTest(1 / 30, 1);
+      return { moved: (s.at.y - y0) * 5, nose: s.railForward.y };
+    };
+    const down = run(1, 15);
+    const turn = run(-1, 15);
+    s.input.walk = 0; s.stepForTest(1 / 30, 3);
+    const up = run(1, 15);
+    s.input.walk = 0;
+    return {
+      downMm: down.moved, downNose: down.nose,
+      turnMm: turn.moved, turnNose: turn.nose,
+      upMm: up.moved, upNose: up.nose,
+    };
+  })();
+
+  /* The chooser: ride up to the T and see what it offers. Re-board first —
+   * the stick test above left her in the SHAFT, on another edge entirely. */
+  board();
+  s.input.walk = 1;
   let offered = null;
   for (let i = 0; i < 400; i += 1) {
     s.stepForTest(1 / 30, 1);
@@ -791,10 +827,19 @@ const points = await page.evaluate(() => {
   s.applyPlanForTest(founding);
   s.teleportMm(28000, 28000);
   s.drainQueueForTest();
-  return { boarded, keptGoing, offered, landed };
+  return { boarded, keptGoing, stick, offered, landed };
 });
 check('she boards the drift', points.boarded);
 check('panning the camera right round does NOT reverse her', points.keptGoing);
+check('forward carries her down the shaft, nose down',
+  !!points.stick && points.stick.downMm < -2 && points.stick.downNose < -0.5,
+  points.stick ? `${points.stick.downMm.toFixed(1)} mm, nose ${points.stick.downNose.toFixed(2)}` : '');
+check('BACK turns her round and travels nowhere',
+  !!points.stick && Math.abs(points.stick.turnMm) < 2 && points.stick.turnNose > 0.5,
+  points.stick ? `${points.stick.turnMm.toFixed(1)} mm, nose ${points.stick.turnNose.toFixed(2)}` : '');
+check('and THEN forward carries her up — the stick never inverts',
+  !!points.stick && points.stick.upMm > 2 && points.stick.upNose > 0.5,
+  points.stick ? `${points.stick.upMm.toFixed(1)} mm, nose ${points.stick.upNose.toFixed(2)}` : '');
 check('the T offers both its roads', !!points.offered
   && points.offered.labels.length === 2, points.offered
   ? points.offered.labels.join(' / ') : 'nothing offered');

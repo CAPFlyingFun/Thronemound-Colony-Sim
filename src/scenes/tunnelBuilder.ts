@@ -89,8 +89,14 @@ export type JointKind = JunctionKind | RoomKind;
 export const ROOM_KINDS: readonly RoomKind[] = ['queen', 'nursery', 'storage', 'food'];
 export const JUNCTION_KINDS: readonly JunctionKind[] = ['Y', 'T', 'X'];
 
+/*
+ * Short on purpose. The chip row is bottom-anchored and grows upward, and
+ * at full labels the seven of them wrapped to two lines, pushing the whole
+ * right-hand column up into the quest banner. One line of seven fits; two
+ * does not. They sit beside the Y/T/X splits, so the context carries them.
+ */
 export const ROOM_LABELS: Record<RoomKind, string> = {
-  queen: "QUEEN'S", nursery: 'NURSERY', storage: 'STORAGE', food: 'FOOD',
+  queen: 'QUEEN', nursery: 'NURSE', storage: 'STORE', food: 'FOOD',
 };
 
 /**
