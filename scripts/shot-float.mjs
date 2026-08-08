@@ -157,6 +157,45 @@ const probe = async (label) => page.evaluate((tag) => {
   }
 
   const up = { x: s.up.x, y: s.up.y, z: s.up.z };
+
+  /*
+   * THE LOWEST POINT OF HER DRAWN BODY, which is the only thing a player can
+   * actually see hovering. A bone is a line inside a tube; the tube's
+   * underside is what meets the bark, and the guard that keeps her out of
+   * the soil moves the WHOLE model rigidly, so the gap the eye reads is not
+   * necessarily the gap at any one claw.
+   */
+  const skinLow = (() => {
+    let lowest = Infinity;
+    const v = { x: 0, y: 0, z: 0 };
+    const walk = (obj) => {
+      if (obj.isSkinnedMesh || obj.isMesh) {
+        const g = obj.geometry;
+        const pos = g?.attributes?.position;
+        if (pos) {
+          obj.updateMatrixWorld();
+          for (let i = 0; i < pos.count; i += 1) {
+            v.x = pos.getX(i); v.y = pos.getY(i); v.z = pos.getZ(i);
+            /* BIND POSE, not the posed one — these vertices are moved by the
+             * skeleton and this ignores it, so the number is a bound on how
+             * low her body reaches and not the live silhouette. The claw
+             * bones above are the authoritative measurement; this is here to
+             * catch the case where the whole model has been lifted clear. */
+            const m = obj.matrixWorld.elements;
+            const wx = m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12];
+            const wy = m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13];
+            const wz = m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14];
+            const e = (wx - s.at.x) * up.x + (wy - s.at.y) * up.y + (wz - s.at.z) * up.z;
+            if (e < lowest) lowest = e;
+          }
+        }
+      }
+      for (const kid of obj.children) walk(kid);
+    };
+    walk(s.queen.root);
+    return lowest;
+  })();
+
   const gaps = feet.map((f) => {
     const hit = nearestSurface(f.x, f.y, f.z, -up.x, -up.y, -up.z, 6);
     /*
@@ -187,6 +226,13 @@ const probe = async (label) => page.evaluate((tag) => {
     minMm: found.length ? Math.min(...found) : null,
     maxMm: found.length ? Math.max(...found) : null,
     missed: gaps.length - found.length,
+    skinLowMm: skinLow * MM,
+    seatToSolidMm: (() => {
+      for (let d = 0; d < 8; d += 0.005) {
+        if (s.soilSolidAt(s.at.x - up.x * d, s.at.y - up.y * d, s.at.z - up.z * d)) return d * MM;
+      }
+      return null;
+    })(),
     /*
      * WHAT IS SHE ACTUALLY ON? Each source of solidity, asked separately at
      * her own centre and a hair below it — because "she is climbing
@@ -234,6 +280,8 @@ const say = (r) => {
       + `min ${r.minMm.toFixed(2)}, max ${r.maxMm.toFixed(2)}  (${r.missed} feet found nothing)`);
     console.log('  ' + r.feet.map((f) => `${f.slot}:${f.gapMm === null ? '—' : f.gapMm.toFixed(2)}[${f.what}]`).join('  '));
   }
+  console.log(`  her ORIGIN sits ${r.seatToSolidMm === null ? '—' : r.seatToSolidMm.toFixed(2)} mm above the collision; `
+    + `her lowest drawn vertex is ${r.skinLowMm.toFixed(2)} mm from it (negative = below her origin)`);
   const solid = r.feet.map((f) => f.solidMm).filter((v) => v !== null);
   console.log(`  claw -> COLLISION surface: `
     + (solid.length

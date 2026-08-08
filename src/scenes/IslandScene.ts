@@ -2654,7 +2654,20 @@ export class IslandScene {
       turn: -this.input.yaw * TURN_RATE,
       digging: this.input.dig ? 1 : 0,
       carrying: 0,
-      headYaw: 0,
+      /*
+       * HER HEAD FOLLOWS THE AIM — ported from the sandbox room, which
+       * drives both of these from its own arrow keys.
+       *
+       * This was `headYaw: 0` with no pitch at all, so she faced dead ahead
+       * whatever the dial said: aiming ninety degrees up a trunk swung the
+       * camera and the bore and left her looking at the bark in front of her
+       * nose. `gaitPose` clamps yaw through the neck's own release curve and
+       * pitch to +16.7/-75 degrees, so handing it a raw camera angle is
+       * safe. In first person her head IS the camera, and turning it would
+       * only fight the view.
+       */
+      headYaw: this.firstPerson ? 0 : -this.camYaw,
+      headPitch: this.aimPitch,
     });
     /* And her FEET are solved in that frame too. The solver has always
      * taken one; the island had been passing `undefined` and letting it
