@@ -49,6 +49,7 @@ import { LoadingOverlay } from './LoadingOverlay';
 import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
 import { SurfaceWalker } from '../world/surfaceWalk';
+import { BARKS, buildTree, type BuiltTree } from '../world/tree';
 import { makeIslandSoil, type IslandSoil } from '../world/islandSoil';
 import {
   loadBiomeTextures, makeBiomeMaterial, type BiomeTextureSet,
@@ -92,6 +93,24 @@ const S_SPOT = new THREE.Vector3();
 /** What is behind an unbuilt chunk once she is under the ground: packed
  *  earth in shadow, rather than the void. */
 const SOIL_DARK = new THREE.Color(0x140f0a);
+
+/**
+ * THE TREE. Three feet through and eighty feet up, in the game's own
+ * millimetres — a metre of girth and twenty-six of height.
+ *
+ * It is planted a hand's breadth from where she starts (700 mm, far enough
+ * to see the whole thing lean away overhead and near enough to walk to),
+ * and its foot is sunk a hundred millimetres INTO the ground. That burial
+ * is not decoration: the island's drawn surface is a 109 mm mesh and the
+ * fine soil window redraws the ground underneath it as she moves, so a tree
+ * seated exactly on the surface would be left hanging in the air the moment
+ * the ground beneath it resolved to something lower. Sunk deep enough to
+ * swallow that difference, the base stays buried whatever the terrain does.
+ */
+const TREE_GIRTH_MM = 1000;
+const TREE_HEIGHT_MM = 26000;
+const TREE_FROM_HER_MM = 700;
+const TREE_BURIED_MM = 100;
 const S_FWD = new THREE.Vector3();
 const S_UP = new THREE.Vector3();
 const S_RIGHT = new THREE.Vector3();
@@ -150,10 +169,14 @@ const SCOOP_DEEP_MM = 3;
 const SMOOTH_STRENGTH = 0.5;
 const SMOOTH_PASSES = 2;
 
-/** The smoothing brush's reach, and the ends of its slider, in mm. */
-const SMOOTH_RADIUS_DEFAULT_MM = 10;
-const SMOOTH_RADIUS_MIN_MM = 4;
-const SMOOTH_RADIUS_MAX_MM = 30;
+/**
+ * The smoothing brush's reach, in mm.
+ *
+ * This used to be a slider running four to thirty, defaulting to ten.
+ * Played, thirty was better everywhere — so it is thirty, and the slider
+ * that only ever wanted pushing to its end is gone.
+ */
+const SMOOTH_RADIUS_MM = 30;
 
 /**
  * The most any one sample may move per pass, in field units.
@@ -325,6 +348,8 @@ export class IslandScene {
    *  come back to. */
   private readonly skyColour = new THREE.Color(0x9cc4e0);
 
+  private tree: BuiltTree | null = null;
+
   private readonly chunkMeshes = new Map<string, THREE.Mesh>();
 
   private readonly queue: { cx: number; cy: number; cz: number }[] = [];
@@ -380,10 +405,8 @@ export class IslandScene {
   /** The shovel, revealed once DIG is armed. */
   private scoopBtn: HTMLButtonElement | null = null;
 
-  private brushRow: HTMLDivElement | null = null;
-
   /** The smoothing brush's radius, in millimetres — the slider's value. */
-  private brushMm = SMOOTH_RADIUS_DEFAULT_MM;
+  private brushMm = SMOOTH_RADIUS_MM;
 
   /** Where the next press will act, drawn before it acts: the cut, and
    *  the halo the same stroke shaves around it. */
@@ -536,6 +559,7 @@ export class IslandScene {
     scrolls: 0,
     lastScrollMs: 0,
     rebases: 0,
+    treeTris: 0,
   };
 
   private readonly hud: HTMLElement;
@@ -711,6 +735,8 @@ export class IslandScene {
     this.remeshEverything();
     this.clipToWindow();
 
+    void this.plantTree();
+
     this.nestView = buildNestView(this.soil.plan);
     this.nestView.root.scale.setScalar(1 / MM);
     this.nestView.root.visible = this.showPlan;
@@ -732,6 +758,86 @@ export class IslandScene {
       this.playerReady = true;
       void this.loading.finish();
     });
+  }
+
+  /**
+   * ONE TREE, beside her, sunk into the hill.
+   *
+   * Loaded off the main thread of the boot: the bark is a megapixel and the
+   * island is already playable without it, so the tree arrives when it
+   * arrives rather than holding the curtain up. Which bark is a throw of the
+   * dice, but a repeatable one — seeded off the spawn, so the tree that
+   * grows here is this tree every time you load, not a different one each
+   * run.
+   */
+  /** Which detail level the tree is actually showing, for the stats chip. */
+  private treeLevel(): number {
+    if (!this.tree) return -1;
+    return this.tree.root.getCurrentLevel();
+  }
+
+  private async plantTree(): Promise<void> {
+    const seed = Math.floor(this.at.x * 7919 + this.at.z * 104729) >>> 0;
+    const bark = BARKS[seed % BARKS.length]!;
+    let map: THREE.Texture;
+    try {
+      map = await new THREE.TextureLoader().loadAsync(`${import.meta.env.BASE_URL}tree-tex/${bark}.jpg`);
+    } catch {
+      return; // A missing bark is not worth failing the island over.
+    }
+    map.wrapS = THREE.RepeatWrapping;
+    /* Mirrored UP the trunk: the bark photographs are square crops, not
+     * seamless tiles, so a plain repeat lays a hard horizontal line every
+     * couple of metres all the way up. Mirroring folds the tile against
+     * itself and the seam disappears into the grain. */
+    map.wrapT = THREE.MirroredRepeatWrapping;
+    map.colorSpace = THREE.SRGBColorSpace;
+    map.anisotropy = 8;
+
+    this.tree = buildTree({
+      girth: TREE_GIRTH_MM / MM,
+      height: TREE_HEIGHT_MM / MM,
+      seed,
+    }, map, bark);
+
+    /*
+     * SEVEN HUNDRED MILLIMETRES OUT — but WHICH WAY matters.
+     *
+     * The first cut picked a fixed bearing and landed on the Waiʻaleʻale
+     * headwall: measured, the ground fell 572 mm over those 700, so the tree
+     * was correctly buried into a forty-five degree cliff and grew out of
+     * the rock below her like a flagpole. Walking a ring of bearings and
+     * taking the one whose ground sits closest to her own costs sixteen
+     * height lookups and puts the tree on the flattest thing within reach.
+     */
+    const away = TREE_FROM_HER_MM / MM;
+    const here = this.walkGroundAt(this.at.x, this.at.z);
+    let tx = this.at.x + away;
+    let tz = this.at.z;
+    let best = Infinity;
+    for (let i = 0; i < 16; i += 1) {
+      const a = (i / 16) * Math.PI * 2;
+      const cx = this.at.x + Math.sin(a) * away;
+      const cz = this.at.z + Math.cos(a) * away;
+      const drop = Math.abs(this.walkGroundAt(cx, cz) - here);
+      if (drop < best) { best = drop; tx = cx; tz = cz; }
+    }
+    /*
+     * And DOWN into the ground by its burial depth. The island's drawn
+     * surface is a 109 mm mesh while the fine soil window redraws the same
+     * ground at one millimetre as she approaches, so the two disagree by a
+     * few millimetres wherever the hill curves — a tree seated exactly on
+     * the coarse surface would be left standing in air the moment the fine
+     * one resolved underneath it. A hundred millimetres swallows that with
+     * room to spare, and at a metre of girth it costs nothing visible.
+     */
+    this.tree.root.position.set(
+      tx,
+      this.walkGroundAt(tx, tz) - TREE_BURIED_MM / MM,
+      tz,
+    );
+    this.scene.add(this.tree.root);
+    this.stats.treeTris = this.tree.triangles[0] ?? 0;
   }
 
   /* ------------------------------------------------------------ the land */
@@ -2358,7 +2464,6 @@ export class IslandScene {
       this.digMode = !this.digMode;
       dig.classList.toggle('is-grip', this.digMode);
       this.scoopBtn!.style.display = this.digMode ? '' : 'none';
-      this.brushRow!.style.display = this.digMode ? '' : 'none';
       if (!this.digMode) this.input.dig = false;
       /* Digging is aiming, and aiming is done down her own eyes: arming
        * DIG drops into first person with a wide 100° field so the tunnel
@@ -2393,35 +2498,14 @@ export class IslandScene {
 
 
     /*
-     * HOW BIG THE SHAVE IS, on a slider, because the right answer depends
-     * on whether you are easing one lip or a whole chamber floor and no
-     * single constant is both.
+     * THE SHAVE HAS NO SLIDER ANY MORE.
+     *
+     * It was there because the right size looked like it depended on
+     * whether you were easing one lip or a whole chamber floor. Played, it
+     * did not: the widest setting was better everywhere, so the control was
+     * a thing to push to the end before starting. A setting with one good
+     * value is a constant.
      */
-    const brushRow = document.createElement('div');
-    brushRow.className = 'density-lab-subrow';
-    brushRow.style.display = 'none';
-    const brushLabel = document.createElement('span');
-    brushLabel.className = 'density-lab-aim-readout';
-    brushLabel.textContent = `${this.brushMm} mm`;
-    const brush = document.createElement('input');
-    brush.type = 'range';
-    brush.min = String(SMOOTH_RADIUS_MIN_MM);
-    brush.max = String(SMOOTH_RADIUS_MAX_MM);
-    brush.step = '1';
-    brush.value = String(this.brushMm);
-    brush.className = 'density-lab-brush';
-    brush.addEventListener('input', () => {
-      this.brushMm = Number(brush.value);
-      brushLabel.textContent = `${this.brushMm} mm`;
-    });
-    // The slider owns its own drags; without this the look-drag steals them.
-    for (const stop of ['pointerdown', 'pointermove', 'pointerup']) {
-      brush.addEventListener(stop, (e) => { e.stopPropagation(); });
-    }
-    brushRow.appendChild(brush);
-    brushRow.appendChild(brushLabel);
-    this.brushRow = brushRow;
-    actions.insertBefore(brushRow, actions.firstChild);
 
 
 
@@ -2632,6 +2716,7 @@ export class IslandScene {
       soil window ${WINDOW_MM} mm · ${(WINDOW_BYTES / 1048576).toFixed(1)} MB ·
       chunks ${this.chunkMeshes.size} · queued ${this.queue.length} ·
       dug ${this.stream?.editedSamples ?? 0}<br>
+      ${this.tree ? `tree ${this.tree.bark} · ${this.tree.triangles.map((t) => t.toLocaleString()).join(' / ')} t · lod ${this.treeLevel()}<br>` : ''}
       band floor ${this.stream?.bandFloorMm ?? 0} m · scrolls ${this.stats.scrolls}
       (${this.stats.rebases} rebases) · last ${this.stats.lastScrollMs.toFixed(0)} ms<br>
       at (${(this.at.x * MM / 1000).toFixed(1)}, ${(this.at.z * MM / 1000).toFixed(1)}) m ·
@@ -2952,6 +3037,7 @@ export class IslandScene {
       const mesh = node as THREE.Mesh;
       if (mesh.geometry) mesh.geometry.dispose();
     });
+    this.tree?.dispose();
     this.islandMaterial?.dispose();
     this.soilMaterial?.dispose();
     if (this.textures) for (const tex of Object.values(this.textures)) tex.dispose();
