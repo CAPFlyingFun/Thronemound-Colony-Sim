@@ -7,9 +7,11 @@
  * problem rather than a taste one: a first-person camera in a 7 mm bore has
  * no landmarks, no horizon and no parallax to read shape from.
  *
- * So underground the terrain stops being lit and becomes SENSED. Near
- * surfaces keep some of their shading, everything further reads as contour
- * lines on darkness, and past her reach there is nothing. That gives a tunnel
+ * So underground the terrain is lit by SENSE rather than by the sun, and a
+ * contour grid is laid over it. The soil keeps its own texture — an early
+ * cut replaced it with lines on darkness, which read as a wireframe model
+ * rather than as dirt — and the grid is an overlay on top of that, fading
+ * with distance so what is past her reach goes dark. That gives a tunnel
  * an obvious shape, a working face an obvious distance, and an old tunnel a
  * visible mouth — the three things you need to navigate — while keeping the
  * map honest: this is a bubble around her, NOT an x-ray. Soil fifty
@@ -183,8 +185,26 @@ export function makeSensed(material: THREE.Material): SenseUniforms {
           vec3 senseView = normalize(cameraPosition - vSenseWorld);
           float senseFace = max(dot(normalize(vSenseNormal), senseView), 0.0);
 
-          vec3 sensed = uDeep;
-          sensed += uWash * (0.30 + 0.70 * senseFace) * (0.20 + 0.80 * senseClose) * senseReach;
+          /*
+           * THE TEXTURE STAYS, AND THE GRID GOES OVER IT.
+           *
+           * The first cut REPLACED the soil with contours on darkness,
+           * which read well and threw away the thing the artist made: the
+           * dirt looked like a wireframe model rather than dirt. So the
+           * albedo is kept and merely LIT — by how squarely a surface
+           * faces her, standing in for a lamp she does not have — and the
+           * lines are drawn on top as an overlay.
+           *
+           * The distance bands still do their job on the light rather
+           * than on the texture: near soil is bright and detailed, soil
+           * past her reach falls away toward the deep colour, so the map
+           * stays a bubble around her rather than an x-ray of the hill.
+           */
+          float senseLamp = (0.35 + 0.65 * senseFace) * (0.30 + 0.70 * senseClose);
+          vec3 sensed = mix(uDeep, gl_FragColor.rgb * (0.55 + 1.05 * senseLamp), senseReach);
+          // A breath of the wash keeps damp earth from reading as grey
+          // stone once the sun is off it.
+          sensed += uWash * 0.12 * senseLamp * senseReach;
           sensed += uLine * senseLines * (0.45 + 0.55 * senseClose) * senseReach;
           gl_FragColor.rgb = mix(gl_FragColor.rgb, sensed, uSense);
         }

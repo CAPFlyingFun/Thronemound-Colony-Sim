@@ -310,7 +310,16 @@ export class IslandStream {
     return result;
   }
 
-  /** The oriented egg scoop, at an absolute WORLD position — see
+  /** Relax the field over a LOCAL sample box — the smoothing brush. The
+   *  box is what a brush just returned, so no conversion is needed. */
+  smoothBox(bounds: BrushResult['bounds'], strength?: number): BrushResult['bounds'] | null {
+    const result = this.field.smoothBox(bounds, strength);
+    if (result.changedSamples === 0) return null;
+    this.remember(result.bounds);
+    return result.bounds;
+  }
+
+  /** The oriented scoop, at an absolute WORLD position — see
    *  `DensityField.subtractEllipsoid`. Direction needs no translation. */
   subtractEllipsoid(
     worldCenter: Vec3Like, along: Vec3Like,

@@ -27,6 +27,11 @@ export interface BrushResult {
 const clamp = (value: number, min: number, max: number): number =>
   Math.max(min, Math.min(max, value));
 
+/** The six face neighbours a smoothing pass averages over. */
+const NEIGHBOURS: ReadonlyArray<readonly [number, number, number]> = [
+  [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+];
+
 /**
  * Compact scalar field for editable soil.
  *
@@ -189,6 +194,66 @@ export class DensityField {
       changedSamples,
       bounds: { minX, minY, minZ, maxX, maxY, maxZ },
     };
+  }
+
+  /**
+   * THE SMOOTHING BRUSH — RollerCoaster Tycoon's, on a density field.
+   *
+   * A tunnel cut by overlapping brushes is not smooth: consecutive scoops
+   * leave a scalloped ridge where their shells cross, and those ridges are
+   * what a walker catches on. Averaging each sample with its six
+   * neighbours rounds them off, because a signed field's ridges ARE local
+   * extrema and a blur is exactly what removes those.
+   *
+   * Read from a SNAPSHOT rather than in place: blurring while you write
+   * feeds each result into the next sample and sweeps the surface along
+   * the scan direction instead of relaxing it evenly.
+   *
+   * `strength` is how far each sample moves toward its neighbourhood mean,
+   * 0 doing nothing and 1 replacing the value outright. Anything much
+   * above a half will eat a thin wall, so callers should stay well under.
+   */
+  smoothBox(
+    bounds: BrushResult['bounds'], strength = 0.5,
+  ): { changedSamples: number; bounds: BrushResult['bounds'] } {
+    const minX = clamp(Math.floor(bounds.minX), 0, this.samplesX - 1);
+    const minY = clamp(Math.floor(bounds.minY), 0, this.samplesY - 1);
+    const minZ = clamp(Math.floor(bounds.minZ), 0, this.samplesZ - 1);
+    const maxX = clamp(Math.ceil(bounds.maxX), 0, this.samplesX - 1);
+    const maxY = clamp(Math.ceil(bounds.maxY), 0, this.samplesY - 1);
+    const maxZ = clamp(Math.ceil(bounds.maxZ), 0, this.samplesZ - 1);
+    const k = clamp(strength, 0, 1);
+    if (k === 0) return { changedSamples: 0, bounds: { minX, minY, minZ, maxX, maxY, maxZ } };
+
+    const before = this.values.slice();
+    const at = (x: number, y: number, z: number): number => {
+      if (x < 0 || x >= this.samplesX || y < 0 || y >= this.samplesY
+        || z < 0 || z >= this.samplesZ) return NaN;
+      return before[this.index(x, y, z)] ?? NaN;
+    };
+    let changedSamples = 0;
+    for (let z = minZ; z <= maxZ; z += 1) {
+      for (let y = minY; y <= maxY; y += 1) {
+        for (let x = minX; x <= maxX; x += 1) {
+          const here = at(x, y, z);
+          if (!Number.isFinite(here)) continue;
+          let sum = here;
+          let n = 1;
+          /* Edge samples average over the neighbours they HAVE. Treating a
+           * missing one as zero would drag the window's rim toward the
+           * surface and open a seam along it. */
+          for (const [dx, dy, dz] of NEIGHBOURS) {
+            const v = at(x + dx, y + dy, z + dz);
+            if (Number.isFinite(v)) { sum += v; n += 1; }
+          }
+          const next = here + (sum / n - here) * k;
+          if (Math.abs(next - here) < 1e-7) continue;
+          this.values[this.index(x, y, z)] = next;
+          changedSamples += 1;
+        }
+      }
+    }
+    return { changedSamples, bounds: { minX, minY, minZ, maxX, maxY, maxZ } };
   }
 
   /**

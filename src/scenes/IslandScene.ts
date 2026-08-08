@@ -132,6 +132,20 @@ const SCOOP_WIDE_MM = 10;
 const SCOOP_TALL_MM = 5;
 const SCOOP_DEEP_MM = 3;
 
+/**
+ * How hard each stroke's own hole is relaxed afterwards.
+ *
+ * A third of the way to the neighbourhood mean: enough to take the edge
+ * off the ridge between two overlapping scoops, little enough that a wall
+ * one scoop thick survives being passed twice.
+ */
+const SMOOTH_STRENGTH = 0.34;
+
+/** How much soil the lens keeps off itself, so the eye never sits in a
+ *  wall — the near plane is tiny, but a camera INSIDE soil renders the
+ *  whole world inside-out. */
+const EYE_SKIN = 0.5 / MM;
+
 /** How far past her centre the jaws reach when the model has not loaded. */
 const NOSE_REACH = 4.5 / MM;
 
@@ -1315,6 +1329,23 @@ export class IslandScene {
     }
     this.biteTouched = touched > 0;
     if (touched === 0) return;
+    /*
+     * SMOOTH WHAT WAS JUST CUT. Consecutive scoops leave a scalloped
+     * ridge where their shells cross, and a walker catches on ridges —
+     * reported as having to keep digging to smooth the tunnel out. A
+     * relaxation pass over the same box the brush touched rounds them
+     * off. Gentle, and only where soil moved this stroke: a strong blur
+     * eats thin walls, and one applied everywhere would slowly melt the
+     * whole hill.
+     */
+    const smoothed = this.stream!.smoothBox(
+      { minX, minY, minZ, maxX, maxY, maxZ }, SMOOTH_STRENGTH,
+    );
+    if (smoothed) {
+      minX = Math.min(minX, smoothed.minX); maxX = Math.max(maxX, smoothed.maxX);
+      minY = Math.min(minY, smoothed.minY); maxY = Math.max(maxY, smoothed.maxY);
+      minZ = Math.min(minZ, smoothed.minZ); maxZ = Math.max(maxZ, smoothed.maxZ);
+    }
     // Work done at depth is chamber-building, whatever she calls it.
     if (this.depthMm() >= QUEST_DEPTH_MM * 0.7) this.deepCarved += touched;
 
@@ -1584,7 +1615,25 @@ export class IslandScene {
        * along the line through `at`, so any eye height above that line
        * makes every tunnel land visibly BELOW the crosshair that aimed it.
        * A trace of lift stays so level ground doesn't fill half the frame. */
-      const eye = this.at.clone().addScaledVector(fwd, 0.26).addScaledVector(upv, 0.06);
+      /*
+       * ...and never THROUGH the wall. The eye sits forward of her centre
+       * so the crosshair and the cut agree, but forward is exactly where
+       * the working face is, so in a tight tunnel that offset put the lens
+       * inside soil and the world rendered inside-out. The offset is
+       * walked back until the eye is in air with a little to spare; her
+       * centre is always air, so there is always somewhere to retreat to.
+       */
+      const eye = this.at.clone();
+      const reach = S_FWD.copy(fwd).multiplyScalar(0.26).addScaledVector(upv, 0.06);
+      for (let t = 1; t > 0.001; t -= 0.2) {
+        const px = this.at.x + reach.x * t;
+        const py = this.at.y + reach.y * t;
+        const pz = this.at.z + reach.z * t;
+        const blocked = this.stream?.solidAtWu(px, py, pz) === true
+          || this.stream?.solidAtWu(px + fwd.x * EYE_SKIN, py + fwd.y * EYE_SKIN,
+            pz + fwd.z * EYE_SKIN) === true;
+        if (!blocked) { eye.set(px, py, pz); break; }
+      }
       this.camera.position.copy(eye);
       const dir = fwd.clone().multiplyScalar(Math.cos(this.fpPitch))
         .addScaledVector(upv, Math.sin(this.fpPitch));
