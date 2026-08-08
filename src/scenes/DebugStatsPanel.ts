@@ -1,3 +1,5 @@
+declare const __APP_VERSION__: string;
+
 /**
  * Collapsible wrapper for the island's developer telemetry.
  *
@@ -37,7 +39,10 @@ export class DebugStatsPanel {
     this.chip = document.createElement('button');
     this.chip.type = 'button';
     this.chip.className = 'tm-stats-chip';
-    this.chip.textContent = 'STATS';
+    /* THE BUILD, ON SCREEN, ALWAYS. "Is it updated yet" was being answered
+     * by squinting at the loading curtain before it faded — so the version
+     * rides on the one chip that is always up. */
+    this.chip.textContent = `STATS · v${__APP_VERSION__}`;
     this.chip.setAttribute('aria-expanded', 'false');
     this.chip.addEventListener('click', this.onChipTap);
 

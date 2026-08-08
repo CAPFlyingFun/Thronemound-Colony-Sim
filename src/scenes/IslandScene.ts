@@ -35,19 +35,29 @@ import * as THREE from 'three';
 import './DensityTerrainLabScene.css';
 import { buildSurfaceNets } from '../density/SurfaceNets';
 import { QueenModel } from '../anim/QueenModel';
-import { FOOT_CLEARANCE_MM } from '../anim/legDrive';
+import {
+  FOOT_CLEARANCE_MM, LegDrive, type DriveReport, type LegSetup,
+} from '../anim/legDrive';
+import { CASTE_LENGTH_MM, stanceRadius } from '../anim/hexapod';
 import { buildNestView, type NestView } from '../nest/nestView';
 import { NestDesigner } from '../nest/NestDesigner';
 import { planBounds } from '../nest/nestCarve';
 import { addNode } from '../nest/nestEdit';
 import { type NestPlan } from '../nest/nestPlan';
-import {
-  chamberBox, chamberNorm, insideChamber, type ChamberBox,
-} from './ChamberMovement';
+import { chamberBox, chamberNorm, type ChamberBox } from './ChamberMovement';
 import { BoreRig } from './BoreControl';
 import { DebugStatsPanel } from './DebugStatsPanel';
 import { LoadingOverlay } from './LoadingOverlay';
+import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
+import { SurfaceWalker } from '../world/surfaceWalk';
+import {
+  BARKS, bakeTree, buildTree, trunkProfile, type BuiltTree, type TreeSpec,
+  type TrunkProfile,
+} from '../world/tree';
+import {
+  burialMm, plantsIn, solidStand, SPECIES, type ForestSolid, type Species,
+} from '../world/forest';
 import { makeIslandSoil, type IslandSoil } from '../world/islandSoil';
 import {
   loadBiomeTextures, makeBiomeMaterial, type BiomeTextureSet,
@@ -72,7 +82,17 @@ const SEC_VERTS = (MESH_N - 1) / SECTIONS + 1;
 /** 15 mm/s — an unhurried queen. The first cut copied the world room's
  *  40 mm/s sprint and the island blurred past; playtest said so. Shift (or
  *  full stick) sprints at three times that for covering ground. */
-const WALK_SPEED = 3;
+/*
+ * HALVED, and the gait halves with it.
+ *
+ * The legs cycle at a rate proportional to how fast she travels, so there
+ * is no separate animation speed to turn down — slowing the animation by
+ * half means slowing HER by half, which is the only way to do it with her
+ * feet still landing where they touch. Three world units a second was 15
+ * mm/s walking and 45 sprinting, near double the block room's pace on an
+ * animal a third the size of its stride.
+ */
+const WALK_SPEED = 1.5;
 const SPRINT = 3;
 const TURN_RATE = 2.4;
 const RIDE = 1.3 / MM;
@@ -80,24 +100,83 @@ const RIDE = 1.3 / MM;
 /* Scratch space for the per-frame hot paths (rail, pose, camera) —
  * allocated once and reused, so a minute of riding feeds the garbage
  * collector nothing (the GC pauses read as hitches on the playtest PC). */
-const S_TAN = new THREE.Vector3();
 const S_PERP = new THREE.Vector3();
 const S_RAD = new THREE.Vector3();
 const S_CENTER = new THREE.Vector3();
 const S_TARGET = new THREE.Vector3();
+/** The ghost's own, so it cannot be trampled by whatever the cameras are
+ *  doing with the shared scratch in the same frame. */
+const S_SPOT = new THREE.Vector3();
+
+/** The orbit arm's own, so it can be asked to write into any of the others
+ *  without quietly aliasing its working vector. */
+const S_NOSE = new THREE.Vector3();
+
+/**
+ * The chase camera's fan, in radians off where it would like to be.
+ *
+ * Swing is across her, rise is over her. Wide enough to find its way round
+ * a trunk (a metre of it, from a hand's breadth away, is most of the sky),
+ * and biased upward because the one direction that is nearly always open is
+ * off her own back.
+ */
+const FAN_SWING = [0, 0.45, -0.45, 0.9, -0.9, 1.35, -1.35] as const;
+const FAN_RISE = [0, 0.4, 0.8, -0.3] as const;
+
+/** A ray that got less than this found no room worth having. */
+const CHASE_MIN = 4 / MM;
+
+/** What is behind an unbuilt chunk once she is under the ground: packed
+ *  earth in shadow, rather than the void. */
+const SOIL_DARK = new THREE.Color(0x140f0a);
+
+/**
+ * THE TREE. Three feet through and eighty feet up, in the game's own
+ * millimetres — a metre of girth and twenty-six of height.
+ *
+ * It is planted a hand's breadth from where she starts (700 mm, far enough
+ * to see the whole thing lean away overhead and near enough to walk to),
+ * and its foot is sunk a hundred millimetres INTO the ground. That burial
+ * is not decoration: the island's drawn surface is a 109 mm mesh and the
+ * fine soil window redraws the ground underneath it as she moves, so a tree
+ * seated exactly on the surface would be left hanging in the air the moment
+ * the ground beneath it resolved to something lower. Sunk deep enough to
+ * swallow that difference, the base stays buried whatever the terrain does.
+ */
+const TREE_GIRTH_MM = 1000;
+const TREE_HEIGHT_MM = 26000;
+const TREE_FROM_HER_MM = 700;
+const TREE_BURIED_MM = 100;
+
+/**
+ * How far around her the small tiers are grown, in millimetres.
+ *
+ * The landmarks and the canopy are few enough to plant over the whole
+ * island at once — a hundred and forty of them. Saplings and bushes run to
+ * thousands, and thousands of anything is worth generating only where she
+ * can see it. Twelve metres is far enough that the edge of the window is
+ * past anything she can make out at her size, and near enough that the
+ * regrow costs a few milliseconds.
+ */
+const SCRUB_WINDOW_MM = 9000;
+
+/** She has to walk this far before the scrub is grown again. */
+const SCRUB_REGROW_MM = 3000;
+
+/** How far out plants are SOLID — comfortably past the regrow distance, so
+ *  she can never outrun her own collision between rebuilds. */
+const STAND_REACH_MM = 5000;
 const S_FWD = new THREE.Vector3();
 const S_UP = new THREE.Vector3();
 const S_RIGHT = new THREE.Vector3();
 const S_MAT = new THREE.Matrix4();
-const S_QUAT = new THREE.Quaternion();
 
-/** The tallest ledge she steps up in one stride; anything higher is a WALL
- *  and blocks her — the fix for walking "through" tunnel ends. */
-const CLIMB_STEP = 2.5 / MM;
-
-/** Pressed against a wall with the stick held, she climbs it slowly —
- *  enough to scale the nest's shaft and get back out of a dug hole. */
-const CLIMB_RATE = 2.4;
+/*
+ * A ledge she may step up, and the rate she scaled a wall at, both gone.
+ * They were the heightfield walker's whole theory of vertical: a wall was a
+ * thing to refuse and then creep up by a special case. She stands ON walls
+ * now, so there is nothing left for either number to decide.
+ */
 
 /** How far below the drawn island counts as "underground" for the camera. */
 const UNDER_MM = 5;
@@ -111,26 +190,169 @@ const MESH_BUDGET = 3;
 /** Recentre lead and thrash guards, straight from the world room. */
 const LEAD_S = 0.45;
 const LEAD_MAX = 24 / MM;
-const SCROLL_COOLDOWN_MS = 150;
+/* Longer than one scroll's own measured cost, so two can never overlap. */
+const SCROLL_COOLDOWN_MS = 600;
 
-const BITE_RADIUS = 1.75 / MM;
+/**
+ * THE SHOVEL 🪏 — dig mode's mouthful, sized for making progress.
+ *
+ * 6 mm wide, 6 mm tall, 9 mm deep per stroke: a bore she can walk straight
+ * into, not a mandible-true nibble. The 1.75 mm bite was honest and it also
+ * took all day, and a passage barely her own width made walking a squeeze —
+ * so dig mode trades the biology for a tunnel that opens at playable speed
+ * with clearance to move in. Cut as three 3 mm-radius spheres stepped along
+ * the aim, because spheres are what the field subtracts.
+ */
+/**
+ * ONE MOUTHFUL, as asked: 10 mm wide, 5 mm tall, 3 mm deep.
+ *
+ * Wide and low, which is what a walking tunnel wants — a floor broader
+ * than her stride and a roof just clear of her back.
+ */
+const SCOOP_WIDE_MM = 10;
+const SCOOP_TALL_MM = 5;
+const SCOOP_DEEP_MM = 3;
 
-/** How far ahead of her centre the jaws bite, in world units. */
-const JAW_REACH = 1.4 / MM;
+/**
+ * How hard each stroke's own hole is relaxed afterwards, and how often.
+ *
+ * Halfway to the neighbourhood mean, twice — one gentle pass took the
+ * worst off the ridge between two overlapping scoops and still left
+ * enough to catch a foot on. Two passes at a half is roughly a wider
+ * kernel without the cost of actually widening one.
+ */
+const SMOOTH_STRENGTH = 0.5;
+const SMOOTH_PASSES = 2;
 
-/** Riding TOWARD a gate this close ASKS whether to surface. Riding away
- *  never asks, however close she passes — the heading is what makes the
- *  question worth asking, and what kept the old prompt from nagging. */
-const SURFACE_ASK_MM = 3;
+/**
+ * The smoothing brush's reach, in mm.
+ *
+ * This used to be a slider running four to thirty, defaulting to ten.
+ * Played, thirty was better everywhere — so it is thirty, and the slider
+ * that only ever wanted pushing to its end is gone.
+ */
+const SMOOTH_RADIUS_MM = 30;
 
-/** A declined gate goes quiet until she is this far from it again. */
-const GATE_RESET_MM = 8;
+/**
+ * The most any one sample may move per pass, in field units.
+ *
+ * A blur cannot tell the tunnel's air from the sky's, so a slab of soil
+ * between the two averages with the OUTSIDE and thins — near the surface
+ * it thinned right through, and the roof came down. A third of a cell
+ * still relaxes the shallow ridges a foot catches on, and refuses the
+ * large correction that a one-sample roof would need to collapse.
+ */
+const SMOOTH_MAX_SHIFT = CELL_SIZE / 3;
 
-/** Chamber-norm threshold (1 = the carved shell): the rail lets go once
- *  its centerline point is this far inside the room, and does not reach
- *  for her again until she has walked back out through the shell — which
- *  is the hysteresis that stops a grab/release flicker at the mouth. */
-const CHAMBER_RELEASE_NORM = 0.55;
+/**
+ * How far OUTSIDE the cut the relaxation reaches, in samples.
+ *
+ * The ridge that matters is not inside this stroke's hole — it is the
+ * seam where this stroke meets the last one, which by definition lies on
+ * the boundary of the box the brush just touched. Smoothing only what was
+ * cut leaves exactly the join that trips her.
+ */
+const SMOOTH_GROW = 2;
+
+/** How much soil the lens keeps off itself, so the eye never sits in a
+ *  wall — the near plane is tiny, but a camera INSIDE soil renders the
+ *  whole world inside-out. */
+const EYE_SKIN = 0.5 / MM;
+
+/**
+ * How far clear of the dirt every drawn bone is kept, and the step the
+ * guard searches in. Small on purpose: this is a fail-safe for the parts
+ * no solver owns, and a big lift would carry six correctly planted feet
+ * off the ground with it.
+ */
+const BONE_CLEARANCE = 0.02 / MM;
+
+/**
+ * How far above the ground the camera is never allowed below.
+ *
+ * The asked-for number is 0.05 mm; the near plane is 0.1 mm, so a
+ * clearance under that still lets the ground poke through the lens. The
+ * floor is whichever is larger, which honours the intent — the camera is
+ * never under the dirt — and actually shows nothing through it.
+ */
+const CAMERA_SKIN = Math.max(0.05 / MM, 0.02 * 1.5);
+
+/** How far forward of her centre the eye rides, along the AIM. */
+const EYE_FORWARD = 1.3 / MM;
+
+/**
+ * How far ABOVE her centre the eye rides, along her own up.
+ *
+ * There was no rise at all: the lens sat on her centre-line, which is the
+ * middle of her thorax, and the view read as low and close to the floor
+ * ("a little taller"). Her head is the top of her, so the eye goes there.
+ */
+const EYE_RISE = 1.1 / MM;
+
+/** How far past her centre the jaws reach when the model has not loaded. */
+const NOSE_REACH = 4.5 / MM;
+
+/**
+ * Her half-WIDTH in a bore. The measured oval's 4.4 mm half-width is her
+ * LEG SPAN — wider than the whole 6 mm tube — but an ant in a tunnel walks
+ * with her feet ON the wall, legs flexed to its curve, not sticking out to
+ * her open-ground stance. So the tube fit uses a tucked body-core width;
+ * the open-ground oval keeps the full span.
+ */
+const BORE_HUG_WIDE = 2.4 / MM;
+
+/** The collision oval wears the measured body 20% small — legs are not
+ *  walls, and a shell-sized fit perched her on every rim and pedestal. */
+const BODY_FIT_SCALE = 0.8;
+
+/*
+ * THE FOUNDING QUESTS — the prologue's spine, straight from the design
+ * brief: the queen finds a spot, digs an entrance, hollows her chamber,
+ * and the first worker emerges. Three beats, each read off what she has
+ * ACTUALLY done to the soil, never off a checkbox.
+ */
+/** Deep enough that the entrance counts as an entrance, in mm. */
+const QUEST_DEPTH_MM = 25;
+/** Soil samples carved OUT while deep — the chamber, measured in work.
+ *  Calibrated against the rig: ~10 s of held digging at depth. */
+const QUEST_CHAMBER_SAMPLES = 30000;
+
+/**
+ * How far PAST HER NOSE the jaws close — not how far past her centre.
+ *
+ * This was 1.4 mm from her middle, on a body whose half-length is 4.5 mm,
+ * which put her mandibles inside her own thorax. She could only ever chew a
+ * pocket she was already standing in, and never the slab of soil in front
+ * that she has to move into, so digging deadlocked: measured, 637 of 643
+ * strokes cut nothing at all and she advanced 0.00 mm in five minutes.
+ *
+ * Her mouth is at the front of her, so the reach is measured from there.
+ */
+const JAW_PAST_NOSE = 0.6 / MM;
+const BODY_HALF_TALL = 1.6 / MM;
+
+/**
+ * Where the oval is tested, as fractions of its half-extents: nose, tail,
+ * both shoulders, back and belly, and the four diagonals of her waist. Her
+ * outline, in eleven questions.
+ */
+/** How far clear of her own feet the oval's belly rides. */
+const BODY_FLOOR_MARGIN = 0.3 / MM;
+
+/** How far up or down she may point: not quite the poles, where a heading
+ *  stops meaning anything. */
+/**
+ * How far up and down she may point: a QUARTER TURN, exactly.
+ *
+ * It was 1.4 radians — eighty degrees — and the gauge sat there pegged.
+ * That is fine while the world is a hill and wrong the moment there is a
+ * tree in it: going up a trunk IS ninety degrees, and a dial that cannot
+ * reach it cannot look where she is going. The degenerate case at the poles
+ * is already handled — the first-person eye rotates its own up by the same
+ * pitch, so its up and its look stay perpendicular at every angle including
+ * this one.
+ */
+const AIM_LIMIT = Math.PI / 2;
 
 /** The room camera starts blending in at norm 1.25 (~3 mm out) and is all
  *  the way in by 0.75 — distance-driven, so walking pace sets the feel. */
@@ -168,8 +390,53 @@ export class IslandScene {
 
   private soilMaterial: THREE.MeshStandardMaterial | null = null;
 
+  /**
+   * THE UNDERGROUND SENSE, the density lab's answer to a problem this room
+   * had too: inside the soil every wall is the same brown, a tunnel is a
+   * featureless void, and a camera that dips below the surface shows empty
+   * space rather than dirt. Underground the terrain stops being lit and
+   * becomes SENSED — near surfaces keep their shading, everything further
+   * reads as contours on darkness, past her reach is unknown. A bubble
+   * around her rather than an x-ray, so where the nest goes next is still
+   * a decision and not a readout.
+   */
+  private sense: SenseUniforms | null = null;
+
   /** The fine window's rectangle, in world units. Island fragments inside die. */
   private readonly clip = { value: new THREE.Vector4(0, 0, 0, 0) };
+
+  /** The top of the streamed soil's depth band, in world units — see
+   *  `refreshBandTop`. Out of reach until the stream exists, so until then
+   *  the island cuts out as before and no soil is thrown away. */
+  private readonly bandTop = { value: 1e9 };
+
+  /** The sky's own colour, kept so the underground blend has something to
+   *  come back to. */
+  private readonly skyColour = new THREE.Color(0x9cc4e0);
+
+  private tree: BuiltTree | null = null;
+
+  /** One instanced mesh per species — a whole tier in a single draw call. */
+  private readonly stands = new Map<string, THREE.InstancedMesh>();
+
+  /**
+   * The unit-height trunk line each tier was baked from.
+   *
+   * The collision reads THIS rather than approximating it. A straight cone
+   * from base radius to a fraction of it — which is what stood in for a
+   * trunk before — measured up to 33 per cent fatter than the drawn wood at
+   * mid-height and modelled none of the lean, so she stood on the invisible
+   * one and floated over the visible one.
+   */
+  private readonly standProfiles = new Map<string, TrunkProfile>();
+
+  /** Where she was when the small tiers were last grown. */
+  private readonly scrubAt = new THREE.Vector3(Infinity, 0, Infinity);
+
+  private forestMaterial: THREE.MeshStandardMaterial | null = null;
+
+  /** The stand near enough to walk into, rebuilt with the scrub. */
+  private stand: ForestSolid | null = null;
 
   private readonly chunkMeshes = new Map<string, THREE.Mesh>();
 
@@ -220,15 +487,99 @@ export class IslandScene {
    */
   private readonly bore = new BoreRig(Math.PI);
 
-  /** True from the first stroke until she is back out in the open — while
-   *  it holds, travel follows the bore's line, so letting go of the button
-   *  means "stop", not "level out and grind into the wall". */
-  private boreEngaged = false;
+  /** DIG is a MODE now: the DIG chip arms it, the 🪏 button strokes. */
+  private digMode = false;
+
+  /** The shovel, revealed once DIG is armed. */
+  private scoopBtn: HTMLButtonElement | null = null;
+
+  /** The smoothing brush's radius, in millimetres — the slider's value. */
+  private brushMm = SMOOTH_RADIUS_MM;
+
+  /** Where the next press will act, drawn before it acts: the cut, and
+   *  the halo the same stroke shaves around it. */
+  private toolGhost: THREE.Mesh | null = null;
+
+  private smoothGhost: THREE.Mesh | null = null;
+
 
   private readonly keysDown = new Set<string>();
 
   private spaceWasDown = false;
 
+  /**
+   * WHICH WAY IS UP FOR HER — and it is not the world's answer.
+   *
+   * An ant has no down; it has a surface, and the surface is down. This is
+   * the outward normal of whatever she is standing on: the hillside, a
+   * tunnel floor, a shaft's wall, the roof of a chamber. Everything that
+   * used to hard-code world +Y — the walk, her orientation, the leg solver's
+   * frame, both cameras — reads this instead, which is the whole of walking
+   * up a wall and across a ceiling.
+   */
+  private readonly up = new THREE.Vector3(0, 1, 0);
+
+  /**
+   * Her nose, in the world, always square to `up`.
+   *
+   * `facing` is a yaw about world +Y and cannot describe an ant on a
+   * ceiling — the same heading means two different directions depending on
+   * which way up she is. The rig still owns the RATE she turns at; what it
+   * hands over is a change in heading, which is applied as a rotation about
+   * her own up. On level ground the two are identical to the digit.
+   */
+  private readonly fwd = new THREE.Vector3(0, 0, 1);
+
+  /** The rig's heading last frame, so a step of it can be applied as a turn
+   *  about her own up rather than the world's. */
+  private headingWas = 0;
+
+  private walker: SurfaceWalker | null = null;
+
+  /** How fast she is actually travelling over the ground, eased — the gait's
+   *  input, and never the stick's. */
+  private groundSpeed = 0;
+
+  private readonly wasAt = new THREE.Vector3();
+
+  /**
+   * THE LEGS, DRIVING.
+   *
+   * The island had the foot solver but not this, and the difference is the
+   * whole of the reported skating. `solveFeet` can only move a foot up and
+   * down — the gait owns where it sits fore and aft — so with nothing
+   * telling it where a foot IS in the world from one frame to the next,
+   * nothing could hold one still. The drive plants a stance foot on a world
+   * point and puts it back there every frame, which makes its ground speed
+   * exactly zero however fast the cycle runs. It also means the LEGS move
+   * her: the stick proposes, the planted feet refuse what they cannot
+   * reach, and what survives is her displacement.
+   */
+  private drive: LegDrive | null = null;
+
+  private driveReport: DriveReport | null = null;
+
+  /** How high her body rides, taken from her own rig once it has loaded. */
+  private legRide = RIDE;
+
+  /**
+   * What the legs may ask of the world: the nearest solid to a point,
+   * searched down her own up and then back along it. Null is a real answer
+   * and means nothing to stand on here, which is how a foot knows to stay
+   * up rather than reach into space.
+   */
+  private readonly groundForLegs = {
+    nearest: (at: THREE.Vector3, up: THREE.Vector3, down: number, rise: number) => {
+      const walker = this.walker;
+      if (!walker) return null;
+      const from = S_RAD.copy(at).addScaledVector(up, rise);
+      const dir = S_SPOT.copy(up).negate();
+      return walker.cast(from, dir, rise + down);
+    },
+  };
+
+  /** How far the third-person camera is swung off her tail by a drag; it
+   *  decays back to zero, which is how the view returns behind her. */
   private camYaw = 0;
 
   private camPitch = 0.5;
@@ -237,72 +588,26 @@ export class IslandScene {
 
   private firstPerson = false;
 
-  private fpPitch = 0;
+  /**
+   * WHERE SHE IS POINTED, up and down — and it STAYS there.
+   *
+   * Taking this from the camera's own look direction was a mistake with
+   * teeth: a third-person camera sits behind and above her, so its look is
+   * permanently tilted down, and "forward" therefore meant "downward" for
+   * as long as she was underground. She dug, sank, and could not aim back
+   * out of the hole she was making. A dial the player sets and the game
+   * leaves alone is the only thing that can mean ""along the tunnel"".
+   */
+  private aimPitch = 0;
+
+  /** The last bearing the aim line actually had — held through plumb, where
+   *  a bearing stops meaning anything. */
+  private aimBearing = 0;
 
   private underground = false;
 
-  /** Her recent path — the underground chase camera follows THIS, because
-   *  the path she walked is guaranteed to be inside the tunnel. */
-  private readonly trail: THREE.Vector3[] = [];
-
-  /** The nest plan as rails: centerline segments with bore radii (wu). */
-  private rails: { a: THREE.Vector3; b: THREE.Vector3; r: number; from: string; to: string }[] = [];
-
-  private readonly railNodes = new Map<string,
-  { p: THREE.Vector3; kind: string; r: number }>();
-
-  /** GRIP is the law of the tunnels: railEdge >= 0 IS the GRIP state, and
-   *  it engages itself whenever she is underground near a planned bore.
-   *  FREE exists only where it is safe — the surface, or inside a room. */
-  private railEdge = -1;
-
-  private railT = 0;
-
-  private railDir: 1 | -1 = 1;
-
-  private readonly railForward = new THREE.Vector3(0, 0, 1);
-
-  private readonly railUp = new THREE.Vector3(0, 1, 0);
-
-  /** Vertical-bore reverse latch: true while the back-pedal that already
-   *  turned her around is still held, so it only turns her ONCE. */
-  private railRev = false;
-
-  /** The remembered wall she crawls in a plumb shaft, where gravity picks
-   *  no floor — unit vector, kept perpendicular to the current bore. */
-  private readonly railWall = new THREE.Vector3(1, 0, 0);
-
-  /** The room she is loose in, or null. Set when the rail hands her into a
-   *  chamber (and when free walking carries her into one); cleared when a
-   *  mouth grabs her back or she surfaces. */
-  private chamberId: string | null = null;
-
   /** The room camera's share of the underground view, eased 0..1. */
   private chamberCam = 0;
-
-  /** The nearest gate on her current bore, refreshed by moveOnRail: how
-   *  far along the tube it is, and whether she is riding AT it. */
-  private railGate: { id: string; distMm: number; toward: boolean } | null = null;
-
-  /** The question on screen, if any. Nothing crosses the threshold in
-   *  either direction without an answer to it. */
-  private gateAsk: { kind: 'enter' | 'surface'; gateId: string } | null = null;
-
-  /** False from the moment a room takes her until she has stepped clear
-   *  of its doorway — see chamberMouthGrab. */
-  private chamberGrabArmed = false;
-
-  /** Gates she has said no to, quiet until she is GATE_RESET_MM away. */
-  private enterDeclined: string | null = null;
-
-  private surfaceDeclined: string | null = null;
-
-  private askEl: HTMLElement | null = null;
-
-  private askLabel: HTMLElement | null = null;
-
-  /** The GRIP / FREE indicator chip. */
-  private modeBtn: HTMLButtonElement | null = null;
 
   /** The tunnel designer — built fresh each time DIG opens it, because its
    *  working box is fitted around wherever the plan has grown to. */
@@ -346,6 +651,33 @@ export class IslandScene {
 
   private biteAt = 0;
 
+  /** Did the LAST bite actually remove soil? Surface engagement hangs on
+   *  it — digging at open air must not grip her to the aim line. */
+  private biteTouched = false;
+
+  /* ------------------------------------------------- the founding quests */
+
+  /** 0 dig the entrance · 1 hollow the chamber · 2 cinematic · 3 done. */
+  private questStage = 0;
+
+  /** Soil removed while deep — the chamber's progress, in samples. */
+  private deepCarved = 0;
+
+  private questEl: HTMLElement | null = null;
+
+  private cineEl: HTMLElement | null = null;
+
+  private cineUntil = 0;
+
+  /** The first worker — spawned when the chamber is made. */
+  private worker: QueenModel | null = null;
+
+  private workerReady = false;
+
+  private readonly workerAnchor = new THREE.Vector3();
+
+  private workerJig = 0;
+
   private showPlan = true;
 
   private readonly stats = {
@@ -355,6 +687,7 @@ export class IslandScene {
     scrolls: 0,
     lastScrollMs: 0,
     rebases: 0,
+    treeTris: 0,
   };
 
   private readonly hud: HTMLElement;
@@ -379,14 +712,28 @@ export class IslandScene {
 
   private aimReadout: HTMLElement | null = null;
 
+  private headingReadout: HTMLElement | null = null;
+
+  private depthReadout: HTMLElement | null = null;
+
   constructor(host: HTMLElement) {
     this.host = host;
     host.classList.add('density-lab-host');
+    /*
+     * Safari in a TAB ignores `user-scalable=no` on purpose, and answers a
+     * pinch with its own `gesture*` events rather than with touches — so
+     * `touch-action` never sees them and the page magnifies anyway.
+     * Refusing the gesture outright is the only thing that stops it.
+     */
+    for (const name of ['gesturestart', 'gesturechange', 'gestureend']) {
+      host.addEventListener(name, this.refuseGesture, { passive: false });
+    }
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     host.appendChild(this.renderer.domElement);
 
     this.scene.background = new THREE.Color(0x9cc4e0);
+    this.skyColour.copy(this.scene.background as THREE.Color);
     /* Haze, not blindness: from the summit the coast is ~5,600 world units
      * away and should read as distant blue land, the way islands do. */
     this.scene.fog = new THREE.Fog(0xb9c9d6, 1200, 11000);
@@ -403,6 +750,18 @@ export class IslandScene {
       new THREE.PlaneGeometry((SPAN_MM / MM) * 1.6, (SPAN_MM / MM) * 1.6),
       new THREE.MeshLambertMaterial({
         color: 0x2e6f8e, transparent: true, opacity: 0.82,
+        /*
+         * PUSHED BACK, so the shore always wins.
+         *
+         * The sea is one flat plane at zero and the island meets it along
+         * every coastline, which is thousands of triangles sitting at the
+         * same depth as the water. From high up the depth buffer cannot
+         * separate them and they flicker against each other — the reported
+         * z-fighting on land. Nudging the sea away from the camera breaks
+         * the tie the same way every frame, and being a hair deeper than it
+         * really is costs nothing on something you look down through.
+         */
+        polygonOffset: true, polygonOffsetFactor: 4, polygonOffsetUnits: 8,
       }),
     );
     sea.rotation.x = -Math.PI / 2;
@@ -444,8 +803,20 @@ export class IslandScene {
     this.heights = new Int16Array(raw);
     this.heightsBase = this.heights.slice();
     this.textures = textures;
-    this.islandMaterial = makeBiomeMaterial(textures, this.clip);
-    this.soilMaterial = makeBiomeMaterial(textures);
+    /* BOTH surfaces band by the stride-1 data slope (aGroundNy): the
+     * island's LOD rings and the soil window then agree on where rock
+     * meets sand, instead of each mesh reading its own normals. */
+    this.islandMaterial = makeBiomeMaterial(textures, this.clip, true, this.bandTop);
+    this.soilMaterial = makeBiomeMaterial(textures, undefined, true, this.bandTop);
+    /* The soil window's rim lies coplanar with the island surface it
+     * replaces — polygon offset pulls the soil forward a hair so the
+     * seam is a line, not a z-fight shimmer. */
+    this.soilMaterial.polygonOffset = true;
+    this.soilMaterial.polygonOffsetFactor = -1;
+    this.soilMaterial.polygonOffsetUnits = -1;
+    /* The soil only: the island's own surface sheet is the lit world she
+     * is standing on, and contouring that would be an x-ray of the hill. */
+    this.sense = makeSensed(this.soilMaterial);
 
     /*
      * The soil's "natural surface" is the DRAWN base island (triangle-exact
@@ -484,16 +855,36 @@ export class IslandScene {
       (xMm, zMm) => this.renderedOn(this.heightsBase!, xMm, zMm),
       this.at.x, this.at.z,
     );
+    /*
+     * The walker is built once the soil exists, because the only thing it
+     * needs is a way to ask how solid a point is — and that answer is the
+     * live field where there is one and the island's own heightfield where
+     * there is not. Its numbers are the island's, not the block room's: her
+     * ride height, the field's cell, and a reach that spans a tunnel.
+     */
+    this.walker = new SurfaceWalker(
+      (x, y, z) => this.soilDensityAt(x, y, z),
+      {
+        cell: CELL_SIZE,
+        ride: RIDE,
+        gripLift: 3 / MM,
+        gripReach: 9 / MM,
+        align: 12,
+        maxTiltRate: (240 * Math.PI) / 180,
+        snap: 14,
+        gravity: 9,
+      },
+      (x, y, z) => this.soilSolidAt(x, y, z),
+    );
     this.remeshEverything();
     this.clipToWindow();
+
+    void this.plantTree();
 
     this.nestView = buildNestView(this.soil.plan);
     this.nestView.root.scale.setScalar(1 / MM);
     this.nestView.root.visible = this.showPlan;
     this.scene.add(this.nestView.root);
-
-    // The plan's graph doubles as the underground RAIL network.
-    this.rebuildRails();
 
     /* The WORLD is ready here; the queen's model arrives when it arrives.
      * Gating `ready` on her GLB made every probe hostage to one slow fetch —
@@ -506,11 +897,309 @@ export class IslandScene {
     void this.queen.load().then((ok) => {
       this.queen.root.visible = ok;
       this.queenReady = ok;
+      if (ok) this.buildLegDrive();
     }).finally(() => {
       this.queenSettled = true;
       this.playerReady = true;
       void this.loading.finish();
     });
+  }
+
+  /**
+   * ONE TREE, beside her, sunk into the hill.
+   *
+   * Loaded off the main thread of the boot: the bark is a megapixel and the
+   * island is already playable without it, so the tree arrives when it
+   * arrives rather than holding the curtain up. Which bark is a throw of the
+   * dice, but a repeatable one — seeded off the spawn, so the tree that
+   * grows here is this tree every time you load, not a different one each
+   * run.
+   */
+  /** Which detail level the tree is actually showing, for the stats chip. */
+  private treeLevel(): number {
+    if (!this.tree) return -1;
+    return this.tree.root.getCurrentLevel();
+  }
+
+  private async plantTree(): Promise<void> {
+    const seed = Math.floor(this.at.x * 7919 + this.at.z * 104729) >>> 0;
+    const bark = BARKS[seed % BARKS.length]!;
+    let map: THREE.Texture;
+    try {
+      map = await new THREE.TextureLoader().loadAsync(`${import.meta.env.BASE_URL}tree-tex/${bark}.jpg`);
+    } catch {
+      return; // A missing bark is not worth failing the island over.
+    }
+    /*
+     * MIRRORED BOTH WAYS, and that is a decision rather than a default.
+     *
+     * None of these images tile — measured, the wrap join on the newest
+     * three was five to nine times worse than an ordinary interior join,
+     * which on a trunk that wraps its texture six times is six hard lines
+     * running the height of the tree. Blending the edges into agreement
+     * fixes the join and leaves a blurred stripe down the middle that is
+     * more obvious than the seam was. Mirroring costs neither: the join is
+     * exactly continuous by construction, the image stays as sharp as it
+     * came, and what it buys instead is a line of symmetry per tile, which
+     * on bark disappears into the grain.
+     *
+     * It also means a new bark has to satisfy nothing at all beyond being
+     * square.
+     */
+    map.wrapS = THREE.MirroredRepeatWrapping;
+    map.wrapT = THREE.MirroredRepeatWrapping;
+    map.colorSpace = THREE.SRGBColorSpace;
+    /* Sixteen, not eight: the trunk is almost always seen at a grazing
+     * angle — she is standing on it — and grazing angles are exactly what
+     * anisotropy is for. Free on anything made this decade. */
+    map.anisotropy = Math.min(16, this.renderer.capabilities.getMaxAnisotropy());
+
+    this.tree = buildTree({
+      girth: TREE_GIRTH_MM / MM,
+      height: TREE_HEIGHT_MM / MM,
+      seed,
+    }, map, bark);
+
+    /*
+     * SEVEN HUNDRED MILLIMETRES OUT — but WHICH WAY matters.
+     *
+     * The first cut picked a fixed bearing and landed on the Waiʻaleʻale
+     * headwall: measured, the ground fell 572 mm over those 700, so the tree
+     * was correctly buried into a forty-five degree cliff and grew out of
+     * the rock below her like a flagpole. Walking a ring of bearings and
+     * taking the one whose ground sits closest to her own costs sixteen
+     * height lookups and puts the tree on the flattest thing within reach.
+     */
+    const away = TREE_FROM_HER_MM / MM;
+    const here = this.walkGroundAt(this.at.x, this.at.z);
+    let tx = this.at.x + away;
+    let tz = this.at.z;
+    let best = Infinity;
+    for (let i = 0; i < 16; i += 1) {
+      const a = (i / 16) * Math.PI * 2;
+      const cx = this.at.x + Math.sin(a) * away;
+      const cz = this.at.z + Math.cos(a) * away;
+      const drop = Math.abs(this.walkGroundAt(cx, cz) - here);
+      if (drop < best) { best = drop; tx = cx; tz = cz; }
+    }
+    /*
+     * And DOWN into the ground by its burial depth. The island's drawn
+     * surface is a 109 mm mesh while the fine soil window redraws the same
+     * ground at one millimetre as she approaches, so the two disagree by a
+     * few millimetres wherever the hill curves — a tree seated exactly on
+     * the coarse surface would be left standing in air the moment the fine
+     * one resolved underneath it. A hundred millimetres swallows that with
+     * room to spare, and at a metre of girth it costs nothing visible.
+     */
+    this.tree.root.position.set(
+      tx,
+      this.walkGroundAt(tx, tz) - TREE_BURIED_MM / MM,
+      tz,
+    );
+    /* Solid AFTER placing: the collision is built in world space, and until
+     * the tree has a position there is nothing to build it around. */
+    this.tree.makeSolid(this.tree.root.position);
+    this.scene.add(this.tree.root);
+    this.stats.treeTris = this.tree.triangles[0] ?? 0;
+
+    /*
+     * ONE MATERIAL FOR THE WHOLE FOREST. The bake marks its leaves with a
+     * vertex colour rather than a second material, so wood and foliage
+     * share a shader and a tier stays one draw call. Fog off for the same
+     * reason the landmark's is: the island's curve is tuned for fifty-six
+     * kilometres and would swallow a two-metre sapling standing beside her.
+     */
+    this.forestMaterial = new THREE.MeshStandardMaterial({
+      map, vertexColors: true, roughness: 0.95, metalness: 0, fog: false,
+    });
+    this.growForest();
+  }
+
+
+  /**
+   * Hand her legs the job of moving her.
+   *
+   * Only once her rig is loaded, because the drive is built out of where
+   * her feet actually rest — `legPlan` is read off the model, not guessed.
+   * Until then the walker steps her along her nose as it always did, which
+   * is what the first second of a session looks like either way.
+   */
+  private buildLegDrive(): void {
+    const setup: LegSetup[] = this.queen.legPlan().map((leg) => ({
+      slot: leg.slot,
+      home: new THREE.Vector3(leg.home[0], leg.home[1], leg.home[2]),
+      reach: leg.reach,
+    }));
+    if (setup.length === 0) return;
+    /*
+     * SEAT HER AT THE HEIGHT HER OWN LEGS IMPLY.
+     *
+     * Measured: her rig rests its feet 0.26 mm ABOVE her body origin, and
+     * the island was seating that origin 1.3 mm above the contact — so her
+     * feet hovered 1.56 mm off the ground, against a downward reach of 1.1
+     * to 1.8 mm, with the search starting higher still. All six legs came
+     * back groping: nothing to stand on, every frame. A leg that never
+     * plants is never anchored, and a foot that is never anchored is free
+     * to slide, which is the skating.
+     *
+     * The ride the legs want is minus their own rest height — her origin a
+     * hair BELOW the contact, because that is where this rig puts the sole
+     * plane. Handing that to the walker makes the body height and the leg
+     * geometry one number instead of two that have to be hoped into
+     * agreement.
+     */
+    const meanFootY = setup.reduce((sum, leg) => sum + leg.home.y, 0) / setup.length;
+    this.legRide = -meanFootY;
+    if (this.walker) {
+      this.at.addScaledVector(this.up, this.legRide - this.walker.tune.ride);
+      (this.walker.tune as { ride: number }).ride = this.legRide;
+    }
+    this.drive = new LegDrive(setup);
+    this.drive.plantAll(
+      { at: this.at, up: this.up, forward: this.fwd }, this.groundForLegs,
+    );
+  }
+
+  /* -------------------------------------------------------- the forest */
+
+  /**
+   * The ground, as the scatter needs to see it: how high and how level.
+   *
+   * Read off the DRAWN island rather than the streamed soil, because the
+   * scatter covers the whole map and the soil window is a hundred and
+   * ninety millimetres wide. A plant a metre out would otherwise have no
+   * ground to stand on.
+   */
+  private forestGround(xMm: number, zMm: number): { elevMm: number; flat: number } | null {
+    if (!this.heights) return null;
+    const x = xMm / MM;
+    const z = zMm / MM;
+    const elevMm = this.renderedGroundAt(x, z) * MM;
+    if (elevMm <= 0) return null;
+    const d = STEP_MM / MM;
+    const dhx = (this.renderedGroundAt(x + d, z) - this.renderedGroundAt(x - d, z)) / (2 * d);
+    const dhz = (this.renderedGroundAt(x, z + d) - this.renderedGroundAt(x, z - d)) / (2 * d);
+    return { elevMm, flat: 1 / Math.hypot(dhx, 1, dhz) };
+  }
+
+  /**
+   * Grow one tier and hand it to the GPU as a single instanced mesh.
+   *
+   * Every plant in a tier shares one baked geometry, which is what makes
+   * three thousand bushes one draw call rather than three thousand. They
+   * differ by their MATRIX — where, how big, which way round — and by
+   * nothing else, so the tier's shape is one tree's shape at many sizes.
+   * At a bush's size on screen that reads as variety; at a landmark's it
+   * would not, which is why the landmarks are real trees and not instances.
+   */
+  private growStand(species: Species, box: {
+    x0: number; z0: number; x1: number; z1: number;
+  }): void {
+    const plants = plantsIn(species, box, (x, z) => this.forestGround(x, z));
+    let mesh = this.stands.get(species.name) ?? null;
+    if (!mesh || mesh.count < plants.length || mesh.instanceMatrix.count < plants.length) {
+      if (mesh) {
+        this.scene.remove(mesh);
+        mesh.dispose();
+      }
+      /*
+       * A baked plant is one unit tall and one unit through, so the matrix
+       * carries the whole of its size. Building it at the tier's MIDDLE
+       * height keeps the taper and the branching honest for the sizes it
+       * will actually be stretched to.
+       */
+      const mid = (species.minHeight + species.maxHeight) * 0.5 / MM;
+      const spec: TreeSpec = {
+        girth: mid * species.girthOfHeight,
+        height: mid,
+        seed: 0x5eed ^ species.name.length,
+        rings: species.rings,
+        boughs: species.boughs,
+        twigs: species.twigs,
+      };
+      const geo = bakeTree(spec, species.detail);
+      geo.scale(1 / mid, 1 / mid, 1 / mid);
+      /* The SAME spec gives the collision its line, so the two can never be
+       * describing different trees. */
+      this.standProfiles.set(species.name, trunkProfile(spec));
+      /* Room for growth, so an ordinary step does not rebuild the buffer. */
+      const room = Math.max(16, Math.ceil(plants.length * 1.4));
+      mesh = new THREE.InstancedMesh(geo, this.forestMaterial!, room);
+      mesh.frustumCulled = false;
+      mesh.castShadow = false;
+      this.scene.add(mesh);
+      this.stands.set(species.name, mesh);
+    }
+    const m = S_MAT;
+    const q = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    const at = new THREE.Vector3();
+    for (let i = 0; i < plants.length; i += 1) {
+      const p = plants[i]!;
+      const h = p.heightMm / MM;
+      at.set(p.xMm / MM, (p.groundMm - burialMm(p.heightMm)) / MM, p.zMm / MM);
+      q.setFromAxisAngle(S_UP.set(0, 1, 0), p.spin);
+      /*
+       * UNIFORM. The bake is already the right shape — it was grown at the
+       * tier's own girth-to-height ratio and then divided down to one unit
+       * tall, so its width is that ratio and nothing more is owed. Putting
+       * the ratio on again here multiplied it by itself and turned every
+       * plant on the island into a needle a few millimetres through.
+       */
+      scale.setScalar(h);
+      m.compose(at, q, scale);
+      mesh.setMatrixAt(i, m);
+    }
+    mesh.count = plants.length;
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.computeBoundingSphere();
+  }
+
+  /**
+   * Plant the island: the big tiers once, the small ones around her.
+   *
+   * The split is a measurement, not a preference. Landmarks and canopy come
+   * to about a hundred and forty over the whole map and cost nothing to
+   * hold; saplings and bushes run past three thousand, and three thousand
+   * of anything is worth generating only where she can see it.
+   */
+  private growForest(): void {
+    if (!this.forestMaterial) return;
+    const span = SPAN_MM;
+    for (const species of SPECIES) {
+      if (species.spacing >= 3000) {
+        this.growStand(species, { x0: 0, z0: 0, x1: span, z1: span });
+      }
+    }
+    this.regrowScrub(true);
+  }
+
+  /** The small tiers, kept in a window that follows her. */
+  private regrowScrub(force = false): void {
+    if (!this.forestMaterial) return;
+    if (!force && this.scrubAt.distanceTo(this.at) * MM < SCRUB_REGROW_MM) return;
+    this.scrubAt.copy(this.at);
+    const cx = this.at.x * MM;
+    const cz = this.at.z * MM;
+    const r = SCRUB_WINDOW_MM;
+    for (const species of SPECIES) {
+      if (species.spacing >= 3000) continue;
+      this.growStand(species, {
+        x0: Math.max(0, cx - r), z0: Math.max(0, cz - r),
+        x1: Math.min(SPAN_MM, cx + r), z1: Math.min(SPAN_MM, cz + r),
+      });
+    }
+    /*
+     * And the SOLID stand, on a much tighter radius. Drawing a plant she can
+     * see and colliding with one she can reach are different questions with
+     * very different budgets: the field is probed hundreds of times a frame,
+     * so what it holds is only what she could walk into before the next
+     * regrow.
+     */
+    this.stand = solidStand(
+      { xMm: cx, zMm: cz }, STAND_REACH_MM, MM, (x, z) => this.forestGround(x, z),
+      (species) => this.standProfiles.get(species.name) ?? null,
+    );
   }
 
   /* ------------------------------------------------------------ the land */
@@ -584,8 +1273,6 @@ export class IslandScene {
    * there must mean the drawn island, not the cap.
    */
   private floorBelow(x: number, z: number, fromY: number): number | null {
-    const lid = this.ventLidAt(x, z, fromY);
-    if (lid !== null) return lid;
     const stream = this.stream;
     if (!stream) return null;
     const fine = stream.surfaceBelowY(x, z, fromY);
@@ -595,112 +1282,146 @@ export class IslandScene {
     return fine;
   }
 
-  /**
-   * A MOUTH IS A LID UNTIL SHE SAYS OTHERWISE.
-   *
-   * The vent is a real hole bored through the anthill, so the walker fell
-   * straight down it: walking west to east across her own nest dropped her
-   * fifty millimetres down the shaft without a word. Reported as being
-   * teleported underground, and fairly — she never asked to go in.
-   *
-   * So from ABOVE, a mouth reads as ground at the gate's own height. She
-   * can stand on her anthill and walk over it, and the ENTER? question is
-   * what opens it. From below there is no lid at all — this only answers
-   * something coming down ONTO the mouth — so riding up the shaft and
-   * surfacing is untouched.
-   */
-  private ventLidAt(x: number, z: number, fromY: number): number | null {
-    for (const node of this.railNodes.values()) {
-      if (node.kind !== 'entrance') continue;
-      const dx = x - node.p.x;
-      const dz = z - node.p.z;
-      if (dx * dx + dz * dz > node.r * node.r) continue;
-      // Only for a body standing ON the mouth, never one already below it,
-      // or the lid would form under her feet while she is in the shaft.
-      if (fromY < node.p.y + RIDE) continue;
-      return node.p.y;
-    }
-    return null;
-  }
-
-  /**
-   * THE WAY OUT OF A ROOM IS ITS DOORWAY, WHEREVER THAT IS.
-   *
-   * Inside a chamber the rail keeps its hands off, or every edge — they
-   * all run to the room's centre — would glue her to the middle of her own
-   * room. But that left the room a pit: a chamber whose only tunnel leaves
-   * through the CEILING, which is exactly what the designer's PLACE chain
-   * builds (each piece dropped straight below the last), has its doorway
-   * above the middle of the floor, and no amount of walking or wall-
-   * climbing gets a body up to it. Reported as being stuck in a room, and
-   * it was — the containment was only half of that bug.
-   *
-   * So the rail is offered again at the DOORWAY: the point where each
-   * tunnel crosses out through the room's shell. A tunnel that leaves
-   * sideways has its doorway in the wall, and she walks to it. One that
-   * leaves upward has its doorway in the ceiling, and she stands under it.
-   * Measured horizontally, so "under the hole in the roof" counts as being
-   * at it, which is the whole point. The doorway sits at norm ~1 and the
-   * rail only lets go below 0.55, so grabbing there cannot flicker.
-   */
-  private chamberMouthGrab(roomId: string): { i: number; t: number; d: number } | null {
-    const room = this.railNodes.get(roomId);
-    if (!room || room.kind !== 'chamber') return null;
-    const box = chamberBox(room.p.x, room.p.y, room.p.z, room.r);
-    let best: { i: number; t: number; d: number } | null = null;
-    for (let i = 0; i < this.rails.length; i += 1) {
-      const e = this.rails[i]!;
-      const atFrom = e.from === roomId;
-      if (!atFrom && e.to !== roomId) continue;
-      for (let k = 1; k <= 24; k += 1) {
-        const t = atFrom ? k / 24 : 1 - k / 24;
-        const px = e.a.x + (e.b.x - e.a.x) * t;
-        const py = e.a.y + (e.b.y - e.a.y) * t;
-        const pz = e.a.z + (e.b.z - e.a.z) * t;
-        if (chamberNorm(box, px, py, pz) <= 1) continue;
-        // The doorway. How far is she from standing in it, on the floor?
-        const d = Math.hypot(this.at.x - px, this.at.z - pz);
-        if (!best || d < best.d) best = { i, t, d };
-        break;
-      }
-    }
-    /*
-     * ARMED BY LEAVING IT. On arrival the rail sets her down a stride
-     * inside the room — still within reach of the doorway she just came
-     * through — so an unguarded test grabbed her back on the very frame it
-     * released her, and she hovered in the entrance instead of walking
-     * into her own room. Tightening the reach only traded that for a
-     * doorway she could no longer find on the way out.
-     *
-     * So the doorway goes live once she has been properly clear of it, and
-     * one reach serves both directions: step in, it arms behind her; come
-     * back to it, it takes her.
-     */
-    if (!best) return null;
-    const reach = this.rails[best.i]!.r * 1.6;
-    if (best.d > reach) {
-      this.chamberGrabArmed = true;
-      return null;
-    }
-    return this.chamberGrabArmed ? best : null;
-  }
-
-  /** The mouth she is standing on, if any — what ENTER? asks about. */
-  private gateUnderfoot(): string | null {
-    for (const [id, node] of this.railNodes) {
-      if (node.kind !== 'entrance') continue;
-      const dx = this.at.x - node.p.x;
-      const dz = this.at.z - node.p.z;
-      if (dx * dx + dz * dz > node.r * node.r) continue;
-      if (this.at.y < node.p.y - RIDE) continue;
-      return id;
-    }
-    return null;
-  }
-
   /** Underfoot at HER height: tunnel floors are real, roofs above are not. */
   private footingAt(x: number, z: number): number {
     return this.floorBelow(x, z, this.at.y + 0.4) ?? this.walkGroundAt(x, z);
+  }
+
+  /**
+   * Underfoot at THE FOOT'S OWN height, which is a different question and
+   * the one the solver actually asks.
+   *
+   * Passing her body's height for all six feet asks about HER, not about
+   * them — the solver's own note warns of exactly this: a foot pressed
+   * against the wall of a shaft is inside soil, so the query climbs out of
+   * it, and climbing out from her body's height in a column that is solid
+   * all the way up lands on the rim overhead. The island had been throwing
+   * the third argument away and handing every foot her own elevation,
+   * which is why her legs reached for the surface while she was down a
+   * hole.
+   */
+  private footingFrom(x: number, z: number, y: number): number {
+    return this.floorBelow(x, z, y + 0.4) ?? this.walkGroundAt(x, z);
+  }
+
+  /**
+   * HOW SOLID A WORLD POINT IS — positive in the soil, negative in the air,
+   * zero at the drawn surface. The one question the walker asks, and it must
+   * have an answer EVERYWHERE.
+   *
+   * Inside the streamed window that is the live field, dug tunnels and all.
+   * Outside it there is no field, and a walker that loses its footing at the
+   * window's edge drops her out of the world — so out there the island's own
+   * heightfield answers the identical question in the identical form. It is
+   * not an approximation: the window is FILLED from `surface(x, z) - y`, so
+   * the fallback is the same expression the field was built out of, and the
+   * two stitch together with no seam to fall through.
+   */
+  private groundDensityAt(x: number, y: number, z: number): number {
+    const fine = this.stream?.densityAtWu(x, y, z);
+    if (fine !== null && fine !== undefined) return fine;
+    return this.walkGroundAt(x, z) - y;
+  }
+
+  /**
+   * THE GROUND, AND THE WOOD STANDING IN IT.
+   *
+   * The walker takes exactly one question — how solid is this point — and
+   * turns the answer into standing, climbing, cornering and falling. So the
+   * tree does not need a collision system of its own; it needs to be part of
+   * this answer. Unioned in, she bumps into the trunk, walks round it and
+   * CLIMBS it, entirely through the code that already carries her up the
+   * wall of a shaft: her up comes off this field's gradient, and the
+   * gradient of a trunk points out of the trunk.
+   *
+   * A union is the larger of the two, because both are positive inside.
+   */
+  private soilDensityAt(x: number, y: number, z: number): number {
+    let best = this.groundDensityAt(x, y, z);
+    const landmark = this.tree?.solid?.densityAt(x, y, z);
+    if (landmark !== undefined && landmark > best) best = landmark;
+    const scrub = this.stand?.densityAt(x, y, z);
+    if (scrub !== undefined && scrub > best) best = scrub;
+    return best;
+  }
+
+  /**
+   * IS this point in soil — the same question, asked the cheap way.
+   *
+   * Nearly every probe in the frame wants a yes or no: the walker's casts,
+   * the leg solver's footing, the shovel's reach, the bone guard's escape.
+   * Interpolating eight lattice samples to answer one of those is seven
+   * reads of waste, and it is asked hundreds of times a frame — measured at
+   * 0.033 µs against 0.094 for the smooth read. Only the surface NORMAL
+   * genuinely needs what lies between the samples, and that is six probes.
+   */
+  private groundSolidAt(x: number, y: number, z: number): boolean {
+    const fine = this.stream?.solidAtWu(x, y, z);
+    if (fine !== null && fine !== undefined) return fine;
+    return this.walkGroundAt(x, z) - y > 0;
+  }
+
+  private soilSolidAt(x: number, y: number, z: number): boolean {
+    if (this.groundSolidAt(x, y, z)) return true;
+    if (this.tree?.solid?.solidAt(x, y, z) === true) return true;
+    return this.stand?.solidAt(x, y, z) === true;
+  }
+
+  /**
+   * HER FRAME IN A BURROW — which way is up for her, and where the surface
+   * under a point is measured ALONG that up.
+   *
+   * On open ground up is world vertical and a foot falls to a height. In a
+   * tunnel neither is true: she is inside a tube, her up is whatever her
+   * body is pressed against, and the surface under a foot may be a wall or
+   * a ceiling. The solver has always been able to take this frame; the
+   * island simply never gave it one, so her legs went on solving against a
+   * floor that was not underneath her.
+   *
+   * The up is now HERS — the one the walker maintains off the soil's own
+   * gradient — rather than one inferred from where she is pointed. Those two
+   * agree in a level drift and disagree everywhere interesting: standing on
+   * a wall while looking along it, the aim says up is sideways-ish and the
+   * body says up is off the wall, and only the body is right.
+   */
+  private boreFrame(): {
+    up: readonly [number, number, number];
+    surface: (x: number, y: number, z: number) => number;
+  } {
+    const up = this.up;
+    const REACH = BODY_HALF_TALL * 2 + BODY_FLOOR_MARGIN;
+    /*
+     * COARSE, THEN REFINED. The solver asks this once per joint per CCD
+     * iteration — hundreds of times a frame — so a flat fourteen-step march
+     * was the single most-called loop in the game. Seven strides to bracket
+     * the surface and three bisections to place it inside them is the same
+     * answer to a third of a stride, for half the probes.
+     */
+    const COARSE = 7;
+    const REFINE = 3;
+    return {
+      up: [up.x, up.y, up.z] as const,
+      surface: (x: number, y: number, z: number): number => {
+        const elevOf = (t: number) =>
+          (x - up.x * t) * up.x + (y - up.y * t) * up.y + (z - up.z * t) * up.z;
+        /* Feel DOWN her own up until the soil starts, and report where it
+         * started. Nothing found means open tube — she keeps her stance. */
+        let lo = 0;
+        let hit = -1;
+        for (let i = 0; i <= COARSE; i += 1) {
+          const t = (i / COARSE) * REACH;
+          if (this.soilSolidAt(x - up.x * t, y - up.y * t, z - up.z * t)) { hit = t; break; }
+          lo = t;
+        }
+        if (hit < 0) return elevOf(REACH);
+        for (let i = 0; i < REFINE; i += 1) {
+          const mid = (lo + hit) * 0.5;
+          if (this.soilSolidAt(x - up.x * mid, y - up.y * mid, z - up.z * mid)) hit = mid;
+          else lo = mid;
+        }
+        return elevOf(hit);
+      },
+    };
   }
 
   /** All sixty-four sections, built once, never touched again. */
@@ -716,6 +1437,7 @@ export class IslandScene {
     const positions = new Float32Array(SEC_VERTS * SEC_VERTS * 3);
     const normals = new Float32Array(SEC_VERTS * SEC_VERTS * 3);
     const elev = new Float32Array(SEC_VERTS * SEC_VERTS);
+    const groundNy = new Float32Array(SEC_VERTS * SEC_VERTS);
     const stride = (N - 1) / (MESH_N - 1);
     let at = 0;
     for (let j = 0; j < SEC_VERTS; j += 1) {
@@ -736,6 +1458,16 @@ export class IslandScene {
         normals[at] = -dx * inv;
         normals[at + 1] = inv;
         normals[at + 2] = -dz * inv;
+        /* The BAND slope is measured at stride 1, whatever this section's
+         * LOD stride is. Banding off the mesh normal made the rock/sand
+         * split move with the LOD rings — the same hillside wore
+         * different ground on each side of a detail boundary, and never
+         * quite agreed with the soil window's fine-grid slopes either. */
+        const dx1 = (this.sample(g + 1, gz) - this.sample(g - 1, gz))
+          / (2 * STEP_MM);
+        const dz1 = (this.sample(g, gz + 1) - this.sample(g, gz - 1))
+          / (2 * STEP_MM);
+        groundNy[at / 3] = 1 / Math.hypot(dx1, 1, dz1);
         elev[at / 3] = h; // mm IS real metres at 1:1000 — the biome bands read it raw
         at += 3;
       }
@@ -754,6 +1486,7 @@ export class IslandScene {
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geometry.setAttribute('aElev', new THREE.BufferAttribute(elev, 1));
+    geometry.setAttribute('aGroundNy', new THREE.BufferAttribute(groundNy, 1));
     geometry.setIndex(index);
     geometry.computeBoundingSphere();
     const mesh = new THREE.Mesh(geometry, this.islandMaterial!);
@@ -812,6 +1545,39 @@ export class IslandScene {
       elev[v] = (data.positions[v * 3 + 1]! + stream.bandFloorWu) * MM;
     }
     geometry.setAttribute('aElev', new THREE.BufferAttribute(elev, 1));
+    // ...and the ORIGINAL surface elevation at each vertex, so the shader
+    // can tell an undug top (paint the biome, match the island seamlessly)
+    // from an excavated wall or floor (paint dirt, whatever the altitude).
+    const orig = new Float32Array(elev.length);
+    // ...and the original terrain's SLOPE (its normal's Y), so undug soil
+    // bands by the same slope the island does. Surface-nets normals read
+    // flatter than the data grid's, and the flat reading turned the mound's
+    // dark cliff bands into open mountain/snow — white ground at her feet.
+    const groundNy = new Float32Array(elev.length);
+    const d = STEP_MM / MM; // one data cell, in world units
+    for (let v = 0; v < orig.length; v += 1) {
+      const wx = stream.originWorldX + data.positions[v * 3]!;
+      const wz = stream.originWorldZ + data.positions[v * 3 + 2]!;
+      /*
+       * THE SAME SURFACE THE FIELD WAS BUILT FROM — measured, 4.31 mm out
+       * on average and 22.9 mm at worst when it was not.
+       *
+       * `groundHeightAt` is bilinear on the FULL 1025-sample grid. The soil
+       * window is generated from `renderedOn`, which is triangle-exact on
+       * the DRAWN 513 grid — a different surface, and on curved ground they
+       * disagree by millimetres. The dug test starts at 1.5 mm and is
+       * saturated by 4.0 mm, so undug ground was reading as fully
+       * excavated and the whole window painted itself rock: the patch of
+       * wrong texture around her. Read off the drawn grid and an untouched
+       * soil top is exactly its own original, to the digit, everywhere.
+       */
+      orig[v] = this.renderedOn(this.heights!, wx * MM, wz * MM);
+      const dhx = (this.groundHeightAt(wx + d, wz) - this.groundHeightAt(wx - d, wz)) / (2 * d);
+      const dhz = (this.groundHeightAt(wx, wz + d) - this.groundHeightAt(wx, wz - d)) / (2 * d);
+      groundNy[v] = 1 / Math.hypot(dhx, 1, dhz);
+    }
+    geometry.setAttribute('aOrig', new THREE.BufferAttribute(orig, 1));
+    geometry.setAttribute('aGroundNy', new THREE.BufferAttribute(groundNy, 1));
     geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
     geometry.computeVertexNormals();
     const mesh = new THREE.Mesh(geometry, this.soilMaterial!);
@@ -915,7 +1681,21 @@ export class IslandScene {
     this.clipToWindow();
   }
 
+  /**
+   * Where the streamed band's ceiling currently sits, for both shaders.
+   *
+   * The band moves — it re-anchors under whatever the window's centre is
+   * standing on — so this has to be refreshed with it, or the island keeps
+   * its cut-out at the old altitude and a strip of hill goes missing.
+   */
+  private refreshBandTop(): void {
+    if (!this.stream) return;
+    this.bandTop.value = this.stream.bandFloorWu
+      + (CELLS_Y - CAP_PLANES - 1) * CELL_SIZE;
+  }
+
   private clipToWindow(): void {
+    this.refreshBandTop();
     this.meshedRect.x0 = 0;
     this.meshedRect.z0 = 0;
     this.meshedRect.x1 = WINDOW_CELLS;
@@ -970,18 +1750,6 @@ export class IslandScene {
     };
   }
 
-  railStateForTest(): { edge: number; t: number; offMm: number; rMm: number } {
-    if (this.railEdge < 0) return { edge: -1, t: 0, offMm: -1, rMm: 0 };
-    const e = this.rails[this.railEdge]!;
-    const center = e.a.clone().lerp(e.b, Math.min(1, Math.max(0, this.railT)));
-    return {
-      edge: this.railEdge,
-      t: this.railT,
-      offMm: center.distanceTo(this.at) * MM,
-      rMm: e.r * MM,
-    };
-  }
-
   /* ------------------------------------------------------------ the walk */
 
   private simulate(dt: number): void {
@@ -994,22 +1762,71 @@ export class IslandScene {
       forward: this.input.walk,
       dig: this.input.dig,
     });
-    this.facing = bore.heading;
-    if (bore.digging) this.boreEngaged = true;
-    else if (!this.underground) this.boreEngaged = false;
+    /*
+     * THE RIG STEERS; HER OWN UP IS THE AXIS IT TURNS ABOUT.
+     *
+     * The rig's heading is a yaw about world +Y, and there is no such thing
+     * for an ant on a ceiling: the same number means two opposite directions
+     * depending on which way up she is. So what is taken from it is the
+     * CHANGE, applied as a rotation of her nose about her own up. On level
+     * ground the two are identical to the digit; upside down, only this one
+     * is a turn.
+     */
+    let swing = bore.heading - this.headingWas;
+    while (swing > Math.PI) swing -= Math.PI * 2;
+    while (swing < -Math.PI) swing += Math.PI * 2;
+    this.headingWas = bore.heading;
+    if (Math.abs(swing) > 1e-9) this.fwd.applyAxisAngle(this.up, swing).normalize();
+    /*
+     * HER COMPASS BEARING, and it HOLDS when she has none.
+     *
+     * `atan2(fwd.x, fwd.z)` is the direction her nose points on the map,
+     * which is meaningless the moment her nose is vertical: up a shaft or a
+     * trunk the horizontal part of it is almost nothing and the bearing
+     * spins on rounding. Everything world-referenced reads this — the aim,
+     * the gauge, the scroll's look-ahead — so it keeps the last bearing it
+     * could actually measure rather than inventing one.
+     */
+    const flat = Math.hypot(this.fwd.x, this.fwd.z);
+    if (flat > 0.15) this.facing = Math.atan2(this.fwd.x, this.fwd.z);
     const speed = this.input.walk * WALK_SPEED * (this.input.sprint ? SPRINT : 1);
-    this.velocity.set(Math.sin(this.facing) * speed, 0, Math.cos(this.facing) * speed);
+    this.velocity.copy(this.fwd).multiplyScalar(speed);
 
-    if (this.railEdge >= 0) {
-      this.moveOnRail(dt, speed);
-    } else if (this.boreEngaged) {
-      this.moveBore(dt, speed);
-    } else {
-      this.moveFree(dt, speed);
-    }
+    /*
+     * ONE MOVEMENT LAW: HER LEGS, EVERYWHERE.
+     *
+     * There were three — a rail that owned the tunnels, a gravity-free
+     * bore travel that owned the digging, and this walker that owned the
+     * surface — and they handed her between one another on heuristics.
+     * Nearly every movement bug reported over a week lived in those
+     * hand-offs rather than inside any one system, so each fix moved the
+     * failure instead of removing it.
+     *
+     * The walker is the one that always worked, so it is the one that
+     * stayed. It reads floors out of the dug soil, steps up small ledges,
+     * refuses walls and climbs one it is pressed against — underground
+     * exactly as above it, because underground is only more soil. The
+     * scoop is wider than she is, so a stroke opens something she can
+     * simply walk into and nothing has to gate her.
+     */
+    this.wasAt.copy(this.at);
+    this.moveSurface(dt, speed);
+    /*
+     * Measured ACROSS her up: being re-seated along it by a fraction of a
+     * millimetre a frame is not walking, and counting it had a motionless
+     * ant reporting a jog.
+     */
+    const moved = S_RAD.copy(this.at).sub(this.wasAt);
+    moved.addScaledVector(this.up, -moved.dot(this.up));
+    const went = moved.length() / Math.max(dt, 1e-6);
+    this.groundSpeed += (went - this.groundSpeed) * Math.min(1, dt * 12);
 
     this.underground = this.at.y + RIDE
       < this.walkGroundAt(this.at.x, this.at.z) - UNDER_MM / MM;
+
+    this.questTick(dt);
+    /* The small tiers follow her; the big ones were planted once. */
+    this.regrowScrub();
 
     /*
      * Which ROOM she is loose in, if any. It is DERIVED from where she is,
@@ -1028,67 +1845,47 @@ export class IslandScene {
      * stuck in a room". The carved soil is the only container she needs;
      * a second, tighter, invisible one was the bug.
      */
-    this.chamberId = this.underground && this.railEdge < 0
-      ? this.chamberAt(this.at)
-      : null;
-    const last = this.trail[this.trail.length - 1];
-    if (!last || last.distanceTo(this.at) > 0.3) {
-      this.trail.push(this.at.clone());
-      if (this.trail.length > 240) this.trail.shift();
-    }
-
-    /*
-     * GRIP — playtest's own architecture, now the LAW of the tunnels:
-     * underground she follows "a path right down the middle of the tube",
-     * pitch locked to the tube's axis, roll irrelevant, the camera orbiting
-     * the line. The nest plan IS that path — a graph of centerlines with
-     * radii — so the moment she is underground and near a planned bore the
-     * rail snaps her on, and the noisy free-walker pose that let her
-     * abdomen swing through the shaft wall never runs down there at all.
-     * There is no FREE in a bore any more; FREE lives on the surface and
-     * inside rooms only. Loose in a room the rail keeps its hands off —
-     * every edge into a chamber ends at its centre, so a bare proximity
-     * test would glue her to the middle of her own room — and it picks her
-     * up again the moment she walks out of the room's shell, by whichever
-     * opening she used: a planned tunnel, or a hole she chewed herself.
-     */
-    if (this.railEdge < 0 && this.underground && this.rails.length > 0) {
-      const take = this.chamberId === null
-        ? this.nearestRail(this.at)
-        : this.chamberMouthGrab(this.chamberId);
-      if (take && take.d < this.rails[take.i]!.r * 1.6) {
-        this.railEdge = take.i;
-        this.railT = take.t;
-        const e = this.rails[take.i]!;
-        const tan = e.b.clone().sub(e.a).normalize();
-        /* A shaft is ENTERED downward; a level bore takes whichever way
-         * she faces. Her wall starts on the side she faced when the rail
-         * took her. */
-        /* A shaft is normally ENTERED downward, from its top. Leaving a
-         * room through a doorway in the CEILING is the other case: the
-         * grab point is above her, so travel has to run that way or the
-         * rail would take her straight back down into the room she is
-         * trying to leave. */
-        const up = this.rails[take.i]!.a.clone().lerp(this.rails[take.i]!.b, take.t).y
-          > this.at.y + RIDE;
-        this.railDir = Math.abs(tan.y) > 0.7
-          ? (up ? (tan.y > 0 ? 1 : -1) : (tan.y > 0 ? -1 : 1))
-          : ((Math.sin(this.facing) * tan.x + Math.cos(this.facing) * tan.z) >= 0 ? 1 : -1);
-        this.railRev = false;
-        this.railWall.set(Math.sin(this.facing), 0, Math.cos(this.facing));
-      }
-    }
+    /* Her walked path used to be the tunnel camera's rail. The chase finds
+     * its own open air now, so nothing reads the trail — and a per-frame
+     * list of clones nothing reads is just work. */
 
     if (this.stream) {
-      // Soil leaves at the bottom of the stroke, not on the button.
+      // Soil leaves at the bottom of the stroke, not on the button — and
+      // which stroke it is depends on which tool the shovel is holding.
       if (bore.bite) this.bite();
+
+      /* The builder digs on a BUTTON, not on a frame: `digPiece` is called
+       * straight from the palette's chips. Nothing to do per-frame here. */
 
       const lead = Math.min(LEAD_MAX, Math.abs(speed) * LEAD_S);
       const now = performance.now();
-      if (now - this.lastScrollAt > SCROLL_COOLDOWN_MS) {
+      /*
+       * ONE SCROLL AT A TIME, FINISHED BEFORE THE NEXT.
+       *
+       * A scroll regenerates the whole window — measured at 290 to 508 ms —
+       * and then dumps most of two hundred chunks into the mesh queue. The
+       * gate was a flat 150 ms, which is a third of one scroll's own cost,
+       * so on a run downhill the next one started while the last was still
+       * being digested and the backlog never came back to zero: the report's
+       * "queued 190" beside "scrolls 245", and the lag and the black holes
+       * underground are both that same backlog seen from different angles.
+       * Waiting for the queue to be nearly drained cannot deadlock — the
+       * queue drains on its own every frame whether she moves or not.
+       */
+      const digesting = this.queue.length > MESH_BUDGET * 4;
+      if (!digesting && now - this.lastScrollAt > SCROLL_COOLDOWN_MS) {
+        /*
+         * The look-ahead rides her NOSE, not a compass bearing. `facing` is
+         * `atan2(fwd.x, fwd.z)`, which is noise when her nose is near
+         * vertical — down a shaft the horizontal part of it is almost
+         * nothing and the bearing spins, so a full-length lead was being
+         * flung in a random direction every frame. Using the nose's own
+         * horizontal components shrinks the lead to nothing exactly when the
+         * bearing stops meaning anything, which is the behaviour wanted.
+         */
         const scroll = this.stream.recentreOn(
-          this.at.x + Math.sin(this.facing) * lead,
-          this.at.z + Math.cos(this.facing) * lead,
+          this.at.x + this.fwd.x * lead,
+          this.at.z + this.fwd.z * lead,
         );
         if (scroll) {
           this.lastScrollAt = now;
@@ -1113,13 +1910,40 @@ export class IslandScene {
         /* One chunk ALWAYS lands, but the frame never spends more than
          * ~6 ms meshing — the playtest HUD's "last 74 ms" hitches were
          * this loop eating a whole scroll's backlog in one gulp. */
-        if (performance.now() - meshStart > 6) break;
+        /*
+         * The slice grows with the backlog. Six milliseconds is right when
+         * the queue is a handful, and far too polite when a scroll has just
+         * dumped two hundred chunks: underground an unbuilt chunk is a hole
+         * onto nothing, so the backlog is not just late scenery, it is the
+         * black the report describes. Ten milliseconds for as long as the
+         * pile is deep, six the rest of the time.
+         */
+        if (performance.now() - meshStart > (this.queue.length > 64 ? 10 : 6)) break;
       }
       this.reveal();
     }
 
-    this.updateGateAsk();
-    this.refreshModeChip();
+    /* The crossover is deliberately not instant: breaking the surface is
+     * one of the moments this game has, and half a second of contours
+     * resolving into daylight is the whole of the effect. */
+    if (this.sense) {
+      this.sense.uSense.value += ((this.underground ? 1 : 0) - this.sense.uSense.value)
+        * (1 - Math.exp(-SENSE_EASE * dt));
+      /*
+       * AND THE VOID BEHIND A MISSING CHUNK IS SOIL, NOT NOTHING.
+       *
+       * Underground, a chunk still in the mesh queue leaves a hole with the
+       * clear colour behind it — sky above ground, and after a scroll, a
+       * black gap in the tunnel wall. It cannot be meshed any sooner than it
+       * is, but what shows through while it is pending can be the colour of
+       * packed earth instead of the colour of nothing, which turns a hole
+       * into a patch of unlit dirt. Eased on the same crossing the sense
+       * shader uses, so surfacing does not flash.
+       */
+      (this.scene.background as THREE.Color)
+        .copy(this.skyColour).lerp(SOIL_DARK, this.sense.uSense.value);
+    }
+    this.refreshAim();
     this.pose(dt);
     // While the designer is up the camera is ITS fly rig, not the follow cam.
     if (!this.designer?.isOpen) this.aimCamera(dt);
@@ -1127,256 +1951,140 @@ export class IslandScene {
 
   /* ------------------------------------------------ chambers and the modes */
 
-  /** Which room contains this point, if any. */
-  private chamberAt(p: THREE.Vector3): string | null {
-    for (const [id, node] of this.railNodes) {
-      if (node.kind !== 'chamber') continue;
-      const box = chamberBox(node.p.x, node.p.y, node.p.z, node.r);
-      if (insideChamber(box, p.x, p.y, p.z)) return id;
-    }
-    return null;
-  }
-
-  /**
-   * AUTO-SURFACE: riding TOWARD a gate arms the exit inside ~3 mm and lets
-   * go at half a millimetre, placing her on the daylight surface beside the
-   * mouth. Riding AWAY never surfaces her, however close she passes. The
-   * old SURFACE? YES/NO prompt is gone — the heading is the answer.
-   */
-  private surfaceTo(gateId: string): void {
-    const node = this.railNodes.get(gateId);
-    if (!node) return;
-    this.railEdge = -1;
-    this.railGate = null;
-    this.chamberId = null;
-    /* Standing on her own mouth, the ENTER? question would fire the very
-     * next frame. It stays quiet until she has walked away and come back. */
-    this.enterDeclined = gateId;
-    this.hideGateAsk();
-    /* Beside the vent, not on it: dropped dead-centre she stands over the
-     * hole she just left and sinks straight back in. Her travel direction
-     * (or facing, up a plumb shaft) picks which side of the mound. */
-    const out = new THREE.Vector3(this.railForward.x, 0, this.railForward.z);
-    if (out.lengthSq() < 0.01) out.set(Math.sin(this.facing), 0, Math.cos(this.facing));
-    out.normalize();
-    const x = node.p.x + out.x * node.r * 1.6;
-    const z = node.p.z + out.z * node.r * 1.6;
-    /* ON the anthill, not inside it. Beside a gate the FINE soil carries
-     * the real spoil heap, which stands proud of the coarse island grid
-     * that `walkGroundAt` reads — planted at the grid height she arrives
-     * buried in her own mound and the anti-embed net has to dig her out.
-     * The streamed surface is the truth here; the grid is the fallback
-     * for a column the window does not hold. */
-    const fine = this.stream?.surfaceHeightAt(x, z);
-    const top = fine === null || fine === undefined
-      ? this.walkGroundAt(x, z)
-      : Math.max(this.walkGroundAt(x, z), fine);
-    this.at.set(x, top + RIDE, z);
-    this.trail.length = 0;
-  }
-
-  /**
-   * THE THRESHOLD IS ALWAYS A QUESTION.
-   *
-   * Nothing carries her between daylight and the nest on its own — not
-   * walking over the vent, not riding into the gate. Above it she is asked
-   * ENTER?; riding up to it she is asked SURFACE?; a no is remembered until
-   * she is GATE_RESET_MM away, so it neither nags nor forgets.
-   */
-  private updateGateAsk(): void {
-    if (this.designer?.isOpen) { this.hideGateAsk(); return; }
-
-    if (this.railEdge >= 0) {
-      const near = this.railGate;
-      this.enterDeclined = null; // underground: the way IN is behind her
-      if (!near) { this.hideGateAsk(); return; }
-      if (near.distMm > GATE_RESET_MM && this.surfaceDeclined === near.id) {
-        this.surfaceDeclined = null;
-      }
-      const ask = near.toward && near.distMm <= SURFACE_ASK_MM
-        && this.surfaceDeclined !== near.id;
-      this.showGateAsk(ask ? { kind: 'surface', gateId: near.id } : null);
-      return;
-    }
-
-    this.surfaceDeclined = null; // on the surface: the way OUT is behind her
-    const under = this.gateUnderfoot();
-    if (under === null) {
-      /* Off the mouth entirely — a declined gate re-arms once she has put
-       * real distance between herself and it, not merely stepped aside. */
-      if (this.enterDeclined !== null) {
-        const node = this.railNodes.get(this.enterDeclined);
-        if (!node || this.at.distanceTo(node.p) * MM > GATE_RESET_MM) {
-          this.enterDeclined = null;
-        }
-      }
-      this.showGateAsk(null);
-      return;
-    }
-    this.showGateAsk(this.enterDeclined === under
-      ? null
-      : { kind: 'enter', gateId: under });
-  }
-
-  /** YES on ENTER?: down the vent and onto the bore below it. */
-  private enterVia(gateId: string): void {
-    const node = this.railNodes.get(gateId);
-    if (!node) return;
-    this.hideGateAsk();
-    this.enterDeclined = null;
-    /* Riding out again would be asked SURFACE? on the first frame, at the
-     * gate she just came through. Quiet until she has gone somewhere. */
-    this.surfaceDeclined = gateId;
-    this.trail.length = 0;
-    for (let i = 0; i < this.rails.length; i += 1) {
-      const e = this.rails[i]!;
-      const atFrom = e.from === gateId;
-      if (!atFrom && e.to !== gateId) continue;
-      this.railEdge = i;
-      this.railT = atFrom ? 0 : 1;
-      this.railDir = atFrom ? 1 : -1;
-      this.railRev = false;
-      this.railWall.set(Math.sin(this.facing), 0, Math.cos(this.facing));
-      this.at.copy(atFrom ? e.a : e.b);
-      this.underground = true;
-      this.chamberId = null;
-      return;
-    }
-    /* A mouth with nothing dug under it yet: step off the lid into its own
-     * vent and let the walker find the bottom. */
-    this.at.set(node.p.x, node.p.y - node.r, node.p.z);
-    this.underground = true;
-  }
-
-  answerGateForTest(yes: boolean): void { this.answerGate(yes); }
-
-  gateAskForTest(): { kind: string; gateId: string; shown: boolean } | null {
-    if (!this.gateAsk) return null;
-    return {
-      ...this.gateAsk,
-      shown: this.askEl !== null && this.askEl.style.display !== 'none',
-    };
-  }
-
-  private answerGate(yes: boolean): void {
-    const ask = this.gateAsk;
-    if (!ask) return;
-    if (!yes) {
-      if (ask.kind === 'enter') this.enterDeclined = ask.gateId;
-      else this.surfaceDeclined = ask.gateId;
-      this.showGateAsk(null);
-      return;
-    }
-    if (ask.kind === 'surface') this.surfaceTo(ask.gateId);
-    else this.enterVia(ask.gateId);
-  }
-
-  private showGateAsk(ask: { kind: 'enter' | 'surface'; gateId: string } | null): void {
-    const same = this.gateAsk?.kind === ask?.kind
-      && this.gateAsk?.gateId === ask?.gateId;
-    this.gateAsk = ask;
-    if (!this.askEl || !this.askLabel) return;
-    if (!ask) { this.askEl.style.display = 'none'; return; }
-    if (!same) this.askLabel.textContent = ask.kind === 'enter' ? 'ENTER?' : 'SURFACE?';
-    this.askEl.style.display = '';
-  }
-
-  private hideGateAsk(): void { this.showGateAsk(null); }
-
-  /** The dial, in degrees, where the thumb can see it. */
+  /** The angle she is pointed, in degrees, live. */
   private refreshAim(): void {
+    if (this.digMode && this.headingReadout && this.depthReadout) {
+      /*
+       * The bearing of the AIM, not of her body. On a trunk her nose points
+       * at the sky and has no bearing worth printing; the line she is about
+       * to cut along still does, right up until it goes plumb, and then it
+       * holds rather than spinning on rounding.
+       */
+      const line = this.boreAim();
+      const flat = Math.hypot(line.x, line.z);
+      if (flat > 0.15) this.aimBearing = Math.atan2(line.x, line.z);
+      const hdg = Math.round(((this.aimBearing * 180) / Math.PI + 360) % 360);
+      const bearing = `${String(hdg).padStart(3, '0')}\u00b0`;
+      if (this.headingReadout.textContent !== bearing) {
+        this.headingReadout.textContent = bearing;
+      }
+      const down = Math.round(this.depthMm());
+      const depth = down > 0 ? `\u25bc ${down} mm` : 'surface';
+      if (this.depthReadout.textContent !== depth) {
+        this.depthReadout.textContent = depth;
+        this.depthReadout.classList.toggle('is-steep', down >= QUEST_DEPTH_MM);
+      }
+    }
     if (!this.aimReadout) return;
-    const deg = Math.round((this.bore.pitch * 180) / Math.PI);
-    this.aimReadout.textContent = `${deg >= 0 ? '+' : ''}${deg}°`;
-  }
-
-  /** The GRIP/FREE chip is an INDICATOR — the states switch themselves, so
-   *  the chip's whole job is to make the current one obvious. */
-  private refreshModeChip(): void {
-    if (!this.modeBtn) return;
-    const grip = this.railEdge >= 0;
-    const label = grip ? 'GRIP' : 'FREE';
-    if (this.modeBtn.textContent !== label) this.modeBtn.textContent = label;
-    this.modeBtn.classList.toggle('is-grip', grip);
+    /*
+     * THE ANGLE IS READ AGAINST THE WORLD, whatever frame the stick works
+     * in. `aimPitch` is her own pitch — nought means along her nose — and
+     * printing that would have the dial say nought while she points at the
+     * sky up a trunk. The rise of the actual aim line is the number an
+     * altimeter would agree with.
+     */
+    const line = this.boreAim();
+    const deg = Math.round(
+      (Math.asin(Math.max(-1, Math.min(1, line.y))) * 180) / Math.PI,
+    );
+    const text = `${deg > 0 ? '+' : ''}${deg}°`;
+    if (this.aimReadout.textContent !== text) this.aimReadout.textContent = text;
+    this.aimReadout.classList.toggle('is-steep', deg <= -45);
   }
 
   /**
-   * The free walker: walls are walls, holes are holes. The floor at the
-   * DESTINATION is looked up from her own height downward: a tunnel floor
-   * is a real floor, the roof above it is invisible to her, and a floor
-   * more than one stride ABOVE her is a wall — the move is refused instead
-   * of easing her up through the ceiling ("it bounced me back up").
-   * Refused with the stick still held means she is pressing against the
-   * wall, and she climbs it slowly — enough to get out of a dug pit.
+   * THE WALK, in her own frame: forward is along her nose, and down is
+   * whatever she is standing on.
+   *
+   * Everything that used to make this hard was world +Y sneaking in. A floor
+   * was "the soil below at this x,z", so a wall was a thing to be REFUSED
+   * and then climbed at a fixed rate by a special case; a ceiling was not a
+   * surface at all; and stepping off a lip left her hanging in the black
+   * with nothing underneath, because "underneath" meant one fixed direction
+   * that no longer pointed at any soil. Every one of those was a hand-off
+   * between two ideas of down.
+   *
+   * There is one idea of down now and it is `up`, negated. She steps along
+   * her nose, and `SurfaceWalker` seats her back onto the soil and turns her
+   * up onto its normal — so a wall is a floor she is turning onto, a ceiling
+   * is a floor she is under, and there is no case analysis anywhere for
+   * either. Walking up out of a shaft is not a rule; it is what walking IS
+   * once down points at the shaft's wall.
    */
-  private moveFree(dt: number, speed: number): void {
+  private moveSurface(dt: number, speed: number): void {
+    const walker = this.walker;
+    if (!walker) return;
     const span = SPAN_MM / MM;
-    const nx = Math.min(span - 2, Math.max(2, this.at.x + this.velocity.x * dt));
-    const nz = Math.min(span - 2, Math.max(2, this.at.z + this.velocity.z * dt));
-    const there = this.floorBelow(nx, nz, this.at.y + 0.5);
+
     /*
-     * SHE HAS TO FIT. Finding a floor below the destination is not enough:
-     * at tunnel joints the bores leave thin ribs of soil at body height
-     * with an air pocket underneath, and "there's a floor down there" would
-     * happily walk her centre INTO the rib. Embedded, the camera is inside
-     * soil and the whole world renders see-through — playtest saw it as
-     * "holes all over" and being "forced into the terrain". So a move
-     * commits only when the air at her NEW centre (destination floor plus
-     * ride height) is actually air.
+     * THE LEGS MOVE HER, once she has any.
+     *
+     * The stick proposes a shove and a spin; the planted feet refuse what
+     * they cannot reach; what survives is her displacement. That is what
+     * makes the gait match the ground — the cycle and the travel come out
+     * of the same step rather than being two numbers hoped into agreement,
+     * which is what the skating was. Sliding her along her nose is the
+     * fallback for the first second, before her model has loaded.
      */
-    /* Stepping UP means her new centre (floor + ride) must be air; moving
-     * flat or DOWN means the destination must be air at her CURRENT height
-     * — a floor far below with soil at body height is the rib trap, and
-     * also exactly how she used to ghost sideways through walls. */
-    const clearAt = (yy: number) => this.stream?.solidAtWu(nx, yy, nz) !== true;
-    const fits = (floorY: number) => (floorY > this.at.y
-      ? clearAt(floorY + RIDE)
-      : clearAt(this.at.y + 0.1));
-    let want: number;
-    let blocked = false;
-    if (there !== null) {
-      if (there - this.at.y > CLIMB_STEP || !fits(there)) {
-        blocked = true;
-        want = this.at.y;
-      } else {
-        this.at.x = nx;
-        this.at.z = nz;
-        want = there + RIDE;
-      }
+    if (this.drive) {
+      this.driveReport = this.drive.step(
+        dt,
+        { at: this.at, up: this.up, forward: this.fwd },
+        {
+          walk: this.input.walk,
+          yaw: -this.input.yaw,
+          speed: WALK_SPEED * (this.input.sprint ? SPRINT : 1),
+          yawRate: TURN_RATE,
+          /* The walker seats her: two systems both deciding how high she
+           * rides do not average out, they fight. */
+          settle: false,
+        },
+        this.groundForLegs,
+      );
     } else {
-      const ground = this.walkGroundAt(nx, nz);
-      if (ground - this.at.y <= CLIMB_STEP && fits(ground)) {
-        this.at.x = nx;
-        this.at.z = nz;
-        want = ground + RIDE;
-      } else {
-        blocked = true;
-        want = this.at.y;
-      }
+      this.at.addScaledVector(this.fwd, speed * dt);
     }
-    if (blocked && Math.abs(speed) > 0) {
-      // Climbing needs HEADROOM: open air above her. In the shaft that is
-      // true and she scales it; under a tunnel roof it is not, and she
-      // stays put — going up through a ceiling is what DIG is for. (The
-      // first cut skipped this check and she climbed through the hillside.)
-      const overhead = this.stream?.solidAtWu(this.at.x, this.at.y + 0.5, this.at.z);
-      if (overhead !== true) {
-        this.at.y += CLIMB_RATE * dt;
-        want = this.at.y;
-      }
-    }
-    this.at.y += (want - this.at.y) * Math.min(1, dt * 14);
+    this.at.x = Math.min(span - 2, Math.max(2, this.at.x));
+    this.at.z = Math.min(span - 2, Math.max(2, this.at.z));
+
     /*
-     * The safety net under all of it: if anything above still managed to
-     * put her centre inside soil (rounding at a curved wall, an edit under
-     * her feet), snap back to the last position that was provably in air
-     * rather than let an embedded frame escape — one embedded frame is a
-     * see-through world.
+     * ATTITUDE HOLDS STILL WHILE THE JAWS ARE WORKING.
+     *
+     * Digging takes the ground out from under her, so the normal the grip
+     * finds flips between the floor, the fresh rim and the wall several
+     * times a second — and her up steers the cast that found it, which is a
+     * feedback loop no rate limit can tame. Frozen for the frames a stroke
+     * is actually cutting; free the rest of the time, which is when
+     * cornering happens anyway.
      */
-    if (this.stream?.solidAtWu(this.at.x, this.at.y, this.at.z) === true) {
-      // Three CONSECUTIVE solid frames means truly embedded. One frame is
-      // usually the 1 mm rounding flickering while she hugs a curved wall —
-      // snapping on it yanked her off the shaft wall mid-climb, every climb.
+    const aimDt = this.input.dig && this.underground ? 0 : dt;
+    walker.settle({ at: this.at, up: this.up, forward: this.fwd }, dt, aimDt);
+
+    /*
+     * The safety net is smaller than it was, because most of what it caught
+     * cannot happen any more: there is no "off the modelled window" — the
+     * density answers everywhere — and no "no floor below at this x,z",
+     * because below is wherever she is standing. What is left is genuinely
+     * being inside soil, which the walker's own embedded case handles first
+     * and this only backs up.
+     */
+    /*
+     * Tested a little ABOVE her origin, because her origin is not the
+     * lowest part of her — the rig puts its sole plane through it, so a
+     * correctly seated ant has her root a fraction inside the surface and
+     * testing exactly there calls every properly planted step a burial.
+     * Half a millimetre up is clear of the soles and still deep inside
+     * anything that has actually swallowed her.
+     */
+    const probeUp = 0.5 / MM;
+    if (this.soilDensityAt(
+      this.at.x + this.up.x * probeUp,
+      this.at.y + this.up.y * probeUp,
+      this.at.z + this.up.z * probeUp,
+    ) > 0) {
+      // Three CONSECUTIVE bad frames means it is real. One is usually the
+      // rounding flickering while she hugs a curved wall — snapping on that
+      // yanked her off the shaft wall mid-climb, every climb.
       this.embedFrames += 1;
       if (this.embedFrames >= 3 && this.hasSafe) {
         this.at.copy(this.lastSafe);
@@ -1389,261 +2097,323 @@ export class IslandScene {
     }
   }
 
-  /**
-   * The rail: travel is a single parameter along the plan edge's
-   * centerline. Pitch follows the tube's axis by construction, the joints
-   * hand her from bore to bore by best tangent alignment, the gate node
-   * hands her back to the free walker on the surface — and none of the
-   * free walker's wall problems can exist here, because her position is
-   * DERIVED from the centerline instead of tested against soil.
-   */
-  private moveOnRail(dt: number, speed: number): void {
-    const e = this.rails[this.railEdge]!;
-    const tan = S_TAN.copy(e.b).sub(e.a);
-    const len = tan.length();
-    tan.divideScalar(len);
-    // Turning re-aims travel when her facing meaningfully agrees or
-    // disagrees with the bore. A VERTICAL bore has no facing to steer
-    // with, so the HEADING is the state: forward rides the way she faces
-    // along the shaft, and pulling back TURNS HER AROUND — once. Release
-    // and push forward again and she carries on the NEW way (playtest:
-    // "as soon as I press W it doesn't continue that same direction").
-    const align = Math.sin(this.facing) * tan.x + Math.cos(this.facing) * tan.z;
-    let drive = speed;
-    if (Math.abs(tan.y) > 0.7) {
-      const reversing = speed < -1e-6;
-      if (reversing && !this.railRev) this.railDir = this.railDir === 1 ? -1 : 1;
-      this.railRev = reversing;
-      drive = Math.abs(speed);
-    } else {
-      this.railRev = false;
-      if (Math.abs(align) > 0.35) this.railDir = align >= 0 ? 1 : -1;
-    }
-    this.railT += (drive * this.railDir * dt) / len;
-
-    if (this.railT > 1 || this.railT < 0) {
-      const nodeId = this.railT > 1 ? e.to : e.from;
-      const node = this.railNodes.get(nodeId);
-      const travel = tan.clone().multiplyScalar(this.railT > 1 ? 1 : -1);
-      if (node && node.kind === 'entrance') {
-        /* The gate does not eject her: she parks at the joint and SURFACE?
-         * decides. Riding into the end of the tube is not consent to be
-         * put out in the open. */
-        this.railT = Math.min(1, Math.max(0, this.railT));
-        return;
-      }
-      let best = -1;
-      let bestDot = 0.2;
-      let bestStart = 0;
-      let bestDir: 1 | -1 = 1;
-      for (let i = 0; i < this.rails.length; i += 1) {
-        if (i === this.railEdge) continue;
-        const c = this.rails[i]!;
-        let start: number;
-        let dir: 1 | -1;
-        if (c.from === nodeId) { start = 0; dir = 1; } else if (c.to === nodeId) { start = 1; dir = -1; } else continue;
-        const ct = c.b.clone().sub(c.a).normalize().multiplyScalar(dir);
-        const d = ct.dot(travel);
-        if (d > bestDot) {
-          best = i;
-          bestDot = d;
-          bestStart = start;
-          bestDir = dir;
-        }
-      }
-      if (best >= 0) {
-        this.railEdge = best;
-        this.railT = bestStart;
-        /* railDir maps her INPUT onto the edge parameter. bestDir is the
-         * parameter direction that CONTINUES the travel; when she is
-         * riding backwards (walk < 0), the same continuation needs the
-         * opposite mapping — without this she ping-ponged at every joint
-         * on the way out (the playtest's suspected "- for a +", found).
-         * A VERTICAL next edge runs on |speed| along the heading instead,
-         * so there the continuation IS bestDir — and a held reverse was
-         * already spent turning her, so the latch must not flip again. */
-        const nt = this.rails[best]!;
-        const ny = Math.abs(nt.b.y - nt.a.y) / nt.b.distanceTo(nt.a);
-        if (ny > 0.7) {
-          this.railDir = bestDir;
-          this.railRev = speed < -1e-6;
-        } else {
-          this.railDir = speed < 0 ? (bestDir === 1 ? -1 : 1) : bestDir;
-          this.railRev = false;
-        }
-      } else {
-        this.railT = Math.min(1, Math.max(0, this.railT)); // dead end
-      }
-      return;
-    }
-
-    // She CRAWLS the bore, never floats in it: gravity settles her onto
-    // the floor of a level tube; a plumb shaft — where gravity picks no
-    // wall — keeps a REMEMBERED wall instead. Legs on the bore, back to
-    // the centerline (playtest's screenshot spec: top of the ant at the
-    // center point, legs away, crawling).
-    const center = S_CENTER.copy(e.a).lerp(e.b, Math.min(1, Math.max(0, this.railT)));
-
-    /* ARRIVING IN A ROOM: every edge into a chamber runs to its centre, so
-     * "the point she rides is well inside the carved shell" is the moment
-     * the tunnel has become the room. The rail lets go there and she is
-     * FREE on the chamber floor — the tunnel's grip ends where the walls
-     * stop being close. */
-    for (const roomId of [e.from, e.to]) {
-      const cn = this.railNodes.get(roomId);
-      if (!cn || cn.kind !== 'chamber') continue;
-      const box = chamberBox(cn.p.x, cn.p.y, cn.p.z, cn.r);
-      if (chamberNorm(box, center.x, center.y, center.z) < CHAMBER_RELEASE_NORM) {
-        this.railEdge = -1;
-        this.chamberId = roomId;
-        this.chamberGrabArmed = false;
-        this.railGate = null;
-        /* The hand-off must never strand her inside a rounding-thin wall:
-         * her body lags the centerline by a frame of lerp. The centerline
-         * point is air by construction — if her centre is not, take it. */
-        if (this.stream?.solidAtWu(this.at.x, this.at.y, this.at.z) === true) {
-          this.at.copy(center);
-        }
-        this.embedFrames = 0;
-        this.lastSafe.copy(this.at);
-        this.hasSafe = true;
-        return;
-      }
-    }
-
-    /* How near the nearest gate is, and whether she is riding AT it. This
-     * only REPORTS — updateGateAsk turns it into the SURFACE? question and
-     * a tap turns that into daylight. Distance is measured from her point
-     * ON the centerline, not her body, which rides offset toward the floor
-     * by nearly the bore radius and would never read as "3 mm close". */
-    const step = drive * this.railDir;
-    let gateId: string | null = null;
-    let gateP: THREE.Vector3 | null = null;
-    let dist = Infinity;
-    for (const [id, gn] of this.railNodes) {
-      if (gn.kind !== 'entrance') continue;
-      const d = center.distanceTo(gn.p);
-      if (d < dist) { dist = d; gateId = id; gateP = gn.p; }
-    }
-    this.railGate = gateId && gateP
-      ? {
-        id: gateId,
-        distMm: dist * MM,
-        toward: Math.abs(step) > 1e-6 && (tan.x * (gateP.x - center.x)
-          + tan.y * (gateP.y - center.y)
-          + tan.z * (gateP.z - center.z)) * Math.sign(step) > 0,
-      }
-      : null;
-    /* Facing the way she travels, so an exit taken from here steps off on
-     * the side she was heading for. */
-    if (Math.abs(step) > 1e-6) S_FWD.copy(tan).multiplyScalar(Math.sign(step));
-
-    const perp = S_PERP.set(0, -1, 0).addScaledVector(tan, tan.y);
-    this.railWall.addScaledVector(tan, -this.railWall.dot(tan));
-    if (this.railWall.lengthSq() < 0.05) {
-      this.railWall.set(Math.sin(this.facing), 0, Math.cos(this.facing))
-        .addScaledVector(tan, -align);
-    }
-    this.railWall.normalize();
-    const level = perp.length(); // 1 in a level bore, 0 in a plumb shaft
-    const rad = S_RAD.copy(perp)
-      .addScaledVector(this.railWall, Math.max(0, 1 - level)).normalize();
-    const target = S_TARGET.copy(center).addScaledVector(rad, Math.max(0, e.r - RIDE));
-    this.at.lerp(target, Math.min(1, dt * 12));
-    /* She FACES the way she is travelling: pulling back rides the bore the
-     * other way and the model turns WITH it, instead of moonwalking with
-     * the stick held forward (playtest caught her walking backwards). */
-    if (Math.abs(drive) > 1e-6) {
-      this.railForward.copy(tan).multiplyScalar(this.railDir * (drive < 0 ? -1 : 1));
-    }
-    this.railUp.copy(rad).multiplyScalar(-1);
-    this.hasSafe = true;
-    this.lastSafe.copy(this.at);
-    this.embedFrames = 0;
-  }
-
   /** The way she is pointed AND pitched — the line the bore cuts and, while
    *  she is engaged in one, the line she travels. */
   private boreAim(): THREE.Vector3 {
-    const cp = Math.cos(this.bore.pitch);
-    return new THREE.Vector3(
-      Math.sin(this.facing) * cp, Math.sin(this.bore.pitch), Math.cos(this.facing) * cp,
-    );
+    /*
+     * SHE DIGS WHERE YOU ARE POINTING HER, and the pointing keeps still
+     * until you change it. Dragging up and down sets it in either view —
+     * no buttons, no gauge — and the camera follows it rather than setting
+     * it, which is the way round that stops "forward" quietly meaning
+     * "into the floor".
+     */
+    /*
+     * PITCHED IN HER OWN FRAME — and READ against the world.
+     *
+     * Both halves matter, and putting both in the same frame is what went
+     * wrong. The gauge has to be world-referenced: it is a depth
+     * instrument, and a depth measured against whatever slope she happens
+     * to be on tells you nothing. But the CONTROL cannot be, because the
+     * camera looks down this line: build it from a compass bearing and she
+     * is clinging to a vertical trunk with a bearing that has been frozen
+     * since the last time she was upright, so the view unhooks from her
+     * body and panning turns something that is not the ant.
+     *
+     * So the aim is a rotation between her nose and her back, which the
+     * view can ride, and `refreshAim` reports the world angle OF that line.
+     * Nose-first up a trunk then reads +90 on the dial, which is exactly
+     * what was asked for — the number is world, the stick is hers.
+     */
+    const cp = Math.cos(this.aimPitch);
+    return new THREE.Vector3().copy(this.fwd).multiplyScalar(cp)
+      .addScaledVector(this.up, Math.sin(this.aimPitch));
   }
 
   /**
-   * Travel along the bore's line, paced by the space she has cleared.
+   * ONE STROKE OF THE SHOVEL: a mouthful 10 mm wide, 5 mm tall and 3 mm
+   * deep, taken at her jaws, along the way she is pointed.
    *
-   * No floor-following and no step limit down here: she is in a tube she
-   * cut herself, and the only thing that may stop her is soil that is still
-   * there. That check is what makes the jaws set the rate of tunnelling —
-   * without it the stick drives her straight through the working face and
-   * out the far side of the hill, and the digging becomes decoration.
+   * Wider than she is, and that is the point — a stroke opens something
+   * she can WALK into rather than something she has to be threaded
+   * through. It is what let the body capsule go: nothing needs to check
+   * whether she fits, because at ten millimetres across a nine-millimetre
+   * ant always does.
    */
-  private moveBore(dt: number, speed: number): void {
-    if (Math.abs(speed) < 1e-6) return;
-    const span = SPAN_MM / MM;
-    const next = this.at.clone().addScaledVector(this.boreAim(), speed * dt);
-    next.x = Math.min(span - 2, Math.max(2, next.x));
-    next.z = Math.min(span - 2, Math.max(2, next.z));
-    if (this.stream?.solidAtWu(next.x, next.y, next.z) === true) return;
-    this.at.copy(next);
-    this.lastSafe.copy(this.at);
-    this.hasSafe = true;
-    this.embedFrames = 0;
-  }
-
-  private nearestRail(p: THREE.Vector3): { i: number; t: number; d: number } | null {
-    let best: { i: number; t: number; d: number } | null = null;
-    const ap = new THREE.Vector3();
-    const ab = new THREE.Vector3();
-    for (let i = 0; i < this.rails.length; i += 1) {
-      const e = this.rails[i]!;
-      ab.copy(e.b).sub(e.a);
-      ap.copy(p).sub(e.a);
-      const t = Math.min(1, Math.max(0, ap.dot(ab) / ab.lengthSq()));
-      const d = ap.addScaledVector(ab, -t).length();
-      if (!best || d < best.d) best = { i, t, d };
-    }
-    return best;
-  }
-
   private bite(): void {
-    const mouth = this.at.clone().addScaledVector(this.boreAim(), JAW_REACH);
-    const result = this.stream!.subtractSphere(mouth, BITE_RADIUS);
-    if (result.changedSamples === 0) return;
+    const aim = this.boreAim();
+    /*
+     * AT HER JAWS, or at the front of her while the model is still
+     * loading. `jawPosition` is the real mandible tip where the rigger
+     * gave her one; the fallback is a nose-length along the aim, so the
+     * first frames of a session dig where every frame after them does.
+     */
+    /*
+     * ON THE AIM LINE THROUGH HER CENTRE — never on the jaw BONE.
+     *
+     * The bone is the obvious anchor and it is the wrong one, twice over.
+     * It rides the visual model, which sits above her centre-line and
+     * lags her by a frame of easing, so the cut opened ABOVE where the
+     * crosshair pointed — reported as aiming high, and settling onto the
+     * crosshair only once the model had bedded into the tunnel and its
+     * jaw had come down to the line. And the same offset means a bone-
+     * anchored tunnel runs parallel to her path a few millimetres aside,
+     * which is its own old bug.
+     *
+     * So the bone is allowed to say how FAR along the aim her jaws are,
+     * and nothing else. The cut is centred on the ray the camera looks
+     * down, so what the crosshair covers is what disappears.
+     */
+    const centre = new THREE.Vector3();
+    let hull = NOSE_REACH + JAW_PAST_NOSE;
+    if (this.queenReady && this.queen.jawPosition(centre)) {
+      hull = Math.max(hull, centre.sub(this.at).dot(aim));
+    }
+    this.biteCentre(aim, hull, centre);
+
+    let touched = 0;
+    let minX = Infinity; let minY = Infinity; let minZ = Infinity;
+    let maxX = -Infinity; let maxY = -Infinity; let maxZ = -Infinity;
+    /*
+     * Two scoops, one at the face and one a depth further in, so a HELD
+     * stroke cuts a continuous tube rather than a string of beads — the
+     * brush is only three millimetres deep and her stride outruns a
+     * single one on the first step.
+     */
+    for (let i = 0; i < 2; i += 1) {
+      const at = S_CENTER.copy(centre).addScaledVector(aim, (i * SCOOP_DEEP_MM) / MM);
+      const result = this.stream!.subtractEllipsoid(at, aim, {
+        deep: SCOOP_DEEP_MM / 2 / MM,
+        wide: SCOOP_WIDE_MM / 2 / MM,
+        tall: SCOOP_TALL_MM / 2 / MM,
+      });
+      if (result.changedSamples === 0) continue;
+      touched += result.changedSamples;
+      const bb = result.bounds;
+      minX = Math.min(minX, bb.minX); maxX = Math.max(maxX, bb.maxX);
+      minY = Math.min(minY, bb.minY); maxY = Math.max(maxY, bb.maxY);
+      minZ = Math.min(minZ, bb.minZ); maxZ = Math.max(maxZ, bb.maxZ);
+    }
+    this.biteTouched = touched > 0;
+    if (touched === 0) return;
+    /*
+     * AND SHAVE WHAT WAS JUST CUT, in the same stroke.
+     *
+     * This ran automatically once before and had to be pulled out,
+     * because the brush could fill as well as shave and it brought roofs
+     * down on tunnels barely wider than she is. One-way, it cannot: soil
+     * is only ever removed, so the worst a stroke can do is open the hole
+     * slightly wider than intended, which is the failure you want. So the
+     * two are one action again — cut, then round off what the cut left.
+     */
+    const relaxed = this.smoothAround(centre);
+    if (relaxed) {
+      minX = Math.min(minX, relaxed.minX); maxX = Math.max(maxX, relaxed.maxX);
+      minY = Math.min(minY, relaxed.minY); maxY = Math.max(maxY, relaxed.maxY);
+      minZ = Math.min(minZ, relaxed.minZ); maxZ = Math.max(maxZ, relaxed.maxZ);
+    }
+    // Work done at depth is chamber-building, whatever she calls it.
+    if (this.depthMm() >= QUEST_DEPTH_MM * 0.7) this.deepCarved += touched;
+
+    // One remesh for the whole face, not seven.
     const lo = (v: number) => Math.max(0, Math.floor((v - 1) / CH));
     const hi = (v: number, max: number) => Math.min(max - 1, Math.floor((v + 1) / CH));
-    for (let cz = lo(result.bounds.minZ); cz <= hi(result.bounds.maxZ, CHUNKS_XZ); cz += 1) {
-      for (let cy = lo(result.bounds.minY); cy <= hi(result.bounds.maxY, CHUNKS_Y); cy += 1) {
-        for (let cx = lo(result.bounds.minX); cx <= hi(result.bounds.maxX, CHUNKS_XZ); cx += 1) {
+    for (let cz = lo(minZ); cz <= hi(maxZ, CHUNKS_XZ); cz += 1) {
+      for (let cy = lo(minY); cy <= hi(maxY, CHUNKS_Y); cy += 1) {
+        for (let cx = lo(minX); cx <= hi(maxX, CHUNKS_XZ); cx += 1) {
           this.enqueue(cx, cy, cz);
         }
       }
     }
   }
 
-  /* ------------------------------------------------- the tunnel designer */
-
-  /** The plan's graph IS the rail network — rebuilt whenever the plan is. */
-  private rebuildRails(): void {
-    if (!this.soil) return;
-    this.railNodes.clear();
-    for (const n of this.soil.plan.nodes) {
-      this.railNodes.set(n.id, {
-        p: new THREE.Vector3(n.x / MM, n.y / MM, n.z / MM),
-        kind: n.kind,
-        r: n.radiusMm / MM,
-      });
+  /**
+   * HOW FAR ALONG THE AIM THE SCOOP SITS — where it MEETS SOIL, not at a
+   * fixed arm's length.
+   *
+   * Her jaws are about five millimetres out and the scoop is three deep, so
+   * an anchor pinned to her reach is entirely INSIDE the hill the moment
+   * she is closer to a face than that. It still carves: it opens a bubble a
+   * few millimetres in, sealed behind an unbroken wall, so nothing appears
+   * to happen — and stepping BACK until the scoop straddles the surface is
+   * what made it work again. Reported exactly that way: right up against
+   * dirt it will not dig, back up and it will.
+   *
+   * So the ray is walked out from her centre to the first soil it meets and
+   * the scoop is seated a half-depth past that, which puts its near lip in
+   * the air on this side of every face however close she is. Finding no
+   * soil inside her reach means she is aiming at open sky, and the arm's
+   * length is the honest answer again — that is the stroke that misses, and
+   * it should.
+   *
+   * The preview draws from this same number, so what the ghost promises is
+   * what the stroke takes.
+   *
+   * SOIL ONLY. The walker's field has the tree unioned into it so she can
+   * climb the thing, but the shovel edits the voxel field and a tree is not
+   * in it — aiming at bark would find "solid", cut nothing, and read as the
+   * dig being broken again. Wood is not diggable, so the shovel does not
+   * see it.
+   */
+  private biteCentre(aim: THREE.Vector3, reach: number, out: THREE.Vector3): boolean {
+    const step = CELL_SIZE * 0.5;
+    const far = reach + SCOOP_DEEP_MM / MM;
+    for (let d = 0; d <= far; d += step) {
+      const x = this.at.x + aim.x * d;
+      const y = this.at.y + aim.y * d;
+      const z = this.at.z + aim.z * d;
+      if (this.groundSolidAt(x, y, z)) {
+        out.set(x, y, z).addScaledVector(aim, SCOOP_DEEP_MM / 2 / MM);
+        return true;
+      }
     }
-    this.rails = this.soil.plan.edges.map((edge) => ({
-      a: this.railNodes.get(edge.from)!.p,
-      b: this.railNodes.get(edge.to)!.p,
-      r: edge.radiusMm / MM,
-      from: edge.from,
-      to: edge.to,
-    }));
+    /*
+     * NOTHING ALONG THE AIM — SO DIG THE GROUND SHE IS ON.
+     *
+     * Measured on a hillside, aiming level: thirty millimetres of the ray
+     * ahead of her is air, every sample, because she stands a body-height
+     * off a surface that falls away in front of her. The stroke was seated
+     * at arm's length in that air and removed nothing, which is the press
+     * that does nothing — and at zero degrees, which is where the dial
+     * starts and where "dig the entrance" begins.
+     *
+     * She is standing ON soil, though, and her jaws can reach it. So the
+     * fallback drops from arm's length along her own down until it finds
+     * the floor, and centres the scoop on it: half the mouthful is under
+     * the surface, which is a scrape. That is what an ant aiming level at
+     * a hillside actually does.
+     */
+    out.copy(this.at).addScaledVector(aim, reach);
+    for (let d = 0; d <= RIDE * 4; d += step) {
+      const x = out.x - this.up.x * d;
+      const y = out.y - this.up.y * d;
+      const z = out.z - this.up.z * d;
+      if (this.groundSolidAt(x, y, z)) {
+        out.set(x, y, z);
+        return true;
+      }
+    }
+    /* Air ahead and air below it: she is over a drop, and this stroke is a
+     * genuine miss. Left at arm's length so the ghost still shows where. */
+    return false;
   }
+
+  /** Builder ids are `b{k}-{i}` and `b{k}-e{i}` — how its half of a merged
+   *  plan is told apart from anything the designer or a probe authored. */
+  private static isBuilderId(id: string): boolean {
+    return /^b\d+-/.test(id);
+  }
+
+  /**
+   * Shave the bumps around a point, and only ever OUTWARD.
+   *
+   * A blur moves a surface both ways: it takes off the ridges that poke
+   * into a tunnel, and it fills the hollows — and the filling is how a
+   * roof comes down on a passage barely wider than the animal in it.
+   * One-way, soil may be removed and never added, so narrowing is not
+   * unlikely but arithmetically impossible. That is what lets this run on
+   * every stroke instead of being a tool you have to remember to use.
+   */
+  private smoothAround(centre: THREE.Vector3): { minX: number; minY: number;
+    minZ: number; maxX: number; maxY: number; maxZ: number } | null {
+    if (!this.stream) return null;
+    const box = this.stream.boxAround(centre, this.brushMm / MM);
+    let touched = null;
+    for (let pass = 0; pass < SMOOTH_PASSES; pass += 1) {
+      const done = this.stream.smoothBox(box, SMOOTH_STRENGTH, SMOOTH_MAX_SHIFT, true);
+      if (!done) break;
+      touched = done;
+    }
+    return touched;
+  }
+
+  /**
+   * THE GHOST: where the next press will act, shown before it acts.
+   *
+   * Both tools work at arm's length down a line you cannot see, which is
+   * a guess dressed as an aim. Drawn, the dig is the pair of scoops it
+   * actually removes and the smoothing is the ball it actually relaxes,
+   * so the slider has something to be a slider FOR.
+   */
+  private updateToolGhost(): void {
+    const show = this.digMode && this.ready;
+    if (!show) {
+      if (this.toolGhost) this.toolGhost.visible = false;
+      if (this.smoothGhost) this.smoothGhost.visible = false;
+      return;
+    }
+    const make = (colour: number, opacity: number): THREE.Mesh => {
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(1, 20, 14),
+        new THREE.MeshBasicMaterial({
+          color: colour, wireframe: true, transparent: true, opacity,
+          depthTest: false,
+        }),
+      );
+      mesh.renderOrder = 9;
+      this.scene.add(mesh);
+      return mesh;
+    };
+    if (!this.toolGhost) this.toolGhost = make(0xe9c36f, 0.5);
+    if (!this.smoothGhost) this.smoothGhost = make(0x6fc8e9, 0.22);
+
+    const aim = this.boreAim();
+    /* The same spot the stroke uses, so the ghost cannot promise a hole
+     * somewhere the cut will not make one — including the scrape it falls
+     * back to when the aim itself meets nothing. */
+    const spot = S_SPOT;
+    const willBite = this.biteCentre(aim, NOSE_REACH + JAW_PAST_NOSE, spot);
+
+    /* The CUT, as the pair of scoops it actually removes — wide and low,
+     * her real mouthful shape, because a round marker would promise a
+     * hole of entirely the wrong proportions. */
+    const span = (SCOOP_DEEP_MM * 2) / MM;
+    S_FWD.copy(aim);
+    /* Across her, in HER frame. A right vector built out of world Y —
+     * `(aim.z, 0, -aim.x)` — is the ghost lying flat against the horizon
+     * while the wide scoop it stands for is lying flat against the wall
+     * she is on, and it degenerates outright on a plumb aim. */
+    S_RIGHT.crossVectors(S_FWD, this.up);
+    if (S_RIGHT.lengthSq() < 1e-8) S_RIGHT.set(S_FWD.z, S_FWD.x, S_FWD.y);
+    S_RIGHT.normalize();
+    S_UP.crossVectors(S_RIGHT, S_FWD).normalize();
+    const cut = this.toolGhost;
+    cut.visible = true;
+    cut.quaternion.setFromRotationMatrix(S_MAT.makeBasis(S_RIGHT, S_UP, S_FWD));
+    cut.scale.set(SCOOP_WIDE_MM / 2 / MM, SCOOP_TALL_MM / 2 / MM, span / 2);
+    cut.position.copy(spot);
+    /* A stroke that will remove nothing says so, rather than drawing a
+     * confident hole over open air. */
+    (cut.material as THREE.MeshBasicMaterial).opacity = willBite ? 0.5 : 0.16;
+
+    /* And the SHAVE around it, which is what the slider sizes. Fainter,
+     * because it only rounds off what the cut leaves — it is the halo of
+     * the stroke, not the stroke. */
+    const halo = this.smoothGhost;
+    halo.visible = true;
+    halo.quaternion.identity();
+    halo.scale.setScalar(this.brushMm / MM);
+    halo.position.copy(spot);
+  }
+
+  /** Remesh every chunk a brush result touched — bite()'s own loop, shared. */
+  private enqueueBounds(b: {
+    minX: number; minY: number; minZ: number;
+    maxX: number; maxY: number; maxZ: number;
+  }): void {
+    const lo = (v: number) => Math.max(0, Math.floor((v - 1) / CH));
+    const hi = (v: number, max: number) => Math.min(max - 1, Math.floor((v + 1) / CH));
+    for (let cz = lo(b.minZ); cz <= hi(b.maxZ, CHUNKS_XZ); cz += 1) {
+      for (let cy = lo(b.minY); cy <= hi(b.maxY, CHUNKS_Y); cy += 1) {
+        for (let cx = lo(b.minX); cx <= hi(b.maxX, CHUNKS_XZ); cx += 1) {
+          this.enqueue(cx, cy, cz);
+        }
+      }
+    }
+  }
+
+  /* ----------------------------------------------------- the nest's save */
+
+  /* ------------------------------------------------- the tunnel designer */
 
   /**
    * DIG opens the DESIGNER — the tunnel system is how new tunnels get made.
@@ -1810,18 +2580,12 @@ export class IslandScene {
         }
       }
     }
-    this.rebuildRails();
     /* Her rail may have been resized, moved or deleted: let go and let the
      * regrab find whatever bore is under her now. The room she stood in may
-     * be gone too — it re-derives from her position next frame. */
-    this.railEdge = -1;
-    this.railRev = false;
-    this.chamberId = null;
-    this.boreEngaged = false;
-    this.railGate = null;
-    this.enterDeclined = null;
-    this.surfaceDeclined = null;
-    this.hideGateAsk();
+     * be gone too — it re-derives from her position next frame. The tunnel
+     * builder asks for the ride to be PRESERVED instead: its plan only ever
+     * grows, and committing a leg mid-crawl must not drop her off a rail
+     * or un-declare a gate she just declined. */
     if (this.nestView) {
       this.nestView.dispose();
       this.scene.remove(this.nestView.root);
@@ -1834,57 +2598,143 @@ export class IslandScene {
 
   private pose(dt: number): void {
     if (!this.queenReady) return;
-    if (this.railEdge >= 0) {
-      /* On the rail her BODY follows the bore: pitch is the tube's axis,
-       * up points back at the centerline, roll is nothing — playtest's
-       * spec, and the end of the abdomen-through-the-shaft-wall shots. */
-      const fwd = S_FWD.copy(this.railForward).normalize();
-      const up0 = S_UP.copy(this.railUp).addScaledVector(fwd, -this.railUp.dot(fwd));
-      if (up0.lengthSq() < 0.05) up0.set(0, 1, 0).addScaledVector(fwd, -fwd.y);
-      up0.normalize();
-      const right = S_RIGHT.crossVectors(up0, fwd).normalize();
-      this.queen.root.position.copy(this.at);
-      /* Slerp instead of snap: turning to face the other way (and joint
-       * hand-offs) reads as HER turning, not the model teleporting. */
-      const railPose = S_QUAT.setFromRotationMatrix(S_MAT.makeBasis(right, up0, fwd));
-      this.queen.root.quaternion.slerp(railPose, Math.min(1, dt * 10));
-      this.queen.update(dt, {
-        speed: Math.hypot(this.velocity.x, this.velocity.z),
-        turn: -this.input.yaw * TURN_RATE,
-        digging: this.input.dig ? 1 : 0,
-        carrying: 0,
-        headYaw: 0,
-      });
-      this.queen.solveFeet(
-        (x, z) => this.footingAt(x, z),
-        FOOT_CLEARANCE_MM / MM,
-        RIDE * 2,
-      );
-      return;
-    }
-    const probe = 2 / MM;
-    const hx = (this.footingAt(this.at.x + probe, this.at.z)
-      - this.footingAt(this.at.x - probe, this.at.z)) / (probe * 2);
-    const hz = (this.footingAt(this.at.x, this.at.z + probe)
-      - this.footingAt(this.at.x, this.at.z - probe)) / (probe * 2);
-    const up = S_UP.set(-hx, 1, -hz).normalize();
-    const forward = S_FWD.set(Math.sin(this.facing), 0, Math.cos(this.facing));
+    /*
+     * SHE IS DRAWN IN THE FRAME SHE IS STANDING IN.
+     *
+     * This used to build her up out of the heightfield's slope — `(-hx, 1,
+     * -hz)` — and that hard-coded `1` was the ceiling on the whole game:
+     * with a positive Y component by construction she could never be steeper
+     * than ninety degrees, let alone inverted, however good the walk under
+     * her got. The walker's up is volumetric and has no such preference, so
+     * on the underside of an overhang she is simply upside down, which in
+     * her own frame is perfectly ordinary.
+     */
+    const up = S_UP.copy(this.up);
+    const forward = S_FWD.copy(this.fwd);
     forward.addScaledVector(up, -forward.dot(up)).normalize();
     const right = S_RIGHT.crossVectors(up, forward).normalize();
     this.queen.root.position.copy(this.at);
     this.queen.root.quaternion.setFromRotationMatrix(S_MAT.makeBasis(right, up, forward));
     this.queen.update(dt, {
-      speed: Math.hypot(this.velocity.x, this.velocity.z),
+      /*
+       * WHAT SHE ACTUALLY TRAVELLED, not what the stick asked for.
+       *
+       * `velocity` is the command: stick times walk speed times sprint. It
+       * says the same thing whether she is crossing open ground or pressed
+       * against a trunk going nowhere, so the gait ran her legs at a sprint
+       * while she stood still — reported as the animation being set to
+       * running while she walked. Her real ground speed is the distance she
+       * covered across her own tangent plane, which is zero when she is
+       * blocked and honest on every slope.
+       */
+      speed: this.groundSpeed,
       turn: -this.input.yaw * TURN_RATE,
       digging: this.input.dig ? 1 : 0,
       carrying: 0,
       headYaw: 0,
     });
+    /* And her FEET are solved in that frame too. The solver has always
+     * taken one; the island had been passing `undefined` and letting it
+     * measure every foot as a height above sea level, which on a wall asks
+     * a question the wall has no answer to. `boreFrame` casts along her own
+     * up, so a foot on a ceiling is planted on the ceiling. */
+    /* ANCHORED. Without this the solver may only raise and lower a foot,
+     * and nothing in the pipeline knows where one IS from frame to frame —
+     * so nothing can hold one still, and every planted foot skates. */
     this.queen.solveFeet(
-      (x, z) => this.footingAt(x, z),
+      (x, z, y) => this.footingFrom(x, z, y),
       FOOT_CLEARANCE_MM / MM,
       RIDE * 2,
+      this.drive ? (slot) => this.drive!.anchorFor(slot) : undefined,
+      this.boreFrame(),
     );
+    /*
+     * NOTHING SHE IS MADE OF MAY BE IN THE SOIL.
+     *
+     * The legs and antennae have the solver above, which places them
+     * per joint. Everything else — mandibles, the tip of a gaster over a
+     * bank — has nobody, and on this island it simply sank. `groundGuard`
+     * walks the bones that geometry is actually drawn on, asks how far
+     * each would have to rise to be out of the dirt, and returns the
+     * worst; the model is lifted rigidly by that, because a fail-safe
+     * that tries to bend things is a fail-safe with its own bugs.
+     *
+     * The probe asks whether a POINT is in soil, not whether it is under
+     * the surface. In a burrow those are different questions — a height
+     * query answers "the rim, several millimetres over your head" — and
+     * only the first one has a sensible answer down here.
+     */
+    /* Out along HER up, not the world's — on a ceiling the way out of the
+     * dirt is downward, and a guard that only ever lifted in +Y pushed her
+     * further into it. */
+    /*
+     * Stepped in eighths and then halved down to the clearance, rather than
+     * crawled in 0.004-unit increments: a buried bone was costing a hundred
+     * and thirty probes and there are forty of them, which measured at 732
+     * probes a frame. Twelve probes get the same answer to well inside the
+     * clearance the guard is enforcing.
+     */
+    const GUARD_REACH = RIDE * 2;
+    const lift = this.queen.groundGuard((x, y, z) => {
+      if (!this.soilSolidAt(x, y, z)) return 0;
+      let lo = 0;
+      let clear = -1;
+      for (let i = 1; i <= 8; i += 1) {
+        const d = (i / 8) * GUARD_REACH;
+        if (!this.soilSolidAt(x + up.x * d, y + up.y * d, z + up.z * d)) { clear = d; break; }
+        lo = d;
+      }
+      if (clear < 0) return GUARD_REACH;
+      while (clear - lo > BONE_CLEARANCE) {
+        const mid = (lo + clear) * 0.5;
+        if (this.soilSolidAt(x + up.x * mid, y + up.y * mid, z + up.z * mid)) lo = mid;
+        else clear = mid;
+      }
+      return clear;
+    });
+    if (lift > 0) this.queen.root.position.addScaledVector(up, lift);
+  }
+
+  /**
+   * The lens is never under the dirt, whichever camera placed it.
+   *
+   * Three paths put the camera somewhere — her own eyes, the underground
+   * chase, the shoulder orbit — and each had its own idea of clearance or
+   * none at all. This runs after all of them: lift to a floor's own skin
+   * depth, then, if the point is still INSIDE something (a roof, a wall
+   * it swung into), climb until it is not.
+   */
+  private liftCameraClear(): void {
+    const p = this.camera.position;
+    const walker = this.walker;
+    if (!walker) return;
+    if (this.soilDensityAt(p.x, p.y, p.z) <= 0) return;
+    /*
+     * OUT ALONG THE SOIL'S OWN NORMAL — the shortest way to air, and the
+     * only direction that works on every surface.
+     *
+     * This used to climb in +Y, which is the way out of a floor and the way
+     * further INTO a ceiling: pressed against the roof of a tunnel it
+     * marched the lens deeper the whole length of its search and gave up
+     * still buried, which is the ground coming through the picture. The
+     * gradient points out of whatever it is actually inside, so a roof, a
+     * wall and a floor are one case.
+     */
+    const out = S_TARGET.set(0, 1, 0);
+    walker.normalAt(p, out);
+    for (let d = CAMERA_SKIN; d <= RIDE * 4; d += CAMERA_SKIN) {
+      if (this.soilDensityAt(
+        p.x + out.x * d, p.y + out.y * d, p.z + out.z * d,
+      ) <= 0) {
+        /* One skin PAST the boundary: landing exactly on it leaves the near
+         * plane straddling the surface, which is the dirt still showing. */
+        p.addScaledVector(out, d + CAMERA_SKIN);
+        return;
+      }
+    }
+    /* Buried deeper than the search — the only place certainly in air is
+     * where she is, so fall back on her and let the next frame ease out. */
+    p.copy(this.at);
   }
 
   private aimCamera(dt: number): void {
@@ -1892,112 +2742,266 @@ export class IslandScene {
      * everywhere else (and only once her model has actually loaded). */
     this.queen.root.visible = this.queenReady && !this.firstPerson;
     this.crosshair.style.display = this.firstPerson ? '' : 'none';
+    /*
+     * THE ORBIT'S PITCH IS EASED ONCE, FOR EVERY VIEW.
+     *
+     * It used to be computed at the BOTTOM of this function, past both the
+     * first-person and the underground returns — so underground, the orbit
+     * drag turned the yaw and the pitch stayed at whatever it was last
+     * left at on the surface. One place, before the branches, and every
+     * camera that reads `camPitch` reads a live one.
+     *
+     * The camera FOLLOWS the aim, in both directions and at full gain.
+     * It was `0.28 + max(0, -aimPitch)`: point her down and the view
+     * climbs so you are looking along the line she will cut — right, and
+     * only half the job, because that `max(0, …)` threw away every upward
+     * aim. Dropping the clamp (and NOT rescaling) keeps downward feeling
+     * exactly as it always did and gives upward the same one back.
+     */
+    const wantPitch = Math.min(1.35, Math.max(0.06, 0.28 - this.aimPitch));
+    this.camPitch += (wantPitch - this.camPitch) * Math.min(1, dt * 3);
     if (this.firstPerson) {
       /* Her own eyes: at the head, looking where she faces; the mouse (or
        * right-half drag) turns HER, and pitch is a look, not an orbit. On
        * the rail the eyes follow the BORE's axis — looking up a vertical
        * shaft means looking up it, not at its wall. */
-      const onRail = this.railEdge >= 0;
-      const fwd = onRail
-        ? this.railForward.clone().normalize()
-        : new THREE.Vector3(Math.sin(this.facing), 0, Math.cos(this.facing));
-      const upv = onRail && this.railUp.lengthSq() > 0.1
-        ? this.railUp.clone().normalize()
-        : new THREE.Vector3(0, 1, 0);
-      const eye = this.at.clone().addScaledVector(fwd, 0.26).addScaledVector(upv, 0.3);
+      /*
+       * THE EYE LOOKS DOWN THE CUT'S OWN RAY.
+       *
+       * `boreAim` is the line the shovel works along, so the camera takes
+       * it whole — same origin, same direction — and the crosshair then
+       * covers exactly what the next stroke removes. The eye used to sit
+       * a little above and ahead of her on her FACING instead, which is a
+       * different ray, and the two disagreed by more the further out you
+       * looked.
+       */
+      /*
+       * HER FRAME, because the eye is IN HER HEAD.
+       *
+       * A world frame here rolls the whole view ninety degrees the moment
+       * she is on a trunk — her up is horizontal and the lens insists on
+       * the sky's, so the bark ends up down one side of the screen and a
+       * left-right pan swings around an axis that is nothing to do with
+       * her. Reported exactly that way. The dial still reads against the
+       * world; only the picture rides her body.
+       */
+      const fwd = S_FWD.copy(this.fwd);
+      const upv = S_UP.copy(this.up);
+      const dir = this.boreAim();
+      /*
+       * Forward of her centre so her own back does not fill the frame —
+       * but ALONG THE AIM, so the eye stays on the cut's line. And never
+       * through the wall: the offset walks back until the lens is in air
+       * with a little to spare, and her centre is always air, so there is
+       * always somewhere to retreat to.
+       *
+       * The rise is off HER back, along her own up: an ant's eyes are at
+       * the top of her head, and a lens on her centre-line reads as looking
+       * out of her chest. On a ceiling that rise points at the floor, which
+       * is where the top of her head actually is.
+       */
+      const base = S_CENTER.copy(this.at).addScaledVector(upv, EYE_RISE);
+      const eye = base.clone();
+      for (let t = 1; t > 0.001; t -= 0.2) {
+        const px = base.x + dir.x * EYE_FORWARD * t;
+        const py = base.y + dir.y * EYE_FORWARD * t;
+        const pz = base.z + dir.z * EYE_FORWARD * t;
+        const blocked = this.soilDensityAt(px, py, pz) > 0
+          || this.soilDensityAt(px + dir.x * EYE_SKIN, py + dir.y * EYE_SKIN,
+            pz + dir.z * EYE_SKIN) > 0;
+        if (!blocked) { eye.set(px, py, pz); break; }
+      }
       this.camera.position.copy(eye);
-      this.camera.up.copy(upv);
-      const dir = fwd.clone().multiplyScalar(Math.cos(this.fpPitch))
-        .addScaledVector(upv, Math.sin(this.fpPitch));
-      this.camera.lookAt(eye.x + dir.x, eye.y + dir.y, eye.z + dir.z);
-      return;
-    }
-    if (this.underground) {
       /*
-       * The tunnel chase: the camera follows HER PATH, a few millimetres
-       * back — the path she walked is the one line guaranteed to lie inside
-       * the bore, so following it needs no pathfinding and can never end up
-       * inside a wall. A held drag OVERRIDES the view with a tight orbit —
-       * the capsule keeps following her, the player just turns it — and
-       * letting go hands it back to the trail.
+       * THE EYE'S OWN UP, TURNED WITH THE PITCH — not the world's.
+       *
+       * Handing `lookAt` a fixed up and a look parallel to it leaves the
+       * roll undefined, and three.js picks whatever falls out of a
+       * degenerate cross product. Straight down is exactly that case, and
+       * digging aims her straight down all the time. Rotating the up by
+       * the same pitch keeps it perpendicular to the look by construction
+       * — their dot is `-cos*sin + sin*cos`, zero at every angle.
        */
       /*
-       * THE ROOM CAMERA rides on top of the chase: from ~3 mm outside a
-       * chamber the view starts easing off the trail and onto a post under
-       * the room's ceiling that turns to face her — so a room reads as a
-       * PLACE the camera inhabits, not another stretch of tube — and the
-       * same distance eases it back out on the way to the door. Distance
-       * sets the target, time smooths the move.
+       * ROTATED BY THE AIM ITSELF, not by a copy of it.
+       *
+       * There was a second field, `fpPitch`, written only by the look-drag.
+       * Anything else that moved the aim — a key, a test, a scripted view —
+       * left it behind, and a stale up is not a cosmetic problem: this
+       * rotation exists precisely so that up stays perpendicular to the
+       * look at the poles, where `lookAt` has no other way to choose a
+       * roll. Measured with the dial at ninety, up and look were PARALLEL,
+       * which is the degenerate case it was written to avoid. One number.
        */
-      let roomShare = 0;
-      let roomBox: ChamberBox | null = null;
-      for (const node of this.railNodes.values()) {
-        if (node.kind !== 'chamber') continue;
-        const box = chamberBox(node.p.x, node.p.y, node.p.z, node.r);
-        const u = chamberNorm(box, this.at.x, this.at.y, this.at.z);
-        const t = Math.min(1, Math.max(0,
-          (CHAMBER_CAM_FAR - u) / (CHAMBER_CAM_FAR - CHAMBER_CAM_NEAR)));
-        if (t > roomShare) { roomShare = t; roomBox = box; }
-      }
-      this.chamberCam += (roomShare - this.chamberCam) * Math.min(1, dt * 3);
-
-      const desired = new THREE.Vector3();
-      if (this.lookPointer !== null) {
-        const cp = Math.cos(this.camPitch);
-        const dist = 1.2;
-        desired.set(
-          this.at.x + Math.sin(this.camYaw) * dist * cp,
-          this.at.y + Math.sin(this.camPitch) * dist,
-          this.at.z + Math.cos(this.camYaw) * dist * cp,
-        );
-      } else {
-        desired.copy(this.trailPointBehind(1.0));
-        desired.y += 0.32;
-      }
-      if (roomBox && this.chamberCam > 0.01) {
-        desired.lerp(new THREE.Vector3(
-          roomBox.cx, roomBox.cy + roomBox.ry * 0.55, roomBox.cz,
-        ), this.chamberCam);
-      }
-      this.camera.position.lerp(desired, Math.min(1, dt * 9));
-      this.camera.up.set(0, 1, 0);
-      this.camera.lookAt(this.at.x, this.at.y + 0.15, this.at.z);
+      this.camera.up.copy(fwd).multiplyScalar(-Math.sin(this.aimPitch))
+        .addScaledVector(upv, Math.cos(this.aimPitch));
+      this.liftCameraClear();
+      /* Aim from where the lens ACTUALLY ended up. The guard above may have
+       * nudged it out of a roof, and looking at a target measured from the
+       * old spot tilts the whole view by however far it moved — a pitch
+       * that drifts on its own every time she brushes a ceiling. */
+      const lens = this.camera.position;
+      this.camera.lookAt(lens.x + dir.x, lens.y + dir.y, lens.z + dir.z);
       return;
     }
-    const wantYaw = this.facing + Math.PI;
-    let d = wantYaw - this.camYaw;
-    while (d > Math.PI) d -= Math.PI * 2;
-    while (d < -Math.PI) d += Math.PI * 2;
-    if (this.lookPointer === null) this.camYaw += d * Math.min(1, dt * 2.4);
-    const cp = Math.cos(this.camPitch);
-    this.camera.position.set(
-      this.at.x + Math.sin(this.camYaw) * this.camDist * cp,
-      this.at.y + Math.sin(this.camPitch) * this.camDist,
-      this.at.z + Math.cos(this.camYaw) * this.camDist * cp,
-    );
-    const eyeGround = this.footingAt(this.camera.position.x, this.camera.position.z);
-    if (this.camera.position.y < eyeGround + 0.6) this.camera.position.y = eyeGround + 0.6;
-    this.camera.up.set(0, 1, 0);
-    this.camera.lookAt(this.at.x, this.at.y + 0.4, this.at.z);
+    /* The drag swings the arm off her tail and it decays back to zero, so
+     * the camera returns behind her without ever holding an absolute world
+     * bearing — which is the thing that stops meaning anything on a wall. */
+    if (this.lookPointer === null) this.camYaw -= this.camYaw * Math.min(1, dt * 2.4);
+    this.chaseCamera(dt);
   }
 
-  /** A point `distance` back along her walked path (or straight behind her
-   *  when the trail is still short). */
-  private trailPointBehind(distance: number): THREE.Vector3 {
-    let left = distance;
-    let previous = this.at;
-    for (let i = this.trail.length - 1; i >= 0; i -= 1) {
-      const point = this.trail[i]!;
-      const seg = previous.distanceTo(point);
-      if (seg >= left) {
-        return previous.clone().lerp(point, seg === 0 ? 0 : left / seg);
-      }
-      left -= seg;
-      previous = point;
+  /**
+   * THE CHASE: find the open air behind her, and sit in the middle of it.
+   *
+   * There were two of these — a tunnel chase that followed her walked path
+   * and a shoulder orbit that swung a fixed arm — and the seam between them
+   * is where the camera got stuck. Stepping from the hill onto the trunk is
+   * not underground and it is not open country either: the arm swung into a
+   * metre of solid wood, the guard hauled it back onto her, and the view sat
+   * under the ant with nothing to show. Switching to first person "fixed" it
+   * because first person does not use the arm.
+   *
+   * So there is one camera, and instead of one arm it CASTS A FAN of them —
+   * a spread of directions around where it would like to be — and asks each
+   * how far it gets before it meets something. The answer is the weighted
+   * mean of where those rays ended: a spot in the middle of whatever open
+   * space actually exists behind her, whether that is a tunnel, the gap
+   * between the trunk and the hillside, or the whole sky. Nothing about it
+   * knows what a tree is, or a tunnel, which is exactly why it cannot have a
+   * seam between them.
+   *
+   * The mean is what makes it steady. Picking the single best ray snaps
+   * between candidates as she turns; averaging a dozen of them moves
+   * continuously, because one ray losing its clearance only shifts the
+   * average by its own share.
+   */
+  private chaseCamera(dt: number): void {
+    const ideal = S_PERP.copy(this.orbitBack(S_RAD));
+    /* A basis to sweep the fan in: across her, and the third axis. */
+    const across = S_RIGHT.crossVectors(ideal, this.up);
+    if (across.lengthSq() < 1e-8) across.set(ideal.z, ideal.x, ideal.y);
+    across.normalize();
+    const over = S_FWD.crossVectors(across, ideal).normalize();
+
+    /*
+     * THE FAN IS A FALLBACK, NOT THE RULE.
+     *
+     * When it always ran, it always won: in open country the downward rays
+     * of the fan hit the ground within a few millimetres and the upward
+     * ones ran free, so the weighted mean sat at whatever elevation the
+     * ground allowed and barely moved when the drag changed the ideal.
+     * That is the reported bug — the third-person view would swing left and
+     * right and refuse to pitch. If the arm the player actually asked for
+     * is clear, it is the answer, and the search never runs.
+     */
+    const straight = this.clearRun(ideal, this.camDist);
+    if (straight > this.camDist * 0.92) {
+      this.settleChase(S_TARGET.copy(this.at).addScaledVector(ideal, straight), dt);
+      return;
     }
-    return this.at.clone().add(new THREE.Vector3(
-      -Math.sin(this.facing) * distance, 0, -Math.cos(this.facing) * distance,
-    ));
+
+    const want = S_TARGET.set(0, 0, 0);
+    let weight = 0;
+    let bestRun = 0;
+    const dir = S_CENTER;
+    for (const swing of FAN_SWING) {
+      for (const rise of FAN_RISE) {
+        dir.copy(ideal).multiplyScalar(Math.cos(swing) * Math.cos(rise))
+          .addScaledVector(across, Math.sin(swing))
+          .addScaledVector(over, Math.sin(rise))
+          .normalize();
+        const run = this.clearRun(dir, this.camDist);
+        if (run < CHASE_MIN) continue;
+        if (run > bestRun) bestRun = run;
+        /*
+         * Weighted by how much room it found AND how close it is to where
+         * the camera wanted to be. Squaring the room makes a ray that got
+         * the whole way worth far more than one that got a third, so the
+         * mean sits in the open rather than being dragged into a corner by
+         * a crowd of stubs.
+         */
+        const aim = 0.3 + 0.7 * Math.max(0, dir.dot(ideal));
+        const w = run * run * aim;
+        want.addScaledVector(dir, run * w);
+        weight += w;
+      }
+    }
+    if (weight > 0) {
+      want.multiplyScalar(1 / weight).add(this.at);
+    } else {
+      /*
+       * Nowhere to stand at all — wedged in a crack barely her own size. Sit
+       * off her back at whatever the ceiling allows and look at her; that is
+       * the honest picture of being stuck, and it is never under her.
+       */
+      want.copy(this.at).addScaledVector(this.up, Math.max(CHASE_MIN, bestRun));
+    }
+
+    /*
+     * THE ROOM CAMERA still rides on top: from a few millimetres outside a
+     * chamber the view eases onto a post under its ceiling, so a room reads
+     * as a PLACE the camera inhabits rather than another stretch of tube.
+     */
+    let roomShare = 0;
+    let roomBox: ChamberBox | null = null;
+    for (const node of this.soil?.plan.nodes ?? []) {
+      if (node.kind !== 'chamber') continue;
+      const box = chamberBox(node.x / MM, node.y / MM, node.z / MM, node.radiusMm / MM);
+      const u = chamberNorm(box, this.at.x, this.at.y, this.at.z);
+      const t = Math.min(1, Math.max(0,
+        (CHAMBER_CAM_FAR - u) / (CHAMBER_CAM_FAR - CHAMBER_CAM_NEAR)));
+      if (t > roomShare) { roomShare = t; roomBox = box; }
+    }
+    this.chamberCam += (roomShare - this.chamberCam) * Math.min(1, dt * 3);
+    if (roomBox && this.chamberCam > 0.01) {
+      want.lerp(S_UP.set(roomBox.cx, roomBox.cy + roomBox.ry * 0.55, roomBox.cz),
+        this.chamberCam);
+    }
+
+    this.settleChase(want, dt);
+  }
+
+  /** Ease the lens onto a chosen spot and point it at her. */
+  private settleChase(want: THREE.Vector3, dt: number): void {
+    /* Eased, and faster when the target has run away from it — squeezing
+     * through a gap should not leave the lens lagging inside the wall. */
+    const gap = this.camera.position.distanceTo(want);
+    const rate = gap > this.camDist ? 14 : 7;
+    this.camera.position.lerp(want, 1 - Math.exp(-rate * dt));
+    this.liftCameraClear();
+    this.camera.up.copy(this.up);
+    const look = S_UP.copy(this.at).addScaledVector(this.up, 0.3);
+    this.camera.lookAt(look.x, look.y, look.z);
+  }
+
+  /**
+   * How far a ray out of her centre gets before it meets something, capped
+   * at `max`. Her own centre is always air, so this always has an answer.
+   */
+  private clearRun(dir: THREE.Vector3, max: number): number {
+    const step = CELL_SIZE * 0.6;
+    for (let d = step; d <= max; d += step) {
+      if (this.soilSolidAt(
+        this.at.x + dir.x * d, this.at.y + dir.y * d, this.at.z + dir.z * d,
+      )) return Math.max(0, d - step - CAMERA_SKIN);
+    }
+    return max;
+  }
+
+  /**
+   * The orbit arm, built in HER frame: back along her nose, swung off it by
+   * the drag, and raised by the pitch — all about her own up.
+   *
+   * The old arm was `(sin camYaw, 0, cos camYaw)` with a world-vertical
+   * rise, which is a rig bolted to the horizon. Underground the horizon is
+   * not a thing she has: in a shaft her up is horizontal, and a camera that
+   * insists on world vertical sits in the wall looking at dirt.
+   */
+  private orbitBack(into: THREE.Vector3): THREE.Vector3 {
+    const nose = S_NOSE.copy(this.fwd).applyAxisAngle(this.up, this.camYaw);
+    return into.copy(nose).negate().multiplyScalar(Math.cos(this.camPitch))
+      .addScaledVector(this.up, Math.sin(this.camPitch)).normalize();
   }
 
   /* ---------------------------------------------------------------- HUD */
@@ -2008,75 +3012,103 @@ export class IslandScene {
     this.hud.appendChild(actions);
 
     /*
-     * DIG IS HER JAWS AGAIN, and it is the drive: hold it and she strokes,
-     * a bite of soil leaves at the bottom of each stroke, and she can walk
-     * forward into exactly as much room as she has made. A tunnel is then
-     * wherever she chewed — no plan to lay out first, nothing authored to
-     * be locked into, and nothing to ask her permission about at either
-     * end of it.
+     * DIG IS A MODE: tap DIG to arm it, and the PALETTE appears. From there
+     * it is a coaster builder — a row of pieces, one tap each, laid on the
+     * end of what is already there. The two-step survives from the chewing
+     * era for the same reason it was introduced: a palette that is always
+     * on screen is a palette that gets dug into by a mis-tap.
      */
     const dig = document.createElement('button');
     dig.className = 'density-lab-button density-lab-dig';
     dig.textContent = 'DIG';
     dig.addEventListener('pointerdown', (e) => {
       e.preventDefault();
-      dig.setPointerCapture(e.pointerId);
-      this.input.dig = true;
+      this.digMode = !this.digMode;
+      dig.classList.toggle('is-grip', this.digMode);
+      this.scoopBtn!.style.display = this.digMode ? '' : 'none';
+      this.headingReadout!.style.display = this.digMode ? '' : 'none';
+      this.depthReadout!.style.display = this.digMode ? '' : 'none';
+      if (!this.digMode) this.input.dig = false;
+      /* Digging is aiming, and aiming is done down her own eyes: arming
+       * DIG drops into first person with a wide 100° field so the tunnel
+       * mouth and the instruments share the frame. Disarming narrows the
+       * lens back; the VIEW chip still switches freely either way. */
+      if (this.digMode) this.firstPerson = true;
+      this.camera.fov = this.digMode ? 100 : 60;
+      this.camera.updateProjectionMatrix();
     });
-    const stopDig = () => { this.input.dig = false; };
-    dig.addEventListener('pointerup', stopDig);
-    dig.addEventListener('pointercancel', stopDig);
-    dig.addEventListener('lostpointercapture', stopDig);
     actions.appendChild(dig);
 
     /*
-     * THE PITCH DIAL. Aiming is the whole difference between a tunnel and a
-     * trench: pitch steers her TRAVEL, not just the bite, so a shaft is dug
-     * by aiming down and holding. Ten degrees a tap, straight down to
-     * straight up — symmetric, because an ant that digs down has to be able
-     * to dig back out. In her own eyes the look IS the aim and these are
-     * not needed; over her shoulder there is no gaze to read, so they are.
+     * THE SHOVEL: hold it and she strokes, each stroke one mouthful along
+     * the aim. Arming DIG first is deliberate — a lone held button carved
+     * tunnels out of mis-taps, and a scoop this size deserves the intent.
      */
-    const aimRow = document.createElement('div');
-    aimRow.className = 'density-lab-aim';
-    const aimChip = (label: string, steps: number) => {
-      const b = document.createElement('button');
-      b.className = 'density-lab-button density-lab-mode';
-      b.textContent = label;
-      b.addEventListener('pointerdown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.bore.aim(steps);
-        this.refreshAim();
-      });
-      return b;
-    };
-    aimRow.appendChild(aimChip('AIM ▲', 1));
-    this.aimReadout = document.createElement('span');
-    this.aimReadout.className = 'density-lab-aim-readout';
-    aimRow.appendChild(this.aimReadout);
-    aimRow.appendChild(aimChip('▼', -1));
-    actions.appendChild(aimRow);
-    this.refreshAim();
-
-    /* The nest tools are still here; they are just no longer what DIG means. */
-    const tools = document.createElement('button');
-    tools.className = 'density-lab-button density-lab-mode';
-    tools.textContent = 'PLAN';
-    tools.addEventListener('pointerdown', (e) => {
+    const scoopBtn = document.createElement('button');
+    scoopBtn.className = 'density-lab-button density-lab-dig';
+    scoopBtn.textContent = '\u{1FA8F}';
+    scoopBtn.style.display = 'none';
+    this.scoopBtn = scoopBtn;
+    scoopBtn.addEventListener('pointerdown', (e) => {
       e.preventDefault();
-      this.openDesigner();
+      scoopBtn.setPointerCapture(e.pointerId);
+      this.input.dig = true;
     });
-    actions.appendChild(tools);
+    const stopDig = (): void => { this.input.dig = false; };
+    scoopBtn.addEventListener('pointerup', stopDig);
+    scoopBtn.addEventListener('pointercancel', stopDig);
+    scoopBtn.addEventListener('lostpointercapture', stopDig);
+    actions.appendChild(scoopBtn);
 
-    /* GRIP / FREE — an indicator, not a switch: the tunnel takes her, the
-     * room and the surface free her, all by themselves. It exists so the
-     * player always knows which rules they are moving under. */
-    const mode = document.createElement('button');
-    mode.className = 'density-lab-button density-lab-mode is-indicator';
-    mode.textContent = 'FREE';
-    this.modeBtn = mode;
-    actions.appendChild(mode);
+
+    /*
+     * THE SHAVE HAS NO SLIDER ANY MORE.
+     *
+     * It was there because the right size looked like it depended on
+     * whether you were easing one lip or a whole chamber floor. Played, it
+     * did not: the widest setting was better everywhere, so the control was
+     * a thing to push to the end before starting. A setting with one good
+     * value is a constant.
+     */
+
+
+
+    /*
+     * The angle, where the thumb can see it.
+     *
+     * Taking the ± buttons away also took away the only way to tell how
+     * steeply she was pointed, and a bore you cannot read is a bore that
+     * quietly goes too deep — which is exactly what happened. This is a
+     * readout and not a control: the drag still does the aiming.
+     */
+    this.aimReadout = document.createElement('div');
+    this.aimReadout.className = 'density-lab-aim-readout';
+    actions.appendChild(this.aimReadout);
+
+    /*
+     * THE OTHER TWO INSTRUMENTS, while the shovel is out.
+     *
+     * The angle alone says which way the next stroke goes and nothing about
+     * where that leaves her. A bearing and a depth make the three together
+     * a navigation panel: you can drive a tunnel on a heading, hold a
+     * grade, and know how far under you are — which is the whole of digging
+     * blind. Both are world-referenced, like the angle beside them.
+     */
+    this.headingReadout = document.createElement('div');
+    this.headingReadout.className = 'density-lab-aim-readout';
+    this.headingReadout.style.display = 'none';
+    actions.appendChild(this.headingReadout);
+
+    this.depthReadout = document.createElement('div');
+    this.depthReadout.className = 'density-lab-aim-readout';
+    this.depthReadout.style.display = 'none';
+    actions.appendChild(this.depthReadout);
+
+
+    /* The PLAN button is gone: the shovel is how tunnels get made now.
+     * The designer code stays for the tests and for a possible return as
+     * a colony-scale tool, but the queen digs with her jaws, not a CAD. */
+
 
     const plan = document.createElement('button');
     plan.className = 'density-lab-button density-lab-mode';
@@ -2087,41 +3119,6 @@ export class IslandScene {
       if (this.nestView) this.nestView.root.visible = this.showPlan;
     });
     actions.appendChild(plan);
-
-    /*
-     * THE THRESHOLD PROMPT — and the reason the last one did nothing.
-     *
-     * `.density-lab-hud` is pointer-events:none, and every control that
-     * works turns it back on (the actions bar, the designer panel, the
-     * stats chip). The old SURFACE? box was styled inline and never did,
-     * and neither button class sets it — only the actions CONTAINER does.
-     * So every tap fell straight through the prompt to the canvas, where
-     * the left half spawns the joystick: the buttons were untappable by
-     * construction, which is why they got removed. The class below lives
-     * in the stylesheet WITH pointer-events:auto, so they take a tap.
-     */
-    const ask = document.createElement('div');
-    ask.className = 'density-lab-gate-ask';
-    ask.style.display = 'none';
-    const askLabel = document.createElement('span');
-    askLabel.className = 'density-lab-gate-label';
-    ask.appendChild(askLabel);
-    const answer = (yes: boolean) => {
-      const button = document.createElement('button');
-      button.className = 'density-lab-button density-lab-mode';
-      button.textContent = yes ? 'YES' : 'NO';
-      button.addEventListener('pointerdown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.answerGate(yes);
-      });
-      return button;
-    };
-    ask.appendChild(answer(true));
-    ask.appendChild(answer(false));
-    this.hud.appendChild(ask);
-    this.askEl = ask;
-    this.askLabel = askLabel;
 
     const view = document.createElement('button');
     view.className = 'density-lab-button density-lab-mode';
@@ -2134,8 +3131,9 @@ export class IslandScene {
 
     /*
      * WASD for the PC hand (playtest: "I was having trouble moving"):
-     * W/S walk, A/D turn, Shift sprint, Space DIGS (hold), R/F aim up and
-     * down, B opens the nest tools, V swaps the view.
+     * W/S walk, A/D turn, Shift sprint, Space DIGS (hold), B opens the nest
+     * tools, V swaps the view. There is no aim key: she digs where the view
+     * looks.
      * Arrows mirror WASD. Keys and stick write the same inputs.
      */
     const applyKeys = () => {
@@ -2156,24 +3154,15 @@ export class IslandScene {
         this.input.yaw = turn;
       }
       this.input.sprint = k.has('shift');
-      /* Space is the jaws, and it is HELD — the button is the drive. */
+      /* Space is the shovel, and it is HELD — but only once DIG is armed. */
       const space = k.has(' ');
       if (space !== this.spaceWasDown) {
-        this.input.dig = space;
+        this.input.dig = this.digMode && space;
         this.spaceWasDown = space;
       }
     };
     window.addEventListener('keydown', (e) => {
       const key = e.key.toLowerCase();
-      /* The threshold question takes a key as well as a tap — E or Enter
-       * to go through, Escape to stay put — so the PC hand never has to
-       * reach for the mouse mid-walk. */
-      if (this.gateAsk && !e.repeat) {
-        if (key === 'e' || key === 'enter') { this.answerGate(true); return; }
-        if (key === 'escape') { this.answerGate(false); return; }
-      }
-      if (key === 'r' && !e.repeat) { this.bore.aim(1); this.refreshAim(); }
-      if (key === 'f' && !e.repeat) { this.bore.aim(-1); this.refreshAim(); }
       if (key === 'b' && !e.repeat) this.openDesigner();
       if (key === 'v' && !e.repeat) this.firstPerson = !this.firstPerson;
       if (key === 'p' && !e.repeat) {
@@ -2229,33 +3218,67 @@ export class IslandScene {
         this.stickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
       } else if (e.pointerId === this.lookPointer) {
         if (this.firstPerson) {
-          /* In her eyes the drag turns HER, and the glance IS the aim —
-           * one number, so the view and the bore can never disagree about
+          /* Her own eyes: the drag turns HER, and the glance IS the
+           * aim — one number, so view and dig can never disagree about
            * which way she is pointed. */
+          /* The rig is turned and nothing else: `simulate` reads the step
+           * off it and applies it about her own up, so a look-drag on a
+           * ceiling turns her along the ceiling. Writing `facing` here as
+           * well would fight that for a frame. */
           this.bore.turn(-e.movementX * 0.004);
-          this.facing = this.bore.heading;
-          this.fpPitch = Math.min(1.1, Math.max(-1.1, this.fpPitch - e.movementY * 0.004));
-          this.bore.aimTo(this.fpPitch);
-          this.refreshAim();
+          this.aimPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
+            this.aimPitch - e.movementY * 0.004));
         } else {
           // Third person: the drag pans the view — above ground a full
           // orbit, underground a tight override the trail cam resumes from
           // the moment the finger lifts.
-          this.camYaw -= e.movementX * 0.005;
-          this.camPitch = Math.min(1.35, Math.max(0.06, this.camPitch + e.movementY * 0.004));
+          /* Over her shoulder the vertical drag AIMS HER, and the camera
+           * elevation follows that aim, so what you are looking along is
+           * always the line she will cut. */
+          /* An OFFSET off her tail, bounded to half a turn either way — it
+           * decays back to zero, which is how the view swings home. */
+          this.camYaw = Math.max(-Math.PI, Math.min(Math.PI,
+            this.camYaw - e.movementX * 0.005));
+          this.aimPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
+            this.aimPitch - e.movementY * 0.004));
         }
       }
     });
+    /*
+     * LETTING GO HAS TO BE UNCONDITIONAL.
+     *
+     * The stick latched: a pointerup that never arrives — a finger leaving
+     * the glass, a capture stolen, the tab going away mid-drag — left
+     * `input.walk` exactly as it was, so she carried on walking, and if the
+     * thumb happened to be below centre she carried on walking BACKWARDS
+     * with nothing on screen to say why. Reported, twice.
+     *
+     * So there is one place that drops the stick, it clears the inputs
+     * whether or not the id matches, and everything that could possibly
+     * mean "the finger is gone" calls it.
+     */
+    const dropStick = (): void => {
+      this.stickPointer = null;
+      this.input.walk = 0;
+      this.input.yaw = 0;
+      this.stickKnob.style.transform = 'translate(0px, 0px)';
+      this.stickEl.style.display = 'none';
+    };
     const release = (e: PointerEvent) => {
       if (this.designer?.isOpen) { this.designer.handlePointerUp(e); return; }
-      if (e.pointerId === this.stickPointer) {
-        this.stickPointer = null;
-        this.input.walk = 0;
-        this.input.yaw = 0;
-        this.stickEl.style.display = 'none';
-      }
-      if (e.pointerId === this.lookPointer) this.lookPointer = null;
+      if (e.pointerId === this.stickPointer) dropStick();
+      if (e.pointerId === this.lookPointer) {
+        this.lookPointer = null;
+        // Finger off: the eye starts sliding back to the tube's own line.
+        }
     };
+    /* The belt and braces: a pointer that vanishes without a pointerup, a
+     * window that loses focus, a tab that goes to the background. */
+    window.addEventListener('pointercancel', dropStick);
+    window.addEventListener('blur', () => { dropStick(); this.input.dig = false; });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { dropStick(); this.input.dig = false; }
+    });
     canvas.addEventListener('pointerup', release);
     canvas.addEventListener('pointercancel', release);
     window.addEventListener('pointerup', release);
@@ -2266,14 +3289,19 @@ export class IslandScene {
     const elevM = this.heights
       ? (this.groundHeightAt(this.at.x, this.at.z) * MM).toFixed(0)
       : '…';
-    const mode = this.railEdge >= 0 ? 'GRIP' : this.chamberId ? 'FREE (room)' : 'FREE';
     this.statsPanel.setHTML(`
       <b>kauai island</b> · 56 m square · 1:1000 · all 64 sections resident<br>
       terrain ${this.terrainVerts.toLocaleString()} v / ${this.terrainTris.toLocaleString()} t
-      · elevation ${elevM} m · mode ${mode}<br>
+      · elevation ${elevM} m<br>
+      aim ${((this.aimPitch * 180) / Math.PI).toFixed(0)}° ·
+      scoop ${SCOOP_WIDE_MM} x ${SCOOP_TALL_MM} x ${SCOOP_DEEP_MM} mm<br>
       soil window ${WINDOW_MM} mm · ${(WINDOW_BYTES / 1048576).toFixed(1)} MB ·
       chunks ${this.chunkMeshes.size} · queued ${this.queue.length} ·
       dug ${this.stream?.editedSamples ?? 0}<br>
+      ${this.stands.size ? `forest ${[...this.stands.values()]
+        .map((m) => m.count).reduce((a, b) => a + b, 0).toLocaleString()} plants ·
+        ${this.stands.size} draws<br>` : ''}
+      ${this.tree ? `tree ${this.tree.bark} · ${this.tree.triangles.map((t) => t.toLocaleString()).join(' / ')} t · lod ${this.treeLevel()}<br>` : ''}
       band floor ${this.stream?.bandFloorMm ?? 0} m · scrolls ${this.stats.scrolls}
       (${this.stats.rebases} rebases) · last ${this.stats.lastScrollMs.toFixed(0)} ms<br>
       at (${(this.at.x * MM / 1000).toFixed(1)}, ${(this.at.z * MM / 1000).toFixed(1)}) m ·
@@ -2326,17 +3354,156 @@ export class IslandScene {
 
   /* -------------------------------------------------------------- probes */
 
+  /* ------------------------------------------------- the founding quests */
+
+  /** How far below the ORIGINAL ground she is, in mm. Never negative. */
+  private depthMm(): number {
+    return Math.max(
+      0, (this.walkGroundAt(this.at.x, this.at.z) - this.at.y) * MM,
+    );
+  }
+
+  private questTick(dt: number): void {
+    if (!this.questEl) this.buildQuestHud();
+    if (this.questStage === 0 && this.depthMm() >= QUEST_DEPTH_MM) {
+      this.questStage = 1;
+    } else if (this.questStage === 1 && this.deepCarved >= QUEST_CHAMBER_SAMPLES) {
+      this.questStage = 2;
+      this.cineUntil = performance.now() + 5200;
+      if (this.cineEl) this.cineEl.classList.add('is-on');
+      this.spawnWorker();
+    } else if (this.questStage === 2 && performance.now() > this.cineUntil) {
+      this.questStage = 3;
+      if (this.cineEl) this.cineEl.classList.remove('is-on');
+    }
+    this.renderQuest();
+    this.poseWorker(dt);
+  }
+
+  private buildQuestHud(): void {
+    this.questEl = document.createElement('div');
+    this.questEl.className = 'density-lab-status rail-status';
+    /* Up against the top edge. The shared status style sits 42px down to
+     * clear the STATS chip, which the quest box does not need to — it is
+     * centred and the chip is hard left, so they never meet. */
+    this.questEl.style.top = 'max(8px, env(safe-area-inset-top))';
+    this.questEl.style.left = '50%';
+    this.questEl.style.right = 'auto';
+    this.questEl.style.transform = 'translateX(-50%)';
+    this.hud.appendChild(this.questEl);
+
+    /*
+     * The founding cinematic, as the brief wrote it: a held black beat
+     * while the colony's story turns over. DOM, not canvas — it must sit
+     * over everything and cost nothing when off.
+     */
+    this.cineEl = document.createElement('div');
+    this.cineEl.style.cssText = 'position:absolute;inset:0;z-index:40;'
+      + 'display:flex;flex-direction:column;justify-content:center;'
+      + 'align-items:center;gap:14px;text-align:center;padding:0 9vw;'
+      + 'background:rgba(6,5,8,0.88);color:#e8dfc8;pointer-events:none;'
+      + 'opacity:0;transition:opacity 1.1s ease;'
+      + 'font-family:ui-monospace,monospace;';
+    this.cineEl.innerHTML = '<div style="font-size:19px;letter-spacing:0.4px">'
+      + 'The Queen has made this her home.</div>'
+      + '<div style="font-size:14px;opacity:0.8">Now she waits for her '
+      + 'first generation to emerge…</div>';
+    const style = document.createElement('style');
+    style.textContent = '.density-lab-hud > div.is-on { opacity: 1 !important; }';
+    document.head.appendChild(style);
+    this.hud.appendChild(this.cineEl);
+  }
+
+  private renderQuest(): void {
+    if (!this.questEl) return;
+    let text = '';
+    if (this.questStage === 0) {
+      text = `⛏ QUEST · dig the entrance · ${this.depthMm().toFixed(0)}/${QUEST_DEPTH_MM} mm down`;
+    } else if (this.questStage === 1) {
+      const pct = Math.min(
+        100, Math.round((this.deepCarved / QUEST_CHAMBER_SAMPLES) * 100),
+      );
+      text = `⛏ QUEST · hollow the queen's chamber · ${pct}%`;
+    } else if (this.questStage === 3) {
+      text = '🐜 the first worker is here · the colony begins';
+    }
+    if (this.questEl.textContent !== text) this.questEl.textContent = text;
+    this.questEl.style.display = text ? '' : 'none';
+  }
+
+  /**
+   * The first worker: hatched where the chamber quest completed, wearing
+   * the real worker rig, pottering a small patrol around her birthplace.
+   * She is the payoff — proof the colony is REAL — not yet a colonist
+   * with jobs; that part arrives with the sandbox mechanics.
+   */
+  private spawnWorker(): void {
+    if (this.worker) return;
+    this.workerAnchor.copy(this.at);
+    this.worker = new QueenModel('worker');
+    this.worker.root.visible = false;
+    this.scene.add(this.worker.root);
+    void this.worker.load().then((ok) => {
+      this.workerReady = ok;
+      if (this.worker) this.worker.root.visible = ok;
+    });
+  }
+
+  private poseWorker(dt: number): void {
+    if (!this.worker || !this.workerReady) return;
+    this.workerJig += dt;
+    const angle = this.workerJig * 0.55;
+    const r = 1.1;
+    const x = this.workerAnchor.x + Math.sin(angle) * r;
+    const z = this.workerAnchor.z + Math.cos(angle) * r;
+    const y = this.footingAt(x, z);
+    this.worker.root.position.set(x, y + RIDE * 0.5, z);
+    this.worker.root.rotation.set(0, angle + Math.PI / 2, 0);
+    this.worker.update(dt, {
+      speed: r * 0.55,
+      turn: 0.55,
+      digging: 0,
+      carrying: 0,
+      headYaw: 0,
+    });
+    this.worker.solveFeet(
+      (px, pz) => this.footingAt(px, pz),
+      FOOT_CLEARANCE_MM / MM,
+      RIDE * 2,
+    );
+  }
+
   setPausedForTest(on: boolean): void { this.paused = on; }
+
+  /** Where the next stroke would land, and what it is aimed at — the numbers
+   *  behind "it says it dug and nothing happened". */
+  biteProbeForTest(): { seatMm: number; aimDeg: number; upY: number; ceilMm: number } {
+    const aim = this.boreAim();
+    const spot = new THREE.Vector3();
+    const hit = this.biteCentre(aim, NOSE_REACH + JAW_PAST_NOSE, spot);
+    return {
+      seatMm: hit ? spot.distanceTo(this.at) * MM : -1,
+      aimDeg: (this.aimPitch * 180) / Math.PI,
+      upY: this.up.y,
+      ceilMm: this.bandTop.value * MM,
+    };
+  }
+
+  aimPitchForTest(radians: number): void { this.aimPitch = radians; }
 
   stepForTest(dt: number, steps: number): void {
     for (let i = 0; i < steps; i += 1) this.simulate(dt);
   }
 
   setFacingForTest(radians: number): void {
-    /* The RIG owns the heading now, so setting the field alone would be
-     * overwritten on the next step. Turn the rig to match. */
+    /* Three things have to agree or the next frame undoes this: the rig owns
+     * the heading, the heading's LAST value is what a turn is measured
+     * against, and her nose is what actually points anywhere. */
     this.facing = radians;
     this.bore.turn(radians - this.bore.heading);
+    this.headingWas = this.bore.heading;
+    this.fwd.set(Math.sin(radians), 0, Math.cos(radians));
+    this.walker?.squareForward({ at: this.at, up: this.up, forward: this.fwd });
   }
 
   teleportMm(xMm: number, zMm: number): void {
@@ -2344,19 +3511,22 @@ export class IslandScene {
     this.at.z = zMm / MM;
     this.at.y = this.walkGroundAt(this.at.x, this.at.z) + RIDE;
     this.velocity.set(0, 0, 0);
-    this.trail.length = 0;
     this.underground = false;
     this.hasSafe = false;
-    /* A teleport leaves the rail behind like everything else it resets —
-     * stale rail state used to drag her back into the tunnel she left. */
-    this.railEdge = -1;
-    this.railRev = false;
-    this.chamberId = null;
-    this.boreEngaged = false;
-    this.railGate = null;
-    this.enterDeclined = null;
-    this.surfaceDeclined = null;
-    this.hideGateAsk();
+    /* Set down the right way up wherever she lands, gripping again. Carrying
+     * a ceiling's attitude across a teleport would have her arrive upside
+     * down over open ground and fall off the hill. */
+    this.up.set(0, 1, 0);
+    if (this.walker) {
+      this.walker.gripping = true;
+      this.walker.fallSpeed = 0;
+      this.walker.squareForward({ at: this.at, up: this.up, forward: this.fwd });
+    }
+    /* Her feet are anchored to world points; a teleport leaves them behind
+     * on ground she is no longer standing on. */
+    this.drive?.plantAll(
+      { at: this.at, up: this.up, forward: this.fwd }, this.groundForLegs,
+    );
     if (this.stream) {
       const scroll = this.stream.recentreOn(this.at.x, this.at.z);
       if (scroll) this.onScroll(scroll);
@@ -2414,16 +3584,18 @@ export class IslandScene {
       bandFloorMm: this.stream?.bandFloorMm ?? -1,
       underground: this.underground ? 1 : 0,
       firstPerson: this.firstPerson ? 1 : 0,
-      railBound: this.railEdge >= 0 ? 1 : 0,
-      // GRIP and FREE are one coin: on the rail is GRIP, everything else
-      // (surface, chamber) is FREE. `chamberNow` says which FREE.
-      free: this.railEdge >= 0 ? 0 : 1,
-      chamberNow: this.chamberId !== null ? 1 : 0,
-      asking: this.gateAsk ? 1 : 0,
+      aimDeg: (this.aimPitch * 180) / Math.PI,
+      scoopWideMm: SCOOP_WIDE_MM,
+      scoopTallMm: SCOOP_TALL_MM,
+      scoopDeepMm: SCOOP_DEEP_MM,
+      digMode: this.digMode ? 1 : 0,
+      questStage: this.questStage,
+      questDepthMm: +this.depthMm().toFixed(1),
+      deepCarved: this.deepCarved,
+      workerOut: this.worker && this.workerReady ? 1 : 0,
       playerReady: this.playerReady ? 1 : 0,
       statsOpen: this.statsPanel.bodyVisible ? 1 : 0,
       designing: this.designer?.isOpen ? 1 : 0,
-      rails: this.rails.length,
       planNodes: this.soil?.plan.nodes.length ?? 0,
       designX: this.designOriginMm.x,
       designY: this.designOriginMm.y,
@@ -2445,19 +3617,33 @@ export class IslandScene {
     this.closeDesigner();
   }
 
+  private readonly refuseGesture = (e: Event): void => { e.preventDefault(); };
+
   dispose(): void {
     cancelAnimationFrame(this.frame);
+    for (const name of ['gesturestart', 'gesturechange', 'gestureend']) {
+      this.host.removeEventListener(name, this.refuseGesture);
+    }
     this.statsPanel.dispose();
     this.designer?.dispose();
     this.scene.traverse((node) => {
       const mesh = node as THREE.Mesh;
       if (mesh.geometry) mesh.geometry.dispose();
     });
+    for (const mesh of this.stands.values()) {
+      this.scene.remove(mesh);
+      mesh.geometry.dispose();
+      mesh.dispose();
+    }
+    this.stands.clear();
+    this.forestMaterial?.dispose();
+    this.tree?.dispose();
     this.islandMaterial?.dispose();
     this.soilMaterial?.dispose();
     if (this.textures) for (const tex of Object.values(this.textures)) tex.dispose();
     this.nestView?.dispose();
     this.queen.dispose();
+    this.worker?.dispose();
     this.renderer.dispose();
     this.host.replaceChildren();
   }

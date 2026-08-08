@@ -1,3 +1,6 @@
+declare const __APP_VERSION__: string;
+declare const __BUILD_TIME__: string;
+
 /**
  * Full-screen DOM loading overlay for the island scene.
  *
@@ -64,6 +67,13 @@ function buildStyles(): string {
   text-indent: 0.38em;
   text-align: center;
 }
+.tm-loading-version {
+  margin: 6px 0 0;
+  font: 500 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.08em;
+  color: rgba(216, 206, 186, 0.42);
+}
+
 .tm-loading-status {
   margin: 0;
   font-family: Georgia, "Iowan Old Style", "Times New Roman", serif;
@@ -88,7 +98,14 @@ function buildStyles(): string {
 /* Error state: the title stays put (never a blank screen), the status turns a
    warm ember tone, and the dot freezes — a stopped heartbeat reads as "this is
    not still loading" without anything vanishing. */
-.tm-loading-root.tm-loading-failed .tm-loading-status {
+.tm-loading-root.tm-loading-failed .tm-loading-version {
+  margin: 6px 0 0;
+  font: 500 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.08em;
+  color: rgba(216, 206, 186, 0.42);
+}
+
+.tm-loading-status {
   color: #e0956b;
 }
 .tm-loading-root.tm-loading-failed .tm-loading-dot {
@@ -137,6 +154,20 @@ export class LoadingOverlay {
     this.statusLine.setAttribute('aria-live', 'polite');
     this.statusLine.textContent = 'Preparing the island…';
     this.root.appendChild(this.statusLine);
+
+    /*
+     * WHICH BUILD IS THIS. A phone caches aggressively, and a report of
+     * "still broken" against code two versions old costs more than the
+     * line of text that would have settled it. The lab menu already
+     * carries the same stamp; the island had no way to show one.
+     */
+    const version = doc.createElement('p');
+    version.className = 'tm-loading-version';
+    /* The VERSION is what identifies a build to the person testing it. The
+     * timestamp stays as a tiebreaker, small and second — "is 0.0.12 live
+     * yet" is the question actually being asked. */
+    version.textContent = `v${__APP_VERSION__}`;
+    this.root.appendChild(version);
 
     const dot = doc.createElement('div');
     dot.className = 'tm-loading-dot';

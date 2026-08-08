@@ -310,6 +310,49 @@ export class IslandStream {
     return result;
   }
 
+  /** Relax the field over a LOCAL sample box — the smoothing brush. The
+   *  box is what a brush just returned, so no conversion is needed. */
+  /** The same box, from a WORLD-space sphere: centre and radius in world
+   *  units, which is how a hand-aimed brush thinks. */
+  boxAround(centre: Vec3Like, radius: number): BrushResult['bounds'] {
+    const lx = (centre.x - this.originWorldX) / CELL_SIZE;
+    const ly = (centre.y - this.bandFloorWu) / CELL_SIZE;
+    const lz = (centre.z - this.originWorldZ) / CELL_SIZE;
+    const r = radius / CELL_SIZE;
+    return {
+      minX: Math.floor(lx - r), minY: Math.floor(ly - r), minZ: Math.floor(lz - r),
+      maxX: Math.ceil(lx + r), maxY: Math.ceil(ly + r), maxZ: Math.ceil(lz + r),
+    };
+  }
+
+  smoothBox(
+    bounds: BrushResult['bounds'], strength?: number, maxShift?: number,
+    onlyCarve?: boolean,
+  ): BrushResult['bounds'] | null {
+    const result = this.field.smoothBox(bounds, strength, maxShift, onlyCarve);
+    if (result.changedSamples === 0) return null;
+    this.remember(result.bounds);
+    return result.bounds;
+  }
+
+  /** The oriented scoop, at an absolute WORLD position — see
+   *  `DensityField.subtractEllipsoid`. Direction needs no translation. */
+  subtractEllipsoid(
+    worldCenter: Vec3Like, along: Vec3Like,
+    semis: { deep: number; wide: number; tall: number }, rightHint?: Vec3Like,
+  ): BrushResult {
+    const result = this.field.subtractEllipsoid(
+      {
+        x: worldCenter.x - this.originWorldX,
+        y: worldCenter.y - this.bandFloorWu,
+        z: worldCenter.z - this.originWorldZ,
+      },
+      along, semis, rightHint,
+    );
+    if (result.changedSamples > 0) this.remember(result.bounds);
+    return result;
+  }
+
   /**
    * Record samples in the box that differ from the BASE soil — which
    * includes the nest plan, so re-opening a planned tunnel stores nothing.
@@ -393,6 +436,31 @@ export class IslandStream {
       }
     }
     return null;
+  }
+
+  /**
+   * How solid this ABSOLUTE world-unit position is — the field itself, read
+   * BETWEEN the samples. Positive is soil, negative is air, zero is the
+   * drawn surface. Null out of window.
+   *
+   * `solidAtWu` rounds to a lattice point and answers yes or no, which is
+   * everything a "may I stand here" test needs and nothing a NORMAL needs:
+   * a gradient of rounded booleans is a staircase, so it points along one of
+   * six axes and jumps between them. Walking a curved wall on a normal like
+   * that reads as the ant snapping between faces. This is the same field,
+   * interpolated, so its gradient turns.
+   */
+  densityAtWu(worldX: number, worldY: number, worldZ: number): number | null {
+    const x = worldX - this.originWorldX;
+    const y = worldY - this.bandFloorWu;
+    const z = worldZ - this.originWorldZ;
+    /* One cell in from the edge: `sample` reads the NEXT lattice point up in
+     * each axis, and past the window `get` answers -MAX_VALUE, which would
+     * hand back a gradient pointing hard out of the world. */
+    const span = (WINDOW_CELLS - 1) * CELL_SIZE;
+    const tall = (SAMPLES_Y - 2) * CELL_SIZE;
+    if (x < 0 || x > span || z < 0 || z > span || y < 0 || y > tall) return null;
+    return this.field.sample(x, y, z);
   }
 
   /** Is this ABSOLUTE world-unit position inside soil? Null out of window. */

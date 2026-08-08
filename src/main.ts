@@ -21,7 +21,8 @@ registerServiceWorker();
  * Everything is imported lazily so a route only pays for its own scene.
  */
 const params = new URLSearchParams(window.location.search);
-const scene = params.get('scene');
+// Case-blind on purpose: "?scene=Sandbox" typed on a phone should work.
+const scene = params.get('scene')?.toLowerCase() ?? null;
 const map = params.get('map');
 const colonySim = scene === 'density'
   || map === 'densityterrainlab'
@@ -63,6 +64,34 @@ if (host) {
   void import('./scenes/sandbox/AntMechanicsSandbox').then(
     ({ AntMechanicsSandbox }) => new AntMechanicsSandbox(host),
   );
+  } else if (scene === 'rail') {
+    /*
+     * The monorail room: the coaster-style tunnel builder on its own, with a
+     * cart riding the track. Pieces compile to a NestPlan, so what this room
+     * proves carries into the carved, jaws-executed version unchanged.
+     */
+    void import('./scenes/RailScene').then(({ RailScene }) => new RailScene(host));
+  } else if (scene === 'pipes') {
+    /*
+     * The pipes room: tunnels as plumbing. Arm a pipe piece, rotate it in
+     * 45° racks, tap again to place — it snaps to the open end, carves
+     * instantly, and the network's centerlines are where ants can travel.
+     */
+    void import('./scenes/PipesScene').then(({ PipesScene }) => new PipesScene(host));
+  } else if (scene === 'sandbox') {
+    /*
+     * The ant mechanics sandbox: worker and major, and the head-and-jaws
+     * interaction grammar — approach, aim, clamp, carry or drag or bite —
+     * proved on a bare field before it meets the island.
+     */
+    void import('./scenes/SandboxScene').then(({ SandboxScene }) => new SandboxScene(host));
+  } else if (scene === 'carry') {
+    /*
+     * The carry room: soil as a lattice of 2 mm blocks, and digging as
+     * picking one up. Crosshair on a block, CARRY takes it, DROP places it —
+     * a tunnel is exactly the blocks somebody carried out of it.
+     */
+    void import('./scenes/CarryScene').then(({ CarryScene }) => new CarryScene(host));
   } else {
     /*
      * Default and `?scene=island`: Beyond Extinction's Kauai at 1:1000,

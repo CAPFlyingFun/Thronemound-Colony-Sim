@@ -52,7 +52,12 @@ const PACE_BAND_MM = 0.15;
 
 /** The limits the builder offers, and the runner enforces. */
 export const PIECE_LIMITS = {
-  pitch: { min: -75, max: 75, step: 15 },
+  /* ±90 is REAL vertical. The tube's frame math carries the heading as
+   * integrator state through vertical runs (railFromPlan) and falls back
+   * to the carried heading wherever a frame alone can't say (endStateOf,
+   * the near-vertical branch in TunnelRail.sample) — so a shaft is a
+   * shaft, not a 75° apology for one. */
+  pitch: { min: -90, max: 90, step: 15 },
   turn: { min: -90, max: 90, step: 15 },
   roll: { min: -90, max: 90, step: 15 },
   length: { min: 1, max: 10, step: 1 },

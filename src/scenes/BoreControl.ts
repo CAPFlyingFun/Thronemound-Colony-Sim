@@ -61,6 +61,15 @@ export const STROKE_SECONDS = 0.42;
 /** Where in the stroke the jaws are deepest, as a fraction of it. */
 const STRIKE_AT = 0.55;
 
+/**
+ * Seconds from a cold press to the FIRST bite. The full wind-up puts the
+ * strike 0.23 s after the button, which reads as the button not working —
+ * a tap appeared to do nothing, and players pressed three times for one
+ * bite. A stroke already in flight keeps the honest cadence; only the
+ * first from rest starts mid-dip so soil leaves almost on the press.
+ */
+const FIRST_BITE_S = 0.08;
+
 export interface BoreInput {
   /** -1, 0 or 1: steer left, hold, steer right. */
   yaw: number;
@@ -146,6 +155,7 @@ export class BoreRig {
      * the whole time it is held. Released, she steers at walking rate — in a
      * tunnel the walls constrain her far harder than any rate limit could.
      */
+    const pressed = input.dig && !this.digging;
     this.digging = input.dig;
     const rate = this.digging ? DIG_YAW_RATE : YAW_RATE;
     this.heading += input.yaw * rate * dt;
@@ -159,9 +169,26 @@ export class BoreRig {
      */
     let bite = false;
     const working = this.digging;
+    const fastStart = Math.max(0, STROKE_SECONDS * STRIKE_AT - FIRST_BITE_S);
     if (this.phase < 0) {
-      if (working) this.phase = 0;
+      // From rest, start mid-dip: the first bite lands FIRST_BITE_S after
+      // the press instead of a full wind-up later.
+      if (working) this.phase = fastStart;
     } else {
+      /*
+       * A PRESS ALWAYS EARNS A BITE.
+       *
+       * Letting go mid-lunge leaves the stroke running to its end, which is
+       * right — the head finishes the swing. But a press landing in that
+       * tail found `phase >= 0` and was simply dropped, so a tap arriving
+       * within about a fifth of a second of the last one did nothing at
+       * all: "the shovel doesn't work on every press". If the jaws have
+       * already struck this stroke, a fresh press winds them back to just
+       * before the strike, so the tap gets the bite it asked for. A press
+       * BEFORE the strike needs nothing — the stroke it is riding is about
+       * to bite anyway, and restarting it would double the mouthful.
+       */
+      if (pressed && this.phase >= STROKE_SECONDS * STRIKE_AT) this.phase = fastStart;
       const before = this.phase;
       this.phase += dt;
       const strike = STROKE_SECONDS * STRIKE_AT;
