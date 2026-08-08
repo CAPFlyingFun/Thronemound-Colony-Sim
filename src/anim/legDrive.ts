@@ -209,10 +209,35 @@ export interface BodyPose {
 export interface DriveInput {
   /** -1..1 along her forward. */
   walk: number;
+  /**
+   * -1..1 ACROSS her forward — a side step, not a turn.
+   *
+   * An ant does not have to point where it is going, and a player steering
+   * with the camera does not want her to: the nose stays where the view is
+   * and the body slides. It rides the same clip as the walk and the spin,
+   * because a foot with no room left has no more room for a side step than
+   * for anything else.
+   */
+  strafe?: number;
   /** -1..1 about her up. */
   yaw: number;
   speed: number;
   yawRate: number;
+  /**
+   * Whether this drive APPLIES the spin, or only accounts for it. Default
+   * true.
+   *
+   * A caller may already own the heading — the island's bore rig integrates
+   * the stick into a heading and rotates her nose with it — and then this
+   * applying the spin as well turns her twice. Measured: 1.5 rad/s from the
+   * rig plus 2.4 from here, a stick that asked for one of them and got
+   * 223 degrees a second.
+   *
+   * `yaw` is still read when this is false, because the gait needs it: the
+   * stride table blends on how much of a foot's travel is rotation, and a
+   * turn the legs do not know about is a turn they cannot step for.
+   */
+  spin?: boolean;
   /**
    * Whether the LEGS are allowed to set her height. Default true.
    *
@@ -337,7 +362,8 @@ export class LegDrive {
       .addScaledVector(right, leg.home.x)
       .addScaledVector(body.up, leg.home.y)
       .addScaledVector(body.forward, leg.home.z);
-    const linear = body.forward.clone().multiplyScalar(input.speed * input.walk);
+    const linear = body.forward.clone().multiplyScalar(input.speed * input.walk)
+      .addScaledVector(right, input.speed * (input.strafe ?? 0));
     const angular = new THREE.Vector3()
       .crossVectors(body.up, offset)
       .multiplyScalar(input.yawRate * input.yaw);
@@ -363,7 +389,7 @@ export class LegDrive {
    * the same stroke.
    */
   private radius(body: BodyPose, input: DriveInput): number {
-    const linear = Math.abs(input.speed * input.walk);
+    const linear = Math.hypot(input.speed * input.walk, input.speed * (input.strafe ?? 0));
     const rotational = Math.abs(input.yawRate * input.yaw) * this.stanceRadius;
     const total = linear + rotational;
     const turn = total > 1e-9 ? rotational / total : 0;
@@ -424,8 +450,13 @@ export class LegDrive {
      *    together below, because a foot with no room left has no more room
      *    for the turn than it does for the walk.
      */
-    const shove = body.forward.clone().multiplyScalar(input.speed * input.walk * dt);
-    const spin = input.yawRate * input.yaw * dt;
+    const right = new THREE.Vector3().crossVectors(body.up, body.forward).normalize();
+    const shove = body.forward.clone().multiplyScalar(input.speed * input.walk * dt)
+      .addScaledVector(right, input.speed * (input.strafe ?? 0) * dt);
+    /* Zero when someone else owns the heading — see `DriveInput.spin`. The
+     * clip below must see the same zero, or it constrains a rotation that
+     * is never going to happen and holds back the walk for nothing. */
+    const spin = (input.spin ?? true) ? input.yawRate * input.yaw * dt : 0;
     const wanted = shove.length();
     const radius = this.radius(body, input);
 

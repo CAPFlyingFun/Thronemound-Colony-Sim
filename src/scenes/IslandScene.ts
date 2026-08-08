@@ -45,7 +45,7 @@ import { planBounds } from '../nest/nestCarve';
 import { addNode } from '../nest/nestEdit';
 import { type NestPlan } from '../nest/nestPlan';
 import { chamberBox, chamberNorm, type ChamberBox } from './ChamberMovement';
-import { BoreRig } from './BoreControl';
+import { BoreRig, YAW_RATE } from './BoreControl';
 import { DebugStatsPanel } from './DebugStatsPanel';
 import { LoadingOverlay } from './LoadingOverlay';
 import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
@@ -94,7 +94,52 @@ const SEC_VERTS = (MESH_N - 1) / SECTIONS + 1;
  */
 const WALK_SPEED = 1.5;
 const SPRINT = 3;
-const TURN_RATE = 2.4;
+/*
+ * HOW FAST SHE TURNS, ALL IN — and until now there was no such number.
+ *
+ * The stick was integrated TWICE: `BoreControl` swings the heading at its
+ * own `YAW_RATE` of 1.5 rad/s and the island rotates her nose by that
+ * change, and then `LegDrive` was handed the same stick and spun her again
+ * at 2.4. Measured: 223 degrees a second out of a control that was set to
+ * ask for 137. That is the turn feeling twitchy, and no amount of tuning
+ * either constant alone could have found it.
+ *
+ * One owner now — the rig — and one number here, which is what the rig is
+ * scaled to deliver. 2.53 rad/s is 145 deg/s: 35% below the 223 that was
+ * actually happening, which is what was asked for.
+ */
+const TURN_RATE = 2.53;
+
+/**
+ * How hard the camera pulls her nose round when she is side-stepping.
+ *
+ * In STEER mode the view leads and the body follows: the orbit arm is
+ * already swung off her tail by the drag, and that swing IS the error
+ * signal — turning her toward it and letting the arm decay are the same
+ * motion seen from two ends. Only while she is actually moving, or a drag
+ * to look around would spin her on the spot.
+ */
+const STEER_GAIN = 1.6;
+
+/**
+ * How far above the wood's collision she rides, so she sits on the BARK.
+ *
+ * The trunk's collision is a circle at every height and the mesh is a
+ * polygon whose flats are TANGENT to it, so the drawn bark stands proud of
+ * the collision by up to a facet's sagitta and she seats on the collision.
+ *
+ * CALIBRATED, not derived, because the seat also moves where the leg
+ * solver's own casts land and the two do not add up one for one. Two
+ * measurements of claw-to-drawn-bark on the landmark:
+ *
+ *   lift 0.0 mm  ->  -2.67 mm (that far INSIDE the bark)
+ *   lift 2.5 mm  ->  +1.22 mm (that far OUTSIDE it)
+ *   lift 1.4 mm  ->  +0.04 mm, six claws spread -1.15 to +0.80
+ *
+ * Straddling the surface, which is contact: some feet a hair in, some a
+ * hair out, none of it visible on something 9 mm long.
+ */
+const WOOD_LIFT = 1.4 / MM;
 
 /**
  * THE STICK'S RESPONSE, which is not the same thing as her top speed.
@@ -495,7 +540,21 @@ export class IslandScene {
 
   private readonly velocity = new THREE.Vector3();
 
-  readonly input = { walk: 0, yaw: 0, dig: false, sprint: false };
+  readonly input = { walk: 0, yaw: 0, strafe: 0, dig: false, sprint: false };
+
+  /**
+   * TURN or STEER, and it changes what left and right MEAN.
+   *
+   * STEER (the default) is how the Godot build and Path of Titans read:
+   * left and right SIDE-STEP, and you point her by dragging the view. An
+   * ant does not have to face where it is going, and on a trunk that is the
+   * difference between edging along a branch and pirouetting off it.
+   * TURN is the precision mode — left and right rotate on the spot, which
+   * is what you want when lining a dig up.
+   */
+  private precisionTurn = false;
+
+  private turnChip: HTMLButtonElement | null = null;
 
   /** The WALK/RUN latch, which is the only sprint a thumb has. */
   private running = false;
@@ -591,6 +650,12 @@ export class IslandScene {
 
   /** How high her body rides, taken from her own rig once it has loaded. */
   private legRide = RIDE;
+
+  /** The wood lift, eased — see `woodLift`. */
+  private woodRide = 0;
+
+  /** The camera's pull on her nose this frame, -1..1. See `TURN_RATE`. */
+  private steerYaw = 0;
 
   /**
    * What the legs may ask of the world: the nearest solid to a point,
@@ -1810,8 +1875,28 @@ export class IslandScene {
     /* The rig owns the heading: it steers slowly while she is cutting and
      * at walking rate otherwise. Its yaw runs the other way to the stick's,
      * hence the sign. */
+    /*
+     * THE VIEW STEERS HER, unless she is being turned deliberately.
+     *
+     * `camYaw` is how far the orbit arm has been dragged off her tail, and
+     * it decays back to zero on its own — so it is exactly the error
+     * between where she is pointed and where the player is looking. Fed in
+     * as a turn while she is moving, the camera leads and the body follows,
+     * which is the Godot build's feel. Standing still it does nothing, or a
+     * look round the room would spin her on the spot.
+     *
+     * It goes to the RIG, not to the legs, because the rig owns the
+     * heading — see `TURN_RATE`.
+     */
+    const moving = Math.abs(this.input.walk) + Math.abs(this.input.strafe) > 0.02;
+    this.steerYaw = this.precisionTurn || !moving
+      ? 0
+      : Math.max(-1, Math.min(1, this.camYaw * STEER_GAIN));
     const bore = this.bore.step(dt, {
-      yaw: -this.input.yaw,
+      /* Scaled so the rig delivers TURN_RATE at full stick rather than its
+       * own YAW_RATE, which other rooms share and this one should not be
+       * quietly redefining. */
+      yaw: (-this.input.yaw + this.steerYaw) * (TURN_RATE / YAW_RATE),
       forward: this.input.walk,
       dig: this.input.dig,
     });
@@ -2064,6 +2149,40 @@ export class IslandScene {
    * either. Walking up out of a shaft is not a rule; it is what walking IS
    * once down points at the shaft's wall.
    */
+  /**
+   * How much higher she should ride because she is standing on WOOD.
+   *
+   * Nought on soil. On a trunk it is two thirds of the facet sagitta —
+   * `r (1/cos(pi/sides) - 1)` at twenty sides is 1.23% of the radius, and
+   * averaging that over a facet is about two thirds of the peak. The radius
+   * is read off the collision itself rather than guessed: march out along
+   * her own up until the wood ends, which is the local skin depth and needs
+   * no knowledge of which tree she is on.
+   */
+  private woodLift(): number {
+    /*
+     * BELOW her, not AT her — and the difference is a feedback loop.
+     *
+     * The first cut asked whether her ORIGIN was inside wood. It is, until
+     * the lift works; then it is not, so the lift switched itself off, so
+     * she sank back in. Measured, it settled at 0.7 mm of the 2.5 it was
+     * asked for, oscillating around the boundary. What the question should
+     * have been is whether the thing she is STANDING ON is wood, which is a
+     * short march down her own up and has no such loop in it.
+     */
+    const wood = (x: number, y: number, z: number): boolean => (
+      this.tree?.solid?.solidAt(x, y, z) === true
+      || this.stand?.solidAt(x, y, z) === true
+    );
+    const reach = WOOD_LIFT + RIDE * 2;
+    for (let d = 0; d <= reach; d += CELL_SIZE * 0.5) {
+      if (wood(
+        this.at.x - this.up.x * d, this.at.y - this.up.y * d, this.at.z - this.up.z * d,
+      )) return WOOD_LIFT;
+    }
+    return 0;
+  }
+
   private moveSurface(dt: number, speed: number): void {
     const walker = this.walker;
     if (!walker) return;
@@ -2085,7 +2204,11 @@ export class IslandScene {
         { at: this.at, up: this.up, forward: this.fwd },
         {
           walk: this.input.walk,
-          yaw: -this.input.yaw,
+          strafe: this.input.strafe,
+          /* Told, not obeyed: the rig has already turned her this frame and
+           * the gait still has to step for it. See `DriveInput.spin`. */
+          yaw: -this.input.yaw + this.steerYaw,
+          spin: false,
           speed: WALK_SPEED * (this.input.sprint ? SPRINT : 1),
           yawRate: TURN_RATE,
           /* The walker seats her: two systems both deciding how high she
@@ -2096,6 +2219,13 @@ export class IslandScene {
       );
     } else {
       this.at.addScaledVector(this.fwd, speed * dt);
+      if (this.input.strafe !== 0) {
+        const side = S_RIGHT.crossVectors(this.up, this.fwd).normalize();
+        this.at.addScaledVector(
+          side,
+          this.input.strafe * WALK_SPEED * (this.input.sprint ? SPRINT : 1) * dt,
+        );
+      }
     }
     this.at.x = Math.min(span - 2, Math.max(2, this.at.x));
     this.at.z = Math.min(span - 2, Math.max(2, this.at.z));
@@ -2111,6 +2241,28 @@ export class IslandScene {
      * cornering happens anyway.
      */
     const aimDt = this.input.dig && this.underground ? 0 : dt;
+    /*
+     * WOOD IS DRAWN PROUD OF ITS OWN COLLISION, so she rides a little
+     * higher on it.
+     *
+     * The trunk's collision is the round cone — a circle at every height.
+     * The mesh is a polygon whose flats are TANGENT to that circle, which
+     * is what stopped her hovering, but it means the drawn bark stands out
+     * from the collision by up to a facet's sagitta, and she seats on the
+     * collision. Measured on the landmark: her claws sat 2.7 mm inside the
+     * picture — reported as "still in the tree, but a lot closer".
+     *
+     * The lift is the mean of that excess rather than its worst, so she
+     * sits on the bark whichever way round the trunk she is, and it is
+     * applied ONLY where the thing under her is wood. Soil has no facets
+     * and already measured 0.28 mm, which is contact; lifting her there
+     * would put the hovering back on the ground instead.
+     */
+    /* Eased, because stepping from soil onto a root would otherwise pop her
+     * 2.5 mm in one frame — a quarter of her own length, instantly. */
+    const wantLift = this.woodLift();
+    this.woodRide += (wantLift - this.woodRide) * Math.min(1, dt * 8);
+    (walker.tune as { ride: number }).ride = this.legRide + this.woodRide;
     walker.settle({ at: this.at, up: this.up, forward: this.fwd }, dt, aimDt);
 
     /*
@@ -2696,7 +2848,9 @@ export class IslandScene {
        * safe. In first person her head IS the camera, and turning it would
        * only fight the view.
        */
-      headYaw: this.firstPerson ? 0 : -this.camYaw,
+      /* Left and right were backwards — reported, and the sign lives here
+       * and nowhere else. Her pitch was already right, so only this flips. */
+      headYaw: this.firstPerson ? 0 : this.camYaw,
       headPitch: this.aimPitch,
     });
     /* And her FEET are solved in that frame too. The solver has always
@@ -3234,6 +3388,26 @@ export class IslandScene {
      * left on a phone to hold a second finger down: the left half of the
      * screen is the stick and the right half is the look-drag.
      */
+    /*
+     * TURN — the precision latch, in the Path of Titans sense: held (here
+     * latched, because a phone has no spare finger) it takes left and right
+     * back off the side step and gives them to the rotation.
+     */
+    this.turnChip = document.createElement('button');
+    this.turnChip.className = 'density-lab-button density-lab-mode';
+    this.turnChip.textContent = 'STEER';
+    this.turnChip.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      this.precisionTurn = !this.precisionTurn;
+      this.turnChip!.textContent = this.precisionTurn ? 'TURN' : 'STEER';
+      /* Swap what the axis means the instant the mode does, or whatever the
+       * thumb was already asking for keeps being asked of the old one. */
+      const held = this.precisionTurn ? this.input.strafe : this.input.yaw;
+      this.input.yaw = this.precisionTurn ? held : 0;
+      this.input.strafe = this.precisionTurn ? 0 : held;
+    });
+    actions.appendChild(this.turnChip);
+
     this.paceChip = document.createElement('button');
     this.paceChip.className = 'density-lab-button density-lab-mode';
     this.paceChip.textContent = 'WALK';
@@ -3270,7 +3444,8 @@ export class IslandScene {
         - (k.has('a') || k.has('arrowleft') ? 1 : 0);
       if (this.stickPointer === null) {
         this.input.walk = forward;
-        this.input.yaw = turn;
+        this.input.yaw = this.precisionTurn ? turn : 0;
+        this.input.strafe = this.precisionTurn ? 0 : turn;
       }
       /* Shift OR the latch — the key is a hold and the chip is a toggle,
        * and either one asking for a run is a run. */
@@ -3334,7 +3509,11 @@ export class IslandScene {
       if (e.pointerId === this.stickPointer) {
         const dx = Math.max(-48, Math.min(48, e.clientX - this.stickOrigin.x));
         const dy = Math.max(-48, Math.min(48, e.clientY - this.stickOrigin.y));
-        this.input.yaw = stickCurve(dx / 48);
+        const side = stickCurve(dx / 48);
+        /* One axis, two meanings — see `precisionTurn`. Whichever it is not
+         * must be zeroed, or letting go of TURN would leave her spinning. */
+        this.input.yaw = this.precisionTurn ? side : 0;
+        this.input.strafe = this.precisionTurn ? 0 : side;
         this.input.walk = stickCurve(-dy / 48);
         this.stickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
       } else if (e.pointerId === this.lookPointer) {
@@ -3382,6 +3561,7 @@ export class IslandScene {
       this.stickPointer = null;
       this.input.walk = 0;
       this.input.yaw = 0;
+      this.input.strafe = 0;
       this.stickKnob.style.transform = 'translate(0px, 0px)';
       this.stickEl.style.display = 'none';
     };
