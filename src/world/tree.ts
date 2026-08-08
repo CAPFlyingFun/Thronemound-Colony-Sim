@@ -52,6 +52,19 @@ export interface TreeSpec {
   /** Anything repeatable: the same seed is the same tree, always. */
   seed: number;
   /**
+   * How many sections the trunk is built from, and how many boughs it
+   * carries.
+   *
+   * A twenty-six metre tree wants twenty-two rings to bend convincingly. A
+   * knee-high bush does not, and giving it them is how a thousand bushes
+   * became a million triangles — measured, before these existed. Default to
+   * the big tree's numbers, so nothing that does not ask changes.
+   */
+  rings?: number;
+  boughs?: number;
+  /** Whether boughs carry twigs. Off, a bough simply ends in its leaves. */
+  twigs?: boolean;
+  /**
    * How much TRUNK one tile of bark covers, in world units — the same
    * number in both directions, so the grain is never stretched.
    *
@@ -131,7 +144,7 @@ export function growTree(spec: TreeSpec): TreeParts {
    * the height over its length is what makes it wood. The wander is a slow
    * curve, not noise per segment, or it reads as a crumpled straw.
    */
-  const RINGS = 22;
+  const RINGS = Math.max(3, spec.rings ?? 22);
   const leanX = (rand() - 0.5) * spec.height * 0.05;
   const leanZ = (rand() - 0.5) * spec.height * 0.05;
   const twistPhase = rand() * Math.PI * 2;
@@ -167,12 +180,13 @@ export function growTree(spec: TreeSpec): TreeParts {
    * and steeper than the last, because that is what competition for light
    * produces. The spiral is golden-angled so no two sit above each other.
    */
-  const BOUGHS = 11;
+  const BOUGHS = Math.max(1, spec.boughs ?? 11);
   const GOLDEN = Math.PI * (3 - Math.sqrt(5));
   const up = new THREE.Vector3(0, 1, 0);
   const side = new THREE.Vector3();
   const dir = new THREE.Vector3();
 
+  const withTwigs = spec.twigs ?? true;
   const grow = (
     from: THREE.Vector3, along: THREE.Vector3, len: number, r0: number,
     order: number, startRun: number, depth: number,
@@ -205,7 +219,7 @@ export function growTree(spec: TreeSpec): TreeParts {
      * the twig loop below was dead code. The tree was eleven bare sticks
      * with a blob on each end, which is what "looks weird" was looking at.
      */
-    if (depth <= 0) {
+    if (depth <= 0 || !withTwigs) {
       tufts.push({ at: here.clone(), r: len * 0.42 });
       return;
     }
@@ -252,6 +266,9 @@ const DETAILS: readonly Detail[] = [
   { sides: 20, order: 2, leaf: 2 },
   { sides: 10, order: 1, leaf: 1 },
   { sides: 6, order: 0, leaf: 0 },
+  /* Scrub grade: four sides to a stem and the coarsest possible leaf. At a
+   * bush's size on screen the silhouette is all that survives anyway. */
+  { sides: 4, order: 1, leaf: 0 },
 ];
 
 /**
@@ -348,6 +365,7 @@ function skin(
 /** The leaves, as one merged blob mesh — no alpha, no sorting, no cost. */
 function skinLeaves(tufts: readonly Tuft[], detail: number): THREE.BufferGeometry | null {
   if (detail <= 0 || tufts.length === 0) return null;
+  const subdiv = detail >= 3 ? 1 : 0;
   /*
    * Merged by hand rather than through the example utils, which keeps this
    * module's dependencies to `three` itself — and merged UNINDEXED, because
@@ -358,8 +376,7 @@ function skinLeaves(tufts: readonly Tuft[], detail: number): THREE.BufferGeometr
   const parts: THREE.BufferGeometry[] = [];
   let vTotal = 0;
   for (const tuft of tufts) {
-    const blob = new THREE.IcosahedronGeometry(tuft.r, detail >= 2 ? 1 : 0)
-      .toNonIndexed();
+    const blob = new THREE.IcosahedronGeometry(tuft.r, subdiv).toNonIndexed();
     blob.translate(tuft.at.x, tuft.at.y, tuft.at.z);
     vTotal += blob.getAttribute('position').count;
     parts.push(blob);
@@ -534,6 +551,70 @@ function roundCone(
   if (Math.sign(zz) * a2 * z2 > k) return Math.sqrt(x2 + z2) * il2 - r2;
   if (Math.sign(yy) * a2 * y2 < k) return Math.sqrt(x2 + y2) * il2 - r1;
   return (Math.sqrt(x2 * a2 * il2) + yy * rr) * il2 - r1;
+}
+
+
+/**
+ * ONE TREE AS ONE GEOMETRY, ready to be stamped out thousands of times.
+ *
+ * The LOD chain above is for the handful of trees she can walk up to. A
+ * hillside of them is a different problem: what matters is the DRAW CALL,
+ * and an instanced mesh only gets one geometry. So this bakes a whole tree
+ * — wood and leaves together — into a single buffer, with the leaves marked
+ * by vertex colour rather than by a second material.
+ *
+ * Unindexed, because the leaves are and merging one of each is more code
+ * than the vertices are worth at these sizes.
+ */
+export function bakeTree(
+  spec: TreeSpec, level: number,
+): THREE.BufferGeometry {
+  const parts = growTree(spec);
+  const d = DETAILS[Math.min(DETAILS.length - 1, Math.max(0, level))]!;
+  const barkTile = spec.barkTile ?? spec.girth * 0.5;
+  const around = Math.max(1, Math.round((Math.PI * spec.girth) / barkTile));
+  const wood = skin(parts.limbs, d, barkTile, around).toNonIndexed();
+  /* `leaf: 0` means the COARSEST blob, not "no leaves" — an instanced bush
+   * is mostly foliage, and a bush with no leaves is a twig. */
+  const leaves = skinLeaves(parts.tufts, d.leaf + 1);
+
+  const woodCount = wood.getAttribute('position').count;
+  const leafCount = leaves ? leaves.getAttribute('position').count : 0;
+  const total = woodCount + leafCount;
+  const pos = new Float32Array(total * 3);
+  const nrm = new Float32Array(total * 3);
+  const uv = new Float32Array(total * 2);
+  const col = new Float32Array(total * 3);
+
+  pos.set(wood.getAttribute('position').array as Float32Array, 0);
+  nrm.set(wood.getAttribute('normal').array as Float32Array, 0);
+  uv.set(wood.getAttribute('uv').array as Float32Array, 0);
+  col.fill(1, 0, woodCount * 3);
+
+  if (leaves) {
+    pos.set(leaves.getAttribute('position').array as Float32Array, woodCount * 3);
+    nrm.set(leaves.getAttribute('normal').array as Float32Array, woodCount * 3);
+    /* Leaves take a green tint and a UV that lands somewhere quiet in the
+     * bark — they are lit by their own colour, and at these sizes the map
+     * under them is texture, not detail. */
+    for (let i = 0; i < leafCount; i += 1) {
+      uv[(woodCount + i) * 2] = 0.5;
+      uv[(woodCount + i) * 2 + 1] = 0.5;
+      col[(woodCount + i) * 3] = 0.30;
+      col[(woodCount + i) * 3 + 1] = 0.52;
+      col[(woodCount + i) * 3 + 2] = 0.20;
+    }
+    leaves.dispose();
+  }
+  wood.dispose();
+
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  out.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+  out.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  out.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  out.computeBoundingSphere();
+  return out;
 }
 
 export interface BuiltTree {

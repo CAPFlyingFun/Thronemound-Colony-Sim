@@ -49,7 +49,10 @@ import { LoadingOverlay } from './LoadingOverlay';
 import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
 import { SurfaceWalker } from '../world/surfaceWalk';
-import { BARKS, buildTree, type BuiltTree } from '../world/tree';
+import { BARKS, bakeTree, buildTree, type BuiltTree } from '../world/tree';
+import {
+  burialMm, plantsIn, SPECIES, type Species,
+} from '../world/forest';
 import { makeIslandSoil, type IslandSoil } from '../world/islandSoil';
 import {
   loadBiomeTextures, makeBiomeMaterial, type BiomeTextureSet,
@@ -129,6 +132,21 @@ const TREE_GIRTH_MM = 1000;
 const TREE_HEIGHT_MM = 26000;
 const TREE_FROM_HER_MM = 700;
 const TREE_BURIED_MM = 100;
+
+/**
+ * How far around her the small tiers are grown, in millimetres.
+ *
+ * The landmarks and the canopy are few enough to plant over the whole
+ * island at once — a hundred and forty of them. Saplings and bushes run to
+ * thousands, and thousands of anything is worth generating only where she
+ * can see it. Twelve metres is far enough that the edge of the window is
+ * past anything she can make out at her size, and near enough that the
+ * regrow costs a few milliseconds.
+ */
+const SCRUB_WINDOW_MM = 9000;
+
+/** She has to walk this far before the scrub is grown again. */
+const SCRUB_REGROW_MM = 3000;
 const S_FWD = new THREE.Vector3();
 const S_UP = new THREE.Vector3();
 const S_RIGHT = new THREE.Vector3();
@@ -367,6 +385,14 @@ export class IslandScene {
   private readonly skyColour = new THREE.Color(0x9cc4e0);
 
   private tree: BuiltTree | null = null;
+
+  /** One instanced mesh per species — a whole tier in a single draw call. */
+  private readonly stands = new Map<string, THREE.InstancedMesh>();
+
+  /** Where she was when the small tiers were last grown. */
+  private readonly scrubAt = new THREE.Vector3(Infinity, 0, Infinity);
+
+  private forestMaterial: THREE.MeshStandardMaterial | null = null;
 
   private readonly chunkMeshes = new Map<string, THREE.Mesh>();
 
@@ -858,6 +884,146 @@ export class IslandScene {
     this.tree.makeSolid(this.tree.root.position);
     this.scene.add(this.tree.root);
     this.stats.treeTris = this.tree.triangles[0] ?? 0;
+
+    /*
+     * ONE MATERIAL FOR THE WHOLE FOREST. The bake marks its leaves with a
+     * vertex colour rather than a second material, so wood and foliage
+     * share a shader and a tier stays one draw call. Fog off for the same
+     * reason the landmark's is: the island's curve is tuned for fifty-six
+     * kilometres and would swallow a two-metre sapling standing beside her.
+     */
+    this.forestMaterial = new THREE.MeshStandardMaterial({
+      map, vertexColors: true, roughness: 0.95, metalness: 0, fog: false,
+    });
+    this.growForest();
+  }
+
+
+  /* -------------------------------------------------------- the forest */
+
+  /**
+   * The ground, as the scatter needs to see it: how high and how level.
+   *
+   * Read off the DRAWN island rather than the streamed soil, because the
+   * scatter covers the whole map and the soil window is a hundred and
+   * ninety millimetres wide. A plant a metre out would otherwise have no
+   * ground to stand on.
+   */
+  private forestGround(xMm: number, zMm: number): { elevMm: number; flat: number } | null {
+    if (!this.heights) return null;
+    const x = xMm / MM;
+    const z = zMm / MM;
+    const elevMm = this.renderedGroundAt(x, z) * MM;
+    if (elevMm <= 0) return null;
+    const d = STEP_MM / MM;
+    const dhx = (this.renderedGroundAt(x + d, z) - this.renderedGroundAt(x - d, z)) / (2 * d);
+    const dhz = (this.renderedGroundAt(x, z + d) - this.renderedGroundAt(x, z - d)) / (2 * d);
+    return { elevMm, flat: 1 / Math.hypot(dhx, 1, dhz) };
+  }
+
+  /**
+   * Grow one tier and hand it to the GPU as a single instanced mesh.
+   *
+   * Every plant in a tier shares one baked geometry, which is what makes
+   * three thousand bushes one draw call rather than three thousand. They
+   * differ by their MATRIX — where, how big, which way round — and by
+   * nothing else, so the tier's shape is one tree's shape at many sizes.
+   * At a bush's size on screen that reads as variety; at a landmark's it
+   * would not, which is why the landmarks are real trees and not instances.
+   */
+  private growStand(species: Species, box: {
+    x0: number; z0: number; x1: number; z1: number;
+  }): void {
+    const plants = plantsIn(species, box, (x, z) => this.forestGround(x, z));
+    let mesh = this.stands.get(species.name) ?? null;
+    if (!mesh || mesh.count < plants.length || mesh.instanceMatrix.count < plants.length) {
+      if (mesh) {
+        this.scene.remove(mesh);
+        mesh.dispose();
+      }
+      /*
+       * A baked plant is one unit tall and one unit through, so the matrix
+       * carries the whole of its size. Building it at the tier's MIDDLE
+       * height keeps the taper and the branching honest for the sizes it
+       * will actually be stretched to.
+       */
+      const mid = (species.minHeight + species.maxHeight) * 0.5 / MM;
+      const geo = bakeTree({
+        girth: mid * species.girthOfHeight,
+        height: mid,
+        seed: 0x5eed ^ species.name.length,
+        rings: species.rings,
+        boughs: species.boughs,
+        twigs: species.twigs,
+      }, species.detail);
+      geo.scale(1 / mid, 1 / mid, 1 / mid);
+      /* Room for growth, so an ordinary step does not rebuild the buffer. */
+      const room = Math.max(16, Math.ceil(plants.length * 1.4));
+      mesh = new THREE.InstancedMesh(geo, this.forestMaterial!, room);
+      mesh.frustumCulled = false;
+      mesh.castShadow = false;
+      this.scene.add(mesh);
+      this.stands.set(species.name, mesh);
+    }
+    const m = S_MAT;
+    const q = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    const at = new THREE.Vector3();
+    for (let i = 0; i < plants.length; i += 1) {
+      const p = plants[i]!;
+      const h = p.heightMm / MM;
+      at.set(p.xMm / MM, (p.groundMm - burialMm(p.heightMm)) / MM, p.zMm / MM);
+      q.setFromAxisAngle(S_UP.set(0, 1, 0), p.spin);
+      /*
+       * UNIFORM. The bake is already the right shape — it was grown at the
+       * tier's own girth-to-height ratio and then divided down to one unit
+       * tall, so its width is that ratio and nothing more is owed. Putting
+       * the ratio on again here multiplied it by itself and turned every
+       * plant on the island into a needle a few millimetres through.
+       */
+      scale.setScalar(h);
+      m.compose(at, q, scale);
+      mesh.setMatrixAt(i, m);
+    }
+    mesh.count = plants.length;
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.computeBoundingSphere();
+  }
+
+  /**
+   * Plant the island: the big tiers once, the small ones around her.
+   *
+   * The split is a measurement, not a preference. Landmarks and canopy come
+   * to about a hundred and forty over the whole map and cost nothing to
+   * hold; saplings and bushes run past three thousand, and three thousand
+   * of anything is worth generating only where she can see it.
+   */
+  private growForest(): void {
+    if (!this.forestMaterial) return;
+    const span = SPAN_MM;
+    for (const species of SPECIES) {
+      if (species.spacing >= 3000) {
+        this.growStand(species, { x0: 0, z0: 0, x1: span, z1: span });
+      }
+    }
+    this.regrowScrub(true);
+  }
+
+  /** The small tiers, kept in a window that follows her. */
+  private regrowScrub(force = false): void {
+    if (!this.forestMaterial) return;
+    if (!force && this.scrubAt.distanceTo(this.at) * MM < SCRUB_REGROW_MM) return;
+    this.scrubAt.copy(this.at);
+    const cx = this.at.x * MM;
+    const cz = this.at.z * MM;
+    const r = SCRUB_WINDOW_MM;
+    for (const species of SPECIES) {
+      if (species.spacing >= 3000) continue;
+      this.growStand(species, {
+        x0: Math.max(0, cx - r), z0: Math.max(0, cz - r),
+        x1: Math.min(SPAN_MM, cx + r), z1: Math.min(SPAN_MM, cz + r),
+      });
+    }
   }
 
   /* ------------------------------------------------------------ the land */
@@ -1460,6 +1626,8 @@ export class IslandScene {
       < this.walkGroundAt(this.at.x, this.at.z) - UNDER_MM / MM;
 
     this.questTick(dt);
+    /* The small tiers follow her; the big ones were planted once. */
+    this.regrowScrub();
 
     /*
      * Which ROOM she is loose in, if any. It is DERIVED from where she is,
@@ -2780,6 +2948,9 @@ export class IslandScene {
       soil window ${WINDOW_MM} mm · ${(WINDOW_BYTES / 1048576).toFixed(1)} MB ·
       chunks ${this.chunkMeshes.size} · queued ${this.queue.length} ·
       dug ${this.stream?.editedSamples ?? 0}<br>
+      ${this.stands.size ? `forest ${[...this.stands.values()]
+        .map((m) => m.count).reduce((a, b) => a + b, 0).toLocaleString()} plants ·
+        ${this.stands.size} draws<br>` : ''}
       ${this.tree ? `tree ${this.tree.bark} · ${this.tree.triangles.map((t) => t.toLocaleString()).join(' / ')} t · lod ${this.treeLevel()}<br>` : ''}
       band floor ${this.stream?.bandFloorMm ?? 0} m · scrolls ${this.stats.scrolls}
       (${this.stats.rebases} rebases) · last ${this.stats.lastScrollMs.toFixed(0)} ms<br>
@@ -3100,6 +3271,13 @@ export class IslandScene {
       const mesh = node as THREE.Mesh;
       if (mesh.geometry) mesh.geometry.dispose();
     });
+    for (const mesh of this.stands.values()) {
+      this.scene.remove(mesh);
+      mesh.geometry.dispose();
+      mesh.dispose();
+    }
+    this.stands.clear();
+    this.forestMaterial?.dispose();
     this.tree?.dispose();
     this.islandMaterial?.dispose();
     this.soilMaterial?.dispose();
