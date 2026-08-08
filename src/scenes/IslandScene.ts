@@ -1823,8 +1823,20 @@ export class IslandScene {
    */
   private liftCameraClear(): void {
     const p = this.camera.position;
-    const floor = this.floorBelow(p.x, p.z, p.y + 0.1) ?? this.walkGroundAt(p.x, p.z);
-    if (p.y < floor + CAMERA_SKIN) p.y = floor + CAMERA_SKIN;
+    /*
+     * ONLY EVER CLIMB OUT OF SOMETHING, never up to a height.
+     *
+     * This used to fall back to the drawn island surface when no dug
+     * floor was found under the camera — and underground that is most
+     * columns, and outside the fine window it is all of them. So the
+     * camera was snapped up to ground level every frame, which pinned its
+     * height and made the pitch look broken in both views. The floor test
+     * stays, because a floor found by scanning DOWN from the lens is at
+     * or below it by construction and can only nudge; what is gone is the
+     * fallback that invented one overhead.
+     */
+    const floor = this.floorBelow(p.x, p.z, p.y + 0.1);
+    if (floor !== null && p.y < floor + CAMERA_SKIN) p.y = floor + CAMERA_SKIN;
     if (!this.stream) return;
     for (let d = 0; d <= RIDE * 3; d += CAMERA_SKIN) {
       if (this.stream.solidAtWu(p.x, p.y + d, p.z) !== true) {
@@ -1967,10 +1979,18 @@ export class IslandScene {
     while (d > Math.PI) d -= Math.PI * 2;
     while (d < -Math.PI) d += Math.PI * 2;
     if (this.lookPointer === null) this.camYaw += d * Math.min(1, dt * 2.4);
-    /* The camera FOLLOWS the aim: point her down and the view climbs so you
-     * are looking along the line she will cut, rather than at the back of
-     * her head while she vanishes into the floor. */
-    const wantPitch = Math.min(1.35, Math.max(0.06, 0.28 + Math.max(0, -this.aimPitch)));
+    /*
+     * The camera FOLLOWS the aim, and now in BOTH directions.
+     *
+     * It was `0.28 + max(0, -aimPitch)`: point her down and the view
+     * climbs so you are looking along the line she will cut — right, and
+     * only half the job. That `max(0, …)` threw away every upward aim, so
+     * dragging up over her shoulder moved the crosshair and moved the
+     * camera not at all, which reads exactly as the pitch being broken.
+     * Symmetric now: aim down and the view rises behind her, aim up and
+     * it drops to look along the climb.
+     */
+    const wantPitch = Math.min(1.35, Math.max(0.06, 0.28 - this.aimPitch * 0.8));
     this.camPitch += (wantPitch - this.camPitch) * Math.min(1, dt * 3);
     const cp = Math.cos(this.camPitch);
     this.camera.position.set(
