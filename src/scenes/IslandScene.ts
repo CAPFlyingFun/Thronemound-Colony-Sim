@@ -326,7 +326,18 @@ const BODY_FLOOR_MARGIN = 0.3 / MM;
 
 /** How far up or down she may point: not quite the poles, where a heading
  *  stops meaning anything. */
-const AIM_LIMIT = 1.4;
+/**
+ * How far up and down she may point: a QUARTER TURN, exactly.
+ *
+ * It was 1.4 radians — eighty degrees — and the gauge sat there pegged.
+ * That is fine while the world is a hill and wrong the moment there is a
+ * tree in it: going up a trunk IS ninety degrees, and a dial that cannot
+ * reach it cannot look where she is going. The degenerate case at the poles
+ * is already handled — the first-person eye rotates its own up by the same
+ * pitch, so its up and its look stay perpendicular at every angle including
+ * this one.
+ */
+const AIM_LIMIT = Math.PI / 2;
 
 /** The room camera starts blending in at norm 1.25 (~3 mm out) and is all
  *  the way in by 0.75 — distance-driven, so walking pace sets the feel. */
@@ -499,6 +510,12 @@ export class IslandScene {
 
   private walker: SurfaceWalker | null = null;
 
+  /** How fast she is actually travelling over the ground, eased — the gait's
+   *  input, and never the stick's. */
+  private groundSpeed = 0;
+
+  private readonly wasAt = new THREE.Vector3();
+
   /** How far the third-person camera is swung off her tail by a drag; it
    *  decays back to zero, which is how the view returns behind her. */
   private camYaw = 0;
@@ -508,8 +525,6 @@ export class IslandScene {
   private camDist = 30 / MM;
 
   private firstPerson = false;
-
-  private fpPitch = 0;
 
   /**
    * WHERE SHE IS POINTED, up and down — and it STAYS there.
@@ -669,6 +684,18 @@ export class IslandScene {
       new THREE.PlaneGeometry((SPAN_MM / MM) * 1.6, (SPAN_MM / MM) * 1.6),
       new THREE.MeshLambertMaterial({
         color: 0x2e6f8e, transparent: true, opacity: 0.82,
+        /*
+         * PUSHED BACK, so the shore always wins.
+         *
+         * The sea is one flat plane at zero and the island meets it along
+         * every coastline, which is thousands of triangles sitting at the
+         * same depth as the water. From high up the depth buffer cannot
+         * separate them and they flicker against each other — the reported
+         * z-fighting on land. Nudging the sea away from the camera breaks
+         * the tie the same way every frame, and being a hair deeper than it
+         * really is costs nothing on something you look down through.
+         */
+        polygonOffset: true, polygonOffsetFactor: 4, polygonOffsetUnits: 8,
       }),
     );
     sea.rotation.x = -Math.PI / 2;
@@ -1666,7 +1693,17 @@ export class IslandScene {
      * scoop is wider than she is, so a stroke opens something she can
      * simply walk into and nothing has to gate her.
      */
+    this.wasAt.copy(this.at);
     this.moveSurface(dt, speed);
+    /*
+     * Measured ACROSS her up: being re-seated along it by a fraction of a
+     * millimetre a frame is not walking, and counting it had a motionless
+     * ant reporting a jog.
+     */
+    const moved = S_RAD.copy(this.at).sub(this.wasAt);
+    moved.addScaledVector(this.up, -moved.dot(this.up));
+    const went = moved.length() / Math.max(dt, 1e-6);
+    this.groundSpeed += (went - this.groundSpeed) * Math.min(1, dt * 12);
 
     this.underground = this.at.y + RIDE
       < this.walkGroundAt(this.at.x, this.at.z) - UNDER_MM / MM;
@@ -2409,10 +2446,18 @@ export class IslandScene {
     this.queen.root.position.copy(this.at);
     this.queen.root.quaternion.setFromRotationMatrix(S_MAT.makeBasis(right, up, forward));
     this.queen.update(dt, {
-      /* Her ground speed is the whole of it now, not its horizontal shadow:
-       * running up a shaft wall, `hypot(vx, vz)` is near zero and the gait
-       * read her as standing still while she climbed. */
-      speed: this.velocity.length(),
+      /*
+       * WHAT SHE ACTUALLY TRAVELLED, not what the stick asked for.
+       *
+       * `velocity` is the command: stick times walk speed times sprint. It
+       * says the same thing whether she is crossing open ground or pressed
+       * against a trunk going nowhere, so the gait ran her legs at a sprint
+       * while she stood still — reported as the animation being set to
+       * running while she walked. Her real ground speed is the distance she
+       * covered across her own tangent plane, which is zero when she is
+       * blocked and honest on every slope.
+       */
+      speed: this.groundSpeed,
       turn: -this.input.yaw * TURN_RATE,
       digging: this.input.dig ? 1 : 0,
       carrying: 0,
@@ -2598,8 +2643,19 @@ export class IslandScene {
        * the same pitch keeps it perpendicular to the look by construction
        * — their dot is `-cos*sin + sin*cos`, zero at every angle.
        */
-      this.camera.up.copy(fwd).multiplyScalar(-Math.sin(this.fpPitch))
-        .addScaledVector(upv, Math.cos(this.fpPitch));
+      /*
+       * ROTATED BY THE AIM ITSELF, not by a copy of it.
+       *
+       * There was a second field, `fpPitch`, written only by the look-drag.
+       * Anything else that moved the aim — a key, a test, a scripted view —
+       * left it behind, and a stale up is not a cosmetic problem: this
+       * rotation exists precisely so that up stays perpendicular to the
+       * look at the poles, where `lookAt` has no other way to choose a
+       * roll. Measured with the dial at ninety, up and look were PARALLEL,
+       * which is the degenerate case it was written to avoid. One number.
+       */
+      this.camera.up.copy(fwd).multiplyScalar(-Math.sin(this.aimPitch))
+        .addScaledVector(upv, Math.cos(this.aimPitch));
       this.liftCameraClear();
       /* Aim from where the lens ACTUALLY ended up. The guard above may have
        * nudged it out of a roof, and looking at a target measured from the
@@ -2993,7 +3049,6 @@ export class IslandScene {
           this.bore.turn(-e.movementX * 0.004);
           this.aimPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
             this.aimPitch - e.movementY * 0.004));
-          this.fpPitch = this.aimPitch;
         } else {
           // Third person: the drag pans the view — above ground a full
           // orbit, underground a tight override the trail cam resumes from

@@ -303,16 +303,36 @@ function skin(
   let t = 0;
   let n = 0;
   let f = 0;
+  const seat = new THREE.Vector3();
   for (const limb of used) {
     axis.copy(limb.b).sub(limb.a);
     const len = axis.length() || 1e-6;
     axis.divideScalar(len);
     anyPerp(axis, u);
     v.crossVectors(axis, u);
+    /*
+     * EVERY LIMB IS RUN LONG AT BOTH ENDS, and that is what closes the tree.
+     *
+     * A limb is drawn as its own tube with a flat, open ring at each end.
+     * Where two meet at an angle — every joint in the trunk, every bough
+     * leaving it — the two rings face different ways, so the outside of the
+     * bend opens a wedge between them and the inside of the tree shows
+     * through it. Reported as being able to see through the trunk in places.
+     *
+     * Overrunning each end by a fraction of its own radius makes
+     * consecutive tubes interpenetrate instead of abut, and a wedge cannot
+     * open between two solids that overlap. It costs no triangles at all —
+     * the same rings, moved — and the SOLID form needs none of it, because
+     * its round cones already carry a sphere at each end.
+     */
+    const overA = Math.min(limb.ra * 0.7, len * 0.45);
+    const overB = Math.min(limb.rb * 0.7, len * 0.45);
     const ring0 = n;
     for (let end = 0; end < 2; end += 1) {
-      const centre = end === 0 ? limb.a : limb.b;
       const r = end === 0 ? limb.ra : limb.rb;
+      const centre = end === 0
+        ? seat.copy(limb.a).addScaledVector(axis, -overA)
+        : seat.copy(limb.b).addScaledVector(axis, overB);
       const vCoord = (limb.run + end * len) / barkTile;
       for (let s = 0; s <= d.sides; s += 1) {
         const ang = (s / d.sides) * Math.PI * 2;
@@ -458,12 +478,17 @@ export class TreeSolid {
 
   constructor(limbs: readonly Limb[], origin: THREE.Vector3) {
     /*
-     * Twigs and leaves are NOT solid. A twig is thinner than she is and a
-     * leaf is not a surface an ant stands on in any sense this game models;
-     * making them solid means getting wedged in the canopy. Trunk and
-     * boughs are the tree you can climb.
+     * TWIGS ARE SOLID TOO — leaves are not.
+     *
+     * They were left out on the reasoning that a twig is thinner than she
+     * is. Measured, it is not: the outermost limb on a twenty-six metre
+     * tree comes out at 9.1 mm through, against an ant 9 mm long — as wide
+     * across as she is long, which is a person on a two-metre beam. That is
+     * a branch, and leaving it out is why the far and upper branches
+     * refused her. The leaves stay open air, which is where the
+     * getting-wedged worry actually applied.
      */
-    const solid = limbs.filter((l) => l.order <= 1).map((l) => ({
+    const solid = limbs.filter((l) => l.order <= 2).map((l) => ({
       ...l,
       a: l.a.clone().add(origin),
       b: l.b.clone().add(origin),

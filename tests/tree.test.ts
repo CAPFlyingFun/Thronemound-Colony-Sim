@@ -150,16 +150,25 @@ describe('the tree you can climb', () => {
     expect(g.clone().normalize().x).toBeGreaterThan(0.9);
   });
 
-  it('leaves the canopy alone — twigs and leaves are not climbable', () => {
+  it('makes the twigs climbable too — they are branches at her size', () => {
     const twig = limbs.find((l) => l.order === 2);
     expect(twig).toBeDefined();
+    /* The outermost limb on a twenty-six metre tree measures 9.1 mm
+     * through, against an ant 9 mm long — as wide across as she is long.
+     * Leaving them out is what kept her off the upper branches. */
+    const acrossMm = twig!.ra * 2 * 5;
+    expect(acrossMm).toBeGreaterThan(6);
     const on = twig!.a.clone().lerp(twig!.b, 0.5).add(origin);
-    // The twig itself is not solid; only trunk and boughs are.
-    const boughs = limbs.filter((l) => l.order <= 1);
-    const nearBough = Math.min(...boughs.map((l) => Math.min(
-      l.a.distanceTo(on.clone().sub(origin)), l.b.distanceTo(on.clone().sub(origin)),
-    )));
-    if (nearBough > SPEC.girth) expect(solid.solidAt(on.x, on.y, on.z)).toBe(false);
+    expect(solid.solidAt(on.x, on.y, on.z)).toBe(true);
+  });
+
+  it('leaves the foliage as open air', () => {
+    const { tufts } = growTree(SPEC);
+    const far = tufts[tufts.length - 1]!;
+    /* Out at the edge of a leaf cluster, clear of the wood that carries it. */
+    const edge = far.at.clone().add(origin);
+    edge.y += far.r * 0.9;
+    expect(solid.solidAt(edge.x, edge.y, edge.z)).toBe(false);
   });
 
   it('answers instantly for points nowhere near it', () => {
