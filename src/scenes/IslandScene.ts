@@ -88,6 +88,10 @@ const S_TARGET = new THREE.Vector3();
 /** The ghost's own, so it cannot be trampled by whatever the cameras are
  *  doing with the shared scratch in the same frame. */
 const S_SPOT = new THREE.Vector3();
+
+/** What is behind an unbuilt chunk once she is under the ground: packed
+ *  earth in shadow, rather than the void. */
+const SOIL_DARK = new THREE.Color(0x140f0a);
 const S_FWD = new THREE.Vector3();
 const S_UP = new THREE.Vector3();
 const S_RIGHT = new THREE.Vector3();
@@ -112,7 +116,8 @@ const MESH_BUDGET = 3;
 /** Recentre lead and thrash guards, straight from the world room. */
 const LEAD_S = 0.45;
 const LEAD_MAX = 24 / MM;
-const SCROLL_COOLDOWN_MS = 150;
+/* Longer than one scroll's own measured cost, so two can never overlap. */
+const SCROLL_COOLDOWN_MS = 600;
 
 /**
  * THE SHOVEL 🪏 — dig mode's mouthful, sized for making progress.
@@ -315,6 +320,10 @@ export class IslandScene {
    *  `refreshBandTop`. Out of reach until the stream exists, so until then
    *  the island cuts out as before and no soil is thrown away. */
   private readonly bandTop = { value: 1e9 };
+
+  /** The sky's own colour, kept so the underground blend has something to
+   *  come back to. */
+  private readonly skyColour = new THREE.Color(0x9cc4e0);
 
   private readonly chunkMeshes = new Map<string, THREE.Mesh>();
 
@@ -568,6 +577,7 @@ export class IslandScene {
     host.appendChild(this.renderer.domElement);
 
     this.scene.background = new THREE.Color(0x9cc4e0);
+    this.skyColour.copy(this.scene.background as THREE.Color);
     /* Haze, not blindness: from the summit the coast is ~5,600 world units
      * away and should read as distant blue land, the way islands do. */
     this.scene.fog = new THREE.Fog(0xb9c9d6, 1200, 11000);
@@ -696,6 +706,7 @@ export class IslandScene {
         snap: 14,
         gravity: 9,
       },
+      (x, y, z) => this.soilSolidAt(x, y, z),
     );
     this.remeshEverything();
     this.clipToWindow();
@@ -845,6 +856,22 @@ export class IslandScene {
   }
 
   /**
+   * IS this point in soil — the same question, asked the cheap way.
+   *
+   * Nearly every probe in the frame wants a yes or no: the walker's casts,
+   * the leg solver's footing, the shovel's reach, the bone guard's escape.
+   * Interpolating eight lattice samples to answer one of those is seven
+   * reads of waste, and it is asked hundreds of times a frame — measured at
+   * 0.033 µs against 0.094 for the smooth read. Only the surface NORMAL
+   * genuinely needs what lies between the samples, and that is six probes.
+   */
+  private soilSolidAt(x: number, y: number, z: number): boolean {
+    const fine = this.stream?.solidAtWu(x, y, z);
+    if (fine !== null && fine !== undefined) return fine;
+    return this.walkGroundAt(x, z) - y > 0;
+  }
+
+  /**
    * HER FRAME IN A BURROW — which way is up for her, and where the surface
    * under a point is measured ALONG that up.
    *
@@ -866,23 +893,37 @@ export class IslandScene {
     surface: (x: number, y: number, z: number) => number;
   } {
     const up = this.up;
-    const probe = new THREE.Vector3();
     const REACH = BODY_HALF_TALL * 2 + BODY_FLOOR_MARGIN;
-    const STEPS = 14;
+    /*
+     * COARSE, THEN REFINED. The solver asks this once per joint per CCD
+     * iteration — hundreds of times a frame — so a flat fourteen-step march
+     * was the single most-called loop in the game. Seven strides to bracket
+     * the surface and three bisections to place it inside them is the same
+     * answer to a third of a stride, for half the probes.
+     */
+    const COARSE = 7;
+    const REFINE = 3;
     return {
       up: [up.x, up.y, up.z] as const,
       surface: (x: number, y: number, z: number): number => {
-        const elevOf = (px: number, py: number, pz: number) => px * up.x + py * up.y + pz * up.z;
+        const elevOf = (t: number) =>
+          (x - up.x * t) * up.x + (y - up.y * t) * up.y + (z - up.z * t) * up.z;
         /* Feel DOWN her own up until the soil starts, and report where it
          * started. Nothing found means open tube — she keeps her stance. */
-        for (let i = 0; i <= STEPS; i += 1) {
-          const t = (i / STEPS) * REACH;
-          probe.set(x - up.x * t, y - up.y * t, z - up.z * t);
-          if (this.soilDensityAt(probe.x, probe.y, probe.z) > 0) {
-            return elevOf(probe.x, probe.y, probe.z);
-          }
+        let lo = 0;
+        let hit = -1;
+        for (let i = 0; i <= COARSE; i += 1) {
+          const t = (i / COARSE) * REACH;
+          if (this.soilSolidAt(x - up.x * t, y - up.y * t, z - up.z * t)) { hit = t; break; }
+          lo = t;
         }
-        return elevOf(x, y, z) - REACH;
+        if (hit < 0) return elevOf(REACH);
+        for (let i = 0; i < REFINE; i += 1) {
+          const mid = (lo + hit) * 0.5;
+          if (this.soilSolidAt(x - up.x * mid, y - up.y * mid, z - up.z * mid)) hit = mid;
+          else lo = mid;
+        }
+        return elevOf(hit);
       },
     };
   }
@@ -1303,10 +1344,33 @@ export class IslandScene {
 
       const lead = Math.min(LEAD_MAX, Math.abs(speed) * LEAD_S);
       const now = performance.now();
-      if (now - this.lastScrollAt > SCROLL_COOLDOWN_MS) {
+      /*
+       * ONE SCROLL AT A TIME, FINISHED BEFORE THE NEXT.
+       *
+       * A scroll regenerates the whole window — measured at 290 to 508 ms —
+       * and then dumps most of two hundred chunks into the mesh queue. The
+       * gate was a flat 150 ms, which is a third of one scroll's own cost,
+       * so on a run downhill the next one started while the last was still
+       * being digested and the backlog never came back to zero: the report's
+       * "queued 190" beside "scrolls 245", and the lag and the black holes
+       * underground are both that same backlog seen from different angles.
+       * Waiting for the queue to be nearly drained cannot deadlock — the
+       * queue drains on its own every frame whether she moves or not.
+       */
+      const digesting = this.queue.length > MESH_BUDGET * 4;
+      if (!digesting && now - this.lastScrollAt > SCROLL_COOLDOWN_MS) {
+        /*
+         * The look-ahead rides her NOSE, not a compass bearing. `facing` is
+         * `atan2(fwd.x, fwd.z)`, which is noise when her nose is near
+         * vertical — down a shaft the horizontal part of it is almost
+         * nothing and the bearing spins, so a full-length lead was being
+         * flung in a random direction every frame. Using the nose's own
+         * horizontal components shrinks the lead to nothing exactly when the
+         * bearing stops meaning anything, which is the behaviour wanted.
+         */
         const scroll = this.stream.recentreOn(
-          this.at.x + Math.sin(this.facing) * lead,
-          this.at.z + Math.cos(this.facing) * lead,
+          this.at.x + this.fwd.x * lead,
+          this.at.z + this.fwd.z * lead,
         );
         if (scroll) {
           this.lastScrollAt = now;
@@ -1331,7 +1395,15 @@ export class IslandScene {
         /* One chunk ALWAYS lands, but the frame never spends more than
          * ~6 ms meshing — the playtest HUD's "last 74 ms" hitches were
          * this loop eating a whole scroll's backlog in one gulp. */
-        if (performance.now() - meshStart > 6) break;
+        /*
+         * The slice grows with the backlog. Six milliseconds is right when
+         * the queue is a handful, and far too polite when a scroll has just
+         * dumped two hundred chunks: underground an unbuilt chunk is a hole
+         * onto nothing, so the backlog is not just late scenery, it is the
+         * black the report describes. Ten milliseconds for as long as the
+         * pile is deep, six the rest of the time.
+         */
+        if (performance.now() - meshStart > (this.queue.length > 64 ? 10 : 6)) break;
       }
       this.reveal();
     }
@@ -1342,6 +1414,19 @@ export class IslandScene {
     if (this.sense) {
       this.sense.uSense.value += ((this.underground ? 1 : 0) - this.sense.uSense.value)
         * (1 - Math.exp(-SENSE_EASE * dt));
+      /*
+       * AND THE VOID BEHIND A MISSING CHUNK IS SOIL, NOT NOTHING.
+       *
+       * Underground, a chunk still in the mesh queue leaves a hole with the
+       * clear colour behind it — sky above ground, and after a scroll, a
+       * black gap in the tunnel wall. It cannot be meshed any sooner than it
+       * is, but what shows through while it is pending can be the colour of
+       * packed earth instead of the colour of nothing, which turns a hole
+       * into a patch of unlit dirt. Eased on the same crossing the sense
+       * shader uses, so surfacing does not flash.
+       */
+      (this.scene.background as THREE.Color)
+        .copy(this.skyColour).lerp(SOIL_DARK, this.sense.uSense.value);
     }
     this.refreshAim();
     this.pose(dt);
@@ -1578,7 +1663,7 @@ export class IslandScene {
       const x = this.at.x + aim.x * d;
       const y = this.at.y + aim.y * d;
       const z = this.at.z + aim.z * d;
-      if (this.soilDensityAt(x, y, z) > 0) {
+      if (this.soilSolidAt(x, y, z)) {
         out.set(x, y, z).addScaledVector(aim, SCOOP_DEEP_MM / 2 / MM);
         return true;
       }
@@ -1604,7 +1689,7 @@ export class IslandScene {
       const x = out.x - this.up.x * d;
       const y = out.y - this.up.y * d;
       const z = out.z - this.up.z * d;
-      if (this.soilDensityAt(x, y, z) > 0) {
+      if (this.soilSolidAt(x, y, z)) {
         out.set(x, y, z);
         return true;
       }
@@ -1973,14 +2058,30 @@ export class IslandScene {
     /* Out along HER up, not the world's — on a ceiling the way out of the
      * dirt is downward, and a guard that only ever lifted in +Y pushed her
      * further into it. */
+    /*
+     * Stepped in eighths and then halved down to the clearance, rather than
+     * crawled in 0.004-unit increments: a buried bone was costing a hundred
+     * and thirty probes and there are forty of them, which measured at 732
+     * probes a frame. Twelve probes get the same answer to well inside the
+     * clearance the guard is enforcing.
+     */
+    const GUARD_REACH = RIDE * 2;
     const lift = this.queen.groundGuard((x, y, z) => {
-      if (this.soilDensityAt(x, y, z) <= 0) return 0;
-      for (let d = BONE_CLEARANCE; d <= RIDE * 2; d += BONE_CLEARANCE) {
-        if (this.soilDensityAt(
-          x + up.x * d, y + up.y * d, z + up.z * d,
-        ) <= 0) return d;
+      if (!this.soilSolidAt(x, y, z)) return 0;
+      let lo = 0;
+      let clear = -1;
+      for (let i = 1; i <= 8; i += 1) {
+        const d = (i / 8) * GUARD_REACH;
+        if (!this.soilSolidAt(x + up.x * d, y + up.y * d, z + up.z * d)) { clear = d; break; }
+        lo = d;
       }
-      return RIDE * 2;
+      if (clear < 0) return GUARD_REACH;
+      while (clear - lo > BONE_CLEARANCE) {
+        const mid = (lo + clear) * 0.5;
+        if (this.soilSolidAt(x + up.x * mid, y + up.y * mid, z + up.z * mid)) lo = mid;
+        else clear = mid;
+      }
+      return clear;
     });
     if (lift > 0) this.queen.root.position.addScaledVector(up, lift);
   }
