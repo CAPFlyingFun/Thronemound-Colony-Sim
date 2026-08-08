@@ -438,6 +438,31 @@ export class IslandStream {
     return null;
   }
 
+  /**
+   * How solid this ABSOLUTE world-unit position is — the field itself, read
+   * BETWEEN the samples. Positive is soil, negative is air, zero is the
+   * drawn surface. Null out of window.
+   *
+   * `solidAtWu` rounds to a lattice point and answers yes or no, which is
+   * everything a "may I stand here" test needs and nothing a NORMAL needs:
+   * a gradient of rounded booleans is a staircase, so it points along one of
+   * six axes and jumps between them. Walking a curved wall on a normal like
+   * that reads as the ant snapping between faces. This is the same field,
+   * interpolated, so its gradient turns.
+   */
+  densityAtWu(worldX: number, worldY: number, worldZ: number): number | null {
+    const x = worldX - this.originWorldX;
+    const y = worldY - this.bandFloorWu;
+    const z = worldZ - this.originWorldZ;
+    /* One cell in from the edge: `sample` reads the NEXT lattice point up in
+     * each axis, and past the window `get` answers -MAX_VALUE, which would
+     * hand back a gradient pointing hard out of the world. */
+    const span = (WINDOW_CELLS - 1) * CELL_SIZE;
+    const tall = (SAMPLES_Y - 2) * CELL_SIZE;
+    if (x < 0 || x > span || z < 0 || z > span || y < 0 || y > tall) return null;
+    return this.field.sample(x, y, z);
+  }
+
   /** Is this ABSOLUTE world-unit position inside soil? Null out of window. */
   solidAtWu(worldX: number, worldY: number, worldZ: number): boolean | null {
     const xi = Math.round((worldX - this.originWorldX) / CELL_SIZE);

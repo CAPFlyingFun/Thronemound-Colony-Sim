@@ -48,6 +48,7 @@ import { DebugStatsPanel } from './DebugStatsPanel';
 import { LoadingOverlay } from './LoadingOverlay';
 import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
+import { SurfaceWalker } from '../world/surfaceWalk';
 import { makeIslandSoil, type IslandSoil } from '../world/islandSoil';
 import {
   loadBiomeTextures, makeBiomeMaterial, type BiomeTextureSet,
@@ -80,7 +81,6 @@ const RIDE = 1.3 / MM;
 /* Scratch space for the per-frame hot paths (rail, pose, camera) —
  * allocated once and reused, so a minute of riding feeds the garbage
  * collector nothing (the GC pauses read as hitches on the playtest PC). */
-const S_TAN = new THREE.Vector3();
 const S_PERP = new THREE.Vector3();
 const S_RAD = new THREE.Vector3();
 const S_CENTER = new THREE.Vector3();
@@ -90,13 +90,12 @@ const S_UP = new THREE.Vector3();
 const S_RIGHT = new THREE.Vector3();
 const S_MAT = new THREE.Matrix4();
 
-/** The tallest ledge she steps up in one stride; anything higher is a WALL
- *  and blocks her — the fix for walking "through" tunnel ends. */
-const CLIMB_STEP = 2.5 / MM;
-
-/** Pressed against a wall with the stick held, she climbs it slowly —
- *  enough to scale the nest's shaft and get back out of a dug hole. */
-const CLIMB_RATE = 2.4;
+/*
+ * A ledge she may step up, and the rate she scaled a wall at, both gone.
+ * They were the heightfield walker's whole theory of vertical: a wall was a
+ * thing to refuse and then creep up by a special case. She stands ON walls
+ * now, so there is nothing left for either number to decide.
+ */
 
 /** How far below the drawn island counts as "underground" for the camera. */
 const UNDER_MM = 5;
@@ -194,6 +193,15 @@ const CAMERA_SKIN = Math.max(0.05 / MM, 0.02 * 1.5);
 
 /** How far forward of her centre the eye rides, along the AIM. */
 const EYE_FORWARD = 1.3 / MM;
+
+/**
+ * How far ABOVE her centre the eye rides, along her own up.
+ *
+ * There was no rise at all: the lens sat on her centre-line, which is the
+ * middle of her thorax, and the view read as low and close to the floor
+ * ("a little taller"). Her head is the top of her, so the eye goes there.
+ */
+const EYE_RISE = 1.1 / MM;
 
 /** How far past her centre the jaws reach when the model has not loaded. */
 const NOSE_REACH = 4.5 / MM;
@@ -371,6 +379,37 @@ export class IslandScene {
 
   private spaceWasDown = false;
 
+  /**
+   * WHICH WAY IS UP FOR HER — and it is not the world's answer.
+   *
+   * An ant has no down; it has a surface, and the surface is down. This is
+   * the outward normal of whatever she is standing on: the hillside, a
+   * tunnel floor, a shaft's wall, the roof of a chamber. Everything that
+   * used to hard-code world +Y — the walk, her orientation, the leg solver's
+   * frame, both cameras — reads this instead, which is the whole of walking
+   * up a wall and across a ceiling.
+   */
+  private readonly up = new THREE.Vector3(0, 1, 0);
+
+  /**
+   * Her nose, in the world, always square to `up`.
+   *
+   * `facing` is a yaw about world +Y and cannot describe an ant on a
+   * ceiling — the same heading means two different directions depending on
+   * which way up she is. The rig still owns the RATE she turns at; what it
+   * hands over is a change in heading, which is applied as a rotation about
+   * her own up. On level ground the two are identical to the digit.
+   */
+  private readonly fwd = new THREE.Vector3(0, 0, 1);
+
+  /** The rig's heading last frame, so a step of it can be applied as a turn
+   *  about her own up rather than the world's. */
+  private headingWas = 0;
+
+  private walker: SurfaceWalker | null = null;
+
+  /** How far the third-person camera is swung off her tail by a drag; it
+   *  decays back to zero, which is how the view returns behind her. */
   private camYaw = 0;
 
   private camPitch = 0.5;
@@ -630,6 +669,26 @@ export class IslandScene {
       (xMm, zMm) => this.renderedOn(this.heightsBase!, xMm, zMm),
       this.at.x, this.at.z,
     );
+    /*
+     * The walker is built once the soil exists, because the only thing it
+     * needs is a way to ask how solid a point is — and that answer is the
+     * live field where there is one and the island's own heightfield where
+     * there is not. Its numbers are the island's, not the block room's: her
+     * ride height, the field's cell, and a reach that spans a tunnel.
+     */
+    this.walker = new SurfaceWalker(
+      (x, y, z) => this.soilDensityAt(x, y, z),
+      {
+        cell: CELL_SIZE,
+        ride: RIDE,
+        gripLift: 3 / MM,
+        gripReach: 9 / MM,
+        align: 12,
+        maxTiltRate: (240 * Math.PI) / 180,
+        snap: 14,
+        gravity: 9,
+      },
+    );
     this.remeshEverything();
     this.clipToWindow();
 
@@ -759,6 +818,25 @@ export class IslandScene {
   }
 
   /**
+   * HOW SOLID A WORLD POINT IS — positive in the soil, negative in the air,
+   * zero at the drawn surface. The one question the walker asks, and it must
+   * have an answer EVERYWHERE.
+   *
+   * Inside the streamed window that is the live field, dug tunnels and all.
+   * Outside it there is no field, and a walker that loses its footing at the
+   * window's edge drops her out of the world — so out there the island's own
+   * heightfield answers the identical question in the identical form. It is
+   * not an approximation: the window is FILLED from `surface(x, z) - y`, so
+   * the fallback is the same expression the field was built out of, and the
+   * two stitch together with no seam to fall through.
+   */
+  private soilDensityAt(x: number, y: number, z: number): number {
+    const fine = this.stream?.densityAtWu(x, y, z);
+    if (fine !== null && fine !== undefined) return fine;
+    return this.walkGroundAt(x, z) - y;
+  }
+
+  /**
    * HER FRAME IN A BURROW — which way is up for her, and where the surface
    * under a point is measured ALONG that up.
    *
@@ -767,20 +845,19 @@ export class IslandScene {
    * body is pressed against, and the surface under a foot may be a wall or
    * a ceiling. The solver has always been able to take this frame; the
    * island simply never gave it one, so her legs went on solving against a
-   * floor that was not underneath her — and she could not climb out.
+   * floor that was not underneath her.
+   *
+   * The up is now HERS — the one the walker maintains off the soil's own
+   * gradient — rather than one inferred from where she is pointed. Those two
+   * agree in a level drift and disagree everywhere interesting: standing on
+   * a wall while looking along it, the aim says up is sideways-ish and the
+   * body says up is off the wall, and only the body is right.
    */
   private boreFrame(): {
     up: readonly [number, number, number];
     surface: (x: number, y: number, z: number) => number;
   } {
-    const aim = this.boreAim();
-    /* Perpendicular to the way she is pointed, in the vertical plane that
-     * contains it: level in a level drift, and tipping over as she climbs
-     * so a shaft is walked up its wall rather than fallen down. */
-    const up = new THREE.Vector3(0, 1, 0).addScaledVector(aim, -aim.y);
-    if (up.lengthSq() < 1e-4) up.set(-Math.sin(this.facing), 0, -Math.cos(this.facing));
-    up.normalize();
-    const stream = this.stream;
+    const up = this.up;
     const probe = new THREE.Vector3();
     const REACH = BODY_HALF_TALL * 2 + BODY_FLOOR_MARGIN;
     const STEPS = 14;
@@ -788,13 +865,12 @@ export class IslandScene {
       up: [up.x, up.y, up.z] as const,
       surface: (x: number, y: number, z: number): number => {
         const elevOf = (px: number, py: number, pz: number) => px * up.x + py * up.y + pz * up.z;
-        if (!stream) return elevOf(x, this.walkGroundAt(x, z), z);
         /* Feel DOWN her own up until the soil starts, and report where it
          * started. Nothing found means open tube — she keeps her stance. */
         for (let i = 0; i <= STEPS; i += 1) {
           const t = (i / STEPS) * REACH;
           probe.set(x - up.x * t, y - up.y * t, z - up.z * t);
-          if (stream.solidAtWu(probe.x, probe.y, probe.z) === true) {
+          if (this.soilDensityAt(probe.x, probe.y, probe.z) > 0) {
             return elevOf(probe.x, probe.y, probe.z);
           }
         }
@@ -1114,16 +1190,26 @@ export class IslandScene {
       forward: this.input.walk,
       dig: this.input.dig,
     });
-    this.facing = bore.heading;
     /*
-     * Engagement needs SOIL. Underground, digging always grips her to the
-     * line; on the SURFACE it grips only while the jaws are actually
-     * meeting soil (`biteTouched`) — otherwise breaking out of the ground
-     * with the button held kept her "bored in" to open sky, and she flew
-     * 250 mm up her own aim line before anything let go.
+     * THE RIG STEERS; HER OWN UP IS THE AXIS IT TURNS ABOUT.
+     *
+     * The rig's heading is a yaw about world +Y, and there is no such thing
+     * for an ant on a ceiling: the same number means two opposite directions
+     * depending on which way up she is. So what is taken from it is the
+     * CHANGE, applied as a rotation of her nose about her own up. On level
+     * ground the two are identical to the digit; upside down, only this one
+     * is a turn.
      */
+    let swing = bore.heading - this.headingWas;
+    while (swing > Math.PI) swing -= Math.PI * 2;
+    while (swing < -Math.PI) swing += Math.PI * 2;
+    this.headingWas = bore.heading;
+    if (Math.abs(swing) > 1e-9) this.fwd.applyAxisAngle(this.up, swing).normalize();
+    /* Kept in step for everything that still wants a compass bearing — the
+     * scroll's look-ahead, the trail's fallback — and derived, never set. */
+    this.facing = Math.atan2(this.fwd.x, this.fwd.z);
     const speed = this.input.walk * WALK_SPEED * (this.input.sprint ? SPRINT : 1);
-    this.velocity.set(Math.sin(this.facing) * speed, 0, Math.cos(this.facing) * speed);
+    this.velocity.copy(this.fwd).multiplyScalar(speed);
 
     /*
      * ONE MOVEMENT LAW: HER LEGS, EVERYWHERE.
@@ -1142,7 +1228,7 @@ export class IslandScene {
      * scoop is wider than she is, so a stroke opens something she can
      * simply walk into and nothing has to gate her.
      */
-    this.moveFree(dt, speed);
+    this.moveSurface(dt, speed);
 
     this.underground = this.at.y + RIDE
       < this.walkGroundAt(this.at.x, this.at.z) - UNDER_MM / MM;
@@ -1240,111 +1326,61 @@ export class IslandScene {
   }
 
   /**
-   * The free walker: walls are walls, holes are holes. The floor at the
-   * DESTINATION is looked up from her own height downward: a tunnel floor
-   * is a real floor, the roof above it is invisible to her, and a floor
-   * more than one stride ABOVE her is a wall — the move is refused instead
-   * of easing her up through the ceiling ("it bounced me back up").
-   * Refused with the stick still held means she is pressing against the
-   * wall, and she climbs it slowly — enough to get out of a dug pit.
+   * THE WALK, in her own frame: forward is along her nose, and down is
+   * whatever she is standing on.
+   *
+   * Everything that used to make this hard was world +Y sneaking in. A floor
+   * was "the soil below at this x,z", so a wall was a thing to be REFUSED
+   * and then climbed at a fixed rate by a special case; a ceiling was not a
+   * surface at all; and stepping off a lip left her hanging in the black
+   * with nothing underneath, because "underneath" meant one fixed direction
+   * that no longer pointed at any soil. Every one of those was a hand-off
+   * between two ideas of down.
+   *
+   * There is one idea of down now and it is `up`, negated. She steps along
+   * her nose, and `SurfaceWalker` seats her back onto the soil and turns her
+   * up onto its normal — so a wall is a floor she is turning onto, a ceiling
+   * is a floor she is under, and there is no case analysis anywhere for
+   * either. Walking up out of a shaft is not a rule; it is what walking IS
+   * once down points at the shaft's wall.
    */
-  private moveFree(dt: number, speed: number): void {
+  private moveSurface(dt: number, speed: number): void {
+    const walker = this.walker;
+    if (!walker) return;
     const span = SPAN_MM / MM;
-    const nx = Math.min(span - 2, Math.max(2, this.at.x + this.velocity.x * dt));
-    const nz = Math.min(span - 2, Math.max(2, this.at.z + this.velocity.z * dt));
-    const there = this.floorBelow(nx, nz, this.at.y + 0.5);
+
+    /* The step is along her NOSE, which is already square to her up — so on
+     * a wall it runs up the wall and on a ceiling it runs along the ceiling,
+     * with no component trying to push her through either. */
+    this.at.addScaledVector(this.fwd, speed * dt);
+    this.at.x = Math.min(span - 2, Math.max(2, this.at.x));
+    this.at.z = Math.min(span - 2, Math.max(2, this.at.z));
+
     /*
-     * SHE HAS TO FIT. Finding a floor below the destination is not enough:
-     * at tunnel joints the bores leave thin ribs of soil at body height
-     * with an air pocket underneath, and "there's a floor down there" would
-     * happily walk her centre INTO the rib. Embedded, the camera is inside
-     * soil and the whole world renders see-through — playtest saw it as
-     * "holes all over" and being "forced into the terrain". So a move
-     * commits only when the air at her NEW centre (destination floor plus
-     * ride height) is actually air.
-     */
-    /* Stepping UP means her new centre (floor + ride) must be air; moving
-     * flat or DOWN means the destination must be air at her CURRENT height
-     * — a floor far below with soil at body height is the rib trap, and
-     * also exactly how she used to ghost sideways through walls. */
-    const clearAt = (yy: number) => this.stream?.solidAtWu(nx, yy, nz) !== true;
-    const fits = (floorY: number) => (floorY > this.at.y
-      ? clearAt(floorY + RIDE)
-      : clearAt(this.at.y + 0.1));
-    let want: number;
-    let blocked = false;
-    if (there !== null) {
-      if (there - this.at.y > CLIMB_STEP || !fits(there)) {
-        blocked = true;
-        want = this.at.y;
-      } else {
-        this.at.x = nx;
-        this.at.z = nz;
-        want = there + RIDE;
-      }
-    } else {
-      const ground = this.walkGroundAt(nx, nz);
-      if (ground - this.at.y <= CLIMB_STEP && fits(ground)) {
-        this.at.x = nx;
-        this.at.z = nz;
-        want = ground + RIDE;
-      } else {
-        blocked = true;
-        want = this.at.y;
-      }
-    }
-    if (blocked && Math.abs(speed) > 0) {
-      // Climbing needs HEADROOM: open air above her. In the shaft that is
-      // true and she scales it; under a tunnel roof it is not, and she
-      // stays put — going up through a ceiling is what DIG is for. (The
-      // first cut skipped this check and she climbed through the hillside.)
-      const overhead = this.stream?.solidAtWu(this.at.x, this.at.y + 0.5, this.at.z);
-      if (overhead !== true) {
-        this.at.y += CLIMB_RATE * dt;
-        want = this.at.y;
-      }
-    }
-    this.at.y += (want - this.at.y) * Math.min(1, dt * 14);
-    /*
-     * The safety net under all of it: if anything above still managed to
-     * put her centre inside soil (rounding at a curved wall, an edit under
-     * her feet), snap back to the last position that was provably in air
-     * rather than let an embedded frame escape — one embedded frame is a
-     * see-through world.
-     */
-    const here = this.stream?.solidAtWu(this.at.x, this.at.y, this.at.z);
-    /*
-     * ...and the VOID is as bad as the soil.
+     * ATTITUDE HOLDS STILL WHILE THE JAWS ARE WORKING.
      *
-     * `solidAtWu` answers null off the modelled window — neither dirt nor
-     * a tunnel, just nowhere. She could end up there under the ground and
-     * be stranded in black with nothing to stand on and nothing to dig
-     * (reported, and escaped only by chewing up and down until real soil
-     * arrived). Her side of every surface is the TEXTURED one, so being
-     * off the model is a rescue case exactly like being inside a wall,
-     * and it uses the same last-known-good position.
+     * Digging takes the ground out from under her, so the normal the grip
+     * finds flips between the floor, the fresh rim and the wall several
+     * times a second — and her up steers the cast that found it, which is a
+     * feedback loop no rate limit can tame. Frozen for the frames a stroke
+     * is actually cutting; free the rest of the time, which is when
+     * cornering happens anyway.
      */
+    const aimDt = this.input.dig && this.underground ? 0 : dt;
+    walker.settle({ at: this.at, up: this.up, forward: this.fwd }, dt, aimDt);
+
     /*
-     * ADRIFT: under the ground with NOTHING TO STAND ON.
-     *
-     * The first cut tested `solidAtWu === null` — off the modelled window
-     * — and that is only one of the two ways to be nowhere. The other is
-     * inside the window, in air, below the hill, with no floor beneath
-     * her at all: the walker finds no floor, falls back to the drawn
-     * island, discovers it is ABOVE her by more than a stride, refuses
-     * the step, and she hangs there. That is the reported one — stuck in
-     * the black, escaped only by chewing until real soil arrived.
-     *
-     * Her side of every surface is the textured one, so both shapes are
-     * the same rescue: no floor under her AND the island over her head.
+     * The safety net is smaller than it was, because most of what it caught
+     * cannot happen any more: there is no "off the modelled window" — the
+     * density answers everywhere — and no "no floor below at this x,z",
+     * because below is wherever she is standing. What is left is genuinely
+     * being inside soil, which the walker's own embedded case handles first
+     * and this only backs up.
      */
-    const noFloor = this.floorBelow(this.at.x, this.at.z, this.at.y + 0.5) === null;
-    const buriedUnder = this.at.y + RIDE < this.walkGroundAt(this.at.x, this.at.z);
-    const adrift = buriedUnder && (here === null || noFloor);
-    if (here === true || adrift) {
+    if (this.soilDensityAt(this.at.x, this.at.y, this.at.z) > 0) {
       // Three CONSECUTIVE bad frames means it is real. One is usually the
-      // 1 mm rounding flickering while she hugs a curved wall — snapping on
-      // that yanked her off the shaft wall mid-climb, every climb.
+      // rounding flickering while she hugs a curved wall — snapping on that
+      // yanked her off the shaft wall mid-climb, every climb.
       this.embedFrames += 1;
       if (this.embedFrames >= 3 && this.hasSafe) {
         this.at.copy(this.lastSafe);
@@ -1367,10 +1403,18 @@ export class IslandScene {
      * it, which is the way round that stops "forward" quietly meaning
      * "into the floor".
      */
+    /*
+     * PITCHED IN HER OWN FRAME, not the world's. The aim used to be built
+     * out of a compass bearing and a world-vertical rise, which is only the
+     * same thing while she is the right way up. Standing on a wall, "aim up
+     * ten degrees" meant ten degrees toward the sky rather than ten degrees
+     * off the wall she is on — so the crosshair left the tunnel. Her nose
+     * and her up are already an orthonormal pair; the aim is a rotation
+     * between them, and on level ground it reduces to exactly what it was.
+     */
     const cp = Math.cos(this.aimPitch);
-    return new THREE.Vector3(
-      Math.sin(this.facing) * cp, Math.sin(this.aimPitch), Math.cos(this.facing) * cp,
-    );
+    return new THREE.Vector3().copy(this.fwd).multiplyScalar(cp)
+      .addScaledVector(this.up, Math.sin(this.aimPitch));
   }
 
   /**
@@ -1761,30 +1805,44 @@ export class IslandScene {
 
   private pose(dt: number): void {
     if (!this.queenReady) return;
-    const probe = 2 / MM;
-    const hx = (this.footingAt(this.at.x + probe, this.at.z)
-      - this.footingAt(this.at.x - probe, this.at.z)) / (probe * 2);
-    const hz = (this.footingAt(this.at.x, this.at.z + probe)
-      - this.footingAt(this.at.x, this.at.z - probe)) / (probe * 2);
-    const up = S_UP.set(-hx, 1, -hz).normalize();
-    const forward = S_FWD.set(Math.sin(this.facing), 0, Math.cos(this.facing));
+    /*
+     * SHE IS DRAWN IN THE FRAME SHE IS STANDING IN.
+     *
+     * This used to build her up out of the heightfield's slope — `(-hx, 1,
+     * -hz)` — and that hard-coded `1` was the ceiling on the whole game:
+     * with a positive Y component by construction she could never be steeper
+     * than ninety degrees, let alone inverted, however good the walk under
+     * her got. The walker's up is volumetric and has no such preference, so
+     * on the underside of an overhang she is simply upside down, which in
+     * her own frame is perfectly ordinary.
+     */
+    const up = S_UP.copy(this.up);
+    const forward = S_FWD.copy(this.fwd);
     forward.addScaledVector(up, -forward.dot(up)).normalize();
     const right = S_RIGHT.crossVectors(up, forward).normalize();
     this.queen.root.position.copy(this.at);
     this.queen.root.quaternion.setFromRotationMatrix(S_MAT.makeBasis(right, up, forward));
     this.queen.update(dt, {
-      speed: Math.hypot(this.velocity.x, this.velocity.z),
+      /* Her ground speed is the whole of it now, not its horizontal shadow:
+       * running up a shaft wall, `hypot(vx, vz)` is near zero and the gait
+       * read her as standing still while she climbed. */
+      speed: this.velocity.length(),
       turn: -this.input.yaw * TURN_RATE,
       digging: this.input.dig ? 1 : 0,
       carrying: 0,
       headYaw: 0,
     });
+    /* And her FEET are solved in that frame too. The solver has always
+     * taken one; the island had been passing `undefined` and letting it
+     * measure every foot as a height above sea level, which on a wall asks
+     * a question the wall has no answer to. `boreFrame` casts along her own
+     * up, so a foot on a ceiling is planted on the ceiling. */
     this.queen.solveFeet(
       (x, z, y) => this.footingFrom(x, z, y),
       FOOT_CLEARANCE_MM / MM,
       RIDE * 2,
       undefined,
-      undefined,
+      this.boreFrame(),
     );
     /*
      * NOTHING SHE IS MADE OF MAY BE IN THE SOIL.
@@ -1802,14 +1860,19 @@ export class IslandScene {
      * query answers "the rim, several millimetres over your head" — and
      * only the first one has a sensible answer down here.
      */
+    /* Out along HER up, not the world's — on a ceiling the way out of the
+     * dirt is downward, and a guard that only ever lifted in +Y pushed her
+     * further into it. */
     const lift = this.queen.groundGuard((x, y, z) => {
-      if (this.stream?.solidAtWu(x, y, z) !== true) return 0;
+      if (this.soilDensityAt(x, y, z) <= 0) return 0;
       for (let d = BONE_CLEARANCE; d <= RIDE * 2; d += BONE_CLEARANCE) {
-        if (this.stream.solidAtWu(x, y + d, z) !== true) return d;
+        if (this.soilDensityAt(
+          x + up.x * d, y + up.y * d, z + up.z * d,
+        ) <= 0) return d;
       }
       return RIDE * 2;
     });
-    if (lift > 0) this.queen.root.position.y += lift;
+    if (lift > 0) this.queen.root.position.addScaledVector(up, lift);
   }
 
   /**
@@ -1823,27 +1886,35 @@ export class IslandScene {
    */
   private liftCameraClear(): void {
     const p = this.camera.position;
+    const walker = this.walker;
+    if (!walker) return;
+    if (this.soilDensityAt(p.x, p.y, p.z) <= 0) return;
     /*
-     * ONLY EVER CLIMB OUT OF SOMETHING, never up to a height.
+     * OUT ALONG THE SOIL'S OWN NORMAL — the shortest way to air, and the
+     * only direction that works on every surface.
      *
-     * This used to fall back to the drawn island surface when no dug
-     * floor was found under the camera — and underground that is most
-     * columns, and outside the fine window it is all of them. So the
-     * camera was snapped up to ground level every frame, which pinned its
-     * height and made the pitch look broken in both views. The floor test
-     * stays, because a floor found by scanning DOWN from the lens is at
-     * or below it by construction and can only nudge; what is gone is the
-     * fallback that invented one overhead.
+     * This used to climb in +Y, which is the way out of a floor and the way
+     * further INTO a ceiling: pressed against the roof of a tunnel it
+     * marched the lens deeper the whole length of its search and gave up
+     * still buried, which is the ground coming through the picture. The
+     * gradient points out of whatever it is actually inside, so a roof, a
+     * wall and a floor are one case.
      */
-    const floor = this.floorBelow(p.x, p.z, p.y + 0.1);
-    if (floor !== null && p.y < floor + CAMERA_SKIN) p.y = floor + CAMERA_SKIN;
-    if (!this.stream) return;
-    for (let d = 0; d <= RIDE * 3; d += CAMERA_SKIN) {
-      if (this.stream.solidAtWu(p.x, p.y + d, p.z) !== true) {
-        p.y += d;
+    const out = S_TARGET.set(0, 1, 0);
+    walker.normalAt(p, out);
+    for (let d = CAMERA_SKIN; d <= RIDE * 4; d += CAMERA_SKIN) {
+      if (this.soilDensityAt(
+        p.x + out.x * d, p.y + out.y * d, p.z + out.z * d,
+      ) <= 0) {
+        /* One skin PAST the boundary: landing exactly on it leaves the near
+         * plane straddling the surface, which is the dirt still showing. */
+        p.addScaledVector(out, d + CAMERA_SKIN);
         return;
       }
     }
+    /* Buried deeper than the search — the only place certainly in air is
+     * where she is, so fall back on her and let the next frame ease out. */
+    p.copy(this.at);
   }
 
   private aimCamera(dt: number): void {
@@ -1884,10 +1955,8 @@ export class IslandScene {
        * different ray, and the two disagreed by more the further out you
        * looked.
        */
-      const fwd = new THREE.Vector3(
-        Math.sin(this.facing), 0, Math.cos(this.facing),
-      );
-      const upv = new THREE.Vector3(0, 1, 0);
+      const fwd = S_FWD.copy(this.fwd);
+      const upv = S_UP.copy(this.up);
       const dir = this.boreAim();
       /*
        * Forward of her centre so her own back does not fill the frame —
@@ -1895,15 +1964,21 @@ export class IslandScene {
        * through the wall: the offset walks back until the lens is in air
        * with a little to spare, and her centre is always air, so there is
        * always somewhere to retreat to.
+       *
+       * The rise is off HER back, along her own up: an ant's eyes are at
+       * the top of her head, and a lens on her centre-line reads as looking
+       * out of her chest. On a ceiling that rise points at the floor, which
+       * is where the top of her head actually is.
        */
-      const eye = this.at.clone();
+      const base = S_CENTER.copy(this.at).addScaledVector(upv, EYE_RISE);
+      const eye = base.clone();
       for (let t = 1; t > 0.001; t -= 0.2) {
-        const px = this.at.x + dir.x * EYE_FORWARD * t;
-        const py = this.at.y + dir.y * EYE_FORWARD * t;
-        const pz = this.at.z + dir.z * EYE_FORWARD * t;
-        const blocked = this.stream?.solidAtWu(px, py, pz) === true
-          || this.stream?.solidAtWu(px + dir.x * EYE_SKIN, py + dir.y * EYE_SKIN,
-            pz + dir.z * EYE_SKIN) === true;
+        const px = base.x + dir.x * EYE_FORWARD * t;
+        const py = base.y + dir.y * EYE_FORWARD * t;
+        const pz = base.z + dir.z * EYE_FORWARD * t;
+        const blocked = this.soilDensityAt(px, py, pz) > 0
+          || this.soilDensityAt(px + dir.x * EYE_SKIN, py + dir.y * EYE_SKIN,
+            pz + dir.z * EYE_SKIN) > 0;
         if (!blocked) { eye.set(px, py, pz); break; }
       }
       this.camera.position.copy(eye);
@@ -1961,16 +2036,13 @@ export class IslandScene {
 
       const desired = new THREE.Vector3();
       if (this.lookPointer !== null) {
-        const cp = Math.cos(this.camPitch);
-        const dist = 1.2;
-        desired.set(
-          this.at.x + Math.sin(this.camYaw) * dist * cp,
-          this.at.y + Math.sin(this.camPitch) * dist,
-          this.at.z + Math.cos(this.camYaw) * dist * cp,
-        );
+        desired.copy(this.at).addScaledVector(this.orbitBack(S_PERP), 1.2);
       } else {
         desired.copy(this.trailPointBehind(1.0));
-        desired.y += 0.32;
+        /* Off her BACK. In a shaft she is on the wall and her back points
+         * sideways; adding to world Y there lifts the chase camera into the
+         * roof instead of holding it off her. */
+        desired.addScaledVector(this.up, 0.32);
       }
       if (roomBox && this.chamberCam > 0.01) {
         desired.lerp(new THREE.Vector3(
@@ -1987,35 +2059,53 @@ export class IslandScene {
        * solid walks back along it toward her until it is not.
        */
       for (let i = 0; i < 6; i += 1) {
-        if (this.stream?.solidAtWu(
+        if (this.soilDensityAt(
           this.camera.position.x, this.camera.position.y, this.camera.position.z,
-        ) !== true) break;
+        ) <= 0) break;
         this.camera.position.lerp(this.at, 0.3);
       }
       this.liftCameraClear();
-      this.camera.up.set(0, 1, 0);
-      this.camera.lookAt(this.at.x, this.at.y + 0.15, this.at.z);
+      this.camera.up.copy(this.up);
+      const eyed = S_TARGET.copy(this.at).addScaledVector(this.up, 0.15);
+      this.camera.lookAt(eyed.x, eyed.y, eyed.z);
       return;
     }
-    const wantYaw = this.facing + Math.PI;
-    let d = wantYaw - this.camYaw;
-    while (d > Math.PI) d -= Math.PI * 2;
-    while (d < -Math.PI) d += Math.PI * 2;
-    if (this.lookPointer === null) this.camYaw += d * Math.min(1, dt * 2.4);
-    const cp = Math.cos(this.camPitch);
-    this.camera.position.set(
-      this.at.x + Math.sin(this.camYaw) * this.camDist * cp,
-      this.at.y + Math.sin(this.camPitch) * this.camDist,
-      this.at.z + Math.cos(this.camYaw) * this.camDist * cp,
-    );
+    /* The drag swings the arm off her tail and it decays back to zero, so
+     * the camera returns behind her without ever holding an absolute world
+     * bearing — which is the thing that stops meaning anything on a wall. */
+    if (this.lookPointer === null) this.camYaw -= this.camYaw * Math.min(1, dt * 2.4);
+    this.camera.position.copy(this.at)
+      .addScaledVector(this.orbitBack(S_PERP), this.camDist);
     /* Over her shoulder the camera wants real air between it and the hill,
      * not just the lens's own skin — a shot grazing the grass reads as a
-     * bug even when nothing is clipping. */
-    const eyeGround = this.footingAt(this.camera.position.x, this.camera.position.z);
-    if (this.camera.position.y < eyeGround + 0.6) this.camera.position.y = eyeGround + 0.6;
+     * bug even when nothing is clipping. Pushed out along her up, because
+     * on a wall "off the ground" is not "higher". */
+    for (let i = 0; i < 8; i += 1) {
+      const p = this.camera.position;
+      if (this.soilDensityAt(
+        p.x - this.up.x * 0.6, p.y - this.up.y * 0.6, p.z - this.up.z * 0.6,
+      ) <= 0) break;
+      p.addScaledVector(this.up, 0.12);
+    }
     this.liftCameraClear();
-    this.camera.up.set(0, 1, 0);
-    this.camera.lookAt(this.at.x, this.at.y + 0.4, this.at.z);
+    this.camera.up.copy(this.up);
+    const look = S_TARGET.copy(this.at).addScaledVector(this.up, 0.4);
+    this.camera.lookAt(look.x, look.y, look.z);
+  }
+
+  /**
+   * The orbit arm, built in HER frame: back along her nose, swung off it by
+   * the drag, and raised by the pitch — all about her own up.
+   *
+   * The old arm was `(sin camYaw, 0, cos camYaw)` with a world-vertical
+   * rise, which is a rig bolted to the horizon. Underground the horizon is
+   * not a thing she has: in a shaft her up is horizontal, and a camera that
+   * insists on world vertical sits in the wall looking at dirt.
+   */
+  private orbitBack(into: THREE.Vector3): THREE.Vector3 {
+    const nose = S_RAD.copy(this.fwd).applyAxisAngle(this.up, this.camYaw);
+    return into.copy(nose).negate().multiplyScalar(Math.cos(this.camPitch))
+      .addScaledVector(this.up, Math.sin(this.camPitch)).normalize();
   }
 
   /** A point `distance` back along her walked path (or straight behind her
@@ -2032,9 +2122,7 @@ export class IslandScene {
       left -= seg;
       previous = point;
     }
-    return this.at.clone().add(new THREE.Vector3(
-      -Math.sin(this.facing) * distance, 0, -Math.cos(this.facing) * distance,
-    ));
+    return this.at.clone().addScaledVector(this.fwd, -distance);
   }
 
   /* ---------------------------------------------------------------- HUD */
@@ -2255,8 +2343,11 @@ export class IslandScene {
           /* Her own eyes: the drag turns HER, and the glance IS the
            * aim — one number, so view and dig can never disagree about
            * which way she is pointed. */
+          /* The rig is turned and nothing else: `simulate` reads the step
+           * off it and applies it about her own up, so a look-drag on a
+           * ceiling turns her along the ceiling. Writing `facing` here as
+           * well would fight that for a frame. */
           this.bore.turn(-e.movementX * 0.004);
-          this.facing = this.bore.heading;
           this.aimPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
             this.aimPitch - e.movementY * 0.004));
           this.fpPitch = this.aimPitch;
@@ -2267,7 +2358,10 @@ export class IslandScene {
           /* Over her shoulder the vertical drag AIMS HER, and the camera
            * elevation follows that aim, so what you are looking along is
            * always the line she will cut. */
-          this.camYaw -= e.movementX * 0.005;
+          /* An OFFSET off her tail, bounded to half a turn either way — it
+           * decays back to zero, which is how the view swings home. */
+          this.camYaw = Math.max(-Math.PI, Math.min(Math.PI,
+            this.camYaw - e.movementX * 0.005));
           this.aimPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
             this.aimPitch - e.movementY * 0.004));
         }
@@ -2501,10 +2595,14 @@ export class IslandScene {
   }
 
   setFacingForTest(radians: number): void {
-    /* The RIG owns the heading now, so setting the field alone would be
-     * overwritten on the next step. Turn the rig to match. */
+    /* Three things have to agree or the next frame undoes this: the rig owns
+     * the heading, the heading's LAST value is what a turn is measured
+     * against, and her nose is what actually points anywhere. */
     this.facing = radians;
     this.bore.turn(radians - this.bore.heading);
+    this.headingWas = this.bore.heading;
+    this.fwd.set(Math.sin(radians), 0, Math.cos(radians));
+    this.walker?.squareForward({ at: this.at, up: this.up, forward: this.fwd });
   }
 
   teleportMm(xMm: number, zMm: number): void {
@@ -2515,6 +2613,15 @@ export class IslandScene {
     this.trail.length = 0;
     this.underground = false;
     this.hasSafe = false;
+    /* Set down the right way up wherever she lands, gripping again. Carrying
+     * a ceiling's attitude across a teleport would have her arrive upside
+     * down over open ground and fall off the hill. */
+    this.up.set(0, 1, 0);
+    if (this.walker) {
+      this.walker.gripping = true;
+      this.walker.fallSpeed = 0;
+      this.walker.squareForward({ at: this.at, up: this.up, forward: this.fwd });
+    }
     if (this.stream) {
       const scroll = this.stream.recentreOn(this.at.x, this.at.z);
       if (scroll) this.onScroll(scroll);
