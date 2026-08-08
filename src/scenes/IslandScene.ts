@@ -836,6 +836,9 @@ export class IslandScene {
       this.walkGroundAt(tx, tz) - TREE_BURIED_MM / MM,
       tz,
     );
+    /* Solid AFTER placing: the collision is built in world space, and until
+     * the tree has a position there is nothing to build it around. */
+    this.tree.makeSolid(this.tree.root.position);
     this.scene.add(this.tree.root);
     this.stats.treeTris = this.tree.triangles[0] ?? 0;
   }
@@ -955,10 +958,29 @@ export class IslandScene {
    * the fallback is the same expression the field was built out of, and the
    * two stitch together with no seam to fall through.
    */
-  private soilDensityAt(x: number, y: number, z: number): number {
+  private groundDensityAt(x: number, y: number, z: number): number {
     const fine = this.stream?.densityAtWu(x, y, z);
     if (fine !== null && fine !== undefined) return fine;
     return this.walkGroundAt(x, z) - y;
+  }
+
+  /**
+   * THE GROUND, AND THE WOOD STANDING IN IT.
+   *
+   * The walker takes exactly one question — how solid is this point — and
+   * turns the answer into standing, climbing, cornering and falling. So the
+   * tree does not need a collision system of its own; it needs to be part of
+   * this answer. Unioned in, she bumps into the trunk, walks round it and
+   * CLIMBS it, entirely through the code that already carries her up the
+   * wall of a shaft: her up comes off this field's gradient, and the
+   * gradient of a trunk points out of the trunk.
+   *
+   * A union is the larger of the two, because both are positive inside.
+   */
+  private soilDensityAt(x: number, y: number, z: number): number {
+    const ground = this.groundDensityAt(x, y, z);
+    const wood = this.tree?.solid?.densityAt(x, y, z);
+    return wood !== undefined && wood > ground ? wood : ground;
   }
 
   /**
@@ -971,10 +993,15 @@ export class IslandScene {
    * 0.033 µs against 0.094 for the smooth read. Only the surface NORMAL
    * genuinely needs what lies between the samples, and that is six probes.
    */
-  private soilSolidAt(x: number, y: number, z: number): boolean {
+  private groundSolidAt(x: number, y: number, z: number): boolean {
     const fine = this.stream?.solidAtWu(x, y, z);
     if (fine !== null && fine !== undefined) return fine;
     return this.walkGroundAt(x, z) - y > 0;
+  }
+
+  private soilSolidAt(x: number, y: number, z: number): boolean {
+    if (this.groundSolidAt(x, y, z)) return true;
+    return this.tree?.solid?.solidAt(x, y, z) === true;
   }
 
   /**
@@ -1761,6 +1788,12 @@ export class IslandScene {
    *
    * The preview draws from this same number, so what the ghost promises is
    * what the stroke takes.
+   *
+   * SOIL ONLY. The walker's field has the tree unioned into it so she can
+   * climb the thing, but the shovel edits the voxel field and a tree is not
+   * in it — aiming at bark would find "solid", cut nothing, and read as the
+   * dig being broken again. Wood is not diggable, so the shovel does not
+   * see it.
    */
   private biteCentre(aim: THREE.Vector3, reach: number, out: THREE.Vector3): boolean {
     const step = CELL_SIZE * 0.5;
@@ -1769,7 +1802,7 @@ export class IslandScene {
       const x = this.at.x + aim.x * d;
       const y = this.at.y + aim.y * d;
       const z = this.at.z + aim.z * d;
-      if (this.soilSolidAt(x, y, z)) {
+      if (this.groundSolidAt(x, y, z)) {
         out.set(x, y, z).addScaledVector(aim, SCOOP_DEEP_MM / 2 / MM);
         return true;
       }
@@ -1795,7 +1828,7 @@ export class IslandScene {
       const x = out.x - this.up.x * d;
       const y = out.y - this.up.y * d;
       const z = out.z - this.up.z * d;
-      if (this.soilSolidAt(x, y, z)) {
+      if (this.groundSolidAt(x, y, z)) {
         out.set(x, y, z);
         return true;
       }

@@ -8,7 +8,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { BARKS, growTree, type TreeSpec } from '../src/world/tree';
+import * as THREE from 'three';
+import { BARKS, growTree, TreeSolid, type TreeSpec } from '../src/world/tree';
 
 const SPEC: TreeSpec = { girth: 200, height: 5200, seed: 12345 };
 
@@ -83,5 +84,78 @@ describe('the tree', () => {
     const bigTop = Math.max(...big.limbs.map((l) => l.b.y));
     expect(bigTop / smallTop).toBeCloseTo(10, 1);
     expect(small.limbs.length).toBe(big.limbs.length);
+  });
+});
+
+/**
+ * THE TREE AS A SOLID.
+ *
+ * The claim is that the drawn trunk and the one you cannot walk through are
+ * the same wood — no invisible wall standing off the bark, no gap to fall
+ * into — and that the field's gradient points out of it, which is what the
+ * walker turns into climbing.
+ */
+describe('the tree you can climb', () => {
+  const origin = new THREE.Vector3(100, 50, 200);
+  const { limbs } = growTree(SPEC);
+  const solid = new TreeSolid(limbs, origin);
+  const trunk = limbs.filter((l) => l.order === 0);
+
+  it('is solid on the axis and hollow well outside it', () => {
+    const low = trunk[3]!;
+    const mid = low.a.clone().lerp(low.b, 0.5).add(origin);
+    expect(solid.solidAt(mid.x, mid.y, mid.z)).toBe(true);
+    expect(solid.solidAt(mid.x + SPEC.girth, mid.y, mid.z)).toBe(false);
+  });
+
+  it('has its skin where the drawn bark is, within a millimetre', () => {
+    const low = trunk[4]!;
+    const t = 0.5;
+    const mid = low.a.clone().lerp(low.b, t).add(origin);
+    const r = low.ra + (low.rb - low.ra) * t;
+    // Just inside the drawn radius is wood; just outside is air.
+    expect(solid.solidAt(mid.x + r * 0.9, mid.y, mid.z)).toBe(true);
+    expect(solid.solidAt(mid.x + r * 1.1, mid.y, mid.z)).toBe(false);
+  });
+
+  it('reads as a true distance, so the gradient is a unit normal', () => {
+    const low = trunk[4]!;
+    const mid = low.a.clone().lerp(low.b, 0.5).add(origin);
+    const r = low.ra * 0.5 + low.rb * 0.5;
+    const h = 0.2;
+    const at = (x: number, y: number, z: number) => solid.densityAt(x, y, z);
+    const px = mid.x + r * 0.6;
+    const g = new THREE.Vector3(
+      at(px - h, mid.y, mid.z) - at(px + h, mid.y, mid.z),
+      at(px, mid.y - h, mid.z) - at(px, mid.y + h, mid.z),
+      at(px, mid.y, mid.z - h) - at(px, mid.y, mid.z + h),
+    ).multiplyScalar(1 / (2 * h));
+    // A unit gradient, pointing OUT of the trunk (away from the axis).
+    expect(g.length()).toBeCloseTo(1, 1);
+    expect(g.clone().normalize().x).toBeGreaterThan(0.9);
+  });
+
+  it('leaves the canopy alone — twigs and leaves are not climbable', () => {
+    const twig = limbs.find((l) => l.order === 2);
+    expect(twig).toBeDefined();
+    const on = twig!.a.clone().lerp(twig!.b, 0.5).add(origin);
+    // The twig itself is not solid; only trunk and boughs are.
+    const boughs = limbs.filter((l) => l.order <= 1);
+    const nearBough = Math.min(...boughs.map((l) => Math.min(
+      l.a.distanceTo(on.clone().sub(origin)), l.b.distanceTo(on.clone().sub(origin)),
+    )));
+    if (nearBough > SPEC.girth) expect(solid.solidAt(on.x, on.y, on.z)).toBe(false);
+  });
+
+  it('answers instantly for points nowhere near it', () => {
+    expect(solid.densityAt(origin.x + 1e5, origin.y, origin.z)).toBe(-Infinity);
+    expect(solid.solidAt(origin.x, origin.y - 1e5, origin.z)).toBe(false);
+  });
+
+  it('stands where it was put, not at the world origin', () => {
+    const low = trunk[3]!;
+    const mid = low.a.clone().lerp(low.b, 0.5);
+    expect(solid.solidAt(mid.x, mid.y, mid.z)).toBe(false);
+    expect(solid.solidAt(mid.x + origin.x, mid.y + origin.y, mid.z + origin.z)).toBe(true);
   });
 });

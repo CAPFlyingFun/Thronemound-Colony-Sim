@@ -40,7 +40,7 @@ export interface TreeSpec {
 }
 
 /** One tapered section of wood: a line with a radius at each end. */
-interface Limb {
+export interface Limb {
   a: THREE.Vector3;
   b: THREE.Vector3;
   ra: number;
@@ -53,7 +53,7 @@ interface Limb {
 }
 
 /** A cluster of leaves: a centre and a radius. Drawn as cheap blobs. */
-interface Tuft {
+export interface Tuft {
   at: THREE.Vector3;
   r: number;
 }
@@ -152,7 +152,10 @@ export function growTree(spec: TreeSpec): TreeParts {
     from: THREE.Vector3, along: THREE.Vector3, len: number, r0: number,
     order: number, startRun: number, depth: number,
   ): void => {
-    const SEGS = depth === 0 ? 5 : 3;
+    /* A bough is a longer, more curved thing than a twig, so it gets the
+     * segments. This read `depth === 0`, which handed the five to the twigs
+     * and left the boughs as three straight sticks. */
+    const SEGS = depth > 0 ? 5 : 3;
     let here = from.clone();
     let r = r0;
     let along2 = along.clone().normalize();
@@ -170,8 +173,14 @@ export function growTree(spec: TreeSpec): TreeParts {
       here = next;
       r = rNext;
     }
-    if (depth > 0) {
-      /* The end of a bough carries its leaves. */
+    /*
+     * THE END OF THE LINE CARRIES THE LEAVES; everything above it carries
+     * twigs. This test was the wrong way round — `depth > 0` returned at
+     * the FIRST call, which is the bough, so the recursion never ran and
+     * the twig loop below was dead code. The tree was eleven bare sticks
+     * with a blob on each end, which is what "looks weird" was looking at.
+     */
+    if (depth <= 0) {
       tufts.push({ at: here.clone(), r: len * 0.42 });
       return;
     }
@@ -336,8 +345,162 @@ function triCount(g: THREE.BufferGeometry): number {
   return (idx ? idx.count : g.getAttribute('position').count) / 3;
 }
 
+
+/* ------------------------------------------------------- the solid tree */
+
+/**
+ * THE TREE AS SOMETHING YOU CANNOT WALK THROUGH.
+ *
+ * The scene already has a walker that takes one question — how solid is this
+ * point — and turns the answer into standing, climbing, cornering and
+ * falling. So a tree does not need a collision system of its own; it needs
+ * to be part of that answer. Union the wood into the soil's field and she
+ * bumps into the trunk, walks round it, and climbs it, all through the code
+ * that already carries her up a shaft wall. Her up comes off the field's
+ * gradient, and the gradient of a cylinder points out of the cylinder.
+ *
+ * Distances are exact, not approximate: the drawn trunk and the solid trunk
+ * are the SAME limbs, so there is no gap to fall into and no invisible wall
+ * standing off the bark.
+ */
+export class TreeSolid {
+  /** The whole tree's box, for the reject that most probes take. */
+  private readonly minX: number;
+
+  private readonly maxX: number;
+
+  private readonly minY: number;
+
+  private readonly maxY: number;
+
+  private readonly minZ: number;
+
+  private readonly maxZ: number;
+
+  /**
+   * Limbs bucketed by height.
+   *
+   * This is asked hundreds of times a frame by the walker's casts, and a
+   * loop over every limb in the tree would be the most expensive thing in
+   * the frame by a wide margin. Standing at the foot, the only wood within
+   * reach is the two or three trunk sections beside her — so the probe pays
+   * for those and nothing else.
+   */
+  private readonly slabs: Limb[][];
+
+  private readonly slabH: number;
+
+  constructor(limbs: readonly Limb[], origin: THREE.Vector3) {
+    /*
+     * Twigs and leaves are NOT solid. A twig is thinner than she is and a
+     * leaf is not a surface an ant stands on in any sense this game models;
+     * making them solid means getting wedged in the canopy. Trunk and
+     * boughs are the tree you can climb.
+     */
+    const solid = limbs.filter((l) => l.order <= 1).map((l) => ({
+      ...l,
+      a: l.a.clone().add(origin),
+      b: l.b.clone().add(origin),
+    }));
+    let x0 = Infinity; let x1 = -Infinity;
+    let y0 = Infinity; let y1 = -Infinity;
+    let z0 = Infinity; let z1 = -Infinity;
+    for (const l of solid) {
+      const r = Math.max(l.ra, l.rb);
+      x0 = Math.min(x0, l.a.x - r, l.b.x - r); x1 = Math.max(x1, l.a.x + r, l.b.x + r);
+      y0 = Math.min(y0, l.a.y - r, l.b.y - r); y1 = Math.max(y1, l.a.y + r, l.b.y + r);
+      z0 = Math.min(z0, l.a.z - r, l.b.z - r); z1 = Math.max(z1, l.a.z + r, l.b.z + r);
+    }
+    this.minX = x0; this.maxX = x1;
+    this.minY = y0; this.maxY = y1;
+    this.minZ = z0; this.maxZ = z1;
+
+    const SLABS = 64;
+    this.slabH = Math.max(1e-6, (y1 - y0) / SLABS);
+    this.slabs = Array.from({ length: SLABS }, () => [] as Limb[]);
+    for (const l of solid) {
+      const r = Math.max(l.ra, l.rb);
+      const lo = Math.max(0, Math.floor((Math.min(l.a.y, l.b.y) - r - y0) / this.slabH));
+      const hi = Math.min(SLABS - 1, Math.floor((Math.max(l.a.y, l.b.y) + r - y0) / this.slabH));
+      for (let i = lo; i <= hi; i += 1) this.slabs[i]!.push(l);
+    }
+  }
+
+  /**
+   * How far inside the wood a point is: positive in, negative out, in world
+   * units, and a true distance either way so the gradient is a unit normal.
+   *
+   * The per-limb form is the exact round cone — a cone with a sphere welded
+   * on each end — which is precisely what a tapered limb with rounded joints
+   * is. A cheap capsule approximation would leave the collision standing a
+   * few millimetres off the drawn bark, and at this scale that is a visible
+   * gap she hovers in.
+   */
+  densityAt(x: number, y: number, z: number): number {
+    if (x < this.minX || x > this.maxX || y < this.minY || y > this.maxY
+      || z < this.minZ || z > this.maxZ) return -Infinity;
+    const slab = this.slabs[Math.min(
+      this.slabs.length - 1, Math.max(0, Math.floor((y - this.minY) / this.slabH)),
+    )]!;
+    let best = -Infinity;
+    for (let i = 0; i < slab.length; i += 1) {
+      const l = slab[i]!;
+      const inside = -roundCone(x, y, z, l.a, l.b, l.ra, l.rb);
+      if (inside > best) best = inside;
+    }
+    return best;
+  }
+
+  solidAt(x: number, y: number, z: number): boolean {
+    return this.densityAt(x, y, z) > 0;
+  }
+}
+
+/**
+ * Signed distance to a round cone: negative inside, positive outside.
+ *
+ * Inigo Quilez's closed form, transcribed. The three cases are the two end
+ * caps and the side; which one applies is decided by comparing where the
+ * point projects against the slope of the cone's own silhouette, which is
+ * what the `a2` and `k` terms are.
+ */
+function roundCone(
+  px: number, py: number, pz: number,
+  a: THREE.Vector3, b: THREE.Vector3, r1: number, r2: number,
+): number {
+  const bax = b.x - a.x;
+  const bay = b.y - a.y;
+  const baz = b.z - a.z;
+  const l2 = bax * bax + bay * bay + baz * baz;
+  if (l2 < 1e-12) return Math.hypot(px - a.x, py - a.y, pz - a.z) - r1;
+  const rr = r1 - r2;
+  const a2 = l2 - rr * rr;
+  const il2 = 1 / l2;
+  const pax = px - a.x;
+  const pay = py - a.y;
+  const paz = pz - a.z;
+  const yy = pax * bax + pay * bay + paz * baz;
+  const zz = yy - l2;
+  const xx = pax * l2 - bax * yy;
+  const xy = pay * l2 - bay * yy;
+  const xz = paz * l2 - baz * yy;
+  const x2 = xx * xx + xy * xy + xz * xz;
+  const y2 = yy * yy * l2;
+  const z2 = zz * zz * l2;
+  const k = Math.sign(rr) * rr * rr * x2;
+  if (Math.sign(zz) * a2 * z2 > k) return Math.sqrt(x2 + z2) * il2 - r2;
+  if (Math.sign(yy) * a2 * y2 < k) return Math.sqrt(x2 + y2) * il2 - r1;
+  return (Math.sqrt(x2 * a2 * il2) + yy * rr) * il2 - r1;
+}
+
 export interface BuiltTree {
   root: THREE.LOD;
+  /** The wood, as something the walker's field can be unioned with. Set by
+   *  the scene once the tree has been placed, because it is built in world
+   *  space and the tree does not know where it stands until then. */
+  solid: TreeSolid | null;
+  /** Build the solid form now that the tree has a position in the world. */
+  makeSolid(origin: THREE.Vector3): TreeSolid;
   /** Triangles at each detail level, for the stats chip. */
   triangles: number[];
   bark: BarkName;
@@ -398,12 +561,18 @@ export function buildTree(
     root.addLevel(group, level === 0 ? 0 : spec.height * level * 0.9);
   });
 
-  return {
+  const built: BuiltTree = {
     root,
     triangles,
     bark: barkName,
+    solid: null,
+    makeSolid(origin: THREE.Vector3): TreeSolid {
+      built.solid = new TreeSolid(parts.limbs, origin);
+      return built.solid;
+    },
     dispose(): void {
       for (const o of owned) o.dispose();
     },
   };
+  return built;
 }
