@@ -169,6 +169,24 @@ const SMOOTH_GROW = 2;
  *  whole world inside-out. */
 const EYE_SKIN = 0.5 / MM;
 
+/**
+ * How far clear of the dirt every drawn bone is kept, and the step the
+ * guard searches in. Small on purpose: this is a fail-safe for the parts
+ * no solver owns, and a big lift would carry six correctly planted feet
+ * off the ground with it.
+ */
+const BONE_CLEARANCE = 0.02 / MM;
+
+/**
+ * How far above the ground the camera is never allowed below.
+ *
+ * The asked-for number is 0.05 mm; the near plane is 0.1 mm, so a
+ * clearance under that still lets the ground poke through the lens. The
+ * floor is whichever is larger, which honours the intent — the camera is
+ * never under the dirt — and actually shows nothing through it.
+ */
+const CAMERA_SKIN = Math.max(0.05 / MM, 0.02 * 1.5);
+
 /** How far forward of her centre the eye rides, along the AIM. */
 const EYE_FORWARD = 1.3 / MM;
 
@@ -1289,8 +1307,23 @@ export class IslandScene {
      * off the model is a rescue case exactly like being inside a wall,
      * and it uses the same last-known-good position.
      */
-    const adrift = here === null
-      && this.at.y + RIDE < this.walkGroundAt(this.at.x, this.at.z);
+    /*
+     * ADRIFT: under the ground with NOTHING TO STAND ON.
+     *
+     * The first cut tested `solidAtWu === null` — off the modelled window
+     * — and that is only one of the two ways to be nowhere. The other is
+     * inside the window, in air, below the hill, with no floor beneath
+     * her at all: the walker finds no floor, falls back to the drawn
+     * island, discovers it is ABOVE her by more than a stride, refuses
+     * the step, and she hangs there. That is the reported one — stuck in
+     * the black, escaped only by chewing until real soil arrived.
+     *
+     * Her side of every surface is the textured one, so both shapes are
+     * the same rescue: no floor under her AND the island over her head.
+     */
+    const noFloor = this.floorBelow(this.at.x, this.at.z, this.at.y + 0.5) === null;
+    const buriedUnder = this.at.y + RIDE < this.walkGroundAt(this.at.x, this.at.z);
+    const adrift = buriedUnder && (here === null || noFloor);
     if (here === true || adrift) {
       // Three CONSECUTIVE bad frames means it is real. One is usually the
       // 1 mm rounding flickering while she hugs a curved wall — snapping on
@@ -1657,6 +1690,52 @@ export class IslandScene {
       undefined,
       undefined,
     );
+    /*
+     * NOTHING SHE IS MADE OF MAY BE IN THE SOIL.
+     *
+     * The legs and antennae have the solver above, which places them
+     * per joint. Everything else — mandibles, the tip of a gaster over a
+     * bank — has nobody, and on this island it simply sank. `groundGuard`
+     * walks the bones that geometry is actually drawn on, asks how far
+     * each would have to rise to be out of the dirt, and returns the
+     * worst; the model is lifted rigidly by that, because a fail-safe
+     * that tries to bend things is a fail-safe with its own bugs.
+     *
+     * The probe asks whether a POINT is in soil, not whether it is under
+     * the surface. In a burrow those are different questions — a height
+     * query answers "the rim, several millimetres over your head" — and
+     * only the first one has a sensible answer down here.
+     */
+    const lift = this.queen.groundGuard((x, y, z) => {
+      if (this.stream?.solidAtWu(x, y, z) !== true) return 0;
+      for (let d = BONE_CLEARANCE; d <= RIDE * 2; d += BONE_CLEARANCE) {
+        if (this.stream.solidAtWu(x, y + d, z) !== true) return d;
+      }
+      return RIDE * 2;
+    });
+    if (lift > 0) this.queen.root.position.y += lift;
+  }
+
+  /**
+   * The lens is never under the dirt, whichever camera placed it.
+   *
+   * Three paths put the camera somewhere — her own eyes, the underground
+   * chase, the shoulder orbit — and each had its own idea of clearance or
+   * none at all. This runs after all of them: lift to a floor's own skin
+   * depth, then, if the point is still INSIDE something (a roof, a wall
+   * it swung into), climb until it is not.
+   */
+  private liftCameraClear(): void {
+    const p = this.camera.position;
+    const floor = this.floorBelow(p.x, p.z, p.y + 0.1) ?? this.walkGroundAt(p.x, p.z);
+    if (p.y < floor + CAMERA_SKIN) p.y = floor + CAMERA_SKIN;
+    if (!this.stream) return;
+    for (let d = 0; d <= RIDE * 3; d += CAMERA_SKIN) {
+      if (this.stream.solidAtWu(p.x, p.y + d, p.z) !== true) {
+        p.y += d;
+        return;
+      }
+    }
   }
 
   private aimCamera(dt: number): void {
@@ -1714,6 +1793,7 @@ export class IslandScene {
        */
       this.camera.up.copy(fwd).multiplyScalar(-Math.sin(this.fpPitch))
         .addScaledVector(upv, Math.cos(this.fpPitch));
+      this.liftCameraClear();
       this.camera.lookAt(eye.x + dir.x, eye.y + dir.y, eye.z + dir.z);
       return;
     }
@@ -1781,6 +1861,7 @@ export class IslandScene {
         ) !== true) break;
         this.camera.position.lerp(this.at, 0.3);
       }
+      this.liftCameraClear();
       this.camera.up.set(0, 1, 0);
       this.camera.lookAt(this.at.x, this.at.y + 0.15, this.at.z);
       return;
@@ -1801,8 +1882,12 @@ export class IslandScene {
       this.at.y + Math.sin(this.camPitch) * this.camDist,
       this.at.z + Math.cos(this.camYaw) * this.camDist * cp,
     );
+    /* Over her shoulder the camera wants real air between it and the hill,
+     * not just the lens's own skin — a shot grazing the grass reads as a
+     * bug even when nothing is clipping. */
     const eyeGround = this.footingAt(this.camera.position.x, this.camera.position.z);
     if (this.camera.position.y < eyeGround + 0.6) this.camera.position.y = eyeGround + 0.6;
+    this.liftCameraClear();
     this.camera.up.set(0, 1, 0);
     this.camera.lookAt(this.at.x, this.at.y + 0.4, this.at.z);
   }
