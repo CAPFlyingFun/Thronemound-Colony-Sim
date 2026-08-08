@@ -35,7 +35,16 @@ export interface TreeSpec {
   height: number;
   /** Anything repeatable: the same seed is the same tree, always. */
   seed: number;
-  /** How tall a stretch of trunk one tile of bark covers. */
+  /**
+   * How much TRUNK one tile of bark covers, in world units — the same
+   * number in both directions, so the grain is never stretched.
+   *
+   * The first cut wrapped one tile once around the whole trunk: at a metre
+   * of girth that is 3.1 m of bark across a 1024-pixel image, which is
+   * three millimetres a texel, viewed by something nine millimetres long.
+   * Mush. Tiling it several times round costs nothing — the texture is
+   * already loaded — and buys the resolution back in proportion.
+   */
   barkTile?: number;
 }
 
@@ -237,7 +246,9 @@ const DETAILS: readonly Detail[] = [
  * branch can leave the trunk at any angle without the trunk's rings having
  * to know about it.
  */
-function skin(limbs: readonly Limb[], d: Detail, barkTile: number): THREE.BufferGeometry {
+function skin(
+  limbs: readonly Limb[], d: Detail, barkTile: number, around: number,
+): THREE.BufferGeometry {
   const used = limbs.filter((l) => l.order <= d.order);
   const rings = used.length * 2;
   const verts = rings * (d.sides + 1);
@@ -276,7 +287,10 @@ function skin(limbs: readonly Limb[], d: Detail, barkTile: number): THREE.Buffer
         pos[p + 2] = centre.z + nz * r;
         nrm[p] = nx; nrm[p + 1] = ny; nrm[p + 2] = nz;
         p += 3;
-        uv[t] = s / d.sides;
+        /* `around` whole tiles of bark per lap, so the seam still closes —
+         * a fractional repeat would leave a visible join running the height
+         * of the tree. */
+        uv[t] = (s / d.sides) * around;
         uv[t + 1] = vCoord;
         t += 2;
         n += 1;
@@ -532,7 +546,19 @@ export interface BuiltTree {
 export function buildTree(
   spec: TreeSpec, bark: THREE.Texture, barkName: BarkName,
 ): BuiltTree {
-  const barkTile = spec.barkTile ?? spec.girth * 2.2;
+  /*
+   * A tile of bark is half the trunk's own girth square. On a metre-thick
+   * trunk that is 500 mm of bark to a 1024-pixel image — half a millimetre
+   * a texel, which holds up with an ant's face against it.
+   */
+  const barkTile = spec.barkTile ?? spec.girth * 0.5;
+  /*
+   * How many whole tiles go round the trunk. Taken at the FOOT, where she
+   * spends her time and where the texels have to be smallest; the taper
+   * stretches the grain gently as it climbs, which is what bark does. A
+   * whole number, or the wrap leaves a seam up the whole tree.
+   */
+  const around = Math.max(1, Math.round((Math.PI * spec.girth) / barkTile));
   const parts = growTree(spec);
   const root = new THREE.LOD();
   const triangles: number[] = [];
@@ -557,7 +583,7 @@ export function buildTree(
 
   DETAILS.forEach((d, level) => {
     const group = new THREE.Group();
-    const wood = skin(parts.limbs, d, barkTile);
+    const wood = skin(parts.limbs, d, barkTile, around);
     owned.push(wood);
     group.add(new THREE.Mesh(wood, woodMat));
     let tris = triCount(wood);

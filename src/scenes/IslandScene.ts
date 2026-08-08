@@ -90,6 +90,24 @@ const S_TARGET = new THREE.Vector3();
  *  doing with the shared scratch in the same frame. */
 const S_SPOT = new THREE.Vector3();
 
+/** The orbit arm's own, so it can be asked to write into any of the others
+ *  without quietly aliasing its working vector. */
+const S_NOSE = new THREE.Vector3();
+
+/**
+ * The chase camera's fan, in radians off where it would like to be.
+ *
+ * Swing is across her, rise is over her. Wide enough to find its way round
+ * a trunk (a metre of it, from a hand's breadth away, is most of the sky),
+ * and biased upward because the one direction that is nearly always open is
+ * off her own back.
+ */
+const FAN_SWING = [0, 0.45, -0.45, 0.9, -0.9, 1.35, -1.35] as const;
+const FAN_RISE = [0, 0.4, 0.8, -0.3] as const;
+
+/** A ray that got less than this found no room worth having. */
+const CHASE_MIN = 4 / MM;
+
 /** What is behind an unbuilt chunk once she is under the ground: packed
  *  earth in shadow, rather than the void. */
 const SOIL_DARK = new THREE.Color(0x140f0a);
@@ -474,10 +492,6 @@ export class IslandScene {
 
   private underground = false;
 
-  /** Her recent path — the underground chase camera follows THIS, because
-   *  the path she walked is guaranteed to be inside the tunnel. */
-  private readonly trail: THREE.Vector3[] = [];
-
   /** The room camera's share of the underground view, eased 0..1. */
   private chamberCam = 0;
 
@@ -792,7 +806,10 @@ export class IslandScene {
      * itself and the seam disappears into the grain. */
     map.wrapT = THREE.MirroredRepeatWrapping;
     map.colorSpace = THREE.SRGBColorSpace;
-    map.anisotropy = 8;
+    /* Sixteen, not eight: the trunk is almost always seen at a grazing
+     * angle — she is standing on it — and grazing angles are exactly what
+     * anisotropy is for. Free on anything made this decade. */
+    map.anisotropy = Math.min(16, this.renderer.capabilities.getMaxAnisotropy());
 
     this.tree = buildTree({
       girth: TREE_GIRTH_MM / MM,
@@ -1461,11 +1478,9 @@ export class IslandScene {
      * stuck in a room". The carved soil is the only container she needs;
      * a second, tighter, invisible one was the bug.
      */
-    const last = this.trail[this.trail.length - 1];
-    if (!last || last.distanceTo(this.at) > 0.3) {
-      this.trail.push(this.at.clone());
-      if (this.trail.length > 240) this.trail.shift();
-    }
+    /* Her walked path used to be the tunnel camera's rail. The chase finds
+     * its own open air now, so nothing reads the trail — and a per-frame
+     * list of clones nothing reads is just work. */
 
     if (this.stream) {
       // Soil leaves at the bottom of the stroke, not on the button — and
@@ -2353,94 +2368,127 @@ export class IslandScene {
       this.camera.lookAt(lens.x + dir.x, lens.y + dir.y, lens.z + dir.z);
       return;
     }
-    if (this.underground) {
-      /*
-       * The tunnel chase: the camera follows HER PATH, a few millimetres
-       * back — the path she walked is the one line guaranteed to lie inside
-       * the bore, so following it needs no pathfinding and can never end up
-       * inside a wall. A held drag OVERRIDES the view with a tight orbit —
-       * the capsule keeps following her, the player just turns it — and
-       * letting go hands it back to the trail.
-       */
-      /*
-       * THE ROOM CAMERA rides on top of the chase: from ~3 mm outside a
-       * chamber the view starts easing off the trail and onto a post under
-       * the room's ceiling that turns to face her — so a room reads as a
-       * PLACE the camera inhabits, not another stretch of tube — and the
-       * same distance eases it back out on the way to the door. Distance
-       * sets the target, time smooths the move.
-       */
-      let roomShare = 0;
-      let roomBox: ChamberBox | null = null;
-      for (const node of this.soil?.plan.nodes ?? []) {
-        if (node.kind !== 'chamber') continue;
-        const box = chamberBox(
-          node.x / MM, node.y / MM, node.z / MM, node.radiusMm / MM,
-        );
-        const u = chamberNorm(box, this.at.x, this.at.y, this.at.z);
-        const t = Math.min(1, Math.max(0,
-          (CHAMBER_CAM_FAR - u) / (CHAMBER_CAM_FAR - CHAMBER_CAM_NEAR)));
-        if (t > roomShare) { roomShare = t; roomBox = box; }
-      }
-      this.chamberCam += (roomShare - this.chamberCam) * Math.min(1, dt * 3);
-
-      const desired = new THREE.Vector3();
-      if (this.lookPointer !== null) {
-        desired.copy(this.at).addScaledVector(this.orbitBack(S_PERP), 1.2);
-      } else {
-        desired.copy(this.trailPointBehind(1.0));
-        /* Off her BACK. In a shaft she is on the wall and her back points
-         * sideways; adding to world Y there lifts the chase camera into the
-         * roof instead of holding it off her. */
-        desired.addScaledVector(this.up, 0.32);
-      }
-      if (roomBox && this.chamberCam > 0.01) {
-        desired.lerp(new THREE.Vector3(
-          roomBox.cx, roomBox.cy + roomBox.ry * 0.55, roomBox.cz,
-        ), this.chamberCam);
-      }
-      this.camera.position.lerp(desired, Math.min(1, dt * 9));
-      /*
-       * AND NEVER INSIDE THE WALL. A burrow is barely wider than she is —
-       * eight millimetres for a nine millimetre ant — so there is no room
-       * behind her for a chase camera to sit, and it ended up buried in
-       * the soil looking at the inside of her own tunnel. Her PATH is the
-       * one line certain to be clear, so a camera that finds itself in
-       * solid walks back along it toward her until it is not.
-       */
-      for (let i = 0; i < 6; i += 1) {
-        if (this.soilDensityAt(
-          this.camera.position.x, this.camera.position.y, this.camera.position.z,
-        ) <= 0) break;
-        this.camera.position.lerp(this.at, 0.3);
-      }
-      this.liftCameraClear();
-      this.camera.up.copy(this.up);
-      const eyed = S_TARGET.copy(this.at).addScaledVector(this.up, 0.15);
-      this.camera.lookAt(eyed.x, eyed.y, eyed.z);
-      return;
-    }
     /* The drag swings the arm off her tail and it decays back to zero, so
      * the camera returns behind her without ever holding an absolute world
      * bearing — which is the thing that stops meaning anything on a wall. */
     if (this.lookPointer === null) this.camYaw -= this.camYaw * Math.min(1, dt * 2.4);
-    this.camera.position.copy(this.at)
-      .addScaledVector(this.orbitBack(S_PERP), this.camDist);
-    /* Over her shoulder the camera wants real air between it and the hill,
-     * not just the lens's own skin — a shot grazing the grass reads as a
-     * bug even when nothing is clipping. Pushed out along her up, because
-     * on a wall "off the ground" is not "higher". */
-    for (let i = 0; i < 8; i += 1) {
-      const p = this.camera.position;
-      if (this.soilDensityAt(
-        p.x - this.up.x * 0.6, p.y - this.up.y * 0.6, p.z - this.up.z * 0.6,
-      ) <= 0) break;
-      p.addScaledVector(this.up, 0.12);
+    this.chaseCamera(dt);
+  }
+
+  /**
+   * THE CHASE: find the open air behind her, and sit in the middle of it.
+   *
+   * There were two of these — a tunnel chase that followed her walked path
+   * and a shoulder orbit that swung a fixed arm — and the seam between them
+   * is where the camera got stuck. Stepping from the hill onto the trunk is
+   * not underground and it is not open country either: the arm swung into a
+   * metre of solid wood, the guard hauled it back onto her, and the view sat
+   * under the ant with nothing to show. Switching to first person "fixed" it
+   * because first person does not use the arm.
+   *
+   * So there is one camera, and instead of one arm it CASTS A FAN of them —
+   * a spread of directions around where it would like to be — and asks each
+   * how far it gets before it meets something. The answer is the weighted
+   * mean of where those rays ended: a spot in the middle of whatever open
+   * space actually exists behind her, whether that is a tunnel, the gap
+   * between the trunk and the hillside, or the whole sky. Nothing about it
+   * knows what a tree is, or a tunnel, which is exactly why it cannot have a
+   * seam between them.
+   *
+   * The mean is what makes it steady. Picking the single best ray snaps
+   * between candidates as she turns; averaging a dozen of them moves
+   * continuously, because one ray losing its clearance only shifts the
+   * average by its own share.
+   */
+  private chaseCamera(dt: number): void {
+    const ideal = S_PERP.copy(this.orbitBack(S_RAD));
+    /* A basis to sweep the fan in: across her, and the third axis. */
+    const across = S_RIGHT.crossVectors(ideal, this.up);
+    if (across.lengthSq() < 1e-8) across.set(ideal.z, ideal.x, ideal.y);
+    across.normalize();
+    const over = S_FWD.crossVectors(across, ideal).normalize();
+
+    const want = S_TARGET.set(0, 0, 0);
+    let weight = 0;
+    let bestRun = 0;
+    const dir = S_CENTER;
+    for (const swing of FAN_SWING) {
+      for (const rise of FAN_RISE) {
+        dir.copy(ideal).multiplyScalar(Math.cos(swing) * Math.cos(rise))
+          .addScaledVector(across, Math.sin(swing))
+          .addScaledVector(over, Math.sin(rise))
+          .normalize();
+        const run = this.clearRun(dir, this.camDist);
+        if (run < CHASE_MIN) continue;
+        if (run > bestRun) bestRun = run;
+        /*
+         * Weighted by how much room it found AND how close it is to where
+         * the camera wanted to be. Squaring the room makes a ray that got
+         * the whole way worth far more than one that got a third, so the
+         * mean sits in the open rather than being dragged into a corner by
+         * a crowd of stubs.
+         */
+        const aim = 0.3 + 0.7 * Math.max(0, dir.dot(ideal));
+        const w = run * run * aim;
+        want.addScaledVector(dir, run * w);
+        weight += w;
+      }
     }
+    if (weight > 0) {
+      want.multiplyScalar(1 / weight).add(this.at);
+    } else {
+      /*
+       * Nowhere to stand at all — wedged in a crack barely her own size. Sit
+       * off her back at whatever the ceiling allows and look at her; that is
+       * the honest picture of being stuck, and it is never under her.
+       */
+      want.copy(this.at).addScaledVector(this.up, Math.max(CHASE_MIN, bestRun));
+    }
+
+    /*
+     * THE ROOM CAMERA still rides on top: from a few millimetres outside a
+     * chamber the view eases onto a post under its ceiling, so a room reads
+     * as a PLACE the camera inhabits rather than another stretch of tube.
+     */
+    let roomShare = 0;
+    let roomBox: ChamberBox | null = null;
+    for (const node of this.soil?.plan.nodes ?? []) {
+      if (node.kind !== 'chamber') continue;
+      const box = chamberBox(node.x / MM, node.y / MM, node.z / MM, node.radiusMm / MM);
+      const u = chamberNorm(box, this.at.x, this.at.y, this.at.z);
+      const t = Math.min(1, Math.max(0,
+        (CHAMBER_CAM_FAR - u) / (CHAMBER_CAM_FAR - CHAMBER_CAM_NEAR)));
+      if (t > roomShare) { roomShare = t; roomBox = box; }
+    }
+    this.chamberCam += (roomShare - this.chamberCam) * Math.min(1, dt * 3);
+    if (roomBox && this.chamberCam > 0.01) {
+      want.lerp(S_UP.set(roomBox.cx, roomBox.cy + roomBox.ry * 0.55, roomBox.cz),
+        this.chamberCam);
+    }
+
+    /* Eased, and faster when the target has run away from it — squeezing
+     * through a gap should not leave the lens lagging inside the wall. */
+    const gap = this.camera.position.distanceTo(want);
+    const rate = gap > this.camDist ? 14 : 7;
+    this.camera.position.lerp(want, 1 - Math.exp(-rate * dt));
     this.liftCameraClear();
     this.camera.up.copy(this.up);
-    const look = S_TARGET.copy(this.at).addScaledVector(this.up, 0.4);
+    const look = S_TARGET.copy(this.at).addScaledVector(this.up, 0.3);
     this.camera.lookAt(look.x, look.y, look.z);
+  }
+
+  /**
+   * How far a ray out of her centre gets before it meets something, capped
+   * at `max`. Her own centre is always air, so this always has an answer.
+   */
+  private clearRun(dir: THREE.Vector3, max: number): number {
+    const step = CELL_SIZE * 0.6;
+    for (let d = step; d <= max; d += step) {
+      if (this.soilSolidAt(
+        this.at.x + dir.x * d, this.at.y + dir.y * d, this.at.z + dir.z * d,
+      )) return Math.max(0, d - step - CAMERA_SKIN);
+    }
+    return max;
   }
 
   /**
@@ -2453,26 +2501,9 @@ export class IslandScene {
    * insists on world vertical sits in the wall looking at dirt.
    */
   private orbitBack(into: THREE.Vector3): THREE.Vector3 {
-    const nose = S_RAD.copy(this.fwd).applyAxisAngle(this.up, this.camYaw);
+    const nose = S_NOSE.copy(this.fwd).applyAxisAngle(this.up, this.camYaw);
     return into.copy(nose).negate().multiplyScalar(Math.cos(this.camPitch))
       .addScaledVector(this.up, Math.sin(this.camPitch)).normalize();
-  }
-
-  /** A point `distance` back along her walked path (or straight behind her
-   *  when the trail is still short). */
-  private trailPointBehind(distance: number): THREE.Vector3 {
-    let left = distance;
-    let previous = this.at;
-    for (let i = this.trail.length - 1; i >= 0; i -= 1) {
-      const point = this.trail[i]!;
-      const seg = previous.distanceTo(point);
-      if (seg >= left) {
-        return previous.clone().lerp(point, seg === 0 ? 0 : left / seg);
-      }
-      left -= seg;
-      previous = point;
-    }
-    return this.at.clone().addScaledVector(this.fwd, -distance);
   }
 
   /* ---------------------------------------------------------------- HUD */
@@ -2955,7 +2986,6 @@ export class IslandScene {
     this.at.z = zMm / MM;
     this.at.y = this.walkGroundAt(this.at.x, this.at.z) + RIDE;
     this.velocity.set(0, 0, 0);
-    this.trail.length = 0;
     this.underground = false;
     this.hasSafe = false;
     /* Set down the right way up wherever she lands, gripping again. Carrying
