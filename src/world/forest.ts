@@ -203,3 +203,140 @@ export function plantsIn(
 export function burialMm(heightMm: number): number {
   return Math.max(30, Math.min(150, heightMm * 0.05));
 }
+
+/* ------------------------------------------------- the forest you can climb */
+
+/** A trunk, as something to bump into: a tapered post standing at a point. */
+interface Post {
+  x: number;
+  y: number;
+  z: number;
+  /** Height in world units, and radius at foot and crown. */
+  h: number;
+  r0: number;
+  r1: number;
+}
+
+/**
+ * THE SCRUB AS SOMETHING SOLID.
+ *
+ * The scene already turns one question — how solid is this point — into
+ * standing, climbing and falling, so a stand of trees needs no collision
+ * system of its own, only to be part of that answer. What it does need is to
+ * be CHEAP: the question is asked hundreds of times a frame and there are
+ * hundreds of plants, and the product of those two is not affordable.
+ *
+ * So this holds only the plants near her, bucketed on a coarse grid. A probe
+ * looks up its own bucket and tests the two or three posts in it. Away from
+ * everything it is one bounds test and out.
+ *
+ * TRUNKS ONLY, and deliberately. Foliage is not a surface an ant stands on
+ * in any sense this game models, and a solid canopy is a thing to get wedged
+ * inside. A bush's stem is a post as far as she is concerned — at her size
+ * it is a tree.
+ */
+export class ForestSolid {
+  private readonly buckets = new Map<number, Post[]>();
+
+  private readonly cell: number;
+
+  private minX = Infinity;
+
+  private maxX = -Infinity;
+
+  private minY = Infinity;
+
+  private maxY = -Infinity;
+
+  private minZ = Infinity;
+
+  private maxZ = -Infinity;
+
+  constructor(posts: readonly Post[], cell: number) {
+    this.cell = cell;
+    for (const p of posts) {
+      const r = Math.max(p.r0, p.r1);
+      this.minX = Math.min(this.minX, p.x - r); this.maxX = Math.max(this.maxX, p.x + r);
+      this.minY = Math.min(this.minY, p.y); this.maxY = Math.max(this.maxY, p.y + p.h);
+      this.minZ = Math.min(this.minZ, p.z - r); this.maxZ = Math.max(this.maxZ, p.z + r);
+      /* A post goes in every bucket its own radius touches, so a probe only
+       * ever has to look in one. */
+      const lo = Math.floor((p.x - r) / cell);
+      const hi = Math.floor((p.x + r) / cell);
+      const lz = Math.floor((p.z - r) / cell);
+      const hz = Math.floor((p.z + r) / cell);
+      for (let gz = lz; gz <= hz; gz += 1) {
+        for (let gx = lo; gx <= hi; gx += 1) {
+          const key = gx * 73856093 ^ gz * 19349663;
+          const list = this.buckets.get(key);
+          if (list) list.push(p);
+          else this.buckets.set(key, [p]);
+        }
+      }
+    }
+  }
+
+  /** Positive inside the wood, negative outside, in world units. */
+  densityAt(x: number, y: number, z: number): number {
+    if (x < this.minX || x > this.maxX || y < this.minY || y > this.maxY
+      || z < this.minZ || z > this.maxZ) return -Infinity;
+    const gx = Math.floor(x / this.cell);
+    const gz = Math.floor(z / this.cell);
+    const list = this.buckets.get(gx * 73856093 ^ gz * 19349663);
+    if (!list) return -Infinity;
+    let best = -Infinity;
+    for (let i = 0; i < list.length; i += 1) {
+      const p = list[i]!;
+      /* A truncated cone about a vertical axis: the radius where the point
+       * is, against how far out it is. Vertical, so no rotation is needed —
+       * plants stand up, whatever the ground under them does. */
+      const t = (y - p.y) / p.h;
+      if (t < 0 || t > 1) continue;
+      const r = p.r0 + (p.r1 - p.r0) * t;
+      const inside = r - Math.hypot(x - p.x, z - p.z);
+      if (inside > best) best = inside;
+    }
+    return best;
+  }
+
+  solidAt(x: number, y: number, z: number): boolean {
+    return this.densityAt(x, y, z) > 0;
+  }
+}
+
+/**
+ * The stand around a point, ready to be walked into.
+ *
+ * `reach` is deliberately small — a plant she cannot get to this frame does
+ * not need to be solid, and the cost of this is linear in what it holds.
+ */
+export function solidStand(
+  around: { xMm: number; zMm: number },
+  reachMm: number,
+  mmPerUnit: number,
+  ground: (xMm: number, zMm: number) => GroundProbe | null,
+): ForestSolid {
+  const posts: Post[] = [];
+  const box = {
+    x0: around.xMm - reachMm, z0: around.zMm - reachMm,
+    x1: around.xMm + reachMm, z1: around.zMm + reachMm,
+  };
+  for (const species of SPECIES) {
+    for (const p of plantsIn(species, box, ground)) {
+      const h = p.heightMm / mmPerUnit;
+      const foot = (p.groundMm - burialMm(p.heightMm)) / mmPerUnit;
+      const r0 = p.girthMm / 2 / mmPerUnit;
+      posts.push({
+        x: p.xMm / mmPerUnit,
+        y: foot,
+        z: p.zMm / mmPerUnit,
+        h,
+        r0,
+        /* Tapered to a sixth at the crown, which is roughly what the drawn
+         * trunk does — close enough that she never stands on air. */
+        r1: r0 * 0.18,
+      });
+    }
+  }
+  return new ForestSolid(posts, 400 / mmPerUnit);
+}

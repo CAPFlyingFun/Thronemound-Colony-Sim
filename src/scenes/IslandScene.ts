@@ -51,7 +51,7 @@ import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
 import { SurfaceWalker } from '../world/surfaceWalk';
 import { BARKS, bakeTree, buildTree, type BuiltTree } from '../world/tree';
 import {
-  burialMm, plantsIn, SPECIES, type Species,
+  burialMm, plantsIn, solidStand, SPECIES, type ForestSolid, type Species,
 } from '../world/forest';
 import { makeIslandSoil, type IslandSoil } from '../world/islandSoil';
 import {
@@ -147,6 +147,10 @@ const SCRUB_WINDOW_MM = 9000;
 
 /** She has to walk this far before the scrub is grown again. */
 const SCRUB_REGROW_MM = 3000;
+
+/** How far out plants are SOLID — comfortably past the regrow distance, so
+ *  she can never outrun her own collision between rebuilds. */
+const STAND_REACH_MM = 5000;
 const S_FWD = new THREE.Vector3();
 const S_UP = new THREE.Vector3();
 const S_RIGHT = new THREE.Vector3();
@@ -394,6 +398,9 @@ export class IslandScene {
 
   private forestMaterial: THREE.MeshStandardMaterial | null = null;
 
+  /** The stand near enough to walk into, rebuilt with the scrub. */
+  private stand: ForestSolid | null = null;
+
   private readonly chunkMeshes = new Map<string, THREE.Mesh>();
 
   private readonly queue: { cx: number; cy: number; cz: number }[] = [];
@@ -623,6 +630,10 @@ export class IslandScene {
   private readonly crosshair = document.createElement('div');
 
   private aimReadout: HTMLElement | null = null;
+
+  private headingReadout: HTMLElement | null = null;
+
+  private depthReadout: HTMLElement | null = null;
 
   constructor(host: HTMLElement) {
     this.host = host;
@@ -1036,6 +1047,16 @@ export class IslandScene {
         x1: Math.min(SPAN_MM, cx + r), z1: Math.min(SPAN_MM, cz + r),
       });
     }
+    /*
+     * And the SOLID stand, on a much tighter radius. Drawing a plant she can
+     * see and colliding with one she can reach are different questions with
+     * very different budgets: the field is probed hundreds of times a frame,
+     * so what it holds is only what she could walk into before the next
+     * regrow.
+     */
+    this.stand = solidStand(
+      { xMm: cx, zMm: cz }, STAND_REACH_MM, MM, (x, z) => this.forestGround(x, z),
+    );
   }
 
   /* ------------------------------------------------------------ the land */
@@ -1173,9 +1194,12 @@ export class IslandScene {
    * A union is the larger of the two, because both are positive inside.
    */
   private soilDensityAt(x: number, y: number, z: number): number {
-    const ground = this.groundDensityAt(x, y, z);
-    const wood = this.tree?.solid?.densityAt(x, y, z);
-    return wood !== undefined && wood > ground ? wood : ground;
+    let best = this.groundDensityAt(x, y, z);
+    const landmark = this.tree?.solid?.densityAt(x, y, z);
+    if (landmark !== undefined && landmark > best) best = landmark;
+    const scrub = this.stand?.densityAt(x, y, z);
+    if (scrub !== undefined && scrub > best) best = scrub;
+    return best;
   }
 
   /**
@@ -1196,7 +1220,8 @@ export class IslandScene {
 
   private soilSolidAt(x: number, y: number, z: number): boolean {
     if (this.groundSolidAt(x, y, z)) return true;
-    return this.tree?.solid?.solidAt(x, y, z) === true;
+    if (this.tree?.solid?.solidAt(x, y, z) === true) return true;
+    return this.stand?.solidAt(x, y, z) === true;
   }
 
   /**
@@ -1609,9 +1634,18 @@ export class IslandScene {
     while (swing < -Math.PI) swing += Math.PI * 2;
     this.headingWas = bore.heading;
     if (Math.abs(swing) > 1e-9) this.fwd.applyAxisAngle(this.up, swing).normalize();
-    /* Kept in step for everything that still wants a compass bearing — the
-     * scroll's look-ahead, the trail's fallback — and derived, never set. */
-    this.facing = Math.atan2(this.fwd.x, this.fwd.z);
+    /*
+     * HER COMPASS BEARING, and it HOLDS when she has none.
+     *
+     * `atan2(fwd.x, fwd.z)` is the direction her nose points on the map,
+     * which is meaningless the moment her nose is vertical: up a shaft or a
+     * trunk the horizontal part of it is almost nothing and the bearing
+     * spins on rounding. Everything world-referenced reads this — the aim,
+     * the gauge, the scroll's look-ahead — so it keeps the last bearing it
+     * could actually measure rather than inventing one.
+     */
+    const flat = Math.hypot(this.fwd.x, this.fwd.z);
+    if (flat > 0.15) this.facing = Math.atan2(this.fwd.x, this.fwd.z);
     const speed = this.input.walk * WALK_SPEED * (this.input.sprint ? SPRINT : 1);
     this.velocity.copy(this.fwd).multiplyScalar(speed);
 
@@ -1766,6 +1800,21 @@ export class IslandScene {
 
   /** The angle she is pointed, in degrees, live. */
   private refreshAim(): void {
+    if (this.digMode && this.headingReadout && this.depthReadout) {
+      /* A compass bearing: +Z is north and it runs clockwise, so it reads
+       * the way a bearing reads rather than the way `atan2` returns. */
+      const hdg = Math.round(((this.facing * 180) / Math.PI + 360) % 360);
+      const bearing = `${String(hdg).padStart(3, '0')}\u00b0`;
+      if (this.headingReadout.textContent !== bearing) {
+        this.headingReadout.textContent = bearing;
+      }
+      const down = Math.round(this.depthMm());
+      const depth = down > 0 ? `\u25bc ${down} mm` : 'surface';
+      if (this.depthReadout.textContent !== depth) {
+        this.depthReadout.textContent = depth;
+        this.depthReadout.classList.toggle('is-steep', down >= QUEST_DEPTH_MM);
+      }
+    }
     if (!this.aimReadout) return;
     const deg = Math.round((this.aimPitch * 180) / Math.PI);
     const text = `${deg > 0 ? '+' : ''}${deg}°`;
@@ -1852,17 +1901,25 @@ export class IslandScene {
      * "into the floor".
      */
     /*
-     * PITCHED IN HER OWN FRAME, not the world's. The aim used to be built
-     * out of a compass bearing and a world-vertical rise, which is only the
-     * same thing while she is the right way up. Standing on a wall, "aim up
-     * ten degrees" meant ten degrees toward the sky rather than ten degrees
-     * off the wall she is on — so the crosshair left the tunnel. Her nose
-     * and her up are already an orthonormal pair; the aim is a rotation
-     * between them, and on level ground it reduces to exactly what it was.
+     * PITCHED AGAINST THE WORLD, not against the ground under her.
+     *
+     * It was her own frame for a while, which has an honest argument behind
+     * it — on a wall, "up ten degrees" plausibly means ten off the wall.
+     * Played, it is wrong, and the reason is the gauge: the number beside
+     * the shovel is a DEPTH instrument, and a depth read against whatever
+     * slope she happens to be on tells you nothing. Minus ninety has to
+     * mean straight down at the centre of the earth from anywhere, the way
+     * an altimeter reads height above sea level and not above the ground it
+     * is passing over.
+     *
+     * So the aim is a compass bearing and a rise, both in world axes. Her
+     * body may be at any attitude; where she is POINTING is a thing the map
+     * can answer.
      */
     const cp = Math.cos(this.aimPitch);
-    return new THREE.Vector3().copy(this.fwd).multiplyScalar(cp)
-      .addScaledVector(this.up, Math.sin(this.aimPitch));
+    return new THREE.Vector3(
+      Math.sin(this.facing) * cp, Math.sin(this.aimPitch), Math.cos(this.facing) * cp,
+    );
   }
 
   /**
@@ -2500,8 +2557,12 @@ export class IslandScene {
        * different ray, and the two disagreed by more the further out you
        * looked.
        */
-      const fwd = S_FWD.copy(this.fwd);
-      const upv = S_UP.copy(this.up);
+      /* The eye's frame is the WORLD's too, so the horizon stays level
+       * whatever she is clinging to. A view that rolled with her body while
+       * the aim it draws is measured against the map would have the
+       * crosshair and the gauge disagreeing about which way is down. */
+      const fwd = S_FWD.set(Math.sin(this.facing), 0, Math.cos(this.facing));
+      const upv = S_UP.set(0, 1, 0);
       const dir = this.boreAim();
       /*
        * Forward of her centre so her own back does not fill the frame —
@@ -2515,7 +2576,7 @@ export class IslandScene {
        * out of her chest. On a ceiling that rise points at the floor, which
        * is where the top of her head actually is.
        */
-      const base = S_CENTER.copy(this.at).addScaledVector(upv, EYE_RISE);
+      const base = S_CENTER.copy(this.at).addScaledVector(this.up, EYE_RISE);
       const eye = base.clone();
       for (let t = 1; t > 0.001; t -= 0.2) {
         const px = base.x + dir.x * EYE_FORWARD * t;
@@ -2588,6 +2649,23 @@ export class IslandScene {
     across.normalize();
     const over = S_FWD.crossVectors(across, ideal).normalize();
 
+    /*
+     * THE FAN IS A FALLBACK, NOT THE RULE.
+     *
+     * When it always ran, it always won: in open country the downward rays
+     * of the fan hit the ground within a few millimetres and the upward
+     * ones ran free, so the weighted mean sat at whatever elevation the
+     * ground allowed and barely moved when the drag changed the ideal.
+     * That is the reported bug — the third-person view would swing left and
+     * right and refuse to pitch. If the arm the player actually asked for
+     * is clear, it is the answer, and the search never runs.
+     */
+    const straight = this.clearRun(ideal, this.camDist);
+    if (straight > this.camDist * 0.92) {
+      this.settleChase(S_TARGET.copy(this.at).addScaledVector(ideal, straight), dt);
+      return;
+    }
+
     const want = S_TARGET.set(0, 0, 0);
     let weight = 0;
     let bestRun = 0;
@@ -2646,6 +2724,11 @@ export class IslandScene {
         this.chamberCam);
     }
 
+    this.settleChase(want, dt);
+  }
+
+  /** Ease the lens onto a chosen spot and point it at her. */
+  private settleChase(want: THREE.Vector3, dt: number): void {
     /* Eased, and faster when the target has run away from it — squeezing
      * through a gap should not leave the lens lagging inside the wall. */
     const gap = this.camera.position.distanceTo(want);
@@ -2653,7 +2736,7 @@ export class IslandScene {
     this.camera.position.lerp(want, 1 - Math.exp(-rate * dt));
     this.liftCameraClear();
     this.camera.up.copy(this.up);
-    const look = S_TARGET.copy(this.at).addScaledVector(this.up, 0.3);
+    const look = S_UP.copy(this.at).addScaledVector(this.up, 0.3);
     this.camera.lookAt(look.x, look.y, look.z);
   }
 
@@ -2708,6 +2791,8 @@ export class IslandScene {
       this.digMode = !this.digMode;
       dig.classList.toggle('is-grip', this.digMode);
       this.scoopBtn!.style.display = this.digMode ? '' : 'none';
+      this.headingReadout!.style.display = this.digMode ? '' : 'none';
+      this.depthReadout!.style.display = this.digMode ? '' : 'none';
       if (!this.digMode) this.input.dig = false;
       /* Digging is aiming, and aiming is done down her own eyes: arming
        * DIG drops into first person with a wide 100° field so the tunnel
@@ -2764,6 +2849,25 @@ export class IslandScene {
     this.aimReadout = document.createElement('div');
     this.aimReadout.className = 'density-lab-aim-readout';
     actions.appendChild(this.aimReadout);
+
+    /*
+     * THE OTHER TWO INSTRUMENTS, while the shovel is out.
+     *
+     * The angle alone says which way the next stroke goes and nothing about
+     * where that leaves her. A bearing and a depth make the three together
+     * a navigation panel: you can drive a tunnel on a heading, hold a
+     * grade, and know how far under you are — which is the whole of digging
+     * blind. Both are world-referenced, like the angle beside them.
+     */
+    this.headingReadout = document.createElement('div');
+    this.headingReadout.className = 'density-lab-aim-readout';
+    this.headingReadout.style.display = 'none';
+    actions.appendChild(this.headingReadout);
+
+    this.depthReadout = document.createElement('div');
+    this.depthReadout.className = 'density-lab-aim-readout';
+    this.depthReadout.style.display = 'none';
+    actions.appendChild(this.depthReadout);
 
 
     /* The PLAN button is gone: the shovel is how tunnels get made now.
@@ -3045,6 +3149,10 @@ export class IslandScene {
   private buildQuestHud(): void {
     this.questEl = document.createElement('div');
     this.questEl.className = 'density-lab-status rail-status';
+    /* Up against the top edge. The shared status style sits 42px down to
+     * clear the STATS chip, which the quest box does not need to — it is
+     * centred and the chip is hard left, so they never meet. */
+    this.questEl.style.top = 'max(8px, env(safe-area-inset-top))';
     this.questEl.style.left = '50%';
     this.questEl.style.right = 'auto';
     this.questEl.style.transform = 'translateX(-50%)';
