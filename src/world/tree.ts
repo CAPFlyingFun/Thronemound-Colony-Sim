@@ -81,7 +81,25 @@ export interface TreeSpec {
    * already loaded — and buys the resolution back in proportion.
    */
   barkTile?: number;
+  /**
+   * The radius the trunk tapers down TO at the leader's tip, in world units
+   * — an absolute size, not a fraction of the base.
+   *
+   * The taper used to hold at 16% of the base, which on the landmark left a
+   * tip 80 mm across: a pole with the end sawn off. A trunk that ends at a
+   * fixed small circle reads as a tree from any girth, and the number is
+   * the same one the collision profile is built from, so what you can climb
+   * is exactly what you can see.
+   */
+  tipRadius?: number;
 }
+
+/**
+ * Default tip: a five-millimetre circle — 1 world unit across, about half
+ * the length of the ant looking at it. Clamped against the base below, so a
+ * knee-high bush cannot end up wider at the top than at the foot.
+ */
+export const TIP_RADIUS = 0.5;
 
 /** One tapered section of wood: a line with a radius at each end. */
 export interface Limb {
@@ -143,6 +161,9 @@ export function growTree(spec: TreeSpec): TreeParts {
   const limbs: Limb[] = [];
   const tufts: Tuft[] = [];
   const baseR = spec.girth / 2;
+  /* Never wider at the tip than half the foot — a bush whose whole stem is
+   * thinner than the default tip would otherwise flare upwards. */
+  const tipR = Math.min(spec.tipRadius ?? TIP_RADIUS, baseR * 0.5);
 
   /*
    * THE TRUNK WANDERS. A perfectly straight cylinder reads as a pipe, and
@@ -159,13 +180,15 @@ export function growTree(spec: TreeSpec): TreeParts {
   for (let i = 0; i <= RINGS; i += 1) {
     const t = i / RINGS;
     /*
-     * Taper: fast out of the flare at the foot, then slow. A linear taper
-     * to a point makes a carrot; real trunks lose most of their girth in
-     * the bottom fifth and then hold.
+     * Taper: widest at the foot, thinning fast out of the flare and then
+     * slowly, and landing on a FIXED small circle at the leader's tip
+     * rather than on a fraction of the base. A linear taper to a point
+     * makes a carrot; real trunks lose most of their girth low down and
+     * then hold, which is what the exponent buys.
      */
     const flare = 1 + 0.28 * Math.exp(-t * 18);
-    const hold = 0.16 + 0.84 * (1 - t) ** 1.35;
-    radii.push(baseR * flare * hold);
+    const shape = (1 - t) ** 1.35;
+    radii.push(tipR + (baseR * flare - tipR) * shape);
     const bend = t * t;
     axis.push(new THREE.Vector3(
       leanX * bend + Math.sin(t * 3.1 + twistPhase) * baseR * 0.35,
@@ -316,6 +339,24 @@ function skin(
   }
   if (run.length > 0) chains.push(run);
 
+  /*
+   * THE DRAWN TUBE CIRCUMSCRIBES THE COLLISION, IT DOES NOT INSCRIBE IT.
+   *
+   * The solid is the exact round cone over the limb's radius — a circle.
+   * The mesh is a polygon, and putting its VERTICES on that circle leaves
+   * every flat between them sunk inside it by `r(1 - cos(pi/sides))`. She
+   * stands on the circle, so she stands that far off the picture: 6 mm on
+   * the landmark's twenty-sided trunk, and 29% of the stem on a four-sided
+   * bush. That is the hovering — collision and mesh agreed about the AXIS
+   * after the last pass, and still disagreed about the skin.
+   *
+   * Pushing the ring out by the circumradius factor makes the flats
+   * TANGENT to the collision circle instead: the bark she is standing on is
+   * the bark that is drawn, and what error is left is a fraction of a
+   * millimetre of contact at the facet corners, which reads as nothing.
+   */
+  const fatten = 1 / Math.cos(Math.PI / d.sides);
+
   let rings = 0;
   let spans = 0;
   for (const chain of chains) { rings += chain.length + 1; spans += chain.length; }
@@ -383,7 +424,7 @@ function skin(
       prev.copy(tangent);
 
       const centre = pts[i]!;
-      const r = rad[i]!;
+      const r = rad[i]! * fatten;
       const vCoord = along[i]! / barkTile;
       for (let sIdx = 0; sIdx <= d.sides; sIdx += 1) {
         const ang = (sIdx / d.sides) * Math.PI * 2;

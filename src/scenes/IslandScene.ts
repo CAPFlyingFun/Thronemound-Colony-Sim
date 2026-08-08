@@ -586,6 +586,29 @@ export class IslandScene {
 
   private camDist = 30 / MM;
 
+  /**
+   * THE CAMERA'S OWN SMOOTHED STATE — a target, a look point, and an up,
+   * each following the real thing over time rather than being copied from
+   * it every frame.
+   *
+   * The lens position was already eased. Everything else was not, and that
+   * is where the shake was: `lookAt` was pointed at her RAW centre and
+   * `camera.up` copied her RAW up, so every millimetre the walker re-seated
+   * her — and it re-seats her every frame, on a lattice — went straight
+   * into the view as angular jitter, magnified by the length of the arm.
+   * The chosen SPOT jittered too, both from `clearRun`'s step quantisation
+   * and from the hard switch between the straight arm and the fan.
+   *
+   * Three low-pass filters, so the picture moves like a camera on a rig and
+   * not like one bolted to her thorax. `null` until the first frame places
+   * them, because starting them at the origin would sweep the whole island.
+   */
+  private camWant: THREE.Vector3 | null = null;
+
+  private camLook: THREE.Vector3 | null = null;
+
+  private camRoll = new THREE.Vector3(0, 1, 0);
+
   private firstPerson = false;
 
   /**
@@ -2962,17 +2985,47 @@ export class IslandScene {
     this.settleChase(want, dt);
   }
 
-  /** Ease the lens onto a chosen spot and point it at her. */
+  /**
+   * Ease the lens onto a chosen spot and point it at her — through three
+   * filters rather than none.
+   *
+   * The order matters. The chosen spot is smoothed FIRST, so the pop when
+   * the straight arm gives way to the fan is spread over a few tenths of a
+   * second instead of landing in one frame; then the lens eases onto that
+   * already-calm target, which is a two-pole filter and reads as a camera
+   * rig. The look point and the up get their own, slower filters, because
+   * the eye reads a shaking DIRECTION far more harshly than a shaking
+   * position — an arm's length of lever turns a 1 mm wobble in her seat
+   * into a couple of degrees of picture.
+   */
   private settleChase(want: THREE.Vector3, dt: number): void {
-    /* Eased, and faster when the target has run away from it — squeezing
-     * through a gap should not leave the lens lagging inside the wall. */
-    const gap = this.camera.position.distanceTo(want);
+    if (!this.camWant) this.camWant = want.clone();
+    /* Faster when the target has run away — squeezing through a gap should
+     * not leave the lens lagging inside the wall — but never instant. */
+    const jump = this.camWant.distanceTo(want);
+    this.camWant.lerp(want, 1 - Math.exp(-(jump > this.camDist ? 12 : 5) * dt));
+
+    const gap = this.camera.position.distanceTo(this.camWant);
     const rate = gap > this.camDist ? 14 : 7;
-    this.camera.position.lerp(want, 1 - Math.exp(-rate * dt));
+    this.camera.position.lerp(this.camWant, 1 - Math.exp(-rate * dt));
     this.liftCameraClear();
-    this.camera.up.copy(this.up);
+
     const look = S_UP.copy(this.at).addScaledVector(this.up, 0.3);
-    this.camera.lookAt(look.x, look.y, look.z);
+    if (!this.camLook) this.camLook = look.clone();
+    /* A filter is for jitter, not for teleports: if she has been MOVED —
+     * a respawn, a rail grab, an embed rescue — following her over half a
+     * second would sweep the whole island past the lens. */
+    if (this.camLook.distanceTo(look) > this.camDist * 3) this.camLook.copy(look);
+    this.camLook.lerp(look, 1 - Math.exp(-9 * dt));
+    /*
+     * The up is filtered as a DIRECTION and renormalised, so easing it can
+     * never shorten it to nothing on the way between two opposed ups —
+     * which is what walking round the underside of a branch asks for.
+     */
+    this.camRoll.lerp(this.up, 1 - Math.exp(-7 * dt));
+    if (this.camRoll.lengthSq() < 1e-6) this.camRoll.copy(this.up);
+    this.camera.up.copy(this.camRoll).normalize();
+    this.camera.lookAt(this.camLook.x, this.camLook.y, this.camLook.z);
   }
 
   /**

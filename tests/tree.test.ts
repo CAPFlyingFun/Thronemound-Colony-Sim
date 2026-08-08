@@ -14,6 +14,9 @@ import { BARKS, buildTree, growTree, TreeSolid, type TreeSpec } from '../src/wor
 
 const SPEC: TreeSpec = { girth: 200, height: 5200, seed: 12345 };
 
+/** Millimetres per world unit — the project's own scale. */
+const MM = 5;
+
 describe('the tree', () => {
   it('grows the same tree from the same seed, every time', () => {
     const a = growTree(SPEC);
@@ -297,6 +300,103 @@ describe('the trunk is one continuous tube', () => {
     }
     // A few degrees of drift as the trunk bends is the bend, not a twist.
     expect(worst).toBeLessThan(0.25);
+    built.dispose();
+  });
+
+  it('tapers to a five-millimetre circle whatever its girth', () => {
+    /* An absolute tip, not a fraction of the base: the old curve held at
+     * 16% of the foot, which on the landmark left the leader 80 mm across
+     * — a pole with the end sawn off. */
+    for (const girth of [200, 60, 20]) {
+      const trunk = growTree({ ...SPEC, girth }).limbs.filter((l) => l.order === 0);
+      expect(trunk[trunk.length - 1]!.rb * 2 * MM).toBeCloseTo(5, 3);
+    }
+    /* ...but never wider at the top than at the bottom. A bush whose whole
+     * stem is thinner than the tip would otherwise flare upwards. */
+    const bush = growTree({ girth: 8 / MM, height: 60 / MM, seed: 3, rings: 4 })
+      .limbs.filter((l) => l.order === 0);
+    expect(bush[bush.length - 1]!.rb).toBeLessThan(bush[0]!.ra);
+    expect(bush[bush.length - 1]!.rb * 2 * MM).toBeCloseTo(4, 3);
+  });
+
+  it('never draws the bark INSIDE the wood she is standing on', () => {
+    /*
+     * THE HOVER, measured. The solid is the exact circle of the limb; a
+     * polygon tube with its vertices ON that circle has every flat between
+     * them sunk inside it, and she stands on the circle — so she stands
+     * that far off the picture. Measured before the fix: a mean 2.79 mm of
+     * air under her on the twenty-sided trunk, never less than 0.33, and
+     * 51 mm at scrub tessellation.
+     *
+     * The claim is one-sided: the drawn surface is never INSIDE the
+     * collision surface, at any detail level. Sinking a hair into the bark
+     * is invisible; floating over it is what was reported.
+     */
+    const parts = growTree(SPEC);
+    const solid = new TreeSolid(parts.limbs, new THREE.Vector3(0, 0, 0));
+    const built = buildTree(SPEC, new THREE.Texture(), BARKS[0]!);
+    /*
+     * The CLEAR TRUNK only — below the lowest bough. Above it a coarse
+     * level draws no boughs at all, so a horizontal probe would exit the
+     * solid at a bough's skin and find nothing drawn there: a hundred
+     * millimetres of "float" that is a missing branch, not a hovering one.
+     * The clear trunk is also where she actually stands.
+     */
+    const lowestBough = Math.min(
+      ...parts.limbs.filter((l) => l.order > 0).map((l) => l.a.y),
+    );
+    const trunk = parts.limbs
+      .filter((l) => l.order === 0 && l.b.y < lowestBough);
+    const dir = new THREE.Vector3();
+    const back = new THREE.Vector3();
+    const from = new THREE.Vector3();
+    const ray = new THREE.Raycaster();
+
+    for (const level of built.root.levels) {
+      const wood = ((level.object as THREE.Group).children[0] as THREE.Mesh).geometry;
+      const probe = new THREE.Mesh(
+        wood, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }),
+      );
+      probe.updateMatrixWorld();
+      let worstFloatMm = -Infinity;
+      for (let i = 2; i < trunk.length - 2; i += 3) {
+        const centre = trunk[i]!.a;
+        for (let k = 0; k < 8; k += 1) {
+          const ang = (k / 8) * Math.PI * 2 + 0.37;
+          dir.set(Math.cos(ang), 0, Math.sin(ang));
+          let skin = -1;
+          let inside = 0;
+          for (let d = 0.2; d < SPEC.girth * 2; d += 0.2) {
+            if (!solid.solidAt(
+              centre.x + dir.x * d, centre.y, centre.z + dir.z * d,
+            )) { skin = d; break; }
+            inside = d;
+          }
+          if (skin < 0) continue;
+          /* Bisect the bracket: a 1 mm march step would otherwise report
+           * 1 mm of float that is the PROBE's, not the tree's. */
+          for (let n = 0; n < 24; n += 1) {
+            const mid = (inside + skin) / 2;
+            if (solid.solidAt(
+              centre.x + dir.x * mid, centre.y, centre.z + dir.z * mid,
+            )) inside = mid;
+            else skin = mid;
+          }
+          const out = SPEC.girth * 3;
+          from.copy(centre).addScaledVector(dir, out);
+          ray.set(from, back.copy(dir).negate());
+          const hit = ray.intersectObject(probe, false)[0];
+          if (!hit) continue;
+          worstFloatMm = Math.max(worstFloatMm, (skin - (out - hit.distance)) * MM);
+        }
+      }
+      /* Worst float per level, measured: +0.02, -0.01, -1.90, -25.45 mm
+       * (negative is the bark standing PROUD of the collision, which is the
+       * safe side). Before the fix the same four were +9.84, +29.43,
+       * +121.98 and +155.29 — all air, all of it under her feet. A tenth of
+       * a millimetre of slack for the ring mitre at a bend. */
+      expect(worstFloatMm).toBeLessThan(0.1);
+    }
     built.dispose();
   });
 });
