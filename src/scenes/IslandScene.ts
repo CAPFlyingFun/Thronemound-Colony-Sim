@@ -49,7 +49,10 @@ import { LoadingOverlay } from './LoadingOverlay';
 import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
 import { SurfaceWalker } from '../world/surfaceWalk';
-import { BARKS, bakeTree, buildTree, type BuiltTree } from '../world/tree';
+import {
+  BARKS, bakeTree, buildTree, trunkProfile, type BuiltTree, type TreeSpec,
+  type TrunkProfile,
+} from '../world/tree';
 import {
   burialMm, plantsIn, solidStand, SPECIES, type ForestSolid, type Species,
 } from '../world/forest';
@@ -77,7 +80,17 @@ const SEC_VERTS = (MESH_N - 1) / SECTIONS + 1;
 /** 15 mm/s — an unhurried queen. The first cut copied the world room's
  *  40 mm/s sprint and the island blurred past; playtest said so. Shift (or
  *  full stick) sprints at three times that for covering ground. */
-const WALK_SPEED = 3;
+/*
+ * HALVED, and the gait halves with it.
+ *
+ * The legs cycle at a rate proportional to how fast she travels, so there
+ * is no separate animation speed to turn down — slowing the animation by
+ * half means slowing HER by half, which is the only way to do it with her
+ * feet still landing where they touch. Three world units a second was 15
+ * mm/s walking and 45 sprinting, near double the block room's pace on an
+ * animal a third the size of its stride.
+ */
+const WALK_SPEED = 1.5;
 const SPRINT = 3;
 const TURN_RATE = 2.4;
 const RIDE = 1.3 / MM;
@@ -403,6 +416,17 @@ export class IslandScene {
 
   /** One instanced mesh per species — a whole tier in a single draw call. */
   private readonly stands = new Map<string, THREE.InstancedMesh>();
+
+  /**
+   * The unit-height trunk line each tier was baked from.
+   *
+   * The collision reads THIS rather than approximating it. A straight cone
+   * from base radius to a fraction of it — which is what stood in for a
+   * trunk before — measured up to 33 per cent fatter than the drawn wood at
+   * mid-height and modelled none of the lean, so she stood on the invisible
+   * one and floated over the visible one.
+   */
+  private readonly standProfiles = new Map<string, TrunkProfile>();
 
   /** Where she was when the small tiers were last grown. */
   private readonly scrubAt = new THREE.Vector3(Infinity, 0, Infinity);
@@ -1002,15 +1026,19 @@ export class IslandScene {
        * will actually be stretched to.
        */
       const mid = (species.minHeight + species.maxHeight) * 0.5 / MM;
-      const geo = bakeTree({
+      const spec: TreeSpec = {
         girth: mid * species.girthOfHeight,
         height: mid,
         seed: 0x5eed ^ species.name.length,
         rings: species.rings,
         boughs: species.boughs,
         twigs: species.twigs,
-      }, species.detail);
+      };
+      const geo = bakeTree(spec, species.detail);
       geo.scale(1 / mid, 1 / mid, 1 / mid);
+      /* The SAME spec gives the collision its line, so the two can never be
+       * describing different trees. */
+      this.standProfiles.set(species.name, trunkProfile(spec));
       /* Room for growth, so an ordinary step does not rebuild the buffer. */
       const room = Math.max(16, Math.ceil(plants.length * 1.4));
       mesh = new THREE.InstancedMesh(geo, this.forestMaterial!, room);
@@ -1087,6 +1115,7 @@ export class IslandScene {
      */
     this.stand = solidStand(
       { xMm: cx, zMm: cz }, STAND_REACH_MM, MM, (x, z) => this.forestGround(x, z),
+      (species) => this.standProfiles.get(species.name) ?? null,
     );
   }
 

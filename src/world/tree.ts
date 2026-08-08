@@ -688,6 +688,38 @@ export function bakeTree(
   return out;
 }
 
+
+/**
+ * THE TRUNK'S OWN LINE, scaled to one unit tall.
+ *
+ * An instanced stand shares ONE baked shape, stretched and spun per plant —
+ * so the thing it can be collided against is that same shape, in the same
+ * unit space. Anything else is a guess, and the guess that was there (a
+ * straight vertical cone from base radius to a fraction of it) measured up
+ * to 33 per cent FATTER than the drawn wood at mid-height, and modelled
+ * none of the lean. She stood on the invisible one and floated over the
+ * visible one, which is exactly how it was reported.
+ */
+export interface TrunkProfile {
+  /** Axis points up the trunk, in unit-height space. */
+  pts: { x: number; y: number; z: number }[];
+  /** The radius at each point, in the same space. */
+  r: number[];
+}
+
+export function trunkProfile(spec: TreeSpec): TrunkProfile {
+  const { limbs } = growTree(spec);
+  const trunk = limbs.filter((l) => l.order === 0);
+  const k = 1 / spec.height;
+  const pts = [{ x: trunk[0]!.a.x * k, y: trunk[0]!.a.y * k, z: trunk[0]!.a.z * k }];
+  const r = [trunk[0]!.ra * k];
+  for (const l of trunk) {
+    pts.push({ x: l.b.x * k, y: l.b.y * k, z: l.b.z * k });
+    r.push(l.rb * k);
+  }
+  return { pts, r };
+}
+
 export interface BuiltTree {
   root: THREE.LOD;
   /** The wood, as something the walker's field can be unioned with. Set by

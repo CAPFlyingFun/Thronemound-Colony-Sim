@@ -12,6 +12,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { burialMm, plantsIn, SPECIES, type GroundProbe } from '../src/world/forest';
+import { growTree, trunkProfile } from '../src/world/tree';
 
 const SPAN = 56000;
 const WHOLE = { x0: 0, z0: 0, x1: SPAN, z1: SPAN };
@@ -107,5 +108,62 @@ describe('the scatter', () => {
     expect(burialMm(400)).toBeLessThan(burialMm(26000));
     expect(burialMm(400)).toBeLessThan(400 * 0.5);
     expect(burialMm(26000)).toBeLessThanOrEqual(150);
+  });
+});
+
+/**
+ * THE INVISIBLE TREE.
+ *
+ * A stand's collision used to be a straight vertical cone from base radius
+ * to a fraction of it. The drawn trunk is neither straight nor a cone: it
+ * flares at the foot, tapers on a curve, and leans. Measured, the cone ran
+ * up to 33% fatter than the wood at mid-height and modelled none of the
+ * lean — so she stood on the invisible one and floated over the visible
+ * one, which is exactly how it was reported.
+ *
+ * The fix is not a better approximation, it is the SAME LINE: the collision
+ * reads the polyline the mesh is skinned onto. These check that it really
+ * is the same line, because a second one that merely looks similar is how
+ * this happened in the first place.
+ */
+describe('the solid stand matches the wood you can see', () => {
+  const spec = { girth: 20, height: 400, seed: 0x5eed, rings: 8, boughs: 7, twigs: false };
+
+  it('takes its radius from the drawn trunk, not from a cone through it', () => {
+    const profile = trunkProfile(spec);
+    const { limbs } = growTree(spec);
+    const trunk = limbs.filter((l) => l.order === 0);
+    expect(profile.pts.length).toBe(trunk.length + 1);
+    for (let i = 0; i < trunk.length; i += 1) {
+      /* Unit-height space: the profile is the trunk divided by its height. */
+      expect(profile.r[i]! * spec.height).toBeCloseTo(trunk[i]!.ra, 6);
+      expect(profile.pts[i]!.y * spec.height).toBeCloseTo(trunk[i]!.a.y, 6);
+      expect(profile.pts[i]!.x * spec.height).toBeCloseTo(trunk[i]!.a.x, 6);
+    }
+  });
+
+  it('carries the trunk’s lean, which a vertical post cannot', () => {
+    const profile = trunkProfile(spec);
+    const foot = profile.pts[0]!;
+    const top = profile.pts[profile.pts.length - 1]!;
+    const drift = Math.hypot(top.x - foot.x, top.z - foot.z);
+    /* If this is zero the trunk is a plumb pole and the old straight post
+     * would have been fine. It is not — which is why it was not. */
+    expect(drift).toBeGreaterThan(0);
+  });
+
+  it('flares at the foot and narrows all the way up', () => {
+    const profile = trunkProfile(spec);
+    /* The shape a straight cone gets wrong: widest at the very bottom, then
+     * losing most of its girth early and holding. */
+    expect(profile.r[0]!).toBeGreaterThan(profile.r[1]!);
+    for (let i = 2; i < profile.r.length; i += 1) {
+      expect(profile.r[i]!).toBeLessThanOrEqual(profile.r[i - 1]! + 1e-9);
+    }
+    const straight = (t: number) => profile.r[0]! * (1 + (0.18 - 1) * t);
+    const half = Math.floor(profile.r.length / 2);
+    const t = half / (profile.r.length - 1);
+    /* The old post at mid-height, against the wood actually there. */
+    expect(straight(t)).toBeGreaterThan(profile.r[half]! * 1.15);
   });
 });

@@ -206,15 +206,22 @@ export function burialMm(heightMm: number): number {
 
 /* ------------------------------------------------- the forest you can climb */
 
-/** A trunk, as something to bump into: a tapered post standing at a point. */
-interface Post {
+import type { TrunkProfile } from './tree';
+
+/** One plant, placed and sized, ready to be collided against. */
+interface Standing {
   x: number;
   y: number;
   z: number;
-  /** Height in world units, and radius at foot and crown. */
-  h: number;
-  r0: number;
-  r1: number;
+  /** Unit-space is multiplied by this to reach the world. */
+  scale: number;
+  /** Cosine and sine of its spin, so the query can un-turn a point. */
+  cos: number;
+  sin: number;
+  profile: TrunkProfile;
+  /** The world radius of the whole thing, for the bucket and the reject. */
+  reach: number;
+  top: number;
 }
 
 /**
@@ -224,47 +231,38 @@ interface Post {
  * standing, climbing and falling, so a stand of trees needs no collision
  * system of its own, only to be part of that answer. What it does need is to
  * be CHEAP: the question is asked hundreds of times a frame and there are
- * hundreds of plants, and the product of those two is not affordable.
+ * hundreds of plants, and the product of those two is not affordable. So
+ * this holds only the plants near her, bucketed on a coarse grid; a probe
+ * looks up its own bucket and tests the two or three in it, and away from
+ * everything it is one bounds check.
  *
- * So this holds only the plants near her, bucketed on a coarse grid. A probe
- * looks up its own bucket and tests the two or three posts in it. Away from
- * everything it is one bounds test and out.
+ * Each is collided against THE SAME PROFILE ITS MESH WAS BAKED FROM, in the
+ * same unit space, transformed by the same scale and spin. Not an
+ * approximation of it — the identical polyline — so the wood you can see and
+ * the wood you cannot walk through are one shape by construction.
  *
  * TRUNKS ONLY, and deliberately. Foliage is not a surface an ant stands on
  * in any sense this game models, and a solid canopy is a thing to get wedged
- * inside. A bush's stem is a post as far as she is concerned — at her size
- * it is a tree.
+ * inside. A bush's stem is a post as far as she is concerned.
  */
 export class ForestSolid {
-  private readonly buckets = new Map<number, Post[]>();
+  private readonly buckets = new Map<number, Standing[]>();
 
   private readonly cell: number;
-
-  private minX = Infinity;
-
-  private maxX = -Infinity;
 
   private minY = Infinity;
 
   private maxY = -Infinity;
 
-  private minZ = Infinity;
-
-  private maxZ = -Infinity;
-
-  constructor(posts: readonly Post[], cell: number) {
+  constructor(plants: readonly Standing[], cell: number) {
     this.cell = cell;
-    for (const p of posts) {
-      const r = Math.max(p.r0, p.r1);
-      this.minX = Math.min(this.minX, p.x - r); this.maxX = Math.max(this.maxX, p.x + r);
-      this.minY = Math.min(this.minY, p.y); this.maxY = Math.max(this.maxY, p.y + p.h);
-      this.minZ = Math.min(this.minZ, p.z - r); this.maxZ = Math.max(this.maxZ, p.z + r);
-      /* A post goes in every bucket its own radius touches, so a probe only
-       * ever has to look in one. */
-      const lo = Math.floor((p.x - r) / cell);
-      const hi = Math.floor((p.x + r) / cell);
-      const lz = Math.floor((p.z - r) / cell);
-      const hz = Math.floor((p.z + r) / cell);
+    for (const p of plants) {
+      this.minY = Math.min(this.minY, p.y);
+      this.maxY = Math.max(this.maxY, p.top);
+      const lo = Math.floor((p.x - p.reach) / cell);
+      const hi = Math.floor((p.x + p.reach) / cell);
+      const lz = Math.floor((p.z - p.reach) / cell);
+      const hz = Math.floor((p.z + p.reach) / cell);
       for (let gz = lz; gz <= hz; gz += 1) {
         for (let gx = lo; gx <= hi; gx += 1) {
           const key = gx * 73856093 ^ gz * 19349663;
@@ -278,8 +276,7 @@ export class ForestSolid {
 
   /** Positive inside the wood, negative outside, in world units. */
   densityAt(x: number, y: number, z: number): number {
-    if (x < this.minX || x > this.maxX || y < this.minY || y > this.maxY
-      || z < this.minZ || z > this.maxZ) return -Infinity;
+    if (y < this.minY || y > this.maxY) return -Infinity;
     const gx = Math.floor(x / this.cell);
     const gz = Math.floor(z / this.cell);
     const list = this.buckets.get(gx * 73856093 ^ gz * 19349663);
@@ -287,13 +284,14 @@ export class ForestSolid {
     let best = -Infinity;
     for (let i = 0; i < list.length; i += 1) {
       const p = list[i]!;
-      /* A truncated cone about a vertical axis: the radius where the point
-       * is, against how far out it is. Vertical, so no rotation is needed —
-       * plants stand up, whatever the ground under them does. */
-      const t = (y - p.y) / p.h;
-      if (t < 0 || t > 1) continue;
-      const r = p.r0 + (p.r1 - p.r0) * t;
-      const inside = r - Math.hypot(x - p.x, z - p.z);
+      if (y < p.y || y > p.top) continue;
+      /* Into the plant's own space: off its foot, un-spun, unscaled. */
+      const dx = x - p.x;
+      const dz = z - p.z;
+      const lx = (dx * p.cos - dz * p.sin) / p.scale;
+      const lz2 = (dx * p.sin + dz * p.cos) / p.scale;
+      const ly = (y - p.y) / p.scale;
+      const inside = alongProfile(p.profile, lx, ly, lz2) * p.scale;
       if (inside > best) best = inside;
     }
     return best;
@@ -302,6 +300,38 @@ export class ForestSolid {
   solidAt(x: number, y: number, z: number): boolean {
     return this.densityAt(x, y, z) > 0;
   }
+}
+
+/**
+ * How far inside the trunk a point is, in the profile's own unit space.
+ *
+ * A union of round cones down the polyline — the same shape the mesh is
+ * skinned onto, so the two cannot drift apart with height the way a single
+ * straight cone did.
+ */
+function alongProfile(
+  profile: TrunkProfile, x: number, y: number, z: number,
+): number {
+  const { pts, r } = profile;
+  let best = -Infinity;
+  for (let i = 0; i < pts.length - 1; i += 1) {
+    const a = pts[i]!;
+    const b = pts[i + 1]!;
+    const bax = b.x - a.x;
+    const bay = b.y - a.y;
+    const baz = b.z - a.z;
+    const len2 = bax * bax + bay * bay + baz * baz;
+    if (len2 < 1e-12) continue;
+    const pax = x - a.x;
+    const pay = y - a.y;
+    const paz = z - a.z;
+    let t = (pax * bax + pay * bay + paz * baz) / len2;
+    t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    const rr = r[i]! + (r[i + 1]! - r[i]!) * t;
+    const inside = rr - Math.hypot(pax - bax * t, pay - bay * t, paz - baz * t);
+    if (inside > best) best = inside;
+  }
+  return best;
 }
 
 /**
@@ -315,28 +345,35 @@ export function solidStand(
   reachMm: number,
   mmPerUnit: number,
   ground: (xMm: number, zMm: number) => GroundProbe | null,
+  profileFor: (species: Species) => TrunkProfile | null,
 ): ForestSolid {
-  const posts: Post[] = [];
+  const standing: Standing[] = [];
   const box = {
     x0: around.xMm - reachMm, z0: around.zMm - reachMm,
     x1: around.xMm + reachMm, z1: around.zMm + reachMm,
   };
   for (const species of SPECIES) {
+    const profile = profileFor(species);
+    if (!profile) continue;
+    let widest = 0;
+    for (const rr of profile.r) if (rr > widest) widest = rr;
     for (const p of plantsIn(species, box, ground)) {
-      const h = p.heightMm / mmPerUnit;
+      const scale = p.heightMm / mmPerUnit;
       const foot = (p.groundMm - burialMm(p.heightMm)) / mmPerUnit;
-      const r0 = p.girthMm / 2 / mmPerUnit;
-      posts.push({
+      let top = -Infinity;
+      for (const q of profile.pts) if (q.y > top) top = q.y;
+      standing.push({
         x: p.xMm / mmPerUnit,
         y: foot,
         z: p.zMm / mmPerUnit,
-        h,
-        r0,
-        /* Tapered to a sixth at the crown, which is roughly what the drawn
-         * trunk does — close enough that she never stands on air. */
-        r1: r0 * 0.18,
+        scale,
+        cos: Math.cos(-p.spin),
+        sin: Math.sin(-p.spin),
+        profile,
+        reach: (widest + 0.05) * scale,
+        top: foot + top * scale,
       });
     }
   }
-  return new ForestSolid(posts, 400 / mmPerUnit);
+  return new ForestSolid(standing, 400 / mmPerUnit);
 }
