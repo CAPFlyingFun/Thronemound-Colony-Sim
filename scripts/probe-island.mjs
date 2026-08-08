@@ -970,6 +970,51 @@ const fp = await page.evaluate(() => {
   return { d, bodyHidden, crosshairOn, bodyBack, crosshairOff };
 });
 check('the camera sits on the ant', fp.d < 4, `${fp.d.toFixed(1)} mm from her centre`);
+
+/*
+ * THE EYE MUST NOT ROLL. Handing `lookAt` a fixed world up and a look
+ * parallel to it leaves the roll undefined, and straight down a shaft is
+ * exactly that — the opening aims her at exactly -90°, so it was hit every
+ * time. Measured before the fix: camera right ran (-1,0,0) to -89° and
+ * snapped to (+1,0,0) at -90°, reported as the view sitting ninety degrees
+ * off the ant. Both poles are swept, at two headings, because a singularity
+ * that only shows at one bearing is still a singularity.
+ */
+const eyeRoll = await page.evaluate(() => {
+  const s = window.islandScene;
+  s.teleportMm(27950, 27950);
+  s.drainQueueForTest();
+  s.firstPerson = true;
+  const worst = [];
+  for (const facing of [0, Math.PI / 3]) {
+    s.setFacingForTest(facing);
+    // Her right hand, on the flat: the axis the camera's right must track.
+    const rx = -Math.cos(facing);
+    const rz = Math.sin(facing);
+    let least = 1;
+    for (let deg = 0; deg >= -90; deg -= 5) {
+      s.aimPitch = (deg * Math.PI) / 180;
+      s.fpPitch = s.aimPitch;
+      s.stepForTest(1 / 30, 2);
+      const m = s.camera.matrixWorld.elements;
+      least = Math.min(least, m[0] * rx + m[2] * rz);
+    }
+    for (let deg = 0; deg <= 80; deg += 5) {
+      s.aimPitch = (deg * Math.PI) / 180;
+      s.fpPitch = s.aimPitch;
+      s.stepForTest(1 / 30, 2);
+      const m = s.camera.matrixWorld.elements;
+      least = Math.min(least, m[0] * rx + m[2] * rz);
+    }
+    worst.push(least);
+  }
+  s.aimPitch = 0; s.fpPitch = 0; s.firstPerson = false;
+  s.stepForTest(1 / 30, 4);
+  return worst;
+});
+check('the eye never rolls, not even straight down a shaft',
+  eyeRoll.every((d) => d > 0.99),
+  `worst right-axis agreement ${eyeRoll.map((d) => d.toFixed(3)).join(', ')}`);
 check('her body is hidden in her own eyes, crosshair on',
   fp.bodyHidden && fp.crosshairOn);
 check('body and crosshair restore in third person',

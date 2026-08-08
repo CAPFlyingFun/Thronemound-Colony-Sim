@@ -234,6 +234,11 @@ const BODY_FLOOR_MARGIN = 0.3 / MM;
  *  stops meaning anything. */
 const AIM_LIMIT = 1.4;
 
+/** How far off the tube's line the eye may be dragged, and how long it
+ *  takes to slide back — three seconds, near enough, as asked. */
+const EYE_PAN_LIMIT = 1.2;
+const EYE_PAN_HOME_S = 0.9;
+
 const BODY_SHELL: number[][] = [
   [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
   [0.6, 0.6, 0], [0.6, -0.6, 0], [-0.6, 0.6, 0], [-0.6, -0.6, 0],
@@ -429,6 +434,13 @@ export class IslandScene {
   private firstPerson = false;
 
   private fpPitch = 0;
+
+  /** The eye's offset from the tube's own line, while a finger holds it. */
+  private eyePanYaw = 0;
+
+  private eyePanPitch = 0;
+
+  private eyePanHeld = false;
 
   /**
    * WHERE SHE IS POINTED, up and down — and it STAYS there.
@@ -1623,6 +1635,14 @@ export class IslandScene {
         * (1 - Math.exp(-SENSE_EASE * dt));
     }
     this.builder.tick(dt);
+    /* The eye slides home to the tube once the finger is off it. An
+     * exponential rather than a countdown: it starts moving immediately,
+     * and is all but home by three seconds whatever it was dragged to. */
+    if (!this.eyePanHeld) {
+      const keep = Math.exp(-dt / EYE_PAN_HOME_S);
+      this.eyePanYaw *= keep;
+      this.eyePanPitch *= keep;
+    }
     this.updateSwitch();
     this.refreshSwitchRow();
     this.updateGuide();
@@ -3117,9 +3137,55 @@ export class IslandScene {
        * A trace of lift stays so level ground doesn't fill half the frame. */
       const eye = this.at.clone().addScaledVector(fwd, 0.26).addScaledVector(upv, 0.06);
       this.camera.position.copy(eye);
-      this.camera.up.copy(upv);
-      const dir = fwd.clone().multiplyScalar(Math.cos(this.fpPitch))
-        .addScaledVector(upv, Math.sin(this.fpPitch));
+      /*
+       * ON A SPLINE THE TUBE IS THE VIEW.
+       *
+       * A rail edge is two points; travelling it means looking A to B, or
+       * B to A. That is `railForward` already — so the eye simply takes it,
+       * and the aim dial does not get to pitch the view on top. Pitching it
+       * was the whole of the trouble: down a plumb shaft the pitched look
+       * came out parallel to the up vector, `lookAt` had no defined roll
+       * left, and the view sat ninety degrees off the ant.
+       *
+       * The drag is an OFFSET on that, not a replacement for it, and it
+       * eases back to the tube when you let go — so you can look around a
+       * junction without ever losing which way you are going.
+       */
+      const dir = onRail
+        ? fwd.clone().applyAxisAngle(upv, this.eyePanYaw)
+          .applyAxisAngle(S_RIGHT.crossVectors(upv, fwd).normalize(), this.eyePanPitch)
+        : fwd.clone().multiplyScalar(Math.cos(this.fpPitch))
+          .addScaledVector(upv, Math.sin(this.fpPitch));
+      /*
+       * THE EYE'S OWN UP, TURNED WITH THE PITCH — not the world's.
+       *
+       * Handing `lookAt` a fixed up and a direction parallel to it leaves
+       * the roll undefined, and three.js picks whatever falls out of the
+       * cross product. Straight down a shaft is exactly that case, and the
+       * opening aims her at exactly -90°, so it was hit every single time:
+       * measured, the camera's right ran (-1, 0, 0) all the way to -89°
+       * and snapped to (+1, 0, 0) at -90°. Reported as the view sitting
+       * ninety degrees off the way the ant points.
+       *
+       * Rotating the up vector by the same pitch keeps it perpendicular to
+       * the look by construction — their dot is `-cos·sin + sin·cos`, which
+       * is zero at every angle — so there is no singularity to land on. It
+       * also gives the right picture down a shaft: the top of the screen
+       * becomes the way she is FACING, which is the only meaningful "up"
+       * when the world's up is straight behind you.
+       */
+      /*
+       * In a tube the radial IS up — it points from her back at the
+       * centreline, perpendicular to the tangent by construction, so
+       * there is no angle at which it can line up with the look. Loose
+       * on the surface the look is pitched, so the up must pitch with it
+       * or straight down leaves `lookAt` with no roll to choose from.
+       */
+      if (onRail) this.camera.up.copy(upv);
+      else {
+        this.camera.up.copy(fwd).multiplyScalar(-Math.sin(this.fpPitch))
+          .addScaledVector(upv, Math.cos(this.fpPitch));
+      }
       this.camera.lookAt(eye.x + dir.x, eye.y + dir.y, eye.z + dir.z);
       return;
     }
@@ -3507,14 +3573,25 @@ export class IslandScene {
         this.stickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
       } else if (e.pointerId === this.lookPointer) {
         if (this.firstPerson) {
-          /* In her eyes the drag turns HER, and the glance IS the aim —
-           * one number, so the view and the bore can never disagree about
-           * which way she is pointed. */
-          this.bore.turn(-e.movementX * 0.004);
-          this.facing = this.bore.heading;
-          this.aimPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
-            this.aimPitch - e.movementY * 0.004));
-          this.fpPitch = this.aimPitch;
+          if (this.railEdge >= 0) {
+            /* In a tube she cannot turn where she likes — the bore decides
+             * that. So the drag is a LOOK, held against the tube's own
+             * line and eased back to it on release. */
+            this.eyePanHeld = true;
+            this.eyePanYaw = Math.max(-EYE_PAN_LIMIT, Math.min(EYE_PAN_LIMIT,
+              this.eyePanYaw - e.movementX * 0.004));
+            this.eyePanPitch = Math.max(-EYE_PAN_LIMIT, Math.min(EYE_PAN_LIMIT,
+              this.eyePanPitch - e.movementY * 0.004));
+          } else {
+            /* Loose on the surface the drag turns HER, and the glance IS
+             * the aim — one number, so the view and the bore can never
+             * disagree about which way she is pointed. */
+            this.bore.turn(-e.movementX * 0.004);
+            this.facing = this.bore.heading;
+            this.aimPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
+              this.aimPitch - e.movementY * 0.004));
+            this.fpPitch = this.aimPitch;
+          }
         } else {
           // Third person: the drag pans the view — above ground a full
           // orbit, underground a tight override the trail cam resumes from
@@ -3543,6 +3620,7 @@ export class IslandScene {
      */
     const dropStick = (): void => {
       this.stickPointer = null;
+      this.eyePanHeld = false;
       this.input.walk = 0;
       this.input.yaw = 0;
       this.stickKnob.style.transform = 'translate(0px, 0px)';
@@ -3551,7 +3629,11 @@ export class IslandScene {
     const release = (e: PointerEvent) => {
       if (this.designer?.isOpen) { this.designer.handlePointerUp(e); return; }
       if (e.pointerId === this.stickPointer) dropStick();
-      if (e.pointerId === this.lookPointer) this.lookPointer = null;
+      if (e.pointerId === this.lookPointer) {
+        this.lookPointer = null;
+        // Finger off: the eye starts sliding back to the tube's own line.
+        this.eyePanHeld = false;
+      }
     };
     /* The belt and braces: a pointer that vanishes without a pointerup, a
      * window that loses focus, a tab that goes to the background. */
