@@ -289,53 +289,104 @@ function skin(
   limbs: readonly Limb[], d: Detail, barkTile: number, around: number,
 ): THREE.BufferGeometry {
   const used = limbs.filter((l) => l.order <= d.order);
-  const rings = used.length * 2;
-  const verts = rings * (d.sides + 1);
-  const pos = new Float32Array(verts * 3);
-  const nrm = new Float32Array(verts * 3);
-  const uv = new Float32Array(verts * 2);
-  const idx = new Uint32Array(used.length * d.sides * 6);
 
-  const axis = new THREE.Vector3();
+  /*
+   * CHAINS, NOT LIMBS — the trunk is ONE tube.
+   *
+   * Every limb used to be skinned as its own closed-ended tube. Consecutive
+   * sections of the same trunk therefore met as two separate rings facing
+   * slightly different ways, which opens a wedge on the outside of every
+   * bend: you could see into the tree, and from inside it read as a second
+   * trunk crossing the first. Overrunning the ends papered over it.
+   *
+   * A run of limbs where each one's far end IS the next one's near end is a
+   * chain, and a chain is skinned as a single continuous tube with ONE ring
+   * at each joint, shared by the sections either side. Shared rings cannot
+   * disagree, so there is no seam left to hide — not a smaller one, none.
+   * The trunk is one chain; so is each bough and each twig.
+   */
+  const chains: Limb[][] = [];
+  let run: Limb[] = [];
+  for (const limb of used) {
+    if (run.length > 0 && run[run.length - 1]!.b === limb.a) run.push(limb);
+    else {
+      if (run.length > 0) chains.push(run);
+      run = [limb];
+    }
+  }
+  if (run.length > 0) chains.push(run);
+
+  let rings = 0;
+  let spans = 0;
+  for (const chain of chains) { rings += chain.length + 1; spans += chain.length; }
+  const stride = d.sides + 1;
+  const pos = new Float32Array(rings * stride * 3);
+  const nrm = new Float32Array(rings * stride * 3);
+  const uv = new Float32Array(rings * stride * 2);
+  const idx = new Uint32Array(spans * d.sides * 6);
+
+  const tangent = new THREE.Vector3();
+  const tin = new THREE.Vector3();
+  const tout = new THREE.Vector3();
+  const prev = new THREE.Vector3();
   const u = new THREE.Vector3();
   const v = new THREE.Vector3();
+  const turn = new THREE.Quaternion();
   let p = 0;
   let t = 0;
   let n = 0;
   let f = 0;
-  const seat = new THREE.Vector3();
-  for (const limb of used) {
-    axis.copy(limb.b).sub(limb.a);
-    const len = axis.length() || 1e-6;
-    axis.divideScalar(len);
-    anyPerp(axis, u);
-    v.crossVectors(axis, u);
+
+  for (const chain of chains) {
+    const last = chain.length;
+    const pts: THREE.Vector3[] = [chain[0]!.a.clone()];
+    const rad: number[] = [chain[0]!.ra];
+    const along: number[] = [chain[0]!.run];
+    let walked = chain[0]!.run;
+    for (const limb of chain) {
+      walked += limb.a.distanceTo(limb.b);
+      pts.push(limb.b.clone());
+      rad.push(limb.rb);
+      along.push(walked);
+    }
     /*
-     * EVERY LIMB IS RUN LONG AT BOTH ENDS, and that is what closes the tree.
-     *
-     * A limb is drawn as its own tube with a flat, open ring at each end.
-     * Where two meet at an angle — every joint in the trunk, every bough
-     * leaving it — the two rings face different ways, so the outside of the
-     * bend opens a wedge between them and the inside of the tree shows
-     * through it. Reported as being able to see through the trunk in places.
-     *
-     * Overrunning each end by a fraction of its own radius makes
-     * consecutive tubes interpenetrate instead of abut, and a wedge cannot
-     * open between two solids that overlap. It costs no triangles at all —
-     * the same rings, moved — and the SOLID form needs none of it, because
-     * its round cones already carry a sphere at each end.
+     * The two ENDS still overrun, and only the ends: a bough's first ring
+     * has to start inside the trunk it grows from or the join shows, and a
+     * trunk's first ring may as well start under the soil. Nothing between
+     * them needs it any more.
      */
-    const overA = Math.min(limb.ra * 0.7, len * 0.45);
-    const overB = Math.min(limb.rb * 0.7, len * 0.45);
+    tout.copy(pts[1]!).sub(pts[0]!).normalize();
+    pts[0]!.addScaledVector(tout, -Math.min(rad[0]! * 0.9, pts[0]!.distanceTo(pts[1]!) * 0.4));
+    tin.copy(pts[last]!).sub(pts[last - 1]!).normalize();
+    pts[last]!.addScaledVector(tin, Math.min(rad[last]! * 0.6, pts[last]!.distanceTo(pts[last - 1]!) * 0.4));
+
+    prev.copy(pts[1]!).sub(pts[0]!).normalize();
+    anyPerp(prev, u);
     const ring0 = n;
-    for (let end = 0; end < 2; end += 1) {
-      const r = end === 0 ? limb.ra : limb.rb;
-      const centre = end === 0
-        ? seat.copy(limb.a).addScaledVector(axis, -overA)
-        : seat.copy(limb.b).addScaledVector(axis, overB);
-      const vCoord = (limb.run + end * len) / barkTile;
-      for (let s = 0; s <= d.sides; s += 1) {
-        const ang = (s / d.sides) * Math.PI * 2;
+    for (let i = 0; i <= last; i += 1) {
+      if (i > 0) tin.copy(pts[i]!).sub(pts[i - 1]!).normalize();
+      else tin.copy(prev);
+      if (i < last) tout.copy(pts[i + 1]!).sub(pts[i]!).normalize();
+      else tout.copy(tin);
+      /* The ring stands square to the BISECTOR of the two sections meeting
+       * at it — the mitre a real joint makes — so neither side pinches. */
+      tangent.copy(tin).add(tout);
+      if (tangent.lengthSq() < 1e-12) tangent.copy(tin);
+      tangent.normalize();
+      /* Carry the frame along rather than rebuilding it: `anyPerp` of a
+       * slightly different axis is a slightly different starting angle, and
+       * a ring that starts somewhere else twists the bark at every joint. */
+      turn.setFromUnitVectors(prev, tangent);
+      u.applyQuaternion(turn);
+      u.addScaledVector(tangent, -u.dot(tangent)).normalize();
+      v.crossVectors(tangent, u);
+      prev.copy(tangent);
+
+      const centre = pts[i]!;
+      const r = rad[i]!;
+      const vCoord = along[i]! / barkTile;
+      for (let sIdx = 0; sIdx <= d.sides; sIdx += 1) {
+        const ang = (sIdx / d.sides) * Math.PI * 2;
         const cx = Math.cos(ang);
         const sz = Math.sin(ang);
         const nx = u.x * cx + v.x * sz;
@@ -346,39 +397,28 @@ function skin(
         pos[p + 2] = centre.z + nz * r;
         nrm[p] = nx; nrm[p + 1] = ny; nrm[p + 2] = nz;
         p += 3;
-        /* `around` whole tiles of bark per lap, so the seam still closes —
-         * a fractional repeat would leave a visible join running the height
-         * of the tree. */
-        uv[t] = (s / d.sides) * around;
+        uv[t] = (sIdx / d.sides) * around;
         uv[t + 1] = vCoord;
         t += 2;
         n += 1;
       }
     }
-    const stride = d.sides + 1;
-    for (let s = 0; s < d.sides; s += 1) {
-      const a0 = ring0 + s;
-      const a1 = ring0 + s + 1;
-      const b0 = ring0 + stride + s;
-      const b1 = ring0 + stride + s + 1;
-      /*
-       * WOUND OUTWARD. This was `(a0, b0, a1)` and `(a1, b0, b1)`, which is
-       * the mirror of it — every one of the seven thousand triangles faced
-       * INTO the tree. The terrain's material is double-sided so nothing
-       * else in the scene had ever noticed a backwards winding; the tree's
-       * is not, so its near wall was culled and what you saw through the
-       * gap was the inside of the far wall. A solid trunk that reads as a
-       * hollow funnel you are standing inside.
-       *
-       * Around the limb is +v and along it is +axis, and `cross(v, axis)`
-       * is the outward normal by construction — so a triangle that steps
-       * AROUND first and ALONG second faces out.
-       */
-      idx[f] = a0; idx[f + 1] = a1; idx[f + 2] = b0;
-      idx[f + 3] = a1; idx[f + 4] = b1; idx[f + 5] = b0;
-      f += 6;
+    for (let i = 0; i < last; i += 1) {
+      const base = ring0 + i * stride;
+      for (let sIdx = 0; sIdx < d.sides; sIdx += 1) {
+        const a0 = base + sIdx;
+        const a1 = base + sIdx + 1;
+        const b0 = base + stride + sIdx;
+        const b1 = base + stride + sIdx + 1;
+        /* Around first, along second — that is the winding that faces out;
+         * see `tests/tree.test.ts`, which counts any that do not. */
+        idx[f] = a0; idx[f + 1] = a1; idx[f + 2] = b0;
+        idx[f + 3] = a1; idx[f + 4] = b1; idx[f + 5] = b0;
+        f += 6;
+      }
     }
   }
+
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));

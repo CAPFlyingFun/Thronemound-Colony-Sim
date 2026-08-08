@@ -228,3 +228,75 @@ describe('the tree is skinned outward', () => {
     built.dispose();
   });
 });
+
+/**
+ * ONE TUBE PER CHAIN.
+ *
+ * The trunk used to be skinned as one closed tube per section, so every
+ * joint met as two separate rings facing slightly different ways and the
+ * outside of each bend opened a wedge you could see through — from inside,
+ * a second trunk crossing the first. A chain of limbs is one tube now, with
+ * ONE ring at each joint shared by the sections either side, and rings that
+ * are literally the same vertices cannot disagree.
+ */
+describe('the trunk is one continuous tube', () => {
+  it('shares a single ring at every joint, so no seam can open', () => {
+    const built = buildTree(SPEC, new THREE.Texture(), 'bark-grey');
+    const mesh = (built.root.levels[0]!.object as THREE.Group).children[0] as THREE.Mesh;
+    const pos = mesh.geometry.getAttribute('position');
+
+    /*
+     * Count how many vertices sit in exactly the same place. A per-limb
+     * skin duplicates a whole ring at every joint; a shared one does not,
+     * so the only coincident pairs left are each ring's seam vertex, which
+     * has to be doubled to carry two u coordinates.
+     */
+    const seen = new Map<string, number>();
+    const key = (i: number) => [
+      pos.getX(i).toFixed(4), pos.getY(i).toFixed(4), pos.getZ(i).toFixed(4),
+    ].join();
+    for (let i = 0; i < pos.count; i += 1) {
+      const k = key(i);
+      seen.set(k, (seen.get(k) ?? 0) + 1);
+    }
+    let doubled = 0;
+    for (const count of seen.values()) if (count > 1) doubled += count - 1;
+
+    const rings = pos.count / (20 + 1);          // level 0 has 20 sides
+    /* One duplicate per ring — the wrap seam — and not one more. Per-limb
+     * skinning would double a whole ring at each of the tree's joints. */
+    expect(doubled).toBe(Math.round(rings));
+    built.dispose();
+  });
+
+  it('keeps the bark from twisting where two sections meet', () => {
+    /* The frame is carried along the chain rather than rebuilt per section:
+     * rebuilding it lands the first vertex at a different angle each time,
+     * which shears the texture at every joint. Consecutive rings must stay
+     * nearly aligned around the axis. */
+    const built = buildTree(SPEC, new THREE.Texture(), 'bark-grey');
+    const mesh = (built.root.levels[0]!.object as THREE.Group).children[0] as THREE.Mesh;
+    const pos = mesh.geometry.getAttribute('position');
+    const stride = 21;
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const centreA = new THREE.Vector3();
+    const centreB = new THREE.Vector3();
+    let worst = 0;
+    /* The trunk is the first chain, so its rings run from the start. */
+    for (let ring = 0; ring < 12; ring += 1) {
+      centreA.set(0, 0, 0); centreB.set(0, 0, 0);
+      for (let k = 0; k < stride - 1; k += 1) {
+        a.fromBufferAttribute(pos, ring * stride + k); centreA.add(a);
+        b.fromBufferAttribute(pos, (ring + 1) * stride + k); centreB.add(b);
+      }
+      centreA.divideScalar(stride - 1); centreB.divideScalar(stride - 1);
+      a.fromBufferAttribute(pos, ring * stride).sub(centreA).normalize();
+      b.fromBufferAttribute(pos, (ring + 1) * stride).sub(centreB).normalize();
+      worst = Math.max(worst, a.angleTo(b));
+    }
+    // A few degrees of drift as the trunk bends is the bend, not a twist.
+    expect(worst).toBeLessThan(0.25);
+    built.dispose();
+  });
+});
