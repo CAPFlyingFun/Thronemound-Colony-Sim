@@ -1851,6 +1851,24 @@ export class IslandScene {
      * everywhere else (and only once her model has actually loaded). */
     this.queen.root.visible = this.queenReady && !this.firstPerson;
     this.crosshair.style.display = this.firstPerson ? '' : 'none';
+    /*
+     * THE ORBIT'S PITCH IS EASED ONCE, FOR EVERY VIEW.
+     *
+     * It used to be computed at the BOTTOM of this function, past both the
+     * first-person and the underground returns — so underground, the orbit
+     * drag turned the yaw and the pitch stayed at whatever it was last
+     * left at on the surface. One place, before the branches, and every
+     * camera that reads `camPitch` reads a live one.
+     *
+     * The camera FOLLOWS the aim, in both directions and at full gain.
+     * It was `0.28 + max(0, -aimPitch)`: point her down and the view
+     * climbs so you are looking along the line she will cut — right, and
+     * only half the job, because that `max(0, …)` threw away every upward
+     * aim. Dropping the clamp (and NOT rescaling) keeps downward feeling
+     * exactly as it always did and gives upward the same one back.
+     */
+    const wantPitch = Math.min(1.35, Math.max(0.06, 0.28 - this.aimPitch));
+    this.camPitch += (wantPitch - this.camPitch) * Math.min(1, dt * 3);
     if (this.firstPerson) {
       /* Her own eyes: at the head, looking where she faces; the mouse (or
        * right-half drag) turns HER, and pitch is a look, not an orbit. On
@@ -1902,7 +1920,12 @@ export class IslandScene {
       this.camera.up.copy(fwd).multiplyScalar(-Math.sin(this.fpPitch))
         .addScaledVector(upv, Math.cos(this.fpPitch));
       this.liftCameraClear();
-      this.camera.lookAt(eye.x + dir.x, eye.y + dir.y, eye.z + dir.z);
+      /* Aim from where the lens ACTUALLY ended up. The guard above may have
+       * nudged it out of a roof, and looking at a target measured from the
+       * old spot tilts the whole view by however far it moved — a pitch
+       * that drifts on its own every time she brushes a ceiling. */
+      const lens = this.camera.position;
+      this.camera.lookAt(lens.x + dir.x, lens.y + dir.y, lens.z + dir.z);
       return;
     }
     if (this.underground) {
@@ -1979,19 +2002,6 @@ export class IslandScene {
     while (d > Math.PI) d -= Math.PI * 2;
     while (d < -Math.PI) d += Math.PI * 2;
     if (this.lookPointer === null) this.camYaw += d * Math.min(1, dt * 2.4);
-    /*
-     * The camera FOLLOWS the aim, and now in BOTH directions.
-     *
-     * It was `0.28 + max(0, -aimPitch)`: point her down and the view
-     * climbs so you are looking along the line she will cut — right, and
-     * only half the job. That `max(0, …)` threw away every upward aim, so
-     * dragging up over her shoulder moved the crosshair and moved the
-     * camera not at all, which reads exactly as the pitch being broken.
-     * Symmetric now: aim down and the view rises behind her, aim up and
-     * it drops to look along the climb.
-     */
-    const wantPitch = Math.min(1.35, Math.max(0.06, 0.28 - this.aimPitch * 0.8));
-    this.camPitch += (wantPitch - this.camPitch) * Math.min(1, dt * 3);
     const cp = Math.cos(this.camPitch);
     this.camera.position.set(
       this.at.x + Math.sin(this.camYaw) * this.camDist * cp,

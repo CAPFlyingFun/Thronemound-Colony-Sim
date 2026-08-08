@@ -109,6 +109,20 @@
   flex-direction: column;
   gap: 11px;
   align-items: flex-end;
+  /*
+   * THE COLUMN IS AIR; ONLY ITS CONTROLS ARE SOLID.
+   *
+   * This box is as wide as its widest child and as tall as the whole
+   * stack, and with `pointer-events: auto` on the box itself every gap
+   * between the buttons — and all the empty space beside them — ate the
+   * drag that turns the camera. The brush row made it obvious: it is up
+   * to 460px wide and only exists while DIG is armed, so the look-drag
+   * worked everywhere right up until you armed the shovel.
+   */
+  pointer-events: none;
+}
+
+.density-lab-actions > * {
   pointer-events: auto;
 }
 
@@ -1360,6 +1374,13 @@
   justify-content: flex-end;
   align-items: center;
   max-width: min(58vw, 460px);
+  /* Same rule as the column it sits in: the row is a layout box, not a
+   * target. Its chips and its slider take their own touches; the space
+   * between and beside them belongs to the camera. */
+  pointer-events: none;
+}
+
+.density-lab-subrow > * {
   pointer-events: auto;
 }
 
