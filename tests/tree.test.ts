@@ -10,7 +10,9 @@
 import { existsSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { BARKS, buildTree, growTree, TreeSolid, type TreeSpec } from '../src/world/tree';
+import {
+  BARKS, buildTree, growTree, ringFactor, sidesAt, TreeSolid, type TreeSpec,
+} from '../src/world/tree';
 
 const SPEC: TreeSpec = { girth: 200, height: 5200, seed: 12345 };
 
@@ -265,10 +267,19 @@ describe('the trunk is one continuous tube', () => {
     let doubled = 0;
     for (const count of seen.values()) if (count > 1) doubled += count - 1;
 
-    const rings = pos.count / (20 + 1);          // level 0 has 20 sides
-    /* One duplicate per ring — the wrap seam — and not one more. Per-limb
-     * skinning would double a whole ring at each of the tree's joints. */
-    expect(doubled).toBe(Math.round(rings));
+    const rings = Math.round(pos.count / (sidesAt(0) + 1));
+    /*
+     * One duplicate per ring — the wrap seam — and no WHOLE ring anywhere.
+     * Per-limb skinning would double a ring at each of the tree's joints,
+     * which at this tessellation is sixty-five vertices a time, so the
+     * check has room for a handful without any room for that.
+     *
+     * The handful is real and harmless: at sixty-four sides a twig's tip
+     * ring is small enough that neighbouring vertices round to the same
+     * four decimal places. Five of them, measured.
+     */
+    expect(doubled).toBeGreaterThanOrEqual(rings);
+    expect(doubled).toBeLessThan(rings + sidesAt(0) / 2);
     built.dispose();
   });
 
@@ -280,7 +291,7 @@ describe('the trunk is one continuous tube', () => {
     const built = buildTree(SPEC, new THREE.Texture(), 'bark-grey');
     const mesh = (built.root.levels[0]!.object as THREE.Group).children[0] as THREE.Mesh;
     const pos = mesh.geometry.getAttribute('position');
-    const stride = 21;
+    const stride = sidesAt(0) + 1;
     const a = new THREE.Vector3();
     const b = new THREE.Vector3();
     const centreA = new THREE.Vector3();
@@ -414,5 +425,85 @@ describe('the trunk is one continuous tube', () => {
       expect(worstFloatMm).toBeLessThan(0);
     }
     built.dispose();
+  });
+});
+
+/**
+ * SHE STANDS ON THE BARK, NOT UNDER IT.
+ *
+ * The test above pins that the drawn surface is never INSIDE the collision.
+ * This pins the other half, which is the one the player reported: the
+ * collision must never be inside the DRAWN surface either, or she seats on
+ * a circle the mesh has already covered over and ends up half in the trunk.
+ *
+ * `TreeSolid` is built at the drawn ring radius for exactly this reason.
+ */
+describe('the wood she seats on contains the wood she sees', () => {
+  it('never leaves a drawn facet outside the collision', () => {
+    const parts = growTree(SPEC);
+    const sides = sidesAt(0);
+    const solid = new TreeSolid(parts.limbs, new THREE.Vector3(), ringFactor(sides));
+    const built = buildTree(SPEC, new THREE.Texture(), BARKS[0]!);
+    const wood = ((built.root.levels[0]!.object as THREE.Group)
+      .children[0] as THREE.Mesh).geometry;
+    const pos = wood.getAttribute('position');
+    const v = new THREE.Vector3();
+
+    /*
+     * THE CLEAR TRUNK, above the buried foot and below the lowest bough.
+     *
+     * A chain's end rings are deliberately overrun — the trunk's first ring
+     * is driven 460 mm UNDER the soil so the foot never shows a seam, and it
+     * duly measures 194 mm outside a solid that stops at the ground. That is
+     * the overrun working, not a fault, and she cannot walk there.
+     */
+    const trunk = parts.limbs.filter((l) => l.order === 0);
+    const lowestBough = Math.min(
+      ...parts.limbs.filter((l) => l.order > 0).map((l) => l.a.y),
+    );
+    const from = trunk[0]!.b.y;
+
+    let worstOutsideMm = -Infinity;
+    let tested = 0;
+    for (let i = 0; i < pos.count; i += 1) {
+      v.fromBufferAttribute(pos, i);
+      if (v.y < from || v.y > lowestBough) continue;
+      const d = solid.densityAt(v.x, v.y, v.z);
+      if (d === -Infinity) continue;
+      tested += 1;
+      worstOutsideMm = Math.max(worstOutsideMm, -d * MM);
+    }
+    expect(tested).toBeGreaterThan(100);
+    /* Her feet seat on the collision, so a drawn point outside it is a
+     * point she stands UNDER. What is left is the ring MITRE at a bend —
+     * measured 0.035 mm, which is a two-hundred-and-fiftieth of her body —
+     * and `FOOT_AIR` is set above it so the guarantee still holds. */
+    expect(worstOutsideMm).toBeLessThan(0.05);
+    built.dispose();
+  });
+
+  it('leaves no more than a fraction of a millimetre of air on the trunk', () => {
+    /*
+     * The other side of the same trade. The collision is the circle the
+     * drawn polygon is INSCRIBED in, so she is never under the bark — but
+     * she is over it by the facet's sagitta, and that is what the near
+     * level's side count is for. At the landmark's widest, 573 mm of
+     * radius, twenty sides would leave 7 mm of air; sixty-four leaves 0.7.
+     */
+    const r = 573 / MM;
+    const air = r * (ringFactor(sidesAt(0)) - 1) * MM;
+    expect(air).toBeLessThan(0.8);
+  });
+
+  it('widens a coarse tessellation more, because it needs it more', () => {
+    /* A scrub stem is drawn with a handful of sides and stands proud of its
+     * own circle by 8%; the near trunk is at sixty-four and stands proud by
+     * a tenth of one per cent. A single constant would be wrong for one of
+     * them, which is why the collision asks the level how many sides it
+     * actually baked. */
+    /* Compared as EXCESS over the circle, which is the thing that matters —
+     * the factors themselves are both near one and comparing those hides it. */
+    expect(ringFactor(sidesAt(3)) - 1).toBeGreaterThan((ringFactor(sidesAt(0)) - 1) * 8);
+    expect(ringFactor(sidesAt(0))).toBeLessThan(1.002);
   });
 });

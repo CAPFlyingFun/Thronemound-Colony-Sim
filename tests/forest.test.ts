@@ -14,7 +14,7 @@ import { describe, expect, it } from 'vitest';
 import {
   burialMm, ForestSolid, plantsIn, solidStand, SPECIES, type GroundProbe,
 } from '../src/world/forest';
-import { growTree, trunkProfile } from '../src/world/tree';
+import { growTree, ringFactor, trunkProfile } from '../src/world/tree';
 
 const SPAN = 56000;
 const WHOLE = { x0: 0, z0: 0, x1: SPAN, z1: SPAN };
@@ -131,17 +131,31 @@ describe('the scatter', () => {
 describe('the solid stand matches the wood you can see', () => {
   const spec = { girth: 20, height: 400, seed: 0x5eed, rings: 8, boughs: 7, twigs: false };
 
-  it('takes its radius from the drawn trunk, not from a cone through it', () => {
-    const profile = trunkProfile(spec);
-    const { limbs } = growTree(spec);
-    const trunk = limbs.filter((l) => l.order === 0);
-    expect(profile.pts.length).toBe(trunk.length + 1);
-    for (let i = 0; i < trunk.length; i += 1) {
-      /* Unit-height space: the profile is the trunk divided by its height. */
-      expect(profile.r[i]! * spec.height).toBeCloseTo(trunk[i]!.ra, 6);
-      expect(profile.pts[i]!.y * spec.height).toBeCloseTo(trunk[i]!.a.y, 6);
-      expect(profile.pts[i]!.x * spec.height).toBeCloseTo(trunk[i]!.a.x, 6);
+  it('takes its radius from the DRAWN ring, not from the limb inside it', () => {
+    /*
+     * The limb is a circle; the mesh is a polygon whose flats are TANGENT
+     * to that circle, so its corners stand `1/cos(pi/n)` proud of it. A
+     * profile taken off the limb therefore describes a thinner plant than
+     * the one on screen — and she seats on the profile, so she ends up
+     * standing inside the picture. At scrub tessellation, four sides, that
+     * gap is 41% of the stem.
+     */
+    for (const sides of [20, 10, 6, 4]) {
+      const profile = trunkProfile(spec, sides);
+      const { limbs } = growTree(spec);
+      const trunk = limbs.filter((l) => l.order === 0);
+      expect(profile.pts.length).toBe(trunk.length + 1);
+      const f = ringFactor(sides);
+      for (let i = 0; i < trunk.length; i += 1) {
+        /* Unit-height space: the profile is the trunk divided by its height. */
+        expect(profile.r[i]! * spec.height).toBeCloseTo(trunk[i]!.ra * f, 6);
+        expect(profile.pts[i]!.y * spec.height).toBeCloseTo(trunk[i]!.a.y, 6);
+        expect(profile.pts[i]!.x * spec.height).toBeCloseTo(trunk[i]!.a.x, 6);
+      }
     }
+    /* Four sides really is 41% — the number that made this worth doing. */
+    expect(ringFactor(4)).toBeCloseTo(Math.SQRT2, 6);
+    expect(ringFactor(20)).toBeCloseTo(1.0125, 4);
   });
 
   it('carries the trunk’s lean, which a vertical post cannot', () => {

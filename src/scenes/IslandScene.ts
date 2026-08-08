@@ -52,7 +52,7 @@ import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
 import { SurfaceWalker } from '../world/surfaceWalk';
 import {
-  BARKS, bakeTree, buildTree, trunkProfile, type BuiltTree, type TreeSpec,
+  BARKS, bakeTree, buildTree, sidesAt, trunkProfile, type BuiltTree, type TreeSpec,
   type TrunkProfile,
 } from '../world/tree';
 import {
@@ -122,24 +122,32 @@ const TURN_RATE = 2.53;
 const STEER_GAIN = 1.6;
 
 /**
- * How far above the wood's collision she rides, so she sits on the BARK.
+ * THE AIR UNDER HER FEET — a floor, not a fudge.
  *
- * The trunk's collision is a circle at every height and the mesh is a
- * polygon whose flats are TANGENT to it, so the drawn bark stands proud of
- * the collision by up to a facet's sagitta and she seats on the collision.
+ * She used to ride a calibrated 1.4 mm above the wood's collision because
+ * the collision was the limb's CIRCLE while the mesh was a polygon tangent
+ * to it: the drawn bark stood proud by up to a facet's sagitta, 7 mm at the
+ * landmark's foot, and she seated on the circle. A lift tuned to the
+ * average could only ever be right on average, which is why she was still
+ * half in the trunk from some angles.
  *
- * CALIBRATED, not derived, because the seat also moves where the leg
- * solver's own casts land and the two do not add up one for one. Two
- * measurements of claw-to-drawn-bark on the landmark:
+ * The collision is now built at the DRAWN ring radius and the near level is
+ * tessellated finely enough that the ring is barely wider than the wood, so
+ * there is nothing left to calibrate. This is only the last hundredth: the
+ * ring MITRE where two sections meet at a bend still puts the drawn skin up
+ * to 0.035 mm outside the collision, and a floor under that is not a floor.
  *
- *   lift 0.0 mm  ->  -2.67 mm (that far INSIDE the bark)
- *   lift 2.5 mm  ->  +1.22 mm (that far OUTSIDE it)
- *   lift 1.4 mm  ->  +0.04 mm, six claws spread -1.15 to +0.80
- *
- * Straddling the surface, which is contact: some feet a hair in, some a
- * hair out, none of it visible on something 9 mm long.
+ * IT IS DELIBERATELY SMALL, and raising it does not buy what it looks like
+ * it would. Measured on soil, where a rear claw reads about 0.15 mm under
+ * the drawn hillside: 0.05 mm of floor gave -0.19, 0.25 gave -0.12, and
+ * 0.60 gave -0.09 while pushing a swing foot to 1.96 mm of daylight. That
+ * residual is not seating — it is the terrain's MESHER and the density
+ * field it is built from disagreeing by about that much, so the anchor the
+ * leg reaches for is not quite on the triangle that gets drawn. Lifting her
+ * body cannot close it; referencing the leg anchors to the drawn mesh
+ * would, and that is a different job.
  */
-const WOOD_LIFT = 1.4 / MM;
+const FOOT_AIR = 0.05 / MM;
 
 /**
  * THE STICK'S RESPONSE, which is not the same thing as her top speed.
@@ -650,9 +658,6 @@ export class IslandScene {
 
   /** How high her body rides, taken from her own rig once it has loaded. */
   private legRide = RIDE;
-
-  /** The wood lift, eased — see `woodLift`. */
-  private woodRide = 0;
 
   /** The camera's pull on her nose this frame, -1..1. See `TURN_RATE`. */
   private steerYaw = 0;
@@ -1239,7 +1244,11 @@ export class IslandScene {
       geo.scale(1 / mid, 1 / mid, 1 / mid);
       /* The SAME spec gives the collision its line, so the two can never be
        * describing different trees. */
-      this.standProfiles.set(species.name, trunkProfile(spec));
+      /* At the tier's OWN tessellation: a bush is baked with four sides and
+       * is 41% wider at its corners than the stem it was grown from, so a
+       * profile taken off the circle describes a plant she can stand
+       * inside. */
+      this.standProfiles.set(species.name, trunkProfile(spec, sidesAt(species.detail)));
       /* Room for growth, so an ordinary step does not rebuild the buffer. */
       const room = Math.max(16, Math.ceil(plants.length * 1.4));
       mesh = new THREE.InstancedMesh(geo, this.forestMaterial!, room);
@@ -2159,30 +2168,6 @@ export class IslandScene {
    * her own up until the wood ends, which is the local skin depth and needs
    * no knowledge of which tree she is on.
    */
-  private woodLift(): number {
-    /*
-     * BELOW her, not AT her — and the difference is a feedback loop.
-     *
-     * The first cut asked whether her ORIGIN was inside wood. It is, until
-     * the lift works; then it is not, so the lift switched itself off, so
-     * she sank back in. Measured, it settled at 0.7 mm of the 2.5 it was
-     * asked for, oscillating around the boundary. What the question should
-     * have been is whether the thing she is STANDING ON is wood, which is a
-     * short march down her own up and has no such loop in it.
-     */
-    const wood = (x: number, y: number, z: number): boolean => (
-      this.tree?.solid?.solidAt(x, y, z) === true
-      || this.stand?.solidAt(x, y, z) === true
-    );
-    const reach = WOOD_LIFT + RIDE * 2;
-    for (let d = 0; d <= reach; d += CELL_SIZE * 0.5) {
-      if (wood(
-        this.at.x - this.up.x * d, this.at.y - this.up.y * d, this.at.z - this.up.z * d,
-      )) return WOOD_LIFT;
-    }
-    return 0;
-  }
-
   private moveSurface(dt: number, speed: number): void {
     const walker = this.walker;
     if (!walker) return;
@@ -2220,10 +2205,12 @@ export class IslandScene {
     } else {
       this.at.addScaledVector(this.fwd, speed * dt);
       if (this.input.strafe !== 0) {
+        /* `up x fwd` is her model +X, which is screen-LEFT — hence the
+         * minus. Same convention as `DriveInput.strafe`. */
         const side = S_RIGHT.crossVectors(this.up, this.fwd).normalize();
         this.at.addScaledVector(
           side,
-          this.input.strafe * WALK_SPEED * (this.input.sprint ? SPRINT : 1) * dt,
+          -this.input.strafe * WALK_SPEED * (this.input.sprint ? SPRINT : 1) * dt,
         );
       }
     }
@@ -2258,11 +2245,9 @@ export class IslandScene {
      * and already measured 0.28 mm, which is contact; lifting her there
      * would put the hovering back on the ground instead.
      */
-    /* Eased, because stepping from soil onto a root would otherwise pop her
-     * 2.5 mm in one frame — a quarter of her own length, instantly. */
-    const wantLift = this.woodLift();
-    this.woodRide += (wantLift - this.woodRide) * Math.min(1, dt * 8);
-    (walker.tune as { ride: number }).ride = this.legRide + this.woodRide;
+    /* One height law everywhere now: her legs' own rest plane, plus the
+     * hundredth of a millimetre of air that keeps her out of the ground. */
+    (walker.tune as { ride: number }).ride = this.legRide + FOOT_AIR;
     walker.settle({ at: this.at, up: this.up, forward: this.fwd }, dt, aimDt);
 
     /*

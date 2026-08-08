@@ -217,6 +217,13 @@ export interface DriveInput {
    * and the body slides. It rides the same clip as the walk and the spin,
    * because a foot with no room left has no more room for a side step than
    * for anything else.
+   *
+   * POSITIVE IS THE RIGHT OF THE SCREEN, and that is `forward x up`, NOT
+   * the `up x forward` this file calls `right` elsewhere. That axis is the
+   * model's own +X and it points to her LEFT on screen — settled by
+   * `scripts/shot-hands.mjs`, which dots her travel against the camera's
+   * own +X column rather than against another of the code's conventions.
+   * The first cut used the file's `right` and shipped backwards.
    */
   strafe?: number;
   /** -1..1 about her up. */
@@ -363,7 +370,8 @@ export class LegDrive {
       .addScaledVector(body.up, leg.home.y)
       .addScaledVector(body.forward, leg.home.z);
     const linear = body.forward.clone().multiplyScalar(input.speed * input.walk)
-      .addScaledVector(right, input.speed * (input.strafe ?? 0));
+      /* Minus, because this file's `right` is screen-LEFT — see `strafe`. */
+      .addScaledVector(right, -input.speed * (input.strafe ?? 0));
     const angular = new THREE.Vector3()
       .crossVectors(body.up, offset)
       .multiplyScalar(input.yawRate * input.yaw);
@@ -452,7 +460,8 @@ export class LegDrive {
      */
     const right = new THREE.Vector3().crossVectors(body.up, body.forward).normalize();
     const shove = body.forward.clone().multiplyScalar(input.speed * input.walk * dt)
-      .addScaledVector(right, input.speed * (input.strafe ?? 0) * dt);
+      /* Minus, because this file's `right` is screen-LEFT — see `strafe`. */
+      .addScaledVector(right, -input.speed * (input.strafe ?? 0) * dt);
     /* Zero when someone else owns the heading — see `DriveInput.spin`. The
      * clip below must see the same zero, or it constrains a rotation that
      * is never going to happen and holds back the walk for nothing. */

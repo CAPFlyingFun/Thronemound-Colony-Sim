@@ -101,6 +101,22 @@ export interface TreeSpec {
  */
 export const TIP_RADIUS = 0.5;
 
+/**
+ * How much wider the DRAWN ring is than the limb's radius, at `sides`.
+ *
+ * The mesh is a polygon and the limb is a circle. Putting the vertices on
+ * the circle sinks every flat inside it; putting them at `r / cos(pi/n)`
+ * makes the flats tangent to it instead, which is what stopped her
+ * hovering. The collision has to know the same number or it describes a
+ * thinner tree than the one on screen — and she stands on the collision.
+ */
+export function ringFactor(sides: number): number {
+  return 1 / Math.cos(Math.PI / Math.max(3, sides));
+}
+
+/** Sides on the finest wood — the tessellation she is ever close to. */
+export const NEAR_SIDES = 64;
+
 /** One tapered section of wood: a line with a radius at each end. */
 export interface Limb {
   a: THREE.Vector3;
@@ -281,6 +297,12 @@ export function growTree(spec: TreeSpec): TreeParts {
   return { limbs, tufts };
 }
 
+/** Sides used at a detail level — so a caller can match its collision to
+ *  the tessellation it actually baked. */
+export function sidesAt(level: number): number {
+  return DETAILS[Math.min(DETAILS.length - 1, Math.max(0, level))]!.sides;
+}
+
 /** How many limbs and leaves a detail level bothers with. */
 interface Detail {
   /** Sides around a limb. */
@@ -291,13 +313,24 @@ interface Detail {
   leaf: number;
 }
 
+/*
+ * SIDES ARE A CLEARANCE BUDGET, not just a silhouette.
+ *
+ * The collision is the circle the drawn polygon is inscribed in, so she is
+ * never under the bark — and is over it by the facet's sagitta,
+ * `r (1/cos(pi/n) - 1)`. At the landmark's widest, 573 mm of radius, twenty
+ * sides left 7 mm of air under her feet; sixty-four leaves 0.7, which is a
+ * fourteenth of her own body and invisible. The near level is the only one
+ * she is ever close enough to stand on, so it is the only one that pays.
+ */
 const DETAILS: readonly Detail[] = [
-  { sides: 20, order: 2, leaf: 2 },
-  { sides: 10, order: 1, leaf: 1 },
+  { sides: 64, order: 2, leaf: 2 },
+  { sides: 12, order: 1, leaf: 1 },
   { sides: 6, order: 0, leaf: 0 },
-  /* Scrub grade: four sides to a stem and the coarsest possible leaf. At a
-   * bush's size on screen the silhouette is all that survives anyway. */
-  { sides: 4, order: 1, leaf: 0 },
+  /* Scrub grade: eight sides to a stem and the coarsest possible leaf. Four
+   * was enough for the silhouette, but a four-sided stem stands 41% proud of
+   * its own collision and she climbs these too. */
+  { sides: 8, order: 1, leaf: 0 },
 ];
 
 /**
@@ -442,7 +475,18 @@ function skin(
     for (let i = 0; i < rad.length - 1; i += 1) {
       const span = pts[i]!.distanceTo(pts[i + 1]!);
       if (span < 1e-9) continue;
-      const sinA = Math.min(0.999, Math.abs(rad[i]! - rad[i + 1]!) / span);
+      /*
+       * CLAMPED, because the construction runs away at the ends.
+       *
+       * `1/cos a` is only the tangent surface while the two spheres are far
+       * enough apart to have a common tangent at all. A twig's last section
+       * loses nearly its whole radius over its own length — `sin a` goes to
+       * one, the cone degenerates into the larger sphere, and the factor
+       * goes to infinity. Unclamped it reached 22, which put drawn vertices
+       * 194 mm outside the wood they belong to. Past this angle the sphere
+       * cap is the surface anyway and the flare buys nothing.
+       */
+      const sinA = Math.min(0.55, Math.abs(rad[i]! - rad[i + 1]!) / span);
       const wide = 1 / Math.sqrt(1 - sinA * sinA);
       if (wide > widen[i]!) widen[i] = wide;
       if (wide > widen[i + 1]!) widen[i + 1] = wide;
@@ -605,7 +649,12 @@ export class TreeSolid {
 
   private readonly slabH: number;
 
-  constructor(limbs: readonly Limb[], origin: THREE.Vector3) {
+  /**
+   * @param fatten Multiplies every limb's radius, so the solid can be the
+   *   surface that is actually DRAWN rather than the circle inside it. She
+   *   seats on this; anything the mesh puts outside it, she stands under.
+   */
+  constructor(limbs: readonly Limb[], origin: THREE.Vector3, fatten = 1) {
     /*
      * TWIGS ARE SOLID TOO — leaves are not.
      *
@@ -621,6 +670,8 @@ export class TreeSolid {
       ...l,
       a: l.a.clone().add(origin),
       b: l.b.clone().add(origin),
+      ra: l.ra * fatten,
+      rb: l.rb * fatten,
     }));
     let x0 = Infinity; let x1 = -Infinity;
     let y0 = Infinity; let y1 = -Infinity;
@@ -796,15 +847,19 @@ export interface TrunkProfile {
   r: number[];
 }
 
-export function trunkProfile(spec: TreeSpec): TrunkProfile {
+export function trunkProfile(spec: TreeSpec, sides = NEAR_SIDES): TrunkProfile {
   const { limbs } = growTree(spec);
   const trunk = limbs.filter((l) => l.order === 0);
   const k = 1 / spec.height;
+  /* The DRAWN ring, not the limb — see `ringFactor`. A scattered plant is
+   * baked at its tier's own tessellation, and a four-sided bush is 41%
+   * wider at its corners than the stem it is built from. */
+  const f = ringFactor(sides) * k;
   const pts = [{ x: trunk[0]!.a.x * k, y: trunk[0]!.a.y * k, z: trunk[0]!.a.z * k }];
-  const r = [trunk[0]!.ra * k];
+  const r = [trunk[0]!.ra * f];
   for (const l of trunk) {
     pts.push({ x: l.b.x * k, y: l.b.y * k, z: l.b.z * k });
-    r.push(l.rb * k);
+    r.push(l.rb * f);
   }
   return { pts, r };
 }
@@ -895,7 +950,8 @@ export function buildTree(
     bark: barkName,
     solid: null,
     makeSolid(origin: THREE.Vector3): TreeSolid {
-      built.solid = new TreeSolid(parts.limbs, origin);
+      /* At the finest level, because that is the one she can walk up to. */
+      built.solid = new TreeSolid(parts.limbs, origin, ringFactor(DETAILS[0]!.sides));
       return built.solid;
     },
     dispose(): void {
