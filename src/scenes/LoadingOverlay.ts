@@ -163,7 +163,10 @@ export class LoadingOverlay {
      */
     const version = doc.createElement('p');
     version.className = 'tm-loading-version';
-    version.textContent = `v${__APP_VERSION__} · build ${__BUILD_TIME__}`;
+    /* The VERSION is what identifies a build to the person testing it. The
+     * timestamp stays as a tiebreaker, small and second — "is 0.0.12 live
+     * yet" is the question actually being asked. */
+    version.textContent = `v${__APP_VERSION__}`;
     this.root.appendChild(version);
 
     const dot = doc.createElement('div');

@@ -85,6 +85,9 @@ const S_PERP = new THREE.Vector3();
 const S_RAD = new THREE.Vector3();
 const S_CENTER = new THREE.Vector3();
 const S_TARGET = new THREE.Vector3();
+/** The ghost's own, so it cannot be trampled by whatever the cameras are
+ *  doing with the shared scratch in the same frame. */
+const S_SPOT = new THREE.Vector3();
 const S_FWD = new THREE.Vector3();
 const S_UP = new THREE.Vector3();
 const S_RIGHT = new THREE.Vector3();
@@ -1018,7 +1021,20 @@ export class IslandScene {
     for (let v = 0; v < orig.length; v += 1) {
       const wx = stream.originWorldX + data.positions[v * 3]!;
       const wz = stream.originWorldZ + data.positions[v * 3 + 2]!;
-      orig[v] = this.groundHeightAt(wx, wz) * MM;
+      /*
+       * THE SAME SURFACE THE FIELD WAS BUILT FROM — measured, 4.31 mm out
+       * on average and 22.9 mm at worst when it was not.
+       *
+       * `groundHeightAt` is bilinear on the FULL 1025-sample grid. The soil
+       * window is generated from `renderedOn`, which is triangle-exact on
+       * the DRAWN 513 grid — a different surface, and on curved ground they
+       * disagree by millimetres. The dug test starts at 1.5 mm and is
+       * saturated by 4.0 mm, so undug ground was reading as fully
+       * excavated and the whole window painted itself rock: the patch of
+       * wrong texture around her. Read off the drawn grid and an untouched
+       * soil top is exactly its own original, to the digit, everywhere.
+       */
+      orig[v] = this.renderedOn(this.heights!, wx * MM, wz * MM);
       const dhx = (this.groundHeightAt(wx + d, wz) - this.groundHeightAt(wx - d, wz)) / (2 * d);
       const dhz = (this.groundHeightAt(wx, wz + d) - this.groundHeightAt(wx, wz - d)) / (2 * d);
       groundNy[v] = 1 / Math.hypot(dhx, 1, dhz);
@@ -1475,7 +1491,7 @@ export class IslandScene {
     if (this.queenReady && this.queen.jawPosition(centre)) {
       hull = Math.max(hull, centre.sub(this.at).dot(aim));
     }
-    centre.copy(this.at).addScaledVector(aim, this.biteSeat(aim, hull));
+    this.biteCentre(aim, hull, centre);
 
     let touched = 0;
     let minX = Infinity; let minY = Infinity; let minZ = Infinity;
@@ -1555,15 +1571,47 @@ export class IslandScene {
    * The preview draws from this same number, so what the ghost promises is
    * what the stroke takes.
    */
-  private biteSeat(aim: THREE.Vector3, reach: number): number {
+  private biteCentre(aim: THREE.Vector3, reach: number, out: THREE.Vector3): boolean {
     const step = CELL_SIZE * 0.5;
     const far = reach + SCOOP_DEEP_MM / MM;
     for (let d = 0; d <= far; d += step) {
-      if (this.soilDensityAt(
-        this.at.x + aim.x * d, this.at.y + aim.y * d, this.at.z + aim.z * d,
-      ) > 0) return Math.max(0, d + SCOOP_DEEP_MM / 2 / MM);
+      const x = this.at.x + aim.x * d;
+      const y = this.at.y + aim.y * d;
+      const z = this.at.z + aim.z * d;
+      if (this.soilDensityAt(x, y, z) > 0) {
+        out.set(x, y, z).addScaledVector(aim, SCOOP_DEEP_MM / 2 / MM);
+        return true;
+      }
     }
-    return reach;
+    /*
+     * NOTHING ALONG THE AIM — SO DIG THE GROUND SHE IS ON.
+     *
+     * Measured on a hillside, aiming level: thirty millimetres of the ray
+     * ahead of her is air, every sample, because she stands a body-height
+     * off a surface that falls away in front of her. The stroke was seated
+     * at arm's length in that air and removed nothing, which is the press
+     * that does nothing — and at zero degrees, which is where the dial
+     * starts and where "dig the entrance" begins.
+     *
+     * She is standing ON soil, though, and her jaws can reach it. So the
+     * fallback drops from arm's length along her own down until it finds
+     * the floor, and centres the scoop on it: half the mouthful is under
+     * the surface, which is a scrape. That is what an ant aiming level at
+     * a hillside actually does.
+     */
+    out.copy(this.at).addScaledVector(aim, reach);
+    for (let d = 0; d <= RIDE * 4; d += step) {
+      const x = out.x - this.up.x * d;
+      const y = out.y - this.up.y * d;
+      const z = out.z - this.up.z * d;
+      if (this.soilDensityAt(x, y, z) > 0) {
+        out.set(x, y, z);
+        return true;
+      }
+    }
+    /* Air ahead and air below it: she is over a drop, and this stroke is a
+     * genuine miss. Left at arm's length so the ghost still shows where. */
+    return false;
   }
 
   /** Builder ids are `b{k}-{i}` and `b{k}-e{i}` — how its half of a merged
@@ -1626,9 +1674,11 @@ export class IslandScene {
     if (!this.smoothGhost) this.smoothGhost = make(0x6fc8e9, 0.22);
 
     const aim = this.boreAim();
-    /* The same seat the stroke uses, so the ghost cannot promise a hole
-     * somewhere the cut will not make one. */
-    const hull = this.biteSeat(aim, NOSE_REACH + JAW_PAST_NOSE);
+    /* The same spot the stroke uses, so the ghost cannot promise a hole
+     * somewhere the cut will not make one — including the scrape it falls
+     * back to when the aim itself meets nothing. */
+    const spot = S_SPOT;
+    const willBite = this.biteCentre(aim, NOSE_REACH + JAW_PAST_NOSE, spot);
 
     /* The CUT, as the pair of scoops it actually removes — wide and low,
      * her real mouthful shape, because a round marker would promise a
@@ -1647,8 +1697,10 @@ export class IslandScene {
     cut.visible = true;
     cut.quaternion.setFromRotationMatrix(S_MAT.makeBasis(S_RIGHT, S_UP, S_FWD));
     cut.scale.set(SCOOP_WIDE_MM / 2 / MM, SCOOP_TALL_MM / 2 / MM, span / 2);
-    cut.position.copy(this.at)
-      .addScaledVector(aim, hull + span / 2 - SCOOP_DEEP_MM / 2 / MM);
+    cut.position.copy(spot);
+    /* A stroke that will remove nothing says so, rather than drawing a
+     * confident hole over open air. */
+    (cut.material as THREE.MeshBasicMaterial).opacity = willBite ? 0.5 : 0.16;
 
     /* And the SHAVE around it, which is what the slider sizes. Fainter,
      * because it only rounds off what the cut leaves — it is the halo of
@@ -1657,7 +1709,7 @@ export class IslandScene {
     halo.visible = true;
     halo.quaternion.identity();
     halo.scale.setScalar(this.brushMm / MM);
-    halo.position.copy(this.at).addScaledVector(aim, hull);
+    halo.position.copy(spot);
   }
 
   /** Remesh every chunk a brush result touched — bite()'s own loop, shared. */
@@ -2647,6 +2699,22 @@ export class IslandScene {
   }
 
   setPausedForTest(on: boolean): void { this.paused = on; }
+
+  /** Where the next stroke would land, and what it is aimed at — the numbers
+   *  behind "it says it dug and nothing happened". */
+  biteProbeForTest(): { seatMm: number; aimDeg: number; upY: number; ceilMm: number } {
+    const aim = this.boreAim();
+    const spot = new THREE.Vector3();
+    const hit = this.biteCentre(aim, NOSE_REACH + JAW_PAST_NOSE, spot);
+    return {
+      seatMm: hit ? spot.distanceTo(this.at) * MM : -1,
+      aimDeg: (this.aimPitch * 180) / Math.PI,
+      upY: this.up.y,
+      ceilMm: this.bandTop.value * MM,
+    };
+  }
+
+  aimPitchForTest(radians: number): void { this.aimPitch = radians; }
 
   stepForTest(dt: number, steps: number): void {
     for (let i = 0; i < steps; i += 1) this.simulate(dt);
