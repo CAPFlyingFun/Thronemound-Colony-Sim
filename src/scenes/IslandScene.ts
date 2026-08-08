@@ -825,11 +825,23 @@ export class IslandScene {
     } catch {
       return; // A missing bark is not worth failing the island over.
     }
-    map.wrapS = THREE.RepeatWrapping;
-    /* Mirrored UP the trunk: the bark photographs are square crops, not
-     * seamless tiles, so a plain repeat lays a hard horizontal line every
-     * couple of metres all the way up. Mirroring folds the tile against
-     * itself and the seam disappears into the grain. */
+    /*
+     * MIRRORED BOTH WAYS, and that is a decision rather than a default.
+     *
+     * None of these images tile — measured, the wrap join on the newest
+     * three was five to nine times worse than an ordinary interior join,
+     * which on a trunk that wraps its texture six times is six hard lines
+     * running the height of the tree. Blending the edges into agreement
+     * fixes the join and leaves a blurred stripe down the middle that is
+     * more obvious than the seam was. Mirroring costs neither: the join is
+     * exactly continuous by construction, the image stays as sharp as it
+     * came, and what it buys instead is a line of symmetry per tile, which
+     * on bark disappears into the grain.
+     *
+     * It also means a new bark has to satisfy nothing at all beyond being
+     * square.
+     */
+    map.wrapS = THREE.MirroredRepeatWrapping;
     map.wrapT = THREE.MirroredRepeatWrapping;
     map.colorSpace = THREE.SRGBColorSpace;
     /* Sixteen, not eight: the trunk is almost always seen at a grazing

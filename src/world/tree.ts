@@ -36,11 +36,17 @@ import * as THREE from 'three';
  * here. Nothing else needs to change — the scene picks from this list by
  * seed, and the mesh derives its tiling from the trunk's own girth. About
  * 1024 square is right; the wrap tiles it several times round, so a bigger
- * image buys less than it costs. It does not need to be seamless top to
- * bottom (the wrap is mirrored, which hides that join) but the LEFT and
- * RIGHT edges do meet, so a seamless-horizontal tile is worth having.
+ * image buys less than it costs.
+ *
+ * It does NOT need to tile. Both wraps are mirrored, so every join is
+ * continuous by construction whatever the edges do — which is the whole
+ * reason to mirror rather than repeat. The cost is a line of symmetry per
+ * tile, and on bark that vanishes into the grain; the alternative, blending
+ * the edges into agreement, leaves a blurred stripe that does not.
  */
-export const BARKS = ['bark-grey', 'bark-lichen'] as const;
+export const BARKS = [
+  'bark-grey', 'bark-lichen', 'bark-craggy', 'bark-fissured', 'bark-mossy',
+] as const;
 
 export type BarkName = (typeof BARKS)[number];
 
