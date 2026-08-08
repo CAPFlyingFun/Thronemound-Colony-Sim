@@ -367,8 +367,19 @@ export function solidStand(
         y: foot,
         z: p.zMm / mmPerUnit,
         scale,
-        cos: Math.cos(-p.spin),
-        sin: Math.sin(-p.spin),
+        /*
+         * THE PLANT'S OWN SPIN, NOT ITS NEGATIVE.
+         *
+         * `densityAt` already un-turns — it applies the inverse rotation to
+         * the offset before reading the profile. Handing it the cosine and
+         * sine of MINUS the spin negated a negation, leaving the collision
+         * plant turned by TWICE the spin away from the drawn one. A trunk
+         * wanders off its own centre line by more than its own radius, so a
+         * wrong turn moves the wood sideways: she stood on a plant that was
+         * not where the picture was, which is the reported hovering.
+         */
+        cos: Math.cos(p.spin),
+        sin: Math.sin(p.spin),
         profile,
         reach: (widest + 0.05) * scale,
         top: foot + top * scale,

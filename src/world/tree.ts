@@ -395,11 +395,59 @@ function skin(
      * has to start inside the trunk it grows from or the join shows, and a
      * trunk's first ring may as well start under the soil. Nothing between
      * them needs it any more.
+     *
+     * AN OVERRUN EXTENDS THE CONE; IT DOES NOT STRETCH IT.
+     *
+     * Moving the end ring and keeping its radius spreads the section's whole
+     * taper over a longer run, so between that ring and the next one the
+     * drawn tube sits INSIDE the cone the collision is built from — and the
+     * lowest section of the trunk is exactly where she steps onto the tree.
+     * Measured on the landmark, 705 mm up: the wood she stood on was 13.0 mm
+     * outside the bark she could see, against a body 9 mm long. That is the
+     * hovering. Carrying the radius along the same slope keeps the ruled
+     * surface on the cone, which is what makes the two agree everywhere and
+     * not merely at the rings.
      */
+    const widen: number[] = new Array(rad.length).fill(1);
+    const footSpan = pts[0]!.distanceTo(pts[1]!);
+    const back = Math.min(rad[0]! * 0.9, footSpan * 0.4);
     tout.copy(pts[1]!).sub(pts[0]!).normalize();
-    pts[0]!.addScaledVector(tout, -Math.min(rad[0]! * 0.9, pts[0]!.distanceTo(pts[1]!) * 0.4));
+    pts[0]!.addScaledVector(tout, -back);
+    if (footSpan > 1e-9) {
+      rad[0] = Math.max(1e-4, rad[0]! - ((rad[1]! - rad[0]!) / footSpan) * back);
+    }
+    const tipSpan = pts[last]!.distanceTo(pts[last - 1]!);
+    const fwd = Math.min(rad[last]! * 0.6, tipSpan * 0.4);
     tin.copy(pts[last]!).sub(pts[last - 1]!).normalize();
-    pts[last]!.addScaledVector(tin, Math.min(rad[last]! * 0.6, pts[last]!.distanceTo(pts[last - 1]!) * 0.4));
+    pts[last]!.addScaledVector(tin, fwd);
+    if (tipSpan > 1e-9) {
+      rad[last] = Math.max(1e-4, rad[last]! + ((rad[last]! - rad[last - 1]!) / tipSpan) * fwd);
+    }
+
+    /*
+     * A ROUND CONE IS FATTER THAN ITS OWN RADII.
+     *
+     * The solid is a cone with a SPHERE welded on each end, and its side is
+     * the common tangent to those two spheres — not the line between the rim
+     * points. Work the tangency out and the surface is the linear
+     * interpolation of `r / cos a`, where `sin a` is the taper per unit
+     * length. So a ring drawn at plain `r` is inside the wood by
+     * `r (1/cos a - 1)`: three millimetres at the landmark's foot, where the
+     * flare makes the taper steepest and where she steps onto the tree.
+     *
+     * Scaling both ends of a section by `1 / cos a` puts the ruled surface
+     * EXACTLY on the cone's side, not near it. A joint takes the fatter of
+     * the two sections meeting there, so neither side of it can float.
+     */
+    for (let i = 0; i < rad.length - 1; i += 1) {
+      const span = pts[i]!.distanceTo(pts[i + 1]!);
+      if (span < 1e-9) continue;
+      const sinA = Math.min(0.999, Math.abs(rad[i]! - rad[i + 1]!) / span);
+      const wide = 1 / Math.sqrt(1 - sinA * sinA);
+      if (wide > widen[i]!) widen[i] = wide;
+      if (wide > widen[i + 1]!) widen[i + 1] = wide;
+    }
+    for (let i = 0; i < rad.length; i += 1) rad[i]! *= widen[i]!;
 
     prev.copy(pts[1]!).sub(pts[0]!).normalize();
     anyPerp(prev, u);

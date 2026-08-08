@@ -11,7 +11,9 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { burialMm, plantsIn, SPECIES, type GroundProbe } from '../src/world/forest';
+import {
+  burialMm, ForestSolid, plantsIn, solidStand, SPECIES, type GroundProbe,
+} from '../src/world/forest';
 import { growTree, trunkProfile } from '../src/world/tree';
 
 const SPAN = 56000;
@@ -165,5 +167,80 @@ describe('the solid stand matches the wood you can see', () => {
     const t = half / (profile.r.length - 1);
     /* The old post at mid-height, against the wood actually there. */
     expect(straight(t)).toBeGreaterThan(profile.r[half]! * 1.15);
+  });
+});
+
+/**
+ * A SCATTERED PLANT IS SOLID WHERE IT IS DRAWN.
+ *
+ * The landmark tree is one mesh at one place, so its collision only has to
+ * agree about the shape. A scattered plant is an INSTANCE: one baked shape
+ * placed by a matrix, and there are two transforms in play — the one the
+ * GPU draws with and the one the query un-does. If they disagree, she
+ * stands on a plant that is not where the picture is, which is the whole of
+ * the reported hovering.
+ *
+ * So the test is a round trip, not a re-derivation: take a point on the
+ * DRAWN plant, put it through the SAME matrix three.js composes, and ask
+ * the collision whether that world point is wood.
+ */
+describe('a scattered plant is solid where it is drawn', () => {
+  const spec = { girth: 40, height: 400, seed: 4242 };
+  const profile = trunkProfile(spec);
+
+  /** The instance matrix `growStand` composes: spin about Y, then scale. */
+  const draw = (
+    local: { x: number; y: number; z: number },
+    at: { x: number; y: number; z: number },
+    spin: number,
+    scale: number,
+  ) => {
+    const c = Math.cos(spin);
+    const s = Math.sin(spin);
+    const x = local.x * scale;
+    const y = local.y * scale;
+    const z = local.z * scale;
+    return { x: at.x + (c * x + s * z), y: at.y + y, z: at.z + (-s * x + c * z) };
+  };
+
+  it('un-turns a point the same way the instance turns it', () => {
+    /* A trunk WANDERS, so its axis is off centre — which is what makes a
+     * wrong spin measurable at all. A plumb pole is symmetric and hides it. */
+    const mid = Math.floor(profile.pts.length * 0.7);
+    const axis = profile.pts[mid]!;
+    expect(Math.hypot(axis.x, axis.z)).toBeGreaterThan(profile.r[mid]!);
+
+    const at = { x: 300, y: 20, z: -150 };
+    const scale = 80;
+    for (const spin of [0, 0.7, 1.9, 3.6, 5.4]) {
+      const world = draw(axis, at, spin, scale);
+      const solid = new ForestSolid([{
+        x: at.x, y: at.y, z: at.z, scale,
+        cos: Math.cos(spin), sin: Math.sin(spin),
+        profile,
+        reach: (Math.max(...profile.r) + 0.05) * scale,
+        top: at.y + Math.max(...profile.pts.map((p) => p.y)) * scale,
+      }], 400 / 5);
+      /* Dead on the drawn axis at that height: the deepest wood there is. */
+      expect(solid.solidAt(world.x, world.y, world.z), `spin ${spin}`).toBe(true);
+    }
+  });
+
+  it('places the stand around her on the same spot the instance draws', () => {
+    /* The real path, end to end: `solidStand` builds the same `Standing`
+     * the scene collides against, from the same scatter `growStand` draws. */
+    const plants = plantsIn(of('canopy'), WHOLE, island);
+    expect(plants.length).toBeGreaterThan(3);
+    const p = plants.find((q) => Math.abs(Math.sin(q.spin)) > 0.5)!;
+    const solid = solidStand(
+      { xMm: p.xMm, zMm: p.zMm }, 4000, 5, island, () => profile,
+    );
+    const scale = p.heightMm / 5;
+    const foot = (p.groundMm - burialMm(p.heightMm)) / 5;
+    const mid = Math.floor(profile.pts.length * 0.7);
+    const world = draw(
+      profile.pts[mid]!, { x: p.xMm / 5, y: foot, z: p.zMm / 5 }, p.spin, scale,
+    );
+    expect(solid.solidAt(world.x, world.y, world.z)).toBe(true);
   });
 });

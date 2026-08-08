@@ -359,8 +359,19 @@ describe('the trunk is one continuous tube', () => {
       );
       probe.updateMatrixWorld();
       let worstFloatMm = -Infinity;
-      for (let i = 2; i < trunk.length - 2; i += 3) {
-        const centre = trunk[i]!.a;
+      /*
+       * BETWEEN the rings, not only at them — and starting at the FOOT.
+       *
+       * This sampled ring corners from the third section up, which is the
+       * one place the fault could not show: a ring is on the cone by
+       * construction whatever the section between them does, and the whole
+       * error lived in section zero, where the end overrun had stretched
+       * the taper. Thirteen millimetres of hovering, measured in the browser
+       * on the trunk she actually climbs, while this test read clean.
+       */
+      for (let i = 0; i < trunk.length - 1; i += 1) {
+        for (const frac of [0, 0.25, 0.5, 0.75]) {
+        const centre = trunk[i]!.a.clone().lerp(trunk[i]!.b, frac);
         for (let k = 0; k < 8; k += 1) {
           const ang = (k / 8) * Math.PI * 2 + 0.37;
           dir.set(Math.cos(ang), 0, Math.sin(ang));
@@ -389,13 +400,18 @@ describe('the trunk is one continuous tube', () => {
           if (!hit) continue;
           worstFloatMm = Math.max(worstFloatMm, (skin - (out - hit.distance)) * MM);
         }
+        }
       }
-      /* Worst float per level, measured: +0.02, -0.01, -1.90, -25.45 mm
-       * (negative is the bark standing PROUD of the collision, which is the
-       * safe side). Before the fix the same four were +9.84, +29.43,
-       * +121.98 and +155.29 — all air, all of it under her feet. A tenth of
-       * a millimetre of slack for the ring mitre at a bend. */
-      expect(worstFloatMm).toBeLessThan(0.1);
+      /*
+       * Worst float per level, measured: -0.41, -0.41, -1.60, -20.11 mm.
+       * Negative is the bark standing PROUD of the collision, which is the
+       * harmless side — her claw sinks a fraction into the picture instead
+       * of hanging over it. Sampled at the rings AND between them, from the
+       * foot up, the same four levels read +9.84, +29.43, +121.98 and
+       * +155.29 mm of air before any of this, and +13.0 mm at the height
+       * she actually steps onto the trunk.
+       */
+      expect(worstFloatMm).toBeLessThan(0);
     }
     built.dispose();
   });
