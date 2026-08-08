@@ -133,13 +133,25 @@ const SCOOP_TALL_MM = 5;
 const SCOOP_DEEP_MM = 3;
 
 /**
- * How hard each stroke's own hole is relaxed afterwards.
+ * How hard each stroke's own hole is relaxed afterwards, and how often.
  *
- * A third of the way to the neighbourhood mean: enough to take the edge
- * off the ridge between two overlapping scoops, little enough that a wall
- * one scoop thick survives being passed twice.
+ * Halfway to the neighbourhood mean, twice — one gentle pass took the
+ * worst off the ridge between two overlapping scoops and still left
+ * enough to catch a foot on. Two passes at a half is roughly a wider
+ * kernel without the cost of actually widening one.
  */
-const SMOOTH_STRENGTH = 0.34;
+const SMOOTH_STRENGTH = 0.5;
+const SMOOTH_PASSES = 2;
+
+/**
+ * How far OUTSIDE the cut the relaxation reaches, in samples.
+ *
+ * The ridge that matters is not inside this stroke's hole — it is the
+ * seam where this stroke meets the last one, which by definition lies on
+ * the boundary of the box the brush just touched. Smoothing only what was
+ * cut leaves exactly the join that trips her.
+ */
+const SMOOTH_GROW = 2;
 
 /** How much soil the lens keeps off itself, so the eye never sits in a
  *  wall — the near plane is tiny, but a camera INSIDE soil renders the
@@ -447,6 +459,15 @@ export class IslandScene {
   constructor(host: HTMLElement) {
     this.host = host;
     host.classList.add('density-lab-host');
+    /*
+     * Safari in a TAB ignores `user-scalable=no` on purpose, and answers a
+     * pinch with its own `gesture*` events rather than with touches — so
+     * `touch-action` never sees them and the page magnifies anyway.
+     * Refusing the gesture outright is the only thing that stops it.
+     */
+    for (const name of ['gesturestart', 'gesturechange', 'gestureend']) {
+      host.addEventListener(name, this.refuseGesture, { passive: false });
+    }
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     host.appendChild(this.renderer.domElement);
@@ -1338,10 +1359,12 @@ export class IslandScene {
      * eats thin walls, and one applied everywhere would slowly melt the
      * whole hill.
      */
-    const smoothed = this.stream!.smoothBox(
-      { minX, minY, minZ, maxX, maxY, maxZ }, SMOOTH_STRENGTH,
-    );
-    if (smoothed) {
+    for (let pass = 0; pass < SMOOTH_PASSES; pass += 1) {
+      const smoothed = this.stream!.smoothBox({
+        minX: minX - SMOOTH_GROW, minY: minY - SMOOTH_GROW, minZ: minZ - SMOOTH_GROW,
+        maxX: maxX + SMOOTH_GROW, maxY: maxY + SMOOTH_GROW, maxZ: maxZ + SMOOTH_GROW,
+      }, SMOOTH_STRENGTH);
+      if (!smoothed) break;
       minX = Math.min(minX, smoothed.minX); maxX = Math.max(maxX, smoothed.maxX);
       minY = Math.min(minY, smoothed.minY); maxY = Math.max(maxY, smoothed.maxY);
       minZ = Math.min(minZ, smoothed.minZ); maxZ = Math.max(maxZ, smoothed.maxZ);
@@ -2300,8 +2323,13 @@ export class IslandScene {
     this.closeDesigner();
   }
 
+  private readonly refuseGesture = (e: Event): void => { e.preventDefault(); };
+
   dispose(): void {
     cancelAnimationFrame(this.frame);
+    for (const name of ['gesturestart', 'gesturechange', 'gestureend']) {
+      this.host.removeEventListener(name, this.refuseGesture);
+    }
     this.statsPanel.dispose();
     this.designer?.dispose();
     this.scene.traverse((node) => {

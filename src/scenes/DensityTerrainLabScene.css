@@ -4,10 +4,12 @@
   height: 100%;
   overflow: hidden;
   background: #8db4d6;
-  /* No double-tap zoom: a quick second tap is GAMEPLAY (dig, grab, walk),
-   * not a request to magnify the page. `manipulation` keeps taps and pans
-   * working while telling the browser to stop guessing at gestures. */
-  touch-action: manipulation;
+  /* No page zoom at all. `manipulation` was only half of it — it stops a
+   * quick second tap being read as zoom, and leaves PINCH alone, so two
+   * fingers landing anywhere off the canvas still magnified the whole
+   * game. `none` hands every touch gesture to us; the canvas already had
+   * it, and this is the rest of the room. */
+  touch-action: none;
 }
 
 .density-lab-host canvas {
@@ -17,7 +19,10 @@
 }
 
 .density-lab-host button {
-  touch-action: manipulation;
+  /* Buttons included: a double tap on DIG is two digs, never a zoom.
+   * Pointer events are unaffected — this only refuses the BROWSER's
+   * gesture interpretation, not ours. */
+  touch-action: none;
 }
 
 .density-lab-hud {
