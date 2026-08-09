@@ -804,7 +804,7 @@ export class LegDrive {
         leg.from.copy(leg.at);
       }
     } else if (
-      staged && !inTransit && !corner.release && spentest && strain >= 1
+      staged && !inTransit && !corner.release && spentest && strain >= 0.7
       && onFoot >= this.legs.length
     ) {
       /*
@@ -885,7 +885,47 @@ export class LegDrive {
       }
       leg.groping = false;
       leg.to.copy(hit);
-      leg.t = Math.min(1, leg.t + dt / SWING_SECONDS);
+      /*
+       * A CORNER SWING KEEPS HER PACE.
+       *
+       * The 0.16 s swing clock is tuned for the ordinary tripod, where three
+       * feet cross together and the stance carries her meanwhile. At a
+       * corner the queue makes every step SEQUENTIAL — one foot at a time,
+       * body waiting on each — so the fixed clock becomes the speed limit:
+       * measured at full sprint she dropped from 22.8 to ~12 mm/s across
+       * twenty millimetres either side of the fold, all of it spent parked
+       * at the clip while a swing finished. So while the scheduler (or its
+       * grace) owns the queue, an ORDINARY step takes the time her own gait
+       * implies at the commanded pace — one stroke diameter of travel — and
+       * never more than the ordinary clock. The floor keeps a step a step
+       * rather than a teleport at silly speeds.
+       *
+       * A SCHEDULED swing keeps the full clock. Those are the cross-surface
+       * grips, and hurrying one is not free: measured on the way DOWN the
+       * trunk, fast-clocking the scheduled front foot landed it before the
+       * body had folded, the spread rule dragged it straight back off, and
+       * she sat in `acquireFront` for five hundred frames four millimetres
+       * above the soil. Only the creep steps — same surface, same `nearest`,
+       * nothing delicate about them — get the fast clock.
+       */
+      const paced = input.speed > 1e-9
+        ? (2 * radius) / input.speed
+        : SWING_SECONDS;
+      /*
+       * A SCHEDULED swing keeps the full clock, always. Those are the
+       * cross-surface grips, and hurrying one is not free: measured on the
+       * way DOWN the trunk, fast-clocking the scheduled front foot landed
+       * it before the body had folded, the spread rule dragged it straight
+       * back off, and she sat in `acquireFront` for five hundred frames
+       * four millimetres above the soil — intermittently, which is worse
+       * than slow. (A "hurry only when the aim is near home" gate was
+       * tried and jammed the same way.) Only the creep steps — same
+       * surface, same `nearest`, nothing delicate about them — hurry.
+       */
+      const swingSeconds = staged && !scheduled
+        ? Math.max(0.06, Math.min(SWING_SECONDS, paced))
+        : SWING_SECONDS;
+      leg.t = Math.min(1, leg.t + dt / swingSeconds);
       /*
        * The swing LANDS where it lifts off, with no jump at the end.
        *
