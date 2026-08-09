@@ -46,6 +46,7 @@ import { addNode } from '../nest/nestEdit';
 import { type NestPlan } from '../nest/nestPlan';
 import { chamberBox, chamberNorm, type ChamberBox } from './ChamberMovement';
 import { BoreRig, YAW_RATE } from './BoreControl';
+import { Dodge, readFlick } from './dodge';
 import { DebugStatsPanel } from './DebugStatsPanel';
 import { LoadingOverlay } from './LoadingOverlay';
 import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
@@ -111,18 +112,18 @@ const SPRINT = 3;
 const TURN_RATE = 2.53;
 
 /**
- * How far a pan of the view slides her sideways.
+ * THE CAMERA MOVES THE CAMERA. It used to move HER.
  *
- * The two controls are swapped from where they started: the STICK turns her
- * and the VIEW side-steps her. `camYaw` is how far the orbit arm has been
- * dragged off her tail and it decays back to zero on its own, so holding
- * the view swung slides her and letting go stops her — no second latch, no
- * mode to be in.
+ * A pan was read as a side step every frame — `strafe = -camYaw * gain` —
+ * which meant you could not look at anything without travelling toward it,
+ * and letting go left her gliding while the view swung home. It went
+ * through three rounds of gating (idle stick, finger down) and each one made
+ * it less wrong without making it right, because the premise was wrong:
+ * looking is not moving.
  *
- * The gain is what a half-radian drag is worth: at 1.6 that is a full side
- * step, so an ordinary flick moves her and a nudge nudges her.
+ * A deliberate GESTURE moves her instead — see `dodge.ts`. Nothing here
+ * reads `camYaw` for movement any more.
  */
-const PAN_STRAFE_GAIN = 1.6;
 
 /**
  * THE AIR UNDER HER FEET — a floor, not a fudge.
@@ -1003,6 +1004,18 @@ export class IslandScene {
   private stickPointer: number | null = null;
 
   private lookPointer: number | null = null;
+
+  /**
+   * The look pointer's stroke so far — where it went down, when, and how
+   * far it has actually travelled. Read once, on release, to decide whether
+   * that was a pan or a flick. See `readFlick`.
+   */
+  private stroke = {
+    x: 0, y: 0, lastX: 0, lastY: 0, at: 0, travel: 0,
+  };
+
+  /** The evasive burst, and the numbers behind it. See `dodge.ts`. */
+  private readonly dodge = new Dodge();
 
   private readonly stickOrigin = { x: 0, y: 0 };
 
@@ -2072,25 +2085,6 @@ export class IslandScene {
      * rightward drag DECREASES camYaw (`camYaw -= movementX`) while a
      * positive strafe is screen-right.
      */
-    /*
-     * ONLY WHEN THE STICK IS IDLE. Panning to look around while walking was
-     * dragging her sideways at the same time, which makes it impossible to
-     * just LOOK. A thumb on the stick means she is being driven; the view is
-     * then a camera and nothing else.
-     */
-    const driving = Math.abs(this.input.walk) > 0.05 || Math.abs(this.input.yaw) > 0.05;
-    /*
-     * AND ONLY WHILE THE FINGER IS DOWN.
-     *
-     * `camYaw` decays back to zero after the drag ends, and a strafe derived
-     * from it would decay with it — so letting go of the view left her
-     * gliding sideways for as long as the camera took to swing home. Finger
-     * released is movement released; the camera may still ease back, but
-     * that is a camera doing camera things.
-     */
-    this.input.strafe = driving || this.lookPointer === null
-      ? 0
-      : Math.max(-1, Math.min(1, -this.camYaw * PAN_STRAFE_GAIN));
     const bore = this.bore.step(dt, {
       /*
        * Scaled so the rig delivers TURN_RATE at full stick rather than its
@@ -2383,18 +2377,41 @@ export class IslandScene {
      * which is what the skating was. Sliding her along her nose is the
      * fallback for the first second, before her model has loaded.
      */
+    /*
+     * A DODGE IS THE ORDINARY MOVEMENT WITH DIFFERENT NUMBERS IN IT.
+     *
+     * It is mixed into the same walk/strafe/speed the stick fills and
+     * handed to the same drive, which is the whole point: the burst then
+     * inherits the surface frame, the foot clip, the collision and the
+     * measured-speed gait without any of them being told a dodge exists.
+     * On a trunk "left" is along the bark because `forward` and `up` are
+     * hers, not the world's.
+     *
+     * `authority` eases from one to nought over the tail of the burst, so
+     * control returns to whatever the thumb is asking for by then rather
+     * than snapping back to it.
+     */
+    const burst = this.dodge.sample(dt);
+    const stickSpeed = WALK_SPEED * (this.input.sprint ? SPRINT : 1);
+    const w = burst.authority;
+    const walk = this.input.walk + (burst.forward - this.input.walk) * w;
+    const strafe = this.input.strafe + (burst.side - this.input.strafe) * w;
+    const pace = burst.active
+      ? stickSpeed + (burst.speed - stickSpeed) * w
+      : stickSpeed;
+
     if (this.drive) {
       this.driveReport = this.drive.step(
         dt,
         { at: this.at, up: this.up, forward: this.fwd },
         {
-          walk: this.input.walk,
-          strafe: this.input.strafe,
+          walk,
+          strafe,
           /* Told, not obeyed: the rig has already turned her this frame and
            * the gait still has to step for it. See `DriveInput.spin`. */
           yaw: -this.input.yaw,
           spin: false,
-          speed: WALK_SPEED * (this.input.sprint ? SPRINT : 1),
+          speed: pace,
           yawRate: TURN_RATE,
           /* The walker seats her: two systems both deciding how high she
            * rides do not average out, they fight. */
@@ -2403,15 +2420,12 @@ export class IslandScene {
         this.groundForLegs,
       );
     } else {
-      this.at.addScaledVector(this.fwd, speed * dt);
-      if (this.input.strafe !== 0) {
+      this.at.addScaledVector(this.fwd, walk * pace * dt);
+      if (strafe !== 0) {
         /* `up x fwd` is her model +X, which is screen-LEFT — hence the
          * minus. Same convention as `DriveInput.strafe`. */
         const side = S_RIGHT.crossVectors(this.up, this.fwd).normalize();
-        this.at.addScaledVector(
-          side,
-          -this.input.strafe * WALK_SPEED * (this.input.sprint ? SPRINT : 1) * dt,
-        );
+        this.at.addScaledVector(side, -strafe * pace * dt);
       }
     }
     this.at.x = Math.min(span - 2, Math.max(2, this.at.x));
@@ -3459,6 +3473,9 @@ export class IslandScene {
     dig.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       this.digMode = !this.digMode;
+      /* A burst in flight while the jaws come out would carry her off the
+       * spot she was lining up. */
+      if (this.digMode) this.dodge.cancel();
       dig.classList.toggle('is-grip', this.digMode);
       this.scoopBtn!.style.display = this.digMode ? '' : 'none';
       this.headingReadout!.style.display = this.digMode ? '' : 'none';
@@ -3666,6 +3683,14 @@ export class IslandScene {
         this.stickEl.style.display = '';
       } else if (this.lookPointer === null) {
         this.lookPointer = e.pointerId;
+        /* The stroke starts here. Whether it turns out to be a look or a
+         * flick is decided on RELEASE — see the note there. */
+        this.stroke.x = e.clientX;
+        this.stroke.y = e.clientY;
+        this.stroke.lastX = e.clientX;
+        this.stroke.lastY = e.clientY;
+        this.stroke.at = performance.now();
+        this.stroke.travel = 0;
       }
     });
     canvas.addEventListener('pointermove', (e) => {
@@ -3678,6 +3703,13 @@ export class IslandScene {
         this.input.walk = stickCurve(-dy / 48);
         this.stickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
       } else if (e.pointerId === this.lookPointer) {
+        /* Path length, not displacement: a drag that wandered out and back
+         * has gone nowhere, and `readFlick` rejects it on the difference. */
+        this.stroke.travel += Math.hypot(
+          e.clientX - this.stroke.lastX, e.clientY - this.stroke.lastY,
+        );
+        this.stroke.lastX = e.clientX;
+        this.stroke.lastY = e.clientY;
         if (this.firstPerson) {
           /* Her own eyes: the drag turns HER, and the glance IS the
            * aim — one number, so view and dig can never disagree about
@@ -3722,8 +3754,9 @@ export class IslandScene {
       this.stickPointer = null;
       this.input.walk = 0;
       this.input.yaw = 0;
-      /* Not the strafe: the VIEW owns that now and `simulate` writes it
-       * every frame, so clearing it here would only be undone. */
+      /* `strafe` stays nought: nothing writes it any more except the dodge
+       * mixer in `moveSurface`, which owns its own lifetime. */
+      this.input.strafe = 0;
       this.stickKnob.style.transform = 'translate(0px, 0px)';
       this.stickEl.style.display = 'none';
     };
@@ -3732,6 +3765,32 @@ export class IslandScene {
       if (e.pointerId === this.stickPointer) dropStick();
       if (e.pointerId === this.lookPointer) {
         this.lookPointer = null;
+        /*
+         * A FLICK IS READ ON RELEASE, NEVER DURING THE DRAG.
+         *
+         * Halfway through a fast pan the numbers look exactly like a flick
+         * — short, quick, far enough — so classifying as it happens would
+         * fire a dodge every time you whipped the camera round. Waiting for
+         * the finger costs nothing a player can feel and makes an ordinary
+         * look impossible to misread.
+         *
+         * NOT IN FIRST PERSON, AND NOT WITH DIG ARMED. In her own eyes the
+         * drag turns HER and aims the jaws, and lining a bite up is a lot
+         * of quick short strokes — every one of which is a flick by these
+         * numbers. Rather than special-case the thresholds and make digging
+         * worse to make dodging possible, the gesture simply belongs to
+         * third person. DIG forces first person anyway, so one test covers
+         * both.
+         */
+        if (!this.firstPerson && !this.digMode) {
+          const dir = readFlick({
+            dx: this.stroke.lastX - this.stroke.x,
+            dy: this.stroke.lastY - this.stroke.y,
+            travelPx: this.stroke.travel,
+            ms: performance.now() - this.stroke.at,
+          });
+          if (dir) this.dodge.start(dir, MM);
+        }
         // Finger off: the eye starts sliding back to the tube's own line.
         }
     };
