@@ -4,7 +4,7 @@ on:
   push:
     branches: [chatgpt/continuous-corner-climb]
     paths:
-      - scripts/apply-continuous-corner.mjs
+      - scripts/refine-continuous-corner.mjs
       - .github/workflows/apply-chatgpt-corner-patch.yml
 
 permissions:
@@ -21,13 +21,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Apply asserted patch
-        run: node scripts/apply-continuous-corner.mjs
-      - name: Commit production change
+      - name: Apply asserted refinement
+        run: node scripts/refine-continuous-corner.mjs
+      - name: Commit production refinement
         run: |
           git config user.name "ChatGPT"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/anim/legDrive.ts
           git diff --cached --exit-code && exit 1 || true
-          git commit -m "fix: make corner climb feet-first and continuous"
+          git commit -m "fix: guard root only during proven second grip"
           git push origin HEAD:chatgpt/continuous-corner-climb
