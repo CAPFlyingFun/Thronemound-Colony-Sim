@@ -921,8 +921,16 @@ export class LegDrive {
        * than slow. (A "hurry only when the aim is near home" gate was
        * tried and jammed the same way.) Only the creep steps — same
        * surface, same `nearest`, nothing delicate about them — hurry.
+       *
+       * "Scheduled" is asked of the SCHEDULER, not of this frame's command:
+       * on a frame the foothold re-probe fails, `aimSlot` goes null while
+       * the crossing is still in progress, and reading the command alone
+       * would hand that foot the fast clock mid-cross — the exact jam the
+       * slow clock exists to prevent, on the one frame it matters.
        */
-      const swingSeconds = staged && !scheduled
+      const crossing = scheduled !== null
+        || this.corner.swingingSlot === leg.slot;
+      const swingSeconds = staged && !crossing
         ? Math.max(0.06, Math.min(SWING_SECONDS, paced))
         : SWING_SECONDS;
       leg.t = Math.min(1, leg.t + dt / swingSeconds);

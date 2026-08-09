@@ -411,6 +411,16 @@ export class CornerTurn {
 
   get phase(): CornerPhase { return this.state; }
 
+  /**
+   * The slot the scheduler still OWNS mid-swing, aim or no aim.
+   *
+   * `CornerCommand.aimSlot` goes null on a frame the foothold re-probe
+   * fails, but the foot is still a cross-surface crossing in progress —
+   * anyone timing swings off the command alone would misread that frame as
+   * an ordinary step. See the swing clock in `LegDrive`.
+   */
+  get swingingSlot(): string | null { return this.swinging; }
+
   get active(): boolean { return this.state !== 'normal'; }
 
   /** The target surface's normal, for whoever wants to draw or test it. */
