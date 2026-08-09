@@ -38,7 +38,8 @@ import { QueenModel } from '../anim/QueenModel';
 import {
   FOOT_CLEARANCE_MM, LegDrive, type DriveReport, type Ground, type LegSetup,
 } from '../anim/legDrive';
-import { CASTE_LENGTH_MM, stanceRadius } from '../anim/hexapod';
+import { CASTE_LENGTH_MM, VOXEL_MM, stanceRadius } from '../anim/hexapod';
+import { TELEMETRY_MAX_SECONDS, TelemetryRecorder } from './IslandTelemetry';
 import { buildNestView, type NestView } from '../nest/nestView';
 import { NestDesigner } from '../nest/NestDesigner';
 import { planBounds } from '../nest/nestCarve';
@@ -927,6 +928,18 @@ export class IslandScene {
   private drive: LegDrive | null = null;
 
   private driveReport: DriveReport | null = null;
+
+  /**
+   * THE FLIGHT RECORDER.
+   *
+   * Arms itself the first frame she actually moves and keeps sixty seconds of
+   * every frame, because the float and the snap we are chasing last a handful
+   * of frames each and a once-a-second sample reports a smooth run straight
+   * over the top of them. See `IslandTelemetry.ts`.
+   */
+  private readonly telemetry = new TelemetryRecorder();
+
+  private telemetryChip: HTMLButtonElement | null = null;
 
   /** How high her body rides, taken from her own rig once it has loaded. */
   private legRide = RIDE;
@@ -2436,6 +2449,7 @@ export class IslandScene {
     }
     this.refreshAim();
     this.pose(dt);
+    this.recordTelemetry(dt);
     // While the designer is up the camera is ITS fly rig, not the follow cam.
     if (!this.designer?.isOpen) this.aimCamera(dt);
   }
@@ -3995,6 +4009,64 @@ export class IslandScene {
     actions.appendChild(this.paceChip);
 
     /*
+     * THE FLIGHT RECORDER'S THREE BUTTONS.
+     *
+     * REC is a readout rather than a control — it arms itself the moment she
+     * moves, because the interesting run is the one nobody remembered to
+     * start recording. STOP freezes the buffer so a good run cannot be
+     * overwritten by walking back; COPY puts the report on the clipboard.
+     *
+     * Tapping REC once it has stopped clears it and re-arms, so a second
+     * attempt does not need a page reload.
+     */
+    this.telemetryChip = document.createElement('button');
+    this.telemetryChip.className = 'density-lab-button density-lab-mode';
+    this.telemetryChip.textContent = 'REC';
+    this.telemetryChip.title = 'Records automatically once she moves';
+    this.telemetryChip.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      this.telemetry.reset();
+    });
+    actions.appendChild(this.telemetryChip);
+
+    const logStop = document.createElement('button');
+    logStop.className = 'density-lab-button';
+    logStop.textContent = 'STOP';
+    logStop.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      this.telemetry.stop();
+    });
+    actions.appendChild(logStop);
+
+    const logCopy = document.createElement('button');
+    logCopy.className = 'density-lab-button';
+    logCopy.textContent = 'COPY';
+    logCopy.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      /* Stop first: copying a still-running buffer gives a report that
+       * disagrees with itself between the summary and the events. */
+      this.telemetry.stop();
+      const text = this.telemetryReport();
+      const done = (ok: boolean) => {
+        logCopy.textContent = ok ? 'COPIED' : 'SEE LOG';
+        window.setTimeout(() => { logCopy.textContent = 'COPY'; }, 1500);
+      };
+      /* The clipboard needs a secure context and a user gesture; on a plain
+       * http:// LAN address for phone testing it is simply absent, so the
+       * console is the fallback rather than a silent failure. */
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(text).then(() => done(true), () => {
+          console.log(text);
+          done(false);
+        });
+      } else {
+        console.log(text);
+        done(false);
+      }
+    });
+    actions.appendChild(logCopy);
+
+    /*
      * WASD for the PC hand (playtest: "I was having trouble moving"):
      * W/S walk, A/D turn, Shift sprint, Space DIGS (hold), B opens the nest
      * tools, V swaps the view. There is no aim key: she digs where the view
@@ -4443,6 +4515,48 @@ export class IslandScene {
    * feet are actually down. Built only when someone asks: the report itself
    * is state the drive already holds, and this costs a string.
    */
+  /**
+   * One frame into the recorder, in the units a reader thinks in.
+   *
+   * Everything here is state the scene already holds — the cost is a small
+   * object per frame and nothing at all once sixty seconds are up.
+   */
+  private recordTelemetry(dt: number): void {
+    const r = this.driveReport;
+    this.telemetry.offer({
+      x: this.at.x * VOXEL_MM, y: this.at.y * VOXEL_MM, z: this.at.z * VOXEL_MM,
+      upX: this.up.x, upY: this.up.y, upZ: this.up.z,
+      reqMmS: this.velocity.length() * VOXEL_MM,
+      /* movedMm is this frame's displacement, so the rate needs the step. */
+      actMmS: r && dt > 1e-6 ? r.movedMm / dt : 0,
+      heldBackMm: r?.heldBackMm ?? 0,
+      planted: r?.planted ?? 0,
+      groping: r?.groping ?? 0,
+      strain: r?.strain ?? 0,
+      allowed: r?.allowed ?? 1,
+      clearanceMm: r?.clearanceMm ?? 0,
+      phase: r?.corner.phase ?? 'none',
+      turnDeg: r?.corner.turnDeg ?? 0,
+      candidateMm: r?.corner.candidateMm ?? 0,
+      onNew: r?.corner.onNew ?? 0,
+      onOld: r?.corner.onOld ?? 0,
+    }, dt);
+    if (this.telemetryChip) {
+      const st = this.telemetry.status;
+      this.telemetryChip.textContent = st === 'recording'
+        ? `REC ${this.telemetry.elapsed.toFixed(0)}s`
+        : st === 'stopped' ? `LOG ${this.telemetry.count}f` : 'REC';
+      this.telemetryChip.style.color = st === 'recording' ? '#f87171' : '';
+    }
+  }
+
+  /** The recording as pasteable text — the console hook, for a probe. */
+  telemetryReport(): string {
+    return this.telemetry.report(
+      `THRONEMOUND TELEMETRY v${__APP_VERSION__} — max ${TELEMETRY_MAX_SECONDS}s`,
+    );
+  }
+
   cornerLineForTest(): string {
     const r = this.driveReport?.corner;
     if (!r) return 'no drive';
