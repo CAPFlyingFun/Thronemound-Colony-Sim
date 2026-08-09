@@ -1245,6 +1245,13 @@ export class IslandScene {
     });
 
     (window as unknown as { islandScene?: unknown }).islandScene = this;
+    /*
+     * `?ik=off` — the leg solver's off switch, read once at startup so it can
+     * be reached from a phone, where there is no console. See `setIK`.
+     */
+    if (new URLSearchParams(
+      typeof location === 'undefined' ? '' : location.search,
+    ).get('ik') === 'off') this.setIK(false);
     new ResizeObserver(() => this.resize()).observe(host);
     this.resize();
     this.animate();
@@ -4358,6 +4365,7 @@ export class IslandScene {
     };
     for (const caste of ['worker', 'major'] as const) {
       const one = new Colonist(caste, rand);
+      one.model.ikEnabled = this.ikWanted;
       this.scene.add(one.model.root);
       this.colony.push(one);
       void one.load().then((ok) => {
@@ -4404,6 +4412,28 @@ export class IslandScene {
   }
 
   aimPitchForTest(radians: number): void { this.aimPitch = radians; }
+
+  /**
+   * TURN THE LEG SOLVER OFF, to tell a gait fault from a solver fault.
+   *
+   * Everything upstream keeps running — the corner scheduler, the anchors,
+   * the clip, her body — and only the bending of the legs to reach those
+   * anchors stops. If feet still stick with this off, the IK was never the
+   * problem.
+   *
+   * Reachable three ways, because the interesting case is on a phone:
+   * `?ik=off` in the URL, `window.islandScene.setIK(false)` from a console,
+   * and the colonists follow her so the whole colony is one switch.
+   */
+  setIK(on: boolean): void {
+    this.queen.ikEnabled = on;
+    for (const one of this.colony) one.model.ikEnabled = on;
+  }
+
+  get ikEnabled(): boolean { return this.queen.ikEnabled; }
+
+  /** Whatever the switch is set to now — colonists arrive later and ask. */
+  private get ikWanted(): boolean { return this.queen.ikEnabled; }
 
   /**
    * THE CORNER, IN ONE LINE — for a probe or a console, never for a frame.

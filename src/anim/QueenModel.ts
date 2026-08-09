@@ -199,6 +199,15 @@ export class QueenModel {
   /** Materials carrying the head mask, and whether it is currently on. */
   private readonly headMaterials: THREE.Material[] = [];
   private hideHead = false;
+  /**
+   * Is the leg solver allowed to run? See `solveFeet`.
+   *
+   * Public and mutable on purpose: it is meant to be flipped at runtime from
+   * a console or a URL flag while watching her walk, which is the only way
+   * to tell a gait fault from a solver fault by eye.
+   */
+  ikEnabled = true;
+
   private clock = 0;
   /** Gait revolutions, integrated. See `GaitInput.cycle`. */
   private cycle = 0;
@@ -535,6 +544,21 @@ export class QueenModel {
       surface: (x: number, y: number, z: number) => number;
     },
   ): number {
+    /*
+     * THE OFF SWITCH, and it is a diagnostic rather than a feature.
+     *
+     * When feet look wrong at a corner there are two suspects and they are
+     * easy to confuse: the GAIT, which decides where in the world a foot
+     * belongs, and this SOLVER, which bends the leg to get it there. Turning
+     * the solver off leaves the gait, the anchors, the corner scheduler and
+     * the body all running and lets the legs play their plain animation — so
+     * if the sticking survives, it was never the IK.
+     *
+     * Returns nought penetration because none was measured, not because none
+     * exists; a caller reading this while disabled is reading a disabled
+     * solver's opinion and should not treat it as ground truth.
+     */
+    if (!this.ikEnabled) return 0;
     if (!this.loaded) return 0;
     const upX = frame?.up[0] ?? 0;
     const upY = frame?.up[1] ?? 1;
