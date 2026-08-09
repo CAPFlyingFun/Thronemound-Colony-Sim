@@ -443,16 +443,40 @@ export class CornerTurn {
     leg: CornerLeg, body: CornerBody, ground: CornerGround, into: SurfaceContact,
   ): boolean {
     const home = this.homeWorld(leg, body, this.sB);
+    /*
+     * A STEP, NOT A PLANT. The ordinary swing puts a foot a stroke radius
+     * AHEAD of its home along the way it is travelling; a foothold taken
+     * straight down onto the new surface arrives with no stroke left and
+     * runs out the moment she moves, which is what left her clipped on a
+     * quarter of the frames of a corner.
+     *
+     * "Ahead" on the new surface is where she will be going once she is on
+     * it: her OLD up, laid flat against the new face. Walking at a wall that
+     * is straight up it; walking at a ceiling it is on along it. Her forward
+     * is no use here — at a right-angled corner it is the new face's own
+     * normal, and projecting it leaves nothing.
+     */
+    const along = this.sA.copy(this.oldUp)
+      .addScaledVector(this.newUp, -this.oldUp.dot(this.newUp));
+    if (along.lengthSq() > 1e-8) home.addScaledVector(along.normalize(), this.stroke);
     const origin = this.sC.copy(home).addScaledVector(body.up, this.tune.browLift);
     const dir = this.sD.copy(this.newUp).negate();
     const hit = ground.probeContact(origin, dir, leg.spread + this.tune.browLift);
     if (!hit) return false;
-    /* The reach test, in three dimensions and against her MEASURED spread
-     * LESS a stride. Projecting it onto a frame would be picking one of the
-     * two frames that are in dispute, which is the whole difficulty of a
-     * corner; taking the whole spread would be handing her a foothold she
-     * cannot then move from. See `CornerInput.radius`. */
-    if (this.homeWorld(leg, body, this.sB).distanceTo(hit.point) > this.budgetFor(leg)) {
+    /*
+     * The reach test, in three dimensions and against her MEASURED spread —
+     * from the REAL home, not from the strided aim above. Projecting it onto
+     * a frame would be picking one of the two frames that are in dispute,
+     * which is the whole difficulty of a corner.
+     *
+     * The whole spread, because the stride IS the margin now: a foot placed
+     * a stroke ahead of itself spends that stroke walking back through its
+     * home before it runs out, exactly as an ordinary step does. This used
+     * to subtract one, which was right when a scheduled foot was planted
+     * with no stroke at all and would otherwise grip at 97% of its reach and
+     * freeze her.
+     */
+    if (this.homeWorld(leg, body, this.sB).distanceTo(hit.point) > leg.spread) {
       return false;
     }
     /* And it must be the surface we are going to, not some third thing. */
@@ -578,11 +602,14 @@ export class CornerTurn {
   }
 
   /**
-   * How far from home a foot may sit and still be able to walk from there.
+   * How far from home a foot may sit before it is worth re-stepping.
    *
-   * Its measured spread LESS a stride, so a foothold always leaves the room
-   * the gait needs to take the next step. Floored at a quarter of the spread
-   * so a caller that never reports a stride still gets something usable.
+   * Its measured spread LESS a stride: past that, a foot has less than one
+   * ordinary step of room left, which is the point at which the gait would
+   * move it anyway. Only the re-step in `pick` asks this — a foothold is
+   * accepted against the full spread, because a scheduled step now carries
+   * its own stride. Floored at a quarter of the spread so a caller that
+   * never reports a stride still gets something usable.
    */
   private budgetFor(leg: CornerLeg): number {
     return Math.max(leg.spread * 0.25, leg.spread - this.stroke);
@@ -754,6 +781,28 @@ export class CornerTurn {
      * The leg the scheduler is currently flying is exempt: it is still OLD
      * until it lands, by construction.
      */
+    if (!this.swinging) {
+      for (const leg of legs) {
+        if (leg.planted || this.owner.get(leg.slot) !== 'new') continue;
+        /*
+         * ADOPT IT, do not disown it. A foot the spread rule lifted off the
+         * new surface is still a foot that belongs on the new surface, and
+         * the ordinary swing would put it wherever `nearest` says — which is
+         * measured along an up that may still belong to the floor. Taking it
+         * over costs one aim and keeps the label, which keeps the queue where
+         * it was. Disowning it rewound the queue to the leading row and the
+         * phase flapped between acquiring and transferring four times in a
+         * single corner: an ant that visibly cannot decide what it is doing.
+         */
+        this.swinging = leg.slot;
+        this.returning = false;
+        this.gropeClock = 0;
+        break;
+      }
+    }
+    /* Anything still in the air with a NEW label that is not the one we are
+     * flying has genuinely lost the surface, and the queue must go back for
+     * it properly. */
     for (const leg of legs) {
       if (leg.planted || leg.slot === this.swinging) continue;
       if (this.owner.get(leg.slot) === 'new') this.owner.set(leg.slot, 'old');
