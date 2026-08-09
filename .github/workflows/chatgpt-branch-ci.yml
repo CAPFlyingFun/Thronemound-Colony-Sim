@@ -26,4 +26,4 @@ jobs:
         run: npm run typecheck
       - name: Build
         run: npm run build
-      # This branch-only workflow is temporary and is removed before the PR.
+      # Temporary branch-only verification. Revision 2: second-grip guard.
