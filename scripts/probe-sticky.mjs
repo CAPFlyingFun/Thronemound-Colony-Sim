@@ -47,6 +47,7 @@ const march = (frames, sprint) => page.evaluate(([n, run]) => {
   let moved = 0;
   let longestStill = 0;
   let still = 0;
+  const spine = [];
   for (let f = 0; f < n; f += 1) {
     s.stepForTest(1 / 60, 1);
     const r = s.driveReport;
@@ -65,9 +66,34 @@ const march = (frames, sprint) => page.evaluate(([n, run]) => {
       if (row !== undefined) wasRow = row;
     } else wasRow = -1;
     was = c.phase;
+    /*
+     * The spine, sampled on the SAME walk. It used to be its own section
+     * with its own `atTree`, and every re-park started from wherever the
+     * previous section had left her — up the trunk, or inside the flare —
+     * so the trace measured a stuck ant twice running. One approach, one
+     * set of numbers.
+     */
+    if (f % 20 === 0 && s.spineRead && s.spineWant) {
+      const rd = s.spineRead;
+      const wt = s.spineWant;
+      const deg = (x) => +(x * 180 / Math.PI).toFixed(1);
+      const mm = (v) => +(v * 5).toFixed(2);
+      spine.push({
+        f,
+        up: deg(Math.acos(Math.max(-1, Math.min(1, s.up.y)))),
+        ahead: mm(rd.aheadRise),
+        behind: mm(rd.behindRise),
+        hc: Number.isFinite(rd.headClear) ? mm(rd.headClear) : 999,
+        gc: Number.isFinite(rd.gasterClear) ? mm(rd.gasterClear) : 999,
+        wh: deg(wt.head), wt: deg(wt.thorax), wg: deg(wt.gaster),
+        ph: deg(s.spine.pose.head), pt: deg(s.spine.pose.thorax), pg: deg(s.spine.pose.gaster),
+        phase: c.phase,
+      });
+    }
   }
   s.input.walk = 0; s.input.sprint = false;
   return {
+    spine,
     frames: n,
     armedFrames: armed,
     arms,
@@ -89,12 +115,27 @@ const atTree = (gapMm) => page.evaluate((gap) => {
   const len = Math.hypot(dx, dz) || 1;
   const ux = dx / len;
   const uz = dz / len;
-  let bark = -1;
-  for (let r = 0; r < 240; r += 0.02) {
-    if (!s.tree.solid.solidAt(t.x + ux * r, s.at.y, t.z + uz * r)) { bark = r; break; }
-  }
+  /*
+   * TWICE, because the trunk FLARES. The radius is read at the height she
+   * is standing at now, and the teleport then drops her to the ground at
+   * the new spot — which near the foot of a tree is a different height and
+   * therefore a different radius. Parking from one bearing worked; parking
+   * after a trip 1600 mm away put her inside the flare, where she froze and
+   * the whole spine trace measured a stuck ant.
+   */
+  const radiusAt = (y) => {
+    for (let r = 0; r < 240; r += 0.02) {
+      if (!s.tree.solid.solidAt(t.x + ux * r, y, t.z + uz * r)) return r;
+    }
+    return -1;
+  };
+  let bark = radiusAt(s.at.y);
   if (bark < 0) throw new Error('no bark');
-  const stand = (bark * 5 + gap) / 5;
+  let stand = (bark * 5 + gap) / 5;
+  s.teleportMm((t.x + ux * stand) * 5, (t.z + uz * stand) * 5);
+  bark = radiusAt(s.at.y);
+  if (bark < 0) throw new Error('no bark');
+  stand = (bark * 5 + gap) / 5;
   s.teleportMm((t.x + ux * stand) * 5, (t.z + uz * stand) * 5);
   s.setFacingForTest(Math.atan2(t.x - s.at.x, t.z - s.at.z));
   s.input.walk = 0; s.stepForTest(1 / 60, 40);
@@ -127,7 +168,21 @@ const show = (tag, r) => {
 
 console.log('\nAT THE TRUNK — a transition is supposed to happen here');
 await atTree(13);
-show('walk, 600 frames', await march(600, false));
+const trunk = await march(600, false);
+show('walk, 600 frames', trunk);
+
+console.log('\n  THE SPINE ON THAT SAME WALK');
+console.log('    rise = terrain difference over her own probe baseline, mm.');
+console.log('    clear = drawn shell to solid, mm; NEGATIVE is inside something.');
+console.log('\n    frame   up    ahead   behind  headClr gastClr | want h/t/g | pose h/t/g');
+for (const r of trunk.spine) {
+  console.log(`    ${String(r.f).padStart(5)} ${String(r.up).padStart(5)} `
+    + `${String(r.ahead).padStart(8)} ${String(r.behind).padStart(8)} `
+    + `${String(r.hc).padStart(8)} ${String(r.gc).padStart(7)} | `
+    + `${String(r.wh).padStart(5)}/${String(r.wt).padStart(5)}/${String(r.wg).padStart(5)} | `
+    + `${String(r.ph).padStart(5)}/${String(r.pt).padStart(5)}/${String(r.pg).padStart(5)}  ${r.phase}`);
+}
+
 
 console.log('\nON OPEN SOIL — no wood within reach; nothing should ever arm');
 for (const bearing of [0, 90, 180, 270]) {

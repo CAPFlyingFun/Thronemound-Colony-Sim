@@ -47,6 +47,9 @@ export interface SpineLimits {
   headMax: number;
   thoraxMax: number;
   gasterMax: number;
+  /** How far the PROXIMITY bias alone may pitch a section. See below. */
+  headNudge: number;
+  gasterNudge: number;
   /**
    * Exponential follow rates, per second. HEAD > THORAX > GASTER is the
    * whole mechanism — see the header. Making them equal removes the train.
@@ -65,9 +68,33 @@ export interface SpineLimits {
  * the part that visibly trails on a real one.
  */
 export const SPINE_LIMITS: SpineLimits = {
-  headMax: (30 * Math.PI) / 180,
-  thoraxMax: (14 * Math.PI) / 180,
-  gasterMax: (22 * Math.PI) / 180,
+  /*
+   * THIRTY DEGREES AT EACH JOINT, which is not thirty in each of these.
+   *
+   * These three are ABSOLUTE pitches in her own frame, and `QueenModel`
+   * drives the bones with the DIFFERENCES between them — the head bone gets
+   * `head - thorax`, the gaster bone gets `gaster - thorax`, and the hub
+   * gets the thorax. So equal values are not a bend at all: 30/30/30 pitches
+   * her whole body thirty degrees and folds nothing, measured at 2.1 degrees
+   * of visible fold against 4.3 for a body doing nothing.
+   *
+   * A fold is a STAGGER. Thirty degrees at the neck, thirty at the waist and
+   * thirty at the sting — the three pieces asked for — is head 60, thorax
+   * 30, gaster -30 in this convention, and that is what these clamps now
+   * allow. Measured fold at those extremes: 60.5 degrees nose to tail.
+   */
+  headMax: (60 * Math.PI) / 180,
+  thoraxMax: (30 * Math.PI) / 180,
+  gasterMax: (30 * Math.PI) / 180,
+  /*
+   * The proximity bias keeps its OLD authority, deliberately. It is an
+   * emergency nudge away from something a section is about to touch, not a
+   * posture, and giving it the fold's new headroom would let half a
+   * millimetre of terrain throw her head through sixty degrees. Thirty and
+   * twenty-two are the numbers v0.0.39 settled on by measurement.
+   */
+  headNudge: (30 * Math.PI) / 180,
+  gasterNudge: (22 * Math.PI) / 180,
   headRate: 11,
   thoraxRate: 6.5,
   gasterRate: 3.8,
@@ -120,6 +147,15 @@ export interface SpineReading {
   headClear: number;
   /** The same, for the gaster's shell. */
   gasterClear: number;
+  /**
+   * HOW FAR HER BACK MUST BEND, in radians, nose-up positive.
+   *
+   * The angle between the surface her FRONT is over and the one her body is
+   * still seated on — nought everywhere except at a corner, which is the
+   * only place the rises cannot describe. Optional: a caller with no notion
+   * of corners omits it and gets exactly the posture it got before.
+   */
+  fold?: number;
 }
 
 /** Pitches in her own frame: positive is nose-up. */
@@ -169,13 +205,31 @@ export function posture(
     if (!Number.isFinite(gap) || gap >= clearance.soft) return 0;
     return Math.min(1, Math.max(0, (clearance.soft - gap) / band));
   };
-  const headBias = nearness(read.headClear) * limits.headMax;
-  const gasterBias = nearness(read.gasterClear) * limits.gasterMax;
+  const headBias = nearness(read.headClear) * limits.headNudge;
+  const gasterBias = nearness(read.gasterClear) * limits.gasterNudge;
+
+  /*
+   * AND THE FOLD, which is the one thing a rise cannot say.
+   *
+   * The rises are elevation differences measured along her up, and at a
+   * corner there are none: walking straight up a flat trunk, the surface
+   * ahead of her is at the same height in her own frame, so both probes read
+   * exactly zero. Measured on the island — climbing at 85.6 degrees, ahead
+   * and behind both 0.00, head 0.0, thorax 0.0, gaster 19.4, frozen. A
+   * plank. A corner is a change of surface NORMAL, and until now nothing in
+   * this file could hear about one.
+   *
+   * `fold` is that angle, and it is spent as a stagger across the three
+   * joints — two thirds to the neck, one third to the waist, one third back
+   * the other way at the sting — because that is what makes a bend rather
+   * than a tilt. See `SPINE_LIMITS`.
+   */
+  const fold = read.fold ?? 0;
 
   return {
-    head: clamp(ahead + headBias, limits.headMax),
-    thorax: clamp(through, limits.thoraxMax),
-    gaster: clamp(behind + gasterBias, limits.gasterMax),
+    head: clamp(ahead + headBias + (fold * 2) / 3, limits.headMax),
+    thorax: clamp(through + fold / 3, limits.thoraxMax),
+    gaster: clamp(behind + gasterBias - fold / 3, limits.gasterMax),
   };
 }
 

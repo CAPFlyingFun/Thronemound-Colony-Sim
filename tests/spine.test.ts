@@ -68,15 +68,22 @@ describe('the posture the terrain asks for', () => {
   });
 
   it('lifts a section that is about to be inside the ground', () => {
-    /* At the hard shell, the full limit. */
+    /*
+     * At the hard shell, the full NUDGE — which is not the same as the full
+     * limit any more, and the difference is deliberate. The clamp has to be
+     * wide enough for a ninety-degree fold; the emergency lift away from
+     * something she is about to touch must not inherit that headroom, or
+     * half a millimetre of terrain throws her head through sixty degrees.
+     */
     const tight = { ...flat, headClear: CLEARANCE_MM.hard };
     expect(posture(tight, AHEAD, BEHIND).head)
-      .toBeCloseTo(SPINE_LIMITS.headMax, 6);
+      .toBeCloseTo(SPINE_LIMITS.headNudge, 6);
+    expect(SPINE_LIMITS.headNudge).toBeLessThan(SPINE_LIMITS.headMax);
     /* Halfway across the band, about half of it — a lean, not a snap. */
     const mid = (CLEARANCE_MM.soft + CLEARANCE_MM.hard) / 2;
     const half = posture({ ...flat, headClear: mid }, AHEAD, BEHIND).head;
-    expect(half).toBeGreaterThan(SPINE_LIMITS.headMax * 0.4);
-    expect(half).toBeLessThan(SPINE_LIMITS.headMax * 0.6);
+    expect(half).toBeGreaterThan(SPINE_LIMITS.headNudge * 0.4);
+    expect(half).toBeLessThan(SPINE_LIMITS.headNudge * 0.6);
     /* At the soft edge and beyond, NOTHING. This is the case that used to
      * fire on 89% of walking frames and slam her head to the clamp. */
     expect(posture({ ...flat, headClear: CLEARANCE_MM.soft }, AHEAD, BEHIND).head)
@@ -186,6 +193,33 @@ describe('the train', () => {
     spine.set({ head: 0.3, thorax: 0.1, gaster: -0.2 });
     expect(spine.pose.head).toBe(0.3);
     expect(spine.pose.gaster).toBe(-0.2);
+  });
+
+  it('folds through ninety degrees, staggered across the three joints', () => {
+    /*
+     * The manoeuvre the whole thing exists for, and the one the rises cannot
+     * describe: at a corner both probes read exactly zero. Thirty degrees at
+     * each joint is head 60 / thorax 30 / gaster -30 in this file's absolute
+     * convention — see `SPINE_LIMITS`.
+     */
+    const round = posture({ ...flat, fold: Math.PI / 2 }, AHEAD, BEHIND);
+    expect(round.head).toBeCloseTo(SPINE_LIMITS.headMax, 6);
+    expect(round.thorax).toBeCloseTo(SPINE_LIMITS.thoraxMax, 6);
+    expect(round.gaster).toBeCloseTo(-SPINE_LIMITS.gasterMax, 6);
+    /* A stagger, not a tilt: each joint bends against the next. */
+    expect(round.head - round.thorax).toBeGreaterThan(0.4);
+    expect(round.thorax - round.gaster).toBeGreaterThan(0.4);
+    /* And half a corner asks for half of it, rather than all or nothing. */
+    const part = posture({ ...flat, fold: Math.PI / 4 }, AHEAD, BEHIND);
+    expect(part.head).toBeLessThan(round.head * 0.75);
+    expect(part.head).toBeGreaterThan(0);
+  });
+
+  it('is unchanged by a fold nobody reports', () => {
+    /* Every existing caller omits it, and must get exactly what it got. */
+    const without = posture({ ...flat, aheadRise: 0.2 }, AHEAD, BEHIND);
+    const zero = posture({ ...flat, aheadRise: 0.2, fold: 0 }, AHEAD, BEHIND);
+    expect(without).toEqual(zero);
   });
 
   it('is a train only because the rates differ', () => {

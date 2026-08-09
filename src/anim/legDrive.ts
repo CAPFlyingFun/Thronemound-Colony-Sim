@@ -943,7 +943,7 @@ export class LegDrive {
       clearanceMm: Number.isFinite(clearance) ? clearance * MM : -1,
       strain,
       allowed,
-      corner: this.corner.report(this.legs),
+      corner: this.corner.report(this.legs, body.up),
     };
   }
 }

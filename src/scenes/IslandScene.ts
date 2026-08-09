@@ -2564,6 +2564,14 @@ export class IslandScene {
       behindRise: wantBehind,
       headClear: this.shellClearance('head'),
       gasterClear: this.shellClearance('gaster'),
+      /*
+       * The one thing a rise cannot say. Rounding onto a trunk her probes
+       * both read exactly zero — the bark ahead of her is at the same height
+       * in her own frame as the bark under her — so without this her back is
+       * a plank through the only manoeuvre it exists for. The gait already
+       * knows the angle; it just had nowhere to send it.
+       */
+      fold: this.driveReport?.corner.fold ?? 0,
     };
     /* Millimetres converted ONCE, here at the boundary — everything inside
      * `posture` is then in the same units as the reading it was handed. */

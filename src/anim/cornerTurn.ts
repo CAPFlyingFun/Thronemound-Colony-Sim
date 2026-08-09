@@ -277,6 +277,15 @@ export interface CornerReport {
   swinging: string | null;
   /** Degrees between the frozen support normal and the target normal. */
   turnDeg: number;
+  /**
+   * Radians between the surface she is SEATED on right now and the one her
+   * front is going to — how far her back has to bend to lie along both.
+   *
+   * Starts at the corner's full angle and falls to nothing as the walker
+   * brings her round, which is exactly the shape a spine wants. Nought
+   * whenever no transition is running.
+   */
+  fold: number;
   /** Millimetres to the tracked candidate; -1 when there is none. */
   candidateMm: number;
   /**
@@ -979,7 +988,7 @@ export class CornerTurn {
   }
 
   /** Everything a debug line wants, computed from state alone. */
-  report(legs: readonly CornerLeg[]): CornerReport {
+  report(legs: readonly CornerLeg[], up?: THREE.Vector3): CornerReport {
     let onNew = 0;
     let onOld = 0;
     let planted = 0;
@@ -1001,6 +1010,7 @@ export class CornerTurn {
       turnDeg: this.active
         ? +((angleBetween(this.oldUp, this.newUp) * 180) / Math.PI).toFixed(1)
         : 0,
+      fold: this.active && up ? angleBetween(up, this.newUp) : 0,
       candidateMm: this.hasCandidate ? +(this.candidateRange * MM).toFixed(2) : -1,
       feet,
     };
