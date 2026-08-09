@@ -356,15 +356,24 @@ function spread(reach: number, spare: number): number {
 /**
  * How long the ordinary tripod trigger stays muzzled after a corner.
  *
- * Two swings' worth. Coming off a transition her homes are computed from a
- * body frame that has swung ninety degrees, so the excursions the trigger
- * measures are large and ALL of them are large at once — the first normal
- * frame would otherwise read a spent tripod and lift three feet together.
- * Derived from the swing rather than chosen: it is exactly long enough for
- * the spread rule to walk the strung-out feet back under her ONE AT A TIME,
- * which is the same thing the transition was doing and reads as continuous.
+ * TWO FRAMES, and it was two swings — thirty-two hundredths of a second —
+ * on the reasoning that coming off a transition her homes are computed in a
+ * body frame that has swung ninety degrees, so every excursion is large at
+ * once and the first ordinary frame could read a spent tripod and lift three
+ * feet together. The risk is real; the length was over-insurance, and it
+ * cost something measurable. Over the sixty frames after the handoff she
+ * covered 6.86 mm/s of a commanded 7.50 with the long muzzle and the full
+ * 7.50 with this one, and the first ordinary tripod came at frame 8 instead
+ * of frame 26. Neither setting ever released more than one foot on the two
+ * frames that matter.
+ *
+ * Narrowing this came from the `chatgpt/continuous-corner-climb` branch. Two
+ * frames rather than the one it used because this counter is in SECONDS and
+ * is decremented on the same frame it is set: a single frame's worth is
+ * already zero by the first ordinary frame, which is precisely the frame it
+ * exists to guard.
  */
-export const HANDOFF_GRACE = SWING_SECONDS * 2;
+export const HANDOFF_GRACE = 2 / 60;
 
 /** Where a scheduled swing is aiming, this frame. Copied out immediately. */
 const SCRATCH_AIM = new THREE.Vector3();
@@ -664,6 +673,25 @@ export class LegDrive {
     const probe: BodyPose = {
       at: new THREE.Vector3(), up: body.up, forward: new THREE.Vector3(),
     };
+    /*
+     * AND, AT A CORNER, ONE MORE CONSTRAINT IN THE SAME BISECTION.
+     *
+     * A leading-row foot that has not crossed yet must keep its HOME on the
+     * air side of the target face. Without it she simply walks past the only
+     * place she could have gripped from: measured, the second front foot's
+     * home ended up 3.8 mm inside the wall, its probe started in solid, and
+     * no foothold could ever be found again — while the walker turned her
+     * ninety degrees on the one grip she had. See `CornerCommand.hold`.
+     *
+     * It belongs HERE rather than in a clamp of its own because it is the
+     * same kind of statement as every other line in this step: the body may
+     * go as far as the feet allow and no further. The clip already knows how
+     * to find that fraction.
+     */
+    const hold = corner.hold;
+    const holdLegs = hold
+      ? this.legs.filter((l) => hold.slots.includes(l.slot))
+      : [];
     const fits = (s: number): boolean => {
       probe.at.copy(from).addScaledVector(shove, s);
       probe.forward.copy(forward0);
@@ -672,10 +700,16 @@ export class LegDrive {
         this.homeWorld(leg, probe, home);
         if (this.excursion(leg, home, body.up).length() > limit) return false;
       }
+      if (hold) {
+        for (const leg of holdLegs) {
+          this.homeWorld(leg, probe, home);
+          if (home.sub(hold.point).dot(hold.normal) < CORNER_TUNING.browLift) return false;
+        }
+      }
       return true;
     };
     let allowed = 1;
-    if (limits.length > 0 && !fits(1)) {
+    if ((limits.length > 0 || holdLegs.length > 0) && !fits(1)) {
       let lo = 0;
       let hi = 1;
       for (let i = 0; i < CLIP_STEPS; i += 1) {

@@ -453,19 +453,28 @@ describe('the handoff, and what it must not disturb', () => {
     const done = finished(track);
     expect(done, 'the corner never finished').toBeGreaterThan(0);
     /*
-     * Through the grace and not a frame longer. After it the ordinary tripod
-     * is supposed to lift three feet together — that is what a tripod IS —
-     * so a window picked by eye would either miss the bug or fail on the
-     * gait working. The window is the constant itself.
+     * The settle frame and the first ordinary frame after it. That is the
+     * whole of what the guard has to cover — a body frame that has just
+     * swung ninety degrees makes every excursion large AT ONCE, and the risk
+     * is one frame reading a spent tripod and lifting three feet together.
+     * Beyond that the ordinary tripod is SUPPOSED to lift three, so a wider
+     * window would fail on the gait working.
+     *
+     * Not sized from `HANDOFF_GRACE` any more. It used to be, and when the
+     * constant was narrowed to a single frame the window came with it and
+     * this test quietly stopped inspecting anything.
      */
-    const window = Math.round(HANDOFF_GRACE * 60);
-    for (const s of track.slice(done, done + window)) {
+    expect(Math.round(HANDOFF_GRACE * 60)).toBeGreaterThanOrEqual(1);
+    for (const s of track.slice(done, done + 2)) {
       expect(s.released.length, `${s.released.length} let go at frame ${s.frame}`)
         .toBeLessThanOrEqual(1);
     }
-    /* And the strain the first normal frame inherits was survivable: she is
-     * still standing on it. */
-    expect(track[done + window]!.planted).toBeGreaterThanOrEqual(3);
+    /* And she is still standing on it a good while later — the strain the
+     * first normal frames inherit is survivable, however it is spent. */
+    for (const s of track.slice(done, done + 60)) {
+      expect(s.planted, `only ${s.planted} down at frame ${s.frame}`)
+        .toBeGreaterThanOrEqual(3);
+    }
   });
 
   it('hands back to the ordinary gait rather than staying armed', () => {

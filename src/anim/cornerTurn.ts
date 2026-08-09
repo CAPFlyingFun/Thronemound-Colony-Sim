@@ -230,6 +230,42 @@ export interface CornerCommand {
   aimSlot: string | null;
   /** Set on the frame the transition hands back — see `LegDrive` grace. */
   handedOff: boolean;
+  /**
+   * SHE MAY NOT OUT-WALK HER OWN FRONT FEET.
+   *
+   * A plane the named legs must stay on the air side of, in force only while
+   * the LEADING ROW is still incomplete. `slots` are the leading-row feet
+   * that have not crossed yet.
+   *
+   * This is the fix for the thing the whole file exists to prevent, and it
+   * took three measurements to find. The first front foot gripped at frame
+   * 36 and the second not until frame 117, and across those eighty-one
+   * frames SurfaceWalker turned her from level to eighty-six degrees on ONE
+   * grip — then the spread rule dragged even that foot back off the wall.
+   * Body first, feet after.
+   *
+   * The cause was not reach and not the queue competing with the creep for
+   * the one place in the air; suppressing the creep changed the timeline by
+   * exactly nothing. It was that she kept WALKING. By the time the queue
+   * came round to the second front foot, her body had carried that foot's
+   * home 3.8 mm INSIDE the wall — so its probe started in solid, returned
+   * null, and no foothold could ever be found. She had walked past the only
+   * place she could have gripped from.
+   *
+   * So the leading row's homes are held clear of the target face, through
+   * the drive's own reach clip rather than by a separate clamp on the root:
+   * one more constraint in the same bisection that stops a stance foot being
+   * dragged past its spread. She walks continuously right up to the wall and
+   * stops there while two feet go on — which is what an ant does, and it is
+   * not a pause in open ground.
+   *
+   * The idea of guarding the root against the target face is the
+   * `chatgpt/continuous-corner-climb` branch's. What it gated on — a live
+   * scheduler aim — is false for exactly the frames that needed it: measured,
+   * the guard was true on 9 frames of 900, and on those the motion left to
+   * clamp was already 0.0001 mm/frame.
+   */
+  hold: { point: THREE.Vector3; normal: THREE.Vector3; slots: string[] } | null;
 }
 
 /** Everything a debug line wants, and nothing that costs geometry. */
@@ -594,7 +630,8 @@ export class CornerTurn {
     ground: CornerGround | null, legs: readonly CornerLeg[],
   ): CornerCommand {
     const idle: CornerCommand = {
-      active: false, release: null, aim: null, aimSlot: null, handedOff: false,
+      active: false, release: null, aim: null, aimSlot: null,
+      handedOff: false, hold: null,
     };
     if (!ground) { if (this.active) this.stand(); return idle; }
 
@@ -670,12 +707,35 @@ export class CornerTurn {
 
     /* ------------------------------------------------------- in one */
     const cmd: CornerCommand = {
-      active: true, release: null, aim: null, aimSlot: null, handedOff: false,
+      active: true, release: null, aim: null, aimSlot: null,
+      handedOff: false, hold: null,
     };
 
     /* The frame after everything crossed: hand back. The tripod trigger is
      * muzzled a little longer than this by the drive's own grace. */
     if (this.state === 'settle') { this.stand(); return idle; }
+
+    /*
+     * Hold the leading row clear of the face until it is across. One cell of
+     * standoff — the same one the probes use, and for the same reason: that
+     * is where a foothold ray still has clean surface to find.
+     *
+     * Against `crossed`, the ledger that only grows, and NOT against the live
+     * labels. A foot that grips and is later dragged off loses its label, and
+     * reading that would put the hold back on when she is already past the
+     * plane — every home beyond it, the clip unsatisfiable at any fraction,
+     * and her frozen against a wall she is standing on. Measured: stuck at
+     * seventeen degrees for the whole of the next five hundred frames.
+     * Having once had the pair is the thing that is over.
+     */
+    const leading = (this.rows[0] ?? []).filter((s2) => !this.crossed.has(s2));
+    if (leading.length > 0 && this.hasCandidate) {
+      cmd.hold = {
+        point: this.candidatePoint,
+        normal: this.newUp,
+        slots: leading,
+      };
+    }
 
     /*
      * A FOOT THAT LOST ITS GRIP LOSES ITS LABEL — and only then.
