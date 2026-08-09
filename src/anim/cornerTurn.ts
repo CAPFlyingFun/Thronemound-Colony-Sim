@@ -1074,9 +1074,10 @@ export class CornerTurn {
        * is folding over). A groping foot is neither — that is a foot in
        * trouble, and the queue waits.
        */
-      const creepOnly = airborne.length === 1
-        && !airborne[0].groping
-        && (this.owner.get(airborne[0].slot) === 'new'
+      const flier = airborne.length === 1 ? airborne[0] : undefined;
+      const creepOnly = flier !== undefined
+        && !flier.groping
+        && (this.owner.get(flier.slot) === 'new'
           || this.labelFor(this.row) === 'transferMiddle');
       /*
        * NEVER while the leading row is still going on. The front grips are
