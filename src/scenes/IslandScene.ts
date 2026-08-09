@@ -36,7 +36,7 @@ import './DensityTerrainLabScene.css';
 import { buildSurfaceNets } from '../density/SurfaceNets';
 import { QueenModel } from '../anim/QueenModel';
 import {
-  FOOT_CLEARANCE_MM, LegDrive, type DriveReport, type LegSetup,
+  FOOT_CLEARANCE_MM, LegDrive, type DriveReport, type Ground, type LegSetup,
 } from '../anim/legDrive';
 import { CASTE_LENGTH_MM, stanceRadius } from '../anim/hexapod';
 import { buildNestView, type NestView } from '../nest/nestView';
@@ -437,6 +437,192 @@ const AIM_LIMIT = Math.PI / 2;
 const CHAMBER_CAM_FAR = 1.25;
 const CHAMBER_CAM_NEAR = 0.75;
 
+
+/** How fast a colonist walks, and how fast she comes round. */
+const COLONIST_SPEED = 1.1;
+const COLONIST_TURN = 1.6;
+/** Close enough to a wander target to call it arrived, in world units. */
+const COLONIST_ARRIVE = 1.2;
+/** How far from her birthplace a colonist will wander, in world units. */
+const COLONIST_ROAM = 12;
+
+/**
+ * A COLONIST — a worker or a major, walking the island on her own legs.
+ *
+ * The first worker was a JIG: a fixed circle, a hard-coded speed handed
+ * straight to the gait, and a height read off the heightfield. It looked
+ * like a toy beside a queen whose legs carry her, and the note under it
+ * said so — "not yet a colonist with jobs; that part arrives with the
+ * sandbox mechanics".
+ *
+ * This is those mechanics. She gets the same `LegDrive` the player has, so
+ * her gait comes out of the step she actually took rather than a number
+ * hoped into agreement with it; the same leg-rest seating and the same
+ * `FOOT_AIR` floor, so she stands ON the ground; and a heading of her own.
+ *
+ * She does NOT get the queen's jaws. Digging wants two mandibles and a bore
+ * rig, and a colonist has neither — which is why the caste split is here
+ * and not a flag on one shared body.
+ */
+class Colonist {
+  readonly model: QueenModel;
+
+  ready = false;
+
+  readonly at = new THREE.Vector3();
+
+  readonly up = new THREE.Vector3(0, 1, 0);
+
+  readonly fwd = new THREE.Vector3(0, 0, 1);
+
+  private drive: LegDrive | null = null;
+
+  private ride = RIDE;
+
+  /** Where she is headed, and how long before she picks somewhere else. */
+  private readonly want = new THREE.Vector3();
+
+  private dwell = 0;
+
+  private speed = 0;
+
+  private readonly wasAt = new THREE.Vector3();
+
+  private readonly right = new THREE.Vector3();
+
+  private readonly basis = new THREE.Matrix4();
+
+  constructor(
+    readonly caste: 'worker' | 'major',
+    private readonly rand: () => number,
+  ) {
+    this.model = new QueenModel(caste);
+    this.model.root.visible = false;
+  }
+
+  async load(): Promise<boolean> {
+    const ok = await this.model.load();
+    this.ready = ok;
+    this.model.root.visible = ok;
+    if (ok) this.buildDrive();
+    return ok;
+  }
+
+  /** Her legs' own rest plane, measured the same way the queen's is. */
+  private buildDrive(): void {
+    const setup: LegSetup[] = this.model.legPlan().map((leg) => ({
+      slot: leg.slot,
+      home: new THREE.Vector3(leg.home[0], leg.home[1], leg.home[2]),
+      reach: leg.reach,
+    }));
+    if (setup.length === 0) return;
+    const meanFootY = setup.reduce((sum, leg) => sum + leg.home.y, 0) / setup.length;
+    this.ride = -meanFootY + FOOT_AIR;
+    this.drive = new LegDrive(setup);
+  }
+
+  place(x: number, z: number, groundAt: (px: number, pz: number) => number): void {
+    this.at.set(x, groundAt(x, z) + this.ride, z);
+    this.want.set(x, 0, z);
+    this.dwell = 0;
+  }
+
+  step(
+    dt: number,
+    home: THREE.Vector3,
+    roam: number,
+    groundAt: (x: number, z: number) => number,
+    normalAt: (p: THREE.Vector3, into: THREE.Vector3) => void,
+    ground: Ground,
+  ): void {
+    if (!this.ready) return;
+
+    this.dwell -= dt;
+    if (this.dwell <= 0) {
+      /* Somewhere else within reach of where she hatched — a colonist with
+       * no leash is over the horizon in a minute. */
+      const a = this.rand() * Math.PI * 2;
+      const r = roam * (0.35 + this.rand() * 0.65);
+      this.want.set(home.x + Math.cos(a) * r, 0, home.z + Math.sin(a) * r);
+      this.dwell = 3 + this.rand() * 5;
+    }
+
+    const dx = this.want.x - this.at.x;
+    const dz = this.want.z - this.at.z;
+    const far = Math.hypot(dx, dz);
+    let yaw = 0;
+    let walk = 0;
+    if (far > COLONIST_ARRIVE) {
+      /*
+       * Which side her target is on, about her OWN up.
+       *
+       * `up . (forward x target)` is positive when the target lies toward
+       * `up x forward`, and a positive spin about up carries her nose that
+       * same way — so the sign passes straight through with no convention
+       * to get backwards.
+       */
+      const ux = dx / far;
+      const uz = dz / far;
+      const cx = this.fwd.y * uz;
+      const cy = this.fwd.z * ux - this.fwd.x * uz;
+      const cz = -this.fwd.y * ux;
+      const side = this.up.x * cx + this.up.y * cy + this.up.z * cz;
+      const ahead = (this.fwd.x * ux + this.fwd.z * uz);
+      yaw = Math.max(-1, Math.min(1, side * 3));
+      /* Walk once she is roughly pointed at it, and ease off as she lands,
+       * or she paces back and forth across the spot for ever. */
+      walk = ahead > 0.3 ? Math.min(1, far / (COLONIST_ARRIVE * 3)) : 0;
+    } else {
+      this.dwell = Math.min(this.dwell, 0);
+    }
+
+    this.wasAt.copy(this.at);
+    this.drive?.step(
+      dt,
+      { at: this.at, up: this.up, forward: this.fwd },
+      { walk, yaw, speed: COLONIST_SPEED, yawRate: COLONIST_TURN, settle: false },
+      ground,
+    );
+
+    /* Seated on the island and leaning with it: a colonist on a bank stands
+     * square to the bank, not plumb through it. */
+    normalAt(this.at, this.up);
+    if (this.up.lengthSq() < 1e-9) this.up.set(0, 1, 0);
+    this.up.normalize();
+    this.at.y = groundAt(this.at.x, this.at.z) + this.ride;
+    this.fwd.addScaledVector(this.up, -this.fwd.dot(this.up));
+    if (this.fwd.lengthSq() < 1e-9) this.fwd.set(0, 0, 1).addScaledVector(this.up, -this.up.z);
+    this.fwd.normalize();
+
+    /* What she TRAVELLED, across her own tangent plane — the honest number
+     * the gait runs on, so a colonist stopped by a trunk stops her legs
+     * instead of running on the spot. */
+    this.wasAt.sub(this.at);
+    this.wasAt.addScaledVector(this.up, -this.wasAt.dot(this.up));
+    const went = this.wasAt.length() / Math.max(dt, 1e-6);
+    this.speed += (went - this.speed) * Math.min(1, dt * 12);
+
+    this.right.crossVectors(this.up, this.fwd).normalize();
+    this.model.root.position.copy(this.at);
+    this.model.root.quaternion.setFromRotationMatrix(
+      this.basis.makeBasis(this.right, this.up, this.fwd),
+    );
+    this.model.update(dt, {
+      speed: this.speed,
+      turn: yaw * COLONIST_TURN,
+      digging: 0,
+      carrying: 0,
+      headYaw: 0,
+      headPitch: 0,
+    });
+    this.model.solveFeet(
+      (x, z) => groundAt(x, z), FOOT_CLEARANCE_MM / MM, this.ride * 2,
+    );
+  }
+
+  dispose(): void { this.model.dispose(); }
+}
+
 export class IslandScene {
   ready = false;
 
@@ -793,13 +979,14 @@ export class IslandScene {
   private cineUntil = 0;
 
   /** The first worker — spawned when the chamber is made. */
-  private worker: QueenModel | null = null;
+  /** The colony on the surface — a worker and a major, each walking on her
+   *  own legs. See `Colonist`. */
+  private readonly colony: Colonist[] = [];
 
-  private workerReady = false;
 
   private readonly workerAnchor = new THREE.Vector3();
 
-  private workerJig = 0;
+
 
   private showPlan = true;
 
@@ -1902,10 +2089,20 @@ export class IslandScene {
       ? 0
       : Math.max(-1, Math.min(1, this.camYaw * STEER_GAIN));
     const bore = this.bore.step(dt, {
-      /* Scaled so the rig delivers TURN_RATE at full stick rather than its
+      /*
+       * Scaled so the rig delivers TURN_RATE at full stick rather than its
        * own YAW_RATE, which other rooms share and this one should not be
-       * quietly redefining. */
-      yaw: (-this.input.yaw + this.steerYaw) * (TURN_RATE / YAW_RATE),
+       * quietly redefining.
+       *
+       * BOTH TERMS ARE POSITIVE, and that is a correction. The stick's yaw
+       * carried a minus inherited from the rig's own convention and the
+       * camera's pull carried the opposite of it, so pushing right turned
+       * her left and dragging the view right swung her nose away from it.
+       * Measured against a FROZEN screen-right — the camera follows her, so
+       * a live screen axis chases its own tail — the two read -1.58 and
+       * -0.99 where they should have read positive. `shot-hands.mjs`.
+       */
+      yaw: (this.input.yaw - this.steerYaw) * (TURN_RATE / YAW_RATE),
       forward: this.input.walk,
       dig: this.input.dig,
     });
@@ -3724,39 +3921,44 @@ export class IslandScene {
    * with jobs; that part arrives with the sandbox mechanics.
    */
   private spawnWorker(): void {
-    if (this.worker) return;
+    if (this.colony.length > 0) return;
     this.workerAnchor.copy(this.at);
-    this.worker = new QueenModel('worker');
-    this.worker.root.visible = false;
-    this.scene.add(this.worker.root);
-    void this.worker.load().then((ok) => {
-      this.workerReady = ok;
-      if (this.worker) this.worker.root.visible = ok;
-    });
+    /* A worker first, then a major beside her — the two castes the rig
+     * actually ships and the two the sandbox mechanics were written for. */
+    let seed = 0x51ce;
+    const rand = (): number => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+    for (const caste of ['worker', 'major'] as const) {
+      const one = new Colonist(caste, rand);
+      this.scene.add(one.model.root);
+      this.colony.push(one);
+      void one.load().then((ok) => {
+        if (!ok) return;
+        const a = rand() * Math.PI * 2;
+        one.place(
+          this.workerAnchor.x + Math.cos(a) * COLONIST_ARRIVE,
+          this.workerAnchor.z + Math.sin(a) * COLONIST_ARRIVE,
+          (x, z) => this.walkGroundAt(x, z),
+        );
+      });
+    }
   }
 
   private poseWorker(dt: number): void {
-    if (!this.worker || !this.workerReady) return;
-    this.workerJig += dt;
-    const angle = this.workerJig * 0.55;
-    const r = 1.1;
-    const x = this.workerAnchor.x + Math.sin(angle) * r;
-    const z = this.workerAnchor.z + Math.cos(angle) * r;
-    const y = this.footingAt(x, z);
-    this.worker.root.position.set(x, y + RIDE * 0.5, z);
-    this.worker.root.rotation.set(0, angle + Math.PI / 2, 0);
-    this.worker.update(dt, {
-      speed: r * 0.55,
-      turn: 0.55,
-      digging: 0,
-      carrying: 0,
-      headYaw: 0,
-    });
-    this.worker.solveFeet(
-      (px, pz) => this.footingAt(px, pz),
-      FOOT_CLEARANCE_MM / MM,
-      RIDE * 2,
-    );
+    const walker = this.walker;
+    if (!walker || this.colony.length === 0) return;
+    for (const one of this.colony) {
+      one.step(
+        dt,
+        this.workerAnchor,
+        COLONIST_ROAM,
+        (x, z) => this.walkGroundAt(x, z),
+        (p, into) => { walker.normalAt(p, into); },
+        this.groundForLegs,
+      );
+    }
   }
 
   setPausedForTest(on: boolean): void { this.paused = on; }
@@ -3878,7 +4080,7 @@ export class IslandScene {
       questStage: this.questStage,
       questDepthMm: +this.depthMm().toFixed(1),
       deepCarved: this.deepCarved,
-      workerOut: this.worker && this.workerReady ? 1 : 0,
+      workerOut: this.colony.filter((c) => c.ready).length,
       playerReady: this.playerReady ? 1 : 0,
       statsOpen: this.statsPanel.bodyVisible ? 1 : 0,
       designing: this.designer?.isOpen ? 1 : 0,
@@ -3929,7 +4131,7 @@ export class IslandScene {
     if (this.textures) for (const tex of Object.values(this.textures)) tex.dispose();
     this.nestView?.dispose();
     this.queen.dispose();
-    this.worker?.dispose();
+    for (const one of this.colony) one.dispose();
     this.renderer.dispose();
     this.host.replaceChildren();
   }

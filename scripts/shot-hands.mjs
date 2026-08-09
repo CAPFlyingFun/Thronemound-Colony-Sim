@@ -135,5 +135,86 @@ console.log(`  -> ${sr.screenRightMm > 0 && sl.screenRightMm < 0
   ? 'she goes the way you push — CORRECT'
   : 'BACKWARDS: she goes opposite the push'}`);
 
+
+/**
+ * DOES HER NOSE GO THE WAY YOU ASKED?
+ *
+ * Measured as the SIGNED ROTATION OF HER FORWARD ABOUT HER OWN UP, summed
+ * per frame. Two earlier metrics failed here and both failed quietly: the
+ * dot of her forward against a fixed axis is a cosine, so it stops being
+ * monotonic past a right angle AND its value depends on which way she
+ * happened to be pointing, which made the same code read "correct" in one
+ * run and "backwards" in the next.
+ *
+ * The sign convention is fixed once, from geometry that has already been
+ * settled against the screen: a positive rotation about `up` carries a
+ * vector toward `up x forward`, and `up x forward` is the model's +X, which
+ * `shot-hands` has measured to be SCREEN-LEFT. So turning her nose to the
+ * right of the screen is a NEGATIVE rotation about her up, whatever her
+ * heading, whatever the slope.
+ */
+const noseTurn = async (kind, px) => {
+  await reset();
+  await page.evaluate((k) => { window.islandScene.precisionTurn = k === 'turn'; }, kind);
+  if (kind === 'turn') {
+    await page.mouse.move(220, 400);
+    await page.mouse.down();
+    await page.mouse.move(220 + px, 400, { steps: 6 });
+  } else {
+    /* Side-step and hold the view dragged: the camera IS the steering. */
+    await page.evaluate(() => { window.islandScene.input.strafe = 0.6; });
+    await page.mouse.move(700, 320);
+    await page.mouse.down();
+    for (let i = 0; i < 10; i += 1) await page.mouse.move(700 + ((i + 1) * px) / 10, 320);
+  }
+  const out = await page.evaluate(() => {
+    const s = window.islandScene;
+    const held = s.camYaw;
+    let turned = 0;
+    let prev = { x: s.fwd.x, y: s.fwd.y, z: s.fwd.z };
+    for (let i = 0; i < 40; i += 1) {
+      s.camYaw = held;
+      s.stepForTest(1 / 60, 1);
+      /* Signed by the component of (prev x now) along her up. */
+      const cx = prev.y * s.fwd.z - prev.z * s.fwd.y;
+      const cy = prev.z * s.fwd.x - prev.x * s.fwd.z;
+      const cz = prev.x * s.fwd.y - prev.y * s.fwd.x;
+      const sin = cx * s.up.x + cy * s.up.y + cz * s.up.z;
+      const cos = prev.x * s.fwd.x + prev.y * s.fwd.y + prev.z * s.fwd.z;
+      turned += Math.atan2(sin, cos);
+      prev = { x: s.fwd.x, y: s.fwd.y, z: s.fwd.z };
+    }
+    s.input.strafe = 0;
+    /* Negative about her up IS screen-right — see the header. */
+    return { screenRightDeg: +(-turned * 180 / Math.PI).toFixed(1) };
+  });
+  await page.mouse.up();
+  await page.evaluate(() => { window.islandScene.precisionTurn = false; });
+  return out;
+};
+
+const tr = await noseTurn('turn', 40);
+const tl = await noseTurn('turn', -40);
+/*
+ * REPORTED, NOT JUDGED. Which way a TURN should go is a taste call the
+ * player makes, not something this can derive — asked for explicitly, the
+ * stick here turns her AWAY from the push. What the probe is for is that
+ * the two sides stay equal and opposite, and that nobody changes the
+ * mapping by accident.
+ */
+console.log('\nTURN (latch on), degrees her nose swung toward SCREEN-RIGHT');
+console.log(`  stick right -> ${tr.screenRightDeg}°   left -> ${tl.screenRightDeg}°`);
+console.log(`  -> ${tr.screenRightDeg < 0 && tl.screenRightDeg > 0
+  ? 'stick right turns her screen-LEFT, as asked'
+  : 'CHANGED: the turn no longer runs opposite the push'}`);
+
+const pr = await noseTurn('steer', 140);
+const pl = await noseTurn('steer', -140);
+console.log('\nCAMERA PAN steering her while she side-steps');
+console.log(`  drag right -> ${pr.screenRightDeg}°   left -> ${pl.screenRightDeg}°`);
+console.log(`  -> ${pr.screenRightDeg < 0 && pl.screenRightDeg > 0
+  ? 'a pan right swings her nose screen-LEFT, as asked'
+  : 'CHANGED: the pan no longer runs opposite the drag'}`);
+
 console.log(`\npage errors: ${errs.length ? errs.join(' | ') : 'none'}`);
 await browser.close();
