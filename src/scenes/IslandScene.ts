@@ -388,10 +388,22 @@ const EYE_RISE = 1.1 / MM;
  * the aim and never smoothed, so turning has no lag whatever these are set
  * to. That split is deliberate: filter the body, never the intent.
  */
-const EYE_FOLLOW_HZ = 15;
-const EYE_ROLL_HZ = 10;
-const EYE_FOLLOW_RATE = EYE_FOLLOW_HZ * 2 * Math.PI;
-const EYE_ROLL_RATE = EYE_ROLL_HZ * 2 * Math.PI;
+/*
+ * MEASURED, then set. The first pass used 15 and 10 "hertz" turned into
+ * exponential rates by 2*pi, and at 60 fps that is 79% of the way to the
+ * target every frame — very nearly a pass-through. It cut the lens's own
+ * jitter from 0.099 mm to 0.081, which is 18%, and the player still saw
+ * shake.
+ *
+ * Time constants in MILLISECONDS instead, because that is the number this
+ * can be reasoned about in: at 60 fps a 45 ms constant moves 31% a frame
+ * and a 70 ms one 21%. Slow enough to eat lattice noise, far too fast to
+ * feel as lag on something the size of a head.
+ */
+const EYE_FOLLOW_MS = 45;
+const EYE_AIM_MS = 70;
+const EYE_FOLLOW_RATE = 1000 / EYE_FOLLOW_MS;
+const EYE_ROLL_RATE = 1000 / EYE_AIM_MS;
 
 /**
  * Past this, the lens SNAPS instead of chasing.
@@ -933,6 +945,12 @@ export class IslandScene {
   private eyeAt: THREE.Vector3 | null = null;
 
   private readonly eyeRoll = new THREE.Vector3(0, 1, 0);
+
+  /** Her NOSE, filtered — the body half of the first-person look. */
+  private readonly eyeFwd = new THREE.Vector3(0, 0, 1);
+
+  /** Last frame's ground-guard lift, in world units. Diagnostics only. */
+  private guardLift = 0;
 
   private firstPerson = false;
 
@@ -3211,6 +3229,9 @@ export class IslandScene {
       }
       return clear;
     });
+    /* Kept for the shake probe: this is a discrete search and a prime
+     * suspect for vertical jitter, so it has to be measurable. */
+    this.guardLift = lift;
     if (lift > 0) this.queen.root.position.addScaledVector(up, lift);
   }
 
@@ -3306,7 +3327,32 @@ export class IslandScene {
        */
       const fwd = S_FWD.copy(this.fwd);
       const upv = S_UP.copy(this.up);
-      const dir = this.boreAim();
+      /*
+       * THE BODY IS FILTERED; THE AIM IS NOT. This is where the shake
+       * actually was.
+       *
+       * Measured standing still: her seat re-settles 0.099 mm a frame and
+       * her surface normal wobbles with it — the walker samples the density
+       * gradient at a seat the gradient just moved, which is a loop at the
+       * lattice's own scale. That tilts `fwd`, `fwd` IS the aim's base, and
+       * the aim is the camera's look, so the picture pitched 0.48 degrees a
+       * frame with her standing perfectly still. Walking, the same figure
+       * is 0.0001: the real surface changes fast enough to swamp the loop.
+       *
+       * So the look is rebuilt from a FILTERED body frame and the RAW aim
+       * angle. Player input stays instant; only her body's noise is damped.
+       * `boreAim()` is untouched, so the shovel still cuts along her true
+       * frame — the filter moves the picture, never the dig.
+       */
+      this.eyeFwd.lerp(fwd, 1 - Math.exp(-EYE_ROLL_RATE * dt));
+      if (this.eyeFwd.lengthSq() < 1e-9) this.eyeFwd.copy(fwd);
+      this.eyeRoll.lerp(upv, 1 - Math.exp(-EYE_ROLL_RATE * dt));
+      if (this.eyeRoll.lengthSq() < 1e-9) this.eyeRoll.copy(upv);
+      const steadyFwd = S_NOSE.copy(this.eyeFwd).normalize();
+      const steadyUp = S_ROLL.copy(this.eyeRoll)
+        .addScaledVector(steadyFwd, -this.eyeRoll.dot(steadyFwd)).normalize();
+      const dir = S_RAD.copy(steadyFwd).multiplyScalar(Math.cos(this.aimPitch))
+        .addScaledVector(steadyUp, Math.sin(this.aimPitch));
       /*
        * Forward of her centre so her own back does not fill the frame —
        * but ALONG THE AIM, so the eye stays on the cut's line. And never
@@ -3396,14 +3442,10 @@ export class IslandScene {
        * roll. Measured with the dial at ninety, up and look were PARALLEL,
        * which is the degenerate case it was written to avoid. One number.
        */
-      /* The ROLL is filtered too, and more slowly than the position: it
-       * only ever changes when the surface under her does, so a lag there
-       * costs nothing and a jitter there is the whole picture rocking. */
-      this.eyeRoll.lerp(upv, 1 - Math.exp(-EYE_ROLL_RATE * dt));
-      if (this.eyeRoll.lengthSq() < 1e-9) this.eyeRoll.copy(upv);
-      const roll = S_ROLL.copy(this.eyeRoll).normalize();
-      this.camera.up.copy(fwd).multiplyScalar(-Math.sin(this.aimPitch))
-        .addScaledVector(roll, Math.cos(this.aimPitch));
+      /* Built from the same filtered frame, so up and look cannot disagree
+       * about which body they belong to. */
+      this.camera.up.copy(steadyFwd).multiplyScalar(-Math.sin(this.aimPitch))
+        .addScaledVector(steadyUp, Math.cos(this.aimPitch));
       this.liftCameraClear();
       /* Aim from where the lens ACTUALLY ended up. The guard above may have
        * nudged it out of a roof, and looking at a target measured from the
