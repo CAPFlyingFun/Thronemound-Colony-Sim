@@ -111,15 +111,18 @@ const SPRINT = 3;
 const TURN_RATE = 2.53;
 
 /**
- * How hard the camera pulls her nose round when she is side-stepping.
+ * How far a pan of the view slides her sideways.
  *
- * In STEER mode the view leads and the body follows: the orbit arm is
- * already swung off her tail by the drag, and that swing IS the error
- * signal — turning her toward it and letting the arm decay are the same
- * motion seen from two ends. Only while she is actually moving, or a drag
- * to look around would spin her on the spot.
+ * The two controls are swapped from where they started: the STICK turns her
+ * and the VIEW side-steps her. `camYaw` is how far the orbit arm has been
+ * dragged off her tail and it decays back to zero on its own, so holding
+ * the view swung slides her and letting go stops her — no second latch, no
+ * mode to be in.
+ *
+ * The gain is what a half-radian drag is worth: at 1.6 that is a full side
+ * step, so an ordinary flick moves her and a nudge nudges her.
  */
-const STEER_GAIN = 1.6;
+const PAN_STRAFE_GAIN = 1.6;
 
 /**
  * THE AIR UNDER HER FEET — a floor, not a fudge.
@@ -736,19 +739,11 @@ export class IslandScene {
 
   readonly input = { walk: 0, yaw: 0, strafe: 0, dig: false, sprint: false };
 
-  /**
-   * TURN or STEER, and it changes what left and right MEAN.
-   *
-   * STEER (the default) is how the Godot build and Path of Titans read:
-   * left and right SIDE-STEP, and you point her by dragging the view. An
-   * ant does not have to face where it is going, and on a trunk that is the
-   * difference between edging along a branch and pirouetting off it.
-   * TURN is the precision mode — left and right rotate on the spot, which
-   * is what you want when lining a dig up.
+  /*
+   * There is no TURN/STEER latch any more. It existed to choose which of
+   * two things left-and-right meant; now the stick always turns and the
+   * view always side-steps, so there is nothing left to choose.
    */
-  private precisionTurn = false;
-
-  private turnChip: HTMLButtonElement | null = null;
 
   /** The WALK/RUN latch, which is the only sprint a thumb has. */
   private running = false;
@@ -844,9 +839,6 @@ export class IslandScene {
 
   /** How high her body rides, taken from her own rig once it has loaded. */
   private legRide = RIDE;
-
-  /** The camera's pull on her nose this frame, -1..1. See `TURN_RATE`. */
-  private steerYaw = 0;
 
   /**
    * What the legs may ask of the world: the nearest solid to a point,
@@ -2072,22 +2064,15 @@ export class IslandScene {
      * at walking rate otherwise. Its yaw runs the other way to the stick's,
      * hence the sign. */
     /*
-     * THE VIEW STEERS HER, unless she is being turned deliberately.
+     * THE VIEW SIDE-STEPS HER; THE STICK TURNS HER.
      *
-     * `camYaw` is how far the orbit arm has been dragged off her tail, and
-     * it decays back to zero on its own — so it is exactly the error
-     * between where she is pointed and where the player is looking. Fed in
-     * as a turn while she is moving, the camera leads and the body follows,
-     * which is the Godot build's feel. Standing still it does nothing, or a
-     * look round the room would spin her on the spot.
-     *
-     * It goes to the RIG, not to the legs, because the rig owns the
-     * heading — see `TURN_RATE`.
+     * `camYaw` is the orbit arm's swing off her tail, and it decays back to
+     * zero by itself — so holding the view dragged slides her that way and
+     * letting go stops her, with no latch and no mode. Negated because a
+     * rightward drag DECREASES camYaw (`camYaw -= movementX`) while a
+     * positive strafe is screen-right.
      */
-    const moving = Math.abs(this.input.walk) + Math.abs(this.input.strafe) > 0.02;
-    this.steerYaw = this.precisionTurn || !moving
-      ? 0
-      : Math.max(-1, Math.min(1, this.camYaw * STEER_GAIN));
+    this.input.strafe = Math.max(-1, Math.min(1, -this.camYaw * PAN_STRAFE_GAIN));
     const bore = this.bore.step(dt, {
       /*
        * Scaled so the rig delivers TURN_RATE at full stick rather than its
@@ -2102,7 +2087,7 @@ export class IslandScene {
        * a live screen axis chases its own tail — the two read -1.58 and
        * -0.99 where they should have read positive. `shot-hands.mjs`.
        */
-      yaw: (this.input.yaw - this.steerYaw) * (TURN_RATE / YAW_RATE),
+      yaw: -this.input.yaw * (TURN_RATE / YAW_RATE),
       forward: this.input.walk,
       dig: this.input.dig,
     });
@@ -2389,7 +2374,7 @@ export class IslandScene {
           strafe: this.input.strafe,
           /* Told, not obeyed: the rig has already turned her this frame and
            * the gait still has to step for it. See `DriveInput.spin`. */
-          yaw: -this.input.yaw + this.steerYaw,
+          yaw: -this.input.yaw,
           spin: false,
           speed: WALK_SPEED * (this.input.sprint ? SPRINT : 1),
           yawRate: TURN_RATE,
@@ -3570,26 +3555,6 @@ export class IslandScene {
      * left on a phone to hold a second finger down: the left half of the
      * screen is the stick and the right half is the look-drag.
      */
-    /*
-     * TURN — the precision latch, in the Path of Titans sense: held (here
-     * latched, because a phone has no spare finger) it takes left and right
-     * back off the side step and gives them to the rotation.
-     */
-    this.turnChip = document.createElement('button');
-    this.turnChip.className = 'density-lab-button density-lab-mode';
-    this.turnChip.textContent = 'STEER';
-    this.turnChip.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      this.precisionTurn = !this.precisionTurn;
-      this.turnChip!.textContent = this.precisionTurn ? 'TURN' : 'STEER';
-      /* Swap what the axis means the instant the mode does, or whatever the
-       * thumb was already asking for keeps being asked of the old one. */
-      const held = this.precisionTurn ? this.input.strafe : this.input.yaw;
-      this.input.yaw = this.precisionTurn ? held : 0;
-      this.input.strafe = this.precisionTurn ? 0 : held;
-    });
-    actions.appendChild(this.turnChip);
-
     this.paceChip = document.createElement('button');
     this.paceChip.className = 'density-lab-button density-lab-mode';
     this.paceChip.textContent = 'WALK';
@@ -3626,8 +3591,7 @@ export class IslandScene {
         - (k.has('a') || k.has('arrowleft') ? 1 : 0);
       if (this.stickPointer === null) {
         this.input.walk = forward;
-        this.input.yaw = this.precisionTurn ? turn : 0;
-        this.input.strafe = this.precisionTurn ? 0 : turn;
+        this.input.yaw = turn;
       }
       /* Shift OR the latch — the key is a hold and the chip is a toggle,
        * and either one asking for a run is a run. */
@@ -3691,11 +3655,8 @@ export class IslandScene {
       if (e.pointerId === this.stickPointer) {
         const dx = Math.max(-48, Math.min(48, e.clientX - this.stickOrigin.x));
         const dy = Math.max(-48, Math.min(48, e.clientY - this.stickOrigin.y));
-        const side = stickCurve(dx / 48);
-        /* One axis, two meanings — see `precisionTurn`. Whichever it is not
-         * must be zeroed, or letting go of TURN would leave her spinning. */
-        this.input.yaw = this.precisionTurn ? side : 0;
-        this.input.strafe = this.precisionTurn ? 0 : side;
+        /* Left and right TURN her. The side step is the view's job now. */
+        this.input.yaw = stickCurve(dx / 48);
         this.input.walk = stickCurve(-dy / 48);
         this.stickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
       } else if (e.pointerId === this.lookPointer) {
@@ -3743,7 +3704,8 @@ export class IslandScene {
       this.stickPointer = null;
       this.input.walk = 0;
       this.input.yaw = 0;
-      this.input.strafe = 0;
+      /* Not the strafe: the VIEW owns that now and `simulate` writes it
+       * every frame, so clearing it here would only be undone. */
       this.stickKnob.style.transform = 'translate(0px, 0px)';
       this.stickEl.style.display = 'none';
     };
