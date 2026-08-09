@@ -27,14 +27,19 @@ export interface ProbeLayout {
 }
 
 /**
- * A fifth of a body length either way.
+ * Getting on for HALF a body length either way, which is a change from a
+ * fifth and a measured one.
+ *
+ * The baseline is the denominator of every slope this produces, so a short
+ * one magnifies the terrain's own quantisation: at a fifth of a body — 1.8
+ * mm on the queen — one lattice step of a sixteenth of a millimetre came
+ * out as two degrees of head, and the ground's ordinary +-0.9 mm swung the
+ * target 26 degrees at frame rate. At 0.45 the same step is under a degree.
  *
  * Fractions rather than millimetres so a major and a minim probe in
- * proportion to themselves. A fifth is about 1.8 mm on the queen: far
- * enough ahead to start lifting before her face arrives, near enough that
- * she is not reacting to terrain she will never touch.
+ * proportion to themselves.
  */
-export const PROBES: ProbeLayout = { ahead: 0.22, behind: 0.22 };
+export const PROBES: ProbeLayout = { ahead: 0.45, behind: 0.45 };
 
 /** How far each section may bend, and how hard it chases. */
 export interface SpineLimits {
@@ -69,26 +74,52 @@ export const SPINE_LIMITS: SpineLimits = {
 };
 
 /**
- * How close a body section may come to solid ground before the posture is
- * biased away from it, in the caller's own units.
+ * PROXIMITY, IN MILLIMETRES, and it is two numbers rather than one.
  *
- * A FLOOR, not the trigger. Ordinary anticipation starts a fifth of a body
- * length out; this is what catches the case anticipation missed, and it is
- * deliberately tiny — by the time anything is this close, the only useful
- * response is to get away from it.
+ * `soft` is where a section starts easing away from what is in front of it;
+ * `hard` is the shell it must not cross. Between them the bias ramps, so
+ * ordinary terrain produces a lean and only a genuine near-miss produces
+ * the full limit.
+ *
+ * Both are millimetres because that is the unit the design is argued in,
+ * and the caller converts ONCE at the boundary. The version this replaces
+ * was a bare `0.05` in world units — which at 5 mm to the unit is 0.25 mm,
+ * five times what it read as. Naming the unit is the fix for that.
+ *
+ * Soft is 1.2 mm rather than a hair: at a 15 mm/s run that is a twelfth of
+ * a second of travel, and a shell measured in tenths is less than one
+ * frame's movement away.
  */
-export const SPINE_CLEARANCE = 0.05;
+export const CLEARANCE_MM = { soft: 1.2, hard: 0.1 };
 
-/** What the three probes found, as elevations along HER up. */
+/**
+ * What the probes found. TWO KINDS, and conflating them was a real bug.
+ *
+ * The RISES answer "where should this section point" — they are terrain
+ * differences and may be any sign. The CLEARANCES answer "is this section
+ * about to touch something" — they are measured distances from the drawn
+ * shell to solid, and are never a function of a rise's sign.
+ *
+ * The first cut derived the clearances as `max(0, -rise)`, which is a
+ * category error: any uphill rise at all, however small, made the pseudo-gap
+ * exactly zero, which reads as maximally close, which added the FULL head
+ * limit. Measured while walking, that fired on 89% of frames and swung the
+ * head target over 55 degrees from half a millimetre of terrain. That was
+ * the nodding.
+ */
 export interface SpineReading {
   /** Surface elevation ahead of her, relative to under her. */
   aheadRise: number;
   /** Surface elevation behind her, relative to under her. */
   behindRise: number;
-  /** How far the head section is from solid — see `SPINE_CLEARANCE`. */
-  headGap: number;
-  /** How far the gaster section is from solid. */
-  gasterGap: number;
+  /**
+   * MEASURED distance from the head's shell to solid, in the caller's own
+   * units. Negative means already penetrating. Infinity when nothing is
+   * near, which is the common case and must produce no bias at all.
+   */
+  headClear: number;
+  /** The same, for the gaster's shell. */
+  gasterClear: number;
 }
 
 /** Pitches in her own frame: positive is nose-up. */
@@ -112,7 +143,8 @@ export function posture(
   aheadDist: number,
   behindDist: number,
   limits: SpineLimits = SPINE_LIMITS,
-  clearance: number = SPINE_CLEARANCE,
+  /** In the SAME units as the clearances in `read`. */
+  clearance: { soft: number; hard: number } = CLEARANCE_MM,
 ): SpinePose {
   const ahead = aheadDist > 1e-9 ? Math.atan2(read.aheadRise, aheadDist) : 0;
   /* Behind her, a rise means the ground she LEFT was higher, so her tail
@@ -125,16 +157,20 @@ export function posture(
     : 0;
 
   /*
-   * THE PROXIMITY FLOOR. Something is about to be inside the ground and
-   * anticipation did not catch it, so lift that end away — proportionally,
-   * so it is a bias and not a snap.
+   * THE PROXIMITY BIAS, off a MEASURED clearance and ramped across a band.
+   *
+   * Nought at `soft` and further, full at `hard` and closer, linear
+   * between — so ordinary ground produces a lean and only a real near-miss
+   * produces the limit. A single threshold could only ever be on or off,
+   * and being on 89% of the time is what made her nod.
    */
-  const headBias = read.headGap < clearance
-    ? (1 - Math.max(0, read.headGap) / clearance) * limits.headMax
-    : 0;
-  const gasterBias = read.gasterGap < clearance
-    ? (1 - Math.max(0, read.gasterGap) / clearance) * limits.gasterMax
-    : 0;
+  const band = Math.max(1e-9, clearance.soft - clearance.hard);
+  const nearness = (gap: number): number => {
+    if (!Number.isFinite(gap) || gap >= clearance.soft) return 0;
+    return Math.min(1, Math.max(0, (clearance.soft - gap) / band));
+  };
+  const headBias = nearness(read.headClear) * limits.headMax;
+  const gasterBias = nearness(read.gasterClear) * limits.gasterMax;
 
   return {
     head: clamp(ahead + headBias, limits.headMax),

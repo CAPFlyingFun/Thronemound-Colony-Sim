@@ -10,12 +10,16 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  posture, PROBES, Spine, SPINE_CLEARANCE, SPINE_LIMITS,
+  CLEARANCE_MM, posture, PROBES, Spine, SPINE_LIMITS,
 } from '../src/anim/spine';
 
 const AHEAD = 0.4;
 const BEHIND = 0.4;
-const flat = { aheadRise: 0, behindRise: 0, headGap: 1, gasterGap: 1 };
+/* Clear of everything, which is the ordinary case: the proximity bias must
+ * contribute nothing at all here or it is not a proximity bias. */
+const flat = {
+  aheadRise: 0, behindRise: 0, headClear: Infinity, gasterClear: Infinity,
+};
 
 describe('the posture the terrain asks for', () => {
   it('is level on level ground', () => {
@@ -50,7 +54,9 @@ describe('the posture the terrain asks for', () => {
   });
 
   it('never folds — every section is clamped to its own anatomy', () => {
-    const cliff = { aheadRise: 50, behindRise: -50, headGap: 1, gasterGap: 1 };
+    const cliff = {
+      aheadRise: 50, behindRise: -50, headClear: Infinity, gasterClear: Infinity,
+    };
     const p = posture(cliff, AHEAD, BEHIND);
     expect(p.head).toBeCloseTo(SPINE_LIMITS.headMax, 9);
     expect(p.thorax).toBeCloseTo(SPINE_LIMITS.thoraxMax, 9);
@@ -62,25 +68,49 @@ describe('the posture the terrain asks for', () => {
   });
 
   it('lifts a section that is about to be inside the ground', () => {
-    /* The proximity FLOOR, not the trigger: flat terrain, but her head is a
-     * hundredth of a millimetre off the dirt. */
-    const tight = { ...flat, headGap: SPINE_CLEARANCE * 0.2 };
-    const p = posture(tight, AHEAD, BEHIND);
-    expect(p.head).toBeGreaterThan(0.1);
-    /* Proportional, so it is a bias and not a snap: further out, less lift. */
-    const looser = posture({ ...flat, headGap: SPINE_CLEARANCE * 0.8 }, AHEAD, BEHIND);
-    expect(looser.head).toBeGreaterThan(0);
-    expect(looser.head).toBeLessThan(p.head);
-    /* And clear of it, nothing at all. */
-    expect(posture({ ...flat, headGap: SPINE_CLEARANCE * 2 }, AHEAD, BEHIND).head)
+    /* At the hard shell, the full limit. */
+    const tight = { ...flat, headClear: CLEARANCE_MM.hard };
+    expect(posture(tight, AHEAD, BEHIND).head)
+      .toBeCloseTo(SPINE_LIMITS.headMax, 6);
+    /* Halfway across the band, about half of it — a lean, not a snap. */
+    const mid = (CLEARANCE_MM.soft + CLEARANCE_MM.hard) / 2;
+    const half = posture({ ...flat, headClear: mid }, AHEAD, BEHIND).head;
+    expect(half).toBeGreaterThan(SPINE_LIMITS.headMax * 0.4);
+    expect(half).toBeLessThan(SPINE_LIMITS.headMax * 0.6);
+    /* At the soft edge and beyond, NOTHING. This is the case that used to
+     * fire on 89% of walking frames and slam her head to the clamp. */
+    expect(posture({ ...flat, headClear: CLEARANCE_MM.soft }, AHEAD, BEHIND).head)
       .toBeCloseTo(0, 9);
+    expect(posture({ ...flat, headClear: CLEARANCE_MM.soft * 10 }, AHEAD, BEHIND).head)
+      .toBeCloseTo(0, 9);
+    expect(posture(flat, AHEAD, BEHIND).head).toBeCloseTo(0, 9);
   });
 
-  it('probes in proportion to her body, not in millimetres', () => {
-    expect(PROBES.ahead).toBeGreaterThan(0.1);
-    expect(PROBES.ahead).toBeLessThan(0.3);
-    expect(PROBES.behind).toBeGreaterThan(0.1);
-    expect(PROBES.behind).toBeLessThan(0.3);
+  it('never derives clearance from the SIGN of a rise', () => {
+    /*
+     * The regression this whole rewrite exists for. An uphill rise and a
+     * downhill drop of the same size must produce the same PROXIMITY
+     * contribution — the difference between them belongs entirely to the
+     * slope term. Before, an uphill rise made the pseudo-gap exactly zero
+     * and added the full 30-degree limit; a drop added nothing.
+     */
+    const up = posture({ ...flat, aheadRise: 0.02 }, AHEAD, BEHIND);
+    const down = posture({ ...flat, aheadRise: -0.02 }, AHEAD, BEHIND);
+    expect(up.head).toBeCloseTo(-down.head, 9);
+    expect(Math.abs(up.head)).toBeLessThan(SPINE_LIMITS.headMax * 0.5);
+  });
+
+  it('probes in proportion to her body, over a long enough baseline', () => {
+    /*
+     * The baseline is the DENOMINATOR of every slope this produces, so a
+     * short one magnifies the terrain's own quantisation into head angle.
+     * At a fifth of a body one lattice step read as two degrees; a real
+     * ant's look-ahead is most of her own length anyway.
+     */
+    for (const p of [PROBES.ahead, PROBES.behind]) {
+      expect(p).toBeGreaterThan(0.35);
+      expect(p).toBeLessThan(0.7);
+    }
   });
 });
 
@@ -98,9 +128,7 @@ describe('the train', () => {
 
   it('moves the head FIRST, then the thorax, then the gaster', () => {
     const spine = new Spine();
-    const uphill = posture(
-      { aheadRise: 0.3, behindRise: -0.3, headGap: 1, gasterGap: 1 }, AHEAD, BEHIND,
-    );
+    const uphill = posture({ ...flat, aheadRise: 0.3, behindRise: -0.3 }, AHEAD, BEHIND);
     const track = run(spine, uphill, 0.6);
     /* How long each took to cover half its own final travel. */
     const halfway = (pick: (r: typeof track[number]) => number, end: number) =>
@@ -115,9 +143,7 @@ describe('the train', () => {
 
   it('levels in the same order when she crests', () => {
     const spine = new Spine();
-    const uphill = posture(
-      { aheadRise: 0.3, behindRise: -0.3, headGap: 1, gasterGap: 1 }, AHEAD, BEHIND,
-    );
+    const uphill = posture({ ...flat, aheadRise: 0.3, behindRise: -0.3 }, AHEAD, BEHIND);
     run(spine, uphill, 2);
     const bent = { ...spine.pose };
     /* Now the ground goes flat under her — the crest. */

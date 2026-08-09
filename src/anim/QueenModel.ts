@@ -1238,6 +1238,34 @@ export class QueenModel {
     return jaw !== undefined && this.boneWorldPosition(jaw, into);
   }
 
+  /**
+   * WHERE A BODY SEGMENT'S SHELL IS, for a clearance query.
+   *
+   * Returns the widest radius any geometry is drawn at around that segment
+   * and fills `into` with its world position, or -1 when the rig has not
+   * loaded. `groundGuard` deliberately probes bone CENTRES and refuses to
+   * drop by this radius — dropping it straight down assumes the widest part
+   * hangs directly below, and doing that floated the whole ant by 0.29 mm
+   * on every foot. That reasoning holds for a rigid LIFT of the model.
+   *
+   * It does not hold for asking "is this segment about to touch something",
+   * which is what this is for: there the radius is the honest conservative
+   * answer, and the response is to bend that segment rather than to lift
+   * all six planted feet.
+   */
+  segmentShell(which: 'head' | 'gaster', into: THREE.Vector3): number {
+    const names = which === 'head' ? this.rig.thorax : this.rig.gaster;
+    /* The far end of each chain: the head's face, the gaster's tip — the
+     * parts that actually reach terrain first. */
+    const name = names[names.length - 1];
+    if (name === undefined) return -1;
+    const bone = this.bones.get(name);
+    if (!bone) return -1;
+    bone.updateWorldMatrix(true, false);
+    into.setFromMatrixPosition(bone.matrixWorld);
+    return this.limbRadius.get(name) ?? 0;
+  }
+
   /* --------------------------------------------------------------- the eye */
 
   /**

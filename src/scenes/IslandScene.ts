@@ -47,7 +47,9 @@ import { type NestPlan } from '../nest/nestPlan';
 import { chamberBox, chamberNorm, type ChamberBox } from './ChamberMovement';
 import { BoreRig, YAW_RATE } from './BoreControl';
 import { Dodge, readFlick } from './dodge';
-import { posture, PROBES, Spine, type SpinePose } from '../anim/spine';
+import {
+  CLEARANCE_MM, posture, PROBES, Spine, type SpinePose, type SpineReading,
+} from '../anim/spine';
 import { DebugStatsPanel } from './DebugStatsPanel';
 import { LoadingOverlay } from './LoadingOverlay';
 import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
@@ -423,6 +425,22 @@ const EYE_SNAP = 3 / MM;
  * BISECTION at all: the five fixed steps it replaced were the shake.
  */
 const EYE_BISECTIONS = 10;
+
+/**
+ * How far a shell clearance probe looks before calling it clear.
+ *
+ * A body length. Past that the answer cannot matter to a body this size,
+ * and the march is the only per-frame cost the spine's proximity half has.
+ */
+const SHELL_REACH = 2;
+
+/** How much of a segment's widest radius actually hangs below it. See
+ *  `shellClearance` for the measurement this comes from. */
+const SHELL_SHARE = 0.5;
+
+/** How fast the terrain rises are low-passed, per second. Slow enough to
+ *  swallow a lattice step, fast enough to meet a real slope. */
+const RISE_RATE = 9;
 
 /** How far past her centre the jaws reach when the model has not loaded. */
 const NOSE_REACH = 4.5 / MM;
@@ -951,6 +969,16 @@ export class IslandScene {
 
   /** Last frame's ground-guard lift, in world units. Diagnostics only. */
   private guardLift = 0;
+
+  /** The spine's inputs and raw targets last frame. Diagnostics only. */
+  private spineRead: SpineReading | null = null;
+
+  private spineWant: SpinePose | null = null;
+
+  /** The terrain rises, low-passed — see `readSpine`. */
+  private riseAhead = 0;
+
+  private riseBehind = 0;
 
   private firstPerson = false;
 
@@ -2448,23 +2476,104 @@ export class IslandScene {
       return frame.surface(px, py, pz) - (px * up.x + py * up.y + pz * up.z);
     };
     const here = at(0);
-    const wantAhead = at(ahead) - here;
-    const wantBehind = at(-behind) - here;
+    /*
+     * THE RISES ARE FILTERED, because the surface they come off is a
+     * LATTICE and the baseline is short.
+     *
+     * Measured walking: the raw rises land on multiples of a sixteenth of a
+     * millimetre — the lattice's own step — and over a 1.8 mm baseline one
+     * of those steps is two degrees of head. The full +-0.9 mm range the
+     * ground actually produced swung the target 26 degrees, at frame rate.
+     * That is quantisation, not terrain, and converting it to an angle
+     * first only magnifies it.
+     *
+     * So the elevation differences are low-passed before they become
+     * angles. This is not the spine's own smoothing — that shapes the
+     * TRAIN, and no amount of it can help when the target itself is noise.
+     */
+    const rawAhead = at(ahead) - here;
+    const rawBehind = at(-behind) - here;
+    const k = 1 - Math.exp(-RISE_RATE * Math.max(0, dt));
+    this.riseAhead += (rawAhead - this.riseAhead) * k;
+    this.riseBehind += (rawBehind - this.riseBehind) * k;
+    const wantAhead = this.riseAhead;
+    const wantBehind = this.riseBehind;
     /*
      * The proximity floor: how much daylight each end has, measured the
      * same way. `SPINE_CLEARANCE` is a hundredth of a millimetre, so this
      * only ever fires when anticipation has already failed.
      */
-    const want = posture(
-      {
-        aheadRise: wantAhead,
-        behindRise: wantBehind,
-        headGap: Math.max(0, -wantAhead),
-        gasterGap: Math.max(0, -wantBehind),
-      },
-      ahead, behind,
-    );
+    /*
+     * TWO DIFFERENT QUESTIONS, ASKED TWO DIFFERENT WAYS.
+     *
+     * The rises above are terrain DIFFERENCES and say where a section
+     * should point. The clearances below are MEASURED distances from a
+     * drawn shell to solid and say whether it is about to touch anything.
+     * Deriving the second from the sign of the first was a category error
+     * that fired the emergency bias on 89% of walking frames.
+     */
+    const reading: SpineReading = {
+      aheadRise: wantAhead,
+      behindRise: wantBehind,
+      headClear: this.shellClearance('head'),
+      gasterClear: this.shellClearance('gaster'),
+    };
+    /* Millimetres converted ONCE, here at the boundary — everything inside
+     * `posture` is then in the same units as the reading it was handed. */
+    const want = posture(reading, ahead, behind, undefined, {
+      soft: CLEARANCE_MM.soft / MM,
+      hard: CLEARANCE_MM.hard / MM,
+    });
+    /* Diagnostics for `shot-spine.mjs` — every input and both outputs, so
+     * the bobbing can be attributed rather than guessed at. */
+    this.spineRead = reading;
+    this.spineWant = want;
     return this.spine.follow(want, dt);
+  }
+
+  /**
+   * HOW MUCH AIR A BODY SEGMENT'S SHELL HAS, along her own down.
+   *
+   * Against the unioned solid field — soil, landmark, scrub, dug tunnel
+   * wall — so it works on a ceiling and upside down with no per-object
+   * branch anywhere. `Infinity` when nothing is within reach, which is the
+   * ordinary case and must contribute nothing.
+   *
+   * The shell RADIUS is subtracted, which `groundGuard` deliberately does
+   * not do: there the number drives a rigid lift of the whole model and a
+   * radius over-reports, floating all six planted feet. Here it drives a
+   * bend of one segment, and over-reporting is the safe direction.
+   */
+  private shellClearance(which: 'head' | 'gaster'): number {
+    if (!this.queenReady) return Infinity;
+    const radius = this.queen.segmentShell(which, S_SPOT);
+    if (radius < 0) return Infinity;
+    /*
+     * HALF THE RADIUS, and that is a calibration rather than a guess.
+     *
+     * `groundGuard`'s own note says why the whole radius is wrong: it is
+     * the widest the mesh gets ANYWHERE around that bone, and subtracting
+     * it straight down assumes the widest part hangs directly below. On the
+     * gaster that radius is 1.53 mm — most of her abdomen — and using it
+     * reported -0.53 to -1.53 mm of clearance on flat ground she is
+     * visibly not clipping through. I reproduced the exact mistake that
+     * comment warns about.
+     *
+     * Measured: standing on the flat her gaster bone sits about 1.0 mm off
+     * solid and nothing shows, so whatever actually hangs below that bone
+     * is under 1.0 mm — under two thirds of the radius. Half is inside
+     * that and still conservative.
+     */
+    const shell = radius * SHELL_SHARE;
+    const up = this.up;
+    const reach = SHELL_REACH;
+    const step = CELL_SIZE * 0.5;
+    for (let d = 0; d <= reach; d += step) {
+      if (this.soilSolidAt(
+        S_SPOT.x - up.x * d, S_SPOT.y - up.y * d, S_SPOT.z - up.z * d,
+      )) return d - shell;
+    }
+    return Infinity;
   }
 
   /**
