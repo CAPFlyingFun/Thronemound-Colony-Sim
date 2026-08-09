@@ -62,6 +62,19 @@
  *    of its own circles, along its own `v + ω × r`.
  * 5. A swing leg that finds nothing to stand on STAYS UP and keeps reaching.
  *
+ * ## And one thing the tripod cannot do
+ *
+ * A tripod cannot start a climb. Step 4 lifts THREE feet, and at the foot of
+ * a wall two of them have nowhere to go; step 5's question — the nearest
+ * solid along her own up — cannot see a wall at all until a foot's home is
+ * already inside it. So `cornerTurn.ts` sits between steps 1 and 2 as a
+ * QUEUE: while it is running, step 4 releases ONE foot rather than three,
+ * and a foot it has scheduled takes its landing from the new surface instead
+ * of from `nearest`. Everything else — the stride, the clip, the swing arc,
+ * the anchoring — is the same code doing the same job. It arms only where a
+ * front foot can genuinely reach, and a room that cannot answer its one
+ * extra question never arms it at all.
+ *
  * ## The numbers are measured, not chosen
  *
  * Reach comes from the rig: see `scripts/probe-legs.mjs`, which measures
@@ -81,6 +94,12 @@
  */
 
 import * as THREE from 'three';
+import {
+  CORNER_TUNING, CornerTurn, rowsFromHomes,
+  type CornerReport, type SurfaceContact,
+} from './cornerTurn';
+
+export type { SurfaceContact } from './cornerTurn';
 
 /** Millimetres per world unit. */
 const MM = 5;
@@ -169,6 +188,28 @@ export interface Ground {
    * answer and not a failure — the leg stays up.
    */
   nearest(at: THREE.Vector3, up: THREE.Vector3, down: number, rise: number): THREE.Vector3 | null;
+  /**
+   * OPTIONAL, and additive on purpose: the first solid along `dir` within
+   * `maxDistance`, with the surface normal there.
+   *
+   * `nearest` searches along the body's existing up, which is the right
+   * question for the ground she is on and cannot answer for the one she is
+   * not. Measured on the island: from a front foot's home, at gaps of 14
+   * down to 5 mm from a trunk, it returns SOIL every frame while a ray along
+   * her forward finds bark 10.1 to 1.1 mm away. And closer in it returns
+   * something worse — its own origin, 2.5 mm inside the wood, because a cast
+   * that starts in solid reports a hit at zero range.
+   *
+   * A room that cannot answer this simply omits it, and the corner scheduler
+   * never arms. Nothing existing changes: no caller of `nearest` is touched,
+   * and there is no second collision world — the island answers this off the
+   * same unioned field.
+   *
+   * MUST return null when `origin` is already solid. See above.
+   */
+  probeContact?(
+    origin: THREE.Vector3, dir: THREE.Vector3, maxDistance: number,
+  ): SurfaceContact | null;
 }
 
 interface Leg {
@@ -263,6 +304,16 @@ export interface DriveInput {
    * untouched. That is the wiggle, and this is half of why.
    */
   settle?: boolean;
+  /**
+   * May a corner transition ARM this frame? Default true.
+   *
+   * A veto for the caller, not a mode for the drive. A dodge is the ordinary
+   * movement with different numbers in it — the drive is handed a walk and a
+   * strafe and cannot tell a burst from a thumb on a stick — so a flick that
+   * happens to point at a wall must not stage a climb. An active dig stroke
+   * is the same case. See `cornerTurn.ts`.
+   */
+  mayTransition?: boolean;
 }
 
 export interface DriveReport {
@@ -282,6 +333,8 @@ export interface DriveReport {
   strain: number;
   /** Fraction of the proposed twist that survived the feet, 0..1. */
   allowed: number;
+  /** What the corner scheduler is doing, if anything. See `cornerTurn.ts`. */
+  corner: CornerReport;
 }
 
 /**
@@ -300,10 +353,36 @@ function spread(reach: number, spare: number): number {
   return Math.sqrt(Math.max(0, straight * straight - reach * reach));
 }
 
+/**
+ * How long the ordinary tripod trigger stays muzzled after a corner.
+ *
+ * Two swings' worth. Coming off a transition her homes are computed from a
+ * body frame that has swung ninety degrees, so the excursions the trigger
+ * measures are large and ALL of them are large at once — the first normal
+ * frame would otherwise read a spent tripod and lift three feet together.
+ * Derived from the swing rather than chosen: it is exactly long enough for
+ * the spread rule to walk the strung-out feet back under her ONE AT A TIME,
+ * which is the same thing the transition was doing and reads as continuous.
+ */
+export const HANDOFF_GRACE = SWING_SECONDS * 2;
+
+/** Where a scheduled swing is aiming, this frame. Copied out immediately. */
+const SCRATCH_AIM = new THREE.Vector3();
+
 export class LegDrive {
   private readonly legs: Leg[] = [];
   /** Mean distance of a foot from her turn axis. See `radius`. */
   private stanceRadius = 1;
+
+  /**
+   * The corner scheduler. It never moves a foot; it says which ONE may move
+   * next and where it must land, and everything below obeys it exactly as it
+   * obeys the tripod trigger the rest of the time. See `cornerTurn.ts`.
+   */
+  private readonly corner: CornerTurn;
+
+  /** Seconds left of the post-corner muzzle. See `HANDOFF_GRACE`. */
+  private grace = 0;
 
   constructor(setup: LegSetup[]) {
     for (const leg of setup) {
@@ -335,6 +414,10 @@ export class LegDrive {
         (sum, l) => sum + Math.hypot(l.home.x, l.home.z), 0,
       ) / this.legs.length;
     }
+    /* Rows from the MEASURED homes, leading first — so "the front pair" is a
+     * fact about this animal rather than a list of names, and a caste with a
+     * different number of legs rows up the same way. */
+    this.corner = new CornerTurn(rowsFromHomes(this.legs));
   }
 
   /** Where each foot should be drawn this frame, for the IK. */
@@ -416,6 +499,10 @@ export class LegDrive {
    * other is in the air, which is what a tripod gait is for.
    */
   plantAll(body: BodyPose, ground: Ground): void {
+    /* A fresh plant is a respawn or a teleport, and both invalidate the two
+     * surfaces a transition is held between. See `CornerTurn.reset`. */
+    this.corner.reset();
+    this.grace = 0;
     const home = new THREE.Vector3();
     const lead = STRIDE_MM.walk / 2 / MM;
     for (const leg of this.legs) {
@@ -470,6 +557,40 @@ export class LegDrive {
     const radius = this.radius(body, input);
 
     /*
+     * 1b. THE CORNER SCHEDULER, if the room can answer its one question.
+     *
+     * It reads the world and its own state and answers with at most ONE
+     * slot: the foot that may leave its surface this frame, and where it
+     * must land. While it is active the tripod trigger below is PAUSED —
+     * paused, not removed: the group logic, the stride, the clip and the
+     * swing interpolation are the same code doing the same job, and the only
+     * thing suspended is the rule that a spent foot takes its whole tripod
+     * with it. That rule is exactly wrong at a corner.
+     *
+     * A room with no `probeContact` never arms this at all, which is how the
+     * block room and every existing test keep the behaviour they had.
+     */
+    const cornerGround = ground.probeContact
+      ? { probeContact: ground.probeContact.bind(ground) }
+      : null;
+    const corner = this.corner.update(
+      dt, body, { ...input, radius }, cornerGround, this.legs,
+    );
+    if (corner.handedOff) this.grace = HANDOFF_GRACE;
+    this.grace = Math.max(0, this.grace - dt);
+    /** Is the corner scheduler, or its aftermath, in charge of the queue? */
+    const staged = corner.active || this.grace > 0;
+
+    if (corner.release) {
+      const leg = this.legs.find((l) => l.slot === corner.release);
+      if (leg?.planted) {
+        leg.planted = false;
+        leg.t = 0;
+        leg.from.copy(leg.at);
+      }
+    }
+
+    /*
      * 2. A FOOT THAT IS OUT OF LEG LETS GO.
      *
      * Before anything is constrained, because this is what stops a
@@ -485,13 +606,47 @@ export class LegDrive {
      * tripod lifting — could not fire either. A leg stretched past what it
      * physically has does not hold on and win. It lets go.
      */
+    /*
+     * DURING A TRANSITION, THE SAME RULE, ONE FOOT PER FRAME.
+     *
+     * A corner moves her a long way in a frame or two and swings her up with
+     * it, so several old feet can run out of leg at once — and letting them
+     * all go is the giant tripod again, wearing different clothes. Releasing
+     * the worst one per frame escapes the glue trap just as well (a frame is
+     * a sixtieth of a second; four strung-out feet are freed in four of
+     * them) while keeping the promise the whole file makes at a corner: one
+     * foot moves at a time.
+     *
+     * And it waits for an empty sky. `standing` is counted after the
+     * scheduler has had its release, so requiring all of them down means the
+     * two paths into the air can never both fire on one frame — which they
+     * did, and it read as two feet let go together at a corner. A leg held
+     * past its reach for a few frames is a leg that steps next; two in the
+     * air on a wall is most of a fall.
+     */
+    let worst: Leg | null = null;
+    let worstBy = 0;
+    let standing = 0;
+    for (const leg of this.legs) if (leg.planted) standing += 1;
     for (const leg of this.legs) {
       if (!leg.planted) continue;
       this.homeWorld(leg, body, home);
-      if (this.excursion(leg, home, body.up).length() <= leg.spread) continue;
-      leg.planted = false;
-      leg.t = 0;
-      leg.from.copy(leg.at);
+      const over = this.excursion(leg, home, body.up).length() - leg.spread;
+      if (over <= 0) continue;
+      if (!staged) {
+        leg.planted = false;
+        leg.t = 0;
+        leg.from.copy(leg.at);
+        standing -= 1;
+        continue;
+      }
+      if (over > worstBy) { worstBy = over; worst = leg; }
+    }
+    if (worst && standing >= this.legs.length
+      && standing - 1 >= CORNER_TUNING.minPlanted) {
+      worst.planted = false;
+      worst.t = 0;
+      worst.from.copy(worst.at);
     }
 
     /*
@@ -556,7 +711,12 @@ export class LegDrive {
     let strain = 0;
     let spentest: Leg | null = null;
     let inTransit = false;
+    /* Counted HERE rather than reused from step 2: the releases above have
+     * happened since, and a stale count is how a rule that says "only with
+     * an empty sky" ends up firing with a foot already in it. */
+    let onFoot = 0;
     for (const leg of this.legs) {
+      if (leg.planted) onFoot += 1;
       if (!leg.planted) {
         /*
          * A leg on its way to a spot it has FOUND blocks the swap — she may
@@ -583,7 +743,18 @@ export class LegDrive {
         spentest = leg;
       }
     }
-    if (!inTransit && spentest && strain >= 1) {
+    /*
+     * PAUSED, NOT DESTROYED — and the pause has two reasons behind it.
+     *
+     * During a transition the whole point is that one foot moves at a time,
+     * and "the most-spent foot releases its entire tripod" would take three
+     * at once, two of which have nowhere to go. After one, the homes have
+     * been recomputed in a body frame that swung ninety degrees, so every
+     * excursion is large SIMULTANEOUSLY and the first normal frame would
+     * read a spent tripod and lift three feet together. The grace lets the
+     * spread rule bring them back one at a time instead. See `HANDOFF_GRACE`.
+     */
+    if (!staged && !inTransit && spentest && strain >= 1) {
       /*
        * Lift the tripod that the most-spent foot belongs to. Alternation is
        * not bookkept: a group that has just stepped is fresh by definition,
@@ -598,6 +769,32 @@ export class LegDrive {
         leg.t = 0;
         leg.from.copy(leg.at);
       }
+    } else if (
+      staged && !inTransit && !corner.release && spentest && strain >= 1
+      && onFoot >= this.legs.length
+    ) {
+      /*
+       * AND DURING A TRANSITION, THE SAME TRIGGER — ONE FOOT, NOT THREE.
+       *
+       * Without this she stops dead the moment the leading pair grip, and
+       * the measurement is unambiguous: two front feet on the bark, four on
+       * the soil, all six inside their limits, `allowed` clipped to nothing,
+       * and eight hundred and thirty frames in which her gap to the trunk
+       * went from 3.98 mm to 3.81. Every foot was AT its boundary, which is
+       * where the clip parks them, so the spread rule never fired either —
+       * nothing exceeded anything, and nothing could move.
+       *
+       * The escape on flat ground is this same trigger lifting a tripod. A
+       * corner cannot afford three, but it can afford one: the most-spent
+       * foot takes an ordinary step on the surface it is already on, with
+       * the ordinary swing and the ordinary `nearest`. She creeps into the
+       * corner on five feet while the leading pair hold the wall, which is
+       * what carries her body round — no pull on the root, nothing bypassing
+       * the clip, and no motion that some foot did not first make room for.
+       */
+      spentest.planted = false;
+      spentest.t = 0;
+      spentest.from.copy(spentest.at);
     }
 
     /*
@@ -624,7 +821,23 @@ export class LegDrive {
        */
       if (speed <= 1e-9) dir.copy(leg.dir);
       const ahead = home.clone().addScaledVector(dir, speed > 1e-9 ? radius : 0);
-      const hit = ground.nearest(ahead, body.up, leg.down, REACH_UP_MM / MM);
+      /*
+       * A SCHEDULED foot aims where the scheduler found real wood, and every
+       * other foot asks the ground the same question it always did.
+       *
+       * The contact is offset along ITS OWN normal rather than along her up,
+       * which is the whole difference between a claw resting on bark and one
+       * hovering a hundredth of a millimetre off it in the wrong direction.
+       * Everything after this line — the arc, the lock, the anchor, the
+       * stored travel direction — is the ordinary swing, untouched. There is
+       * no reach animation here and there must never be one: a foot arrives
+       * because the world was probed and answered, or it does not arrive.
+       */
+      const scheduled = corner.aimSlot === leg.slot ? corner.aim : null;
+      const hit = scheduled
+        ? SCRATCH_AIM.copy(scheduled.point)
+          .addScaledVector(scheduled.normal, FOOT_CLEARANCE_MM / MM)
+        : ground.nearest(ahead, body.up, leg.down, REACH_UP_MM / MM);
       if (!hit) {
         /*
          * Nothing to stand on. She keeps the leg raised and keeps reaching —
@@ -696,6 +909,7 @@ export class LegDrive {
       clearanceMm: Number.isFinite(clearance) ? clearance * MM : -1,
       strain,
       allowed,
+      corner: this.corner.report(this.legs),
     };
   }
 }

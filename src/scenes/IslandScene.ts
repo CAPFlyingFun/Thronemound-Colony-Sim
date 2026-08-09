@@ -655,7 +655,26 @@ class Colonist {
     this.drive?.step(
       dt,
       { at: this.at, up: this.up, forward: this.fwd },
-      { walk, yaw, speed: COLONIST_SPEED, yawRate: COLONIST_TURN, settle: false },
+      {
+        walk,
+        yaw,
+        speed: COLONIST_SPEED,
+        yawRate: COLONIST_TURN,
+        settle: false,
+        /*
+         * NOT YET, and for a reason about this class rather than about the
+         * scheduler — which is caste-agnostic and would run a worker's legs
+         * on their own measured homes perfectly well.
+         *
+         * A colonist's body is PINNED: three lines below, her height is
+         * written from the heightfield and her up from its normal, every
+         * frame. Feet on a trunk would be dragged straight back off it by
+         * that, so she would stage a transition she could never finish. The
+         * queen is seated by the walker, which is what a corner needs.
+         * Roaming NPCs get this when they get her seating.
+         */
+        mayTransition: false,
+      },
       ground,
     );
 
@@ -925,6 +944,34 @@ export class IslandScene {
       const from = S_RAD.copy(at).addScaledVector(up, rise);
       const dir = S_SPOT.copy(up).negate();
       return walker.cast(from, dir, rise + down);
+    },
+    /*
+     * AND THE SAME QUESTION IN A DIRECTION THAT IS NOT HER UP.
+     *
+     * The one above is the right question for the ground she is standing on
+     * and cannot answer for the one she is not. Measured at the landmark:
+     * from a front foot's home, with a trunk 14 down to 5 mm away, it
+     * returns SOIL every frame, while a ray along her forward finds bark the
+     * whole time. So the corner scheduler gets a direction of its own.
+     *
+     * It is the SAME FIELD — the walker's own cast, over the union of soil,
+     * landmark, scrub and anything dug. No second collision world, no tree.
+     *
+     * The null on a solid origin is not defensive tidying. `cast` reports a
+     * hit at zero range when it starts inside something, which is correct
+     * for a ray and is a foothold 2.5 mm inside the wood here; that is
+     * exactly what the gait's downward cast hands back once a front foot's
+     * home crosses the bark.
+     */
+    probeContact: (origin: THREE.Vector3, dir: THREE.Vector3, maxDistance: number) => {
+      const walker = this.walker;
+      if (!walker) return null;
+      if (walker.solidAt(origin.x, origin.y, origin.z)) return null;
+      const hit = walker.cast(origin, dir, maxDistance);
+      if (!hit) return null;
+      const normal = new THREE.Vector3();
+      walker.normalAt(hit, normal);
+      return { point: hit, normal };
     },
   };
 
@@ -2640,6 +2687,17 @@ export class IslandScene {
           /* The walker seats her: two systems both deciding how high she
            * rides do not average out, they fight. */
           settle: false,
+          /*
+           * A DODGE MAY NOT STAGE A CLIMB, and neither may a dig stroke.
+           *
+           * The drive is handed one walk and one strafe and cannot tell a
+           * burst from a thumb, which is the whole virtue of mixing the
+           * dodge in up there — and it is exactly why the veto has to be
+           * said here, where the difference is still known. A flick that
+           * happens to point at bark is an evasion, not a decision to go
+           * up; a mandible stroke is not travel at all.
+           */
+          mayTransition: !burst.active && !this.input.dig,
         },
         this.groundForLegs,
       );
@@ -4338,6 +4396,24 @@ export class IslandScene {
   }
 
   aimPitchForTest(radians: number): void { this.aimPitch = radians; }
+
+  /**
+   * THE CORNER, IN ONE LINE — for a probe or a console, never for a frame.
+   *
+   * `FL NEW/PLANT FR NEW/SWING ML OLD/PLANT ...` with the phase, how far the
+   * two surfaces disagree, how near the tracked candidate is, and how many
+   * feet are actually down. Built only when someone asks: the report itself
+   * is state the drive already holds, and this costs a string.
+   */
+  cornerLineForTest(): string {
+    const r = this.driveReport?.corner;
+    if (!r) return 'no drive';
+    const feet = r.feet.map((f) => (
+      `${f.slot.replace(/[a-z]/g, '').padEnd(2)} ${f.owner.toUpperCase()}/${f.state}`
+    ));
+    return `${r.phase} turn=${r.turnDeg}deg cand=${r.candidateMm}mm `
+      + `new=${r.onNew} old=${r.onOld} planted=${r.planted} | ${feet.join('  ')}`;
+  }
 
   stepForTest(dt: number, steps: number): void {
     for (let i = 0; i < steps; i += 1) this.simulate(dt);
