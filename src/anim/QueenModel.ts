@@ -38,7 +38,23 @@ import { aimRotation, distanceToPolyline, footTarget, type Vec3 } from './legIk'
  * of it — so the cap only decides how far short the feet land.
  */
 const IK_JOINTS = 3;
-const IK_PASSES = 8;
+/**
+ * The CAP on cyclic-descent passes per attempt, not the number that run.
+ *
+ * It was eight and they all ran, which converged to about a tenth of the
+ * error — see the early exit in `solveFeet`. Raised so a hard frame can
+ * actually finish; the exit means an easy one costs a fraction of it.
+ */
+const IK_PASSES = 24;
+
+/**
+ * Close enough to stop, in world units — a fifth of `FOOT_CLEARANCE_MM`.
+ *
+ * A thousandth of a millimetre. Invisible at a scale where the whole animal
+ * is nine millimetres long, and comfortably larger than the point at which
+ * floating-point noise would keep the loop running.
+ */
+const IK_CLOSE_ENOUGH = 0.001 / 5;
 const IK_MAX_STEP = 0.9;
 
 /**
@@ -689,6 +705,34 @@ export class QueenModel {
             joint.quaternion.premultiply(LOCAL_SPIN);
             joint.updateMatrixWorld(true);
           }
+          /*
+           * STOP WHEN IT IS THERE, which is both the fix and the refund.
+           *
+           * Every joint's correction is scaled by its own `boneMobility` —
+           * as little as a quarter — so one pass closes at most about three
+           * quarters of the error and eight passes leave roughly a tenth of
+           * it. That tenth is not a rounding detail: a stance foot is
+           * supposed to sit on a fixed world anchor with EXACTLY zero ground
+           * speed, and instead the drawn claw trailed its anchor by a
+           * constant fraction of each frame's motion. Measured on flat soil:
+           * 0.018 mm of slip per frame at a walk and 0.060 at a run, which
+           * against 0.144 and 0.366 mm of travel is 12.5% and 16.4% — the
+           * same fraction at both speeds, which is what a convergence
+           * shortfall looks like and a gait error does not. That is the
+           * skating.
+           *
+           * IT IS NOT FREE, and the honest figure is 175 passes a frame
+           * against 70.5 before — two and a half times the work. Two cheaper
+           * shapes were measured and rejected rather than assumed: an early
+           * exit does NOT pay for itself here (the first draft of this
+           * comment claimed it did, and it does not — nearly every limb was
+           * leaving the old fixed eight short, which is the whole point), and
+           * a looser tolerance for un-anchored limbs changed the count by
+           * exactly nothing, because `anchorFor` answers for a swinging foot
+           * as readily as a planted one. One tolerance, measured, kept.
+           */
+          foot.getWorldPosition(FOOT);
+          if (FOOT.distanceToSquared(TARGET) <= IK_CLOSE_ENOUGH * IK_CLOSE_ENOUGH) break;
         }
 
         // Nothing above the foot may be under the soil either. Measure the
