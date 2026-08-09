@@ -389,10 +389,49 @@ export class QueenModel {
      * the view tilts up — which is why `FollowCamera.lookPitch` exists and
      * why reading `aimPitch` here was wrong twice over.
      */
-    turn(head, pose.headYaw, -pose.headPitch);
-    // The counterweight. Yaw only — a gaster that pitched with the head
-    // would see-saw her whole body every time she looked at the floor.
-    turn(this.rig.gaster[0], -pose.headYaw * GASTER_COUNTER, 0);
+    /*
+     * THE TRAIN — and the hierarchy decides which joint is which car.
+     *
+     * Dumped with `scripts/shot-skeleton.mjs` rather than assumed, because
+     * a rotation carries every DESCENDANT with it and the rig tables say
+     * nothing about parenting. On the queen:
+     *
+     *   root -> body[0] -> body[1] ------> thorax[0] -> [1] -> [2] -> mouth
+     *                          |     `---> gaster[0] -> gaster[1]
+     *                          `---------> all six legs
+     *
+     * So `body[1]` is the HUB: pitching it pitches her whole upper body AND
+     * her legs, which is exactly what a thorax doing the work of a middle
+     * rail car should do — and why its limit is the smallest of the three.
+     * `solveFeet` runs after this and puts the feet back on the ground, so
+     * the legs follow the body rather than fighting it.
+     *
+     * Head and gaster hang off that hub, so their pitches are applied
+     * RELATIVE to it — subtract the thorax and the world-space result is
+     * the posture that was asked for rather than the sum of two of them.
+     */
+    const spine = pose.spine;
+    const thoraxPitch = spine ? spine.thorax : 0;
+    const headLocal = spine ? spine.head - spine.thorax : 0;
+    const gasterLocal = spine ? spine.gaster - spine.thorax : 0;
+    if (spine && Math.abs(thoraxPitch) > 1e-6) {
+      turn(this.rig.body[this.rig.body.length - 1], 0, -thoraxPitch);
+    }
+    /*
+     * WHERE THE TWO INFLUENCES MEET, and the only place they do.
+     *
+     * The player's aim and the terrain's posture ADD at the neck, in one
+     * `turn` — two calls on the same bone would reset the first, because
+     * `turn` restores the rest pose before it writes. Nothing downstream of
+     * here sees the player's look at all: the thorax follows the ground and
+     * must not pitch because someone glanced up, and the gaster must not
+     * swing about because the camera did.
+     */
+    turn(head, pose.headYaw, -(pose.headPitch + headLocal));
+    /* The counterweight, now carrying the terrain's follow-through as well.
+     * Its YAW is still the head's — a gaster that yawed with the look reads
+     * as a counterweight — while its PITCH is the ground's alone. */
+    turn(this.rig.gaster[0], -pose.headYaw * GASTER_COUNTER, -gasterLocal);
   }
 
   update(dt: number, input: QueenPoseInput): void {
@@ -1174,6 +1213,19 @@ export class QueenModel {
     return widest;
   }
 
+  /**
+   * How long she is, in world units — nose to tail, at her real size.
+   *
+   * Off the caste table rather than the mesh, because that table is what
+   * the model is SCALED by: it is the same number the scale was derived
+   * from, so the two cannot drift. Used by the spine to place its terrain
+   * probes in proportion to her, which is what makes a major anticipate
+   * further ahead than a minim without anyone editing a constant.
+   */
+  bodyLength(): number {
+    return rigLengthVoxels(this.rig);
+  }
+
   /** Her mouthparts, in world space. False when the rig has not loaded. */
   /** The joint her head hangs off — the head end of the thorax chain. */
   headJointPosition(into: THREE.Vector3): boolean {
@@ -1242,9 +1294,18 @@ export class QueenModel {
     return this.headAxis(MODEL_UP, into);
   }
 
-  /** The head end of the thorax chain — see `RigMap.thorax`. */
+  /**
+   * The HEAD END of the thorax chain — the same joint `headJointPosition`
+   * reports, and NOT `thorax[0]`.
+   *
+   * Worth being explicit about, because the first cut of this used
+   * `thorax[0]` and that is the neck BASE: the joint the aim pivots on,
+   * roughly a body-width behind her face. An eye there looks out of her
+   * shoulders. The two ends of this chain are used for different things a
+   * few lines apart and the array gives no clue which is which.
+   */
   private headBoneName(): string | undefined {
-    return this.rig.thorax[0];
+    return this.rig.thorax[this.rig.thorax.length - 1];
   }
 
   /**

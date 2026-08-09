@@ -295,6 +295,15 @@ export interface GaitPose {
   /** Per-bone Euler rotation offsets from the rest pose, in radians. */
   rotations: Map<string, [number, number, number]>;
   /**
+   * The terrain's posture, carried through from the input untouched.
+   *
+   * Not baked into `rotations` for the same reason the head aim is not: the
+   * bones this ends up on are chosen from the rig's PARENTING, which this
+   * function has no view of, and the clamps belong to `spine.ts`. This is a
+   * passenger, and saying so is cheaper than pretending otherwise.
+   */
+  spine?: { head: number; thorax: number; gaster: number };
+  /**
    * Where her head should be AIMED, clamped to a neck's limits — and NOT
    * baked into `rotations`, on purpose.
    *
@@ -368,6 +377,18 @@ export interface GaitInput {
    */
   headYaw?: number;
   headPitch?: number;
+  /**
+   * TERRAIN POSTURE — three pitches in her own frame, nose-up positive.
+   *
+   * Separate from `headPitch`, and it has to be. `headPitch` is where the
+   * PLAYER is looking; this is what the ground is doing. They add at the
+   * neck and nowhere else: the thorax follows the terrain and must not
+   * rotate because someone glanced upward, and the gaster certainly must
+   * not swing about because the camera did.
+   *
+   * See `src/anim/spine.ts` for where the numbers come from.
+   */
+  spine?: { head: number; thorax: number; gaster: number };
   /**
    * How far her neck may pitch, in radians, down and up separately. Defaults
    * to a neck; see `HEAD_PITCH_DOWN`.
@@ -665,7 +686,7 @@ export function gaitPose(input: GaitInput, rig: RigMap = QUEEN_RIG): GaitPose {
     0,
   ]);
 
-  return { rotations, lift, roll, pitch, headYaw, headPitch };
+  return { rotations, lift, roll, pitch, headYaw, headPitch, spine: input.spine };
 }
 
 /**

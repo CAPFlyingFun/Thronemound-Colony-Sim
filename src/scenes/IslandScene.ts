@@ -47,6 +47,7 @@ import { type NestPlan } from '../nest/nestPlan';
 import { chamberBox, chamberNorm, type ChamberBox } from './ChamberMovement';
 import { BoreRig, YAW_RATE } from './BoreControl';
 import { Dodge, readFlick } from './dodge';
+import { posture, PROBES, Spine, type SpinePose } from '../anim/spine';
 import { DebugStatsPanel } from './DebugStatsPanel';
 import { LoadingOverlay } from './LoadingOverlay';
 import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
@@ -1061,6 +1062,10 @@ export class IslandScene {
 
   /** The evasive burst, and the numbers behind it. See `dodge.ts`. */
   private readonly dodge = new Dodge();
+
+  /** Head, thorax and gaster, each chasing the terrain at its own rate.
+   *  See `src/anim/spine.ts`. */
+  private readonly spine = new Spine();
 
   private readonly stickOrigin = { x: 0, y: 0 };
 
@@ -2398,6 +2403,53 @@ export class IslandScene {
    * once down points at the shaft's wall.
    */
   /**
+   * WHAT THE GROUND IS DOING, ahead of her, under her and behind her.
+   *
+   * Three probes and no more. Each is a surface elevation measured ALONG
+   * HER OWN UP at a point offset along her nose, using the same
+   * `boreFrame().surface` the leg solver already uses — so on a trunk
+   * "ahead" is further up the bark and "rise" is out of it, and none of
+   * this needs to know a tree exists.
+   *
+   * The offsets are fractions of her body length, so a major anticipates in
+   * proportion to herself. Cheap enough to run every frame: three surface
+   * casts against the six the legs already pay for.
+   */
+  private readSpine(dt: number): SpinePose {
+    const frame = this.boreFrame();
+    if (!frame || !this.queenReady) return this.spine.pose;
+    const body = this.queen.bodyLength();
+    const ahead = body * PROBES.ahead;
+    const behind = body * PROBES.behind;
+    const up = this.up;
+    const at = (along: number): number => {
+      const px = this.at.x + this.fwd.x * along;
+      const py = this.at.y + this.fwd.y * along;
+      const pz = this.at.z + this.fwd.z * along;
+      /* Elevation ALONG HER UP, which is what makes this frame-relative. */
+      return frame.surface(px, py, pz) - (px * up.x + py * up.y + pz * up.z);
+    };
+    const here = at(0);
+    const wantAhead = at(ahead) - here;
+    const wantBehind = at(-behind) - here;
+    /*
+     * The proximity floor: how much daylight each end has, measured the
+     * same way. `SPINE_CLEARANCE` is a hundredth of a millimetre, so this
+     * only ever fires when anticipation has already failed.
+     */
+    const want = posture(
+      {
+        aheadRise: wantAhead,
+        behindRise: wantBehind,
+        headGap: Math.max(0, -wantAhead),
+        gasterGap: Math.max(0, -wantBehind),
+      },
+      ahead, behind,
+    );
+    return this.spine.follow(want, dt);
+  }
+
+  /**
    * How much higher she should ride because she is standing on WOOD.
    *
    * Nought on soil. On a trunk it is two thirds of the facet sagitta —
@@ -3096,6 +3148,9 @@ export class IslandScene {
        * and nowhere else. Her pitch was already right, so only this flips. */
       headYaw: this.firstPerson ? 0 : this.camYaw,
       headPitch: this.aimPitch,
+      /* The ground's own posture, kept entirely separate from the aim above
+       * — see `readSpine`. */
+      spine: this.readSpine(dt),
     });
     /* And her FEET are solved in that frame too. The solver has always
      * taken one; the island had been passing `undefined` and letting it
@@ -3474,6 +3529,22 @@ export class IslandScene {
     }
 
     this.settleChase(want, dt);
+  }
+
+  /**
+   * Put the first-person lens on the eye anchor, filtered.
+   *
+   * One exponential on the position and nothing at all on the aim, so
+   * turning has no lag whatever `EYE_FOLLOW_HZ` is set to. `EYE_SNAP`
+   * catches the case a filter must never smooth — a respawn, a rail grab,
+   * an embed rescue — because easing across a teleport would fly the camera
+   * through the island.
+   */
+  private settleEye(want: THREE.Vector3, dt: number): void {
+    if (!this.eyeAt) this.eyeAt = want.clone();
+    else if (this.eyeAt.distanceTo(want) > EYE_SNAP) this.eyeAt.copy(want);
+    else this.eyeAt.lerp(want, 1 - Math.exp(-EYE_FOLLOW_RATE * dt));
+    this.camera.position.copy(this.eyeAt);
   }
 
   /**
