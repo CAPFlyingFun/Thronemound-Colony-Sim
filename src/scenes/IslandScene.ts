@@ -2072,7 +2072,25 @@ export class IslandScene {
      * rightward drag DECREASES camYaw (`camYaw -= movementX`) while a
      * positive strafe is screen-right.
      */
-    this.input.strafe = Math.max(-1, Math.min(1, -this.camYaw * PAN_STRAFE_GAIN));
+    /*
+     * ONLY WHEN THE STICK IS IDLE. Panning to look around while walking was
+     * dragging her sideways at the same time, which makes it impossible to
+     * just LOOK. A thumb on the stick means she is being driven; the view is
+     * then a camera and nothing else.
+     */
+    const driving = Math.abs(this.input.walk) > 0.05 || Math.abs(this.input.yaw) > 0.05;
+    /*
+     * AND ONLY WHILE THE FINGER IS DOWN.
+     *
+     * `camYaw` decays back to zero after the drag ends, and a strafe derived
+     * from it would decay with it — so letting go of the view left her
+     * gliding sideways for as long as the camera took to swing home. Finger
+     * released is movement released; the camera may still ease back, but
+     * that is a camera doing camera things.
+     */
+    this.input.strafe = driving || this.lookPointer === null
+      ? 0
+      : Math.max(-1, Math.min(1, -this.camYaw * PAN_STRAFE_GAIN));
     const bore = this.bore.step(dt, {
       /*
        * Scaled so the rig delivers TURN_RATE at full stick rather than its
@@ -3785,6 +3803,10 @@ export class IslandScene {
       this.updateStatus();
     }
 
+    /* The landmark picks its own detail level, from the distance to its
+     * WOOD rather than to its origin — see `BuiltTree.updateLevels`. It has
+     * to happen after the camera has been placed and before the draw. */
+    this.tree?.updateLevels(this.camera.position);
     this.renderer.render(this.scene, this.camera);
     this.frame = requestAnimationFrame(this.animate);
   };

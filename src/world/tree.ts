@@ -864,8 +864,21 @@ export function trunkProfile(spec: TreeSpec, sides = NEAR_SIDES): TrunkProfile {
   return { pts, r };
 }
 
+/**
+ * How far from the WOOD each detail level takes over, in world units.
+ *
+ * Absolute distances rather than fractions of the tree's height, because
+ * the question is no longer "how big is this tree" but "how close is her
+ * face to it". Level 0 covers everything within 1.5 m of any part of it,
+ * which is every case in which she can be standing on it.
+ */
+const SWAP_AT = [0, 300, 1200, 4000] as const;
+
 export interface BuiltTree {
   root: THREE.LOD;
+  /** Choose the detail level from the distance to the tree's own capsule
+   *  rather than to its origin. Call once a frame. */
+  updateLevels(cameraWorld: THREE.Vector3): void;
   /** The wood, as something the walker's field can be unioned with. Set by
    *  the scene once the tree has been placed, because it is built in world
    *  space and the tree does not know where it stands until then. */
@@ -938,17 +951,59 @@ export function buildTree(
       tris += triCount(leaves);
     }
     triangles.push(tris);
-    /* The near level is free, then the swaps are spaced by the tree's own
-     * height — a distance the tree itself defines rather than a constant
-     * that would be wrong for a different one. */
-    root.addLevel(group, level === 0 ? 0 : spec.height * level * 0.9);
+    /*
+     * The thresholds are on the distance to the WOOD, not to the origin —
+     * see `updateLevels`. `THREE.LOD` cannot compute that itself, so this
+     * registers the levels for their geometry and their disposal and the
+     * distances here are never consulted.
+     */
+    root.addLevel(group, level === 0 ? 0 : SWAP_AT[Math.min(level, SWAP_AT.length - 1)]!);
   });
+  /* Driven by hand, every frame, from the distance to the trunk. */
+  root.autoUpdate = false;
+
+  /* The tree's own extent, for the distance that actually matters. */
+  let crown = 0;
+  for (const l of parts.limbs) {
+    crown = Math.max(crown, Math.hypot(l.b.x, l.b.z) + l.rb, Math.hypot(l.a.x, l.a.z) + l.ra);
+  }
+  for (const t of parts.tufts) crown = Math.max(crown, Math.hypot(t.at.x, t.at.z) + t.r);
+  const topY = spec.height;
 
   const built: BuiltTree = {
     root,
     triangles,
     bark: barkName,
     solid: null,
+    /**
+     * PICK THE LEVEL FROM HOW FAR THE CAMERA IS FROM THE WOOD.
+     *
+     * `THREE.LOD` measures to the object's ORIGIN, which for a twenty-six
+     * metre tree you can climb is the wrong question: at the crown you are
+     * twenty-six metres from the origin and nought from the bark. So the
+     * first swap fired at 23.4 m — ninety per cent of the way up, exactly
+     * where the trunk was reported to start cutting into her — and dropped
+     * the wood from 64 sides to 12 while the collision stayed at 64. Worse,
+     * level 1 draws no twigs at all and `TreeSolid` collides them, so the
+     * crown had climbable branches that were not there to see.
+     *
+     * The honest distance is to the tree's own capsule: its axis from foot
+     * to crown, widened by how far the branches reach. Standing on any part
+     * of it that is nought, whatever the height.
+     */
+    updateLevels(cameraWorld: THREE.Vector3): void {
+      const dx = cameraWorld.x - root.position.x;
+      const dz = cameraWorld.z - root.position.z;
+      const dy = cameraWorld.y - root.position.y;
+      /* Distance to the axis SEGMENT, then out to the branch tips. */
+      const along = Math.min(topY, Math.max(0, dy));
+      const near = Math.max(0, Math.hypot(dx, dz, dy - along) - crown);
+      let level = 0;
+      while (level + 1 < root.levels.length && near > SWAP_AT[level + 1]!) level += 1;
+      for (let i = 0; i < root.levels.length; i += 1) {
+        root.levels[i]!.object.visible = i === level;
+      }
+    },
     makeSolid(origin: THREE.Vector3): TreeSolid {
       /* At the finest level, because that is the one she can walk up to. */
       built.solid = new TreeSolid(parts.limbs, origin, ringFactor(DETAILS[0]!.sides));
