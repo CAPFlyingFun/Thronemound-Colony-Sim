@@ -3,7 +3,9 @@ name: Apply ChatGPT corner patch
 on:
   push:
     branches: [chatgpt/continuous-corner-climb]
-    paths: [scripts/apply-continuous-corner.mjs]
+    paths:
+      - scripts/apply-continuous-corner.mjs
+      - .github/workflows/apply-chatgpt-corner-patch.yml
 
 permissions:
   contents: write
