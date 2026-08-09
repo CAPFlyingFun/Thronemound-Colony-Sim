@@ -421,6 +421,54 @@ export class CornerTurn {
    */
   get swingingSlot(): string | null { return this.swinging; }
 
+  /**
+   * The slot mid-CROSS — a scheduled foot genuinely going to the new
+   * surface, as opposed to one being walked back home after a failed reach.
+   *
+   * The drive's overlap rule wants exactly this distinction: a crossing in
+   * flight is the steady state a stance leg may keep stepping under, while
+   * a returning foot means the corner is already recovering and piling a
+   * second foot into the air on top of that is how a recovery becomes a
+   * fall.
+   */
+  get crossingSlot(): string | null {
+    return this.returning ? null : this.swinging;
+  }
+
+  /**
+   * Which surface a foot belongs to, as the ledger has it.
+   *
+   * The drive's overlap creep needs this: a creep step lands through the
+   * ordinary `nearest`, which measures along an up that still belongs to
+   * the OLD surface — so a foot already across must never be handed to it.
+   * Worse than the wrong landing, a second airborne foot cannot be adopted
+   * while a crossing is in flight, so the label comes off and the corner
+   * can never again observe itself finished. Measured: armed for the whole
+   * of a 700-frame descent, one ground foot forever flapping back to 'old'.
+   */
+  ownerOf(slot: string): Owner { return this.owner.get(slot) ?? 'old'; }
+
+  /**
+   * A landing for a foot ALREADY ACROSS that the drive is re-stepping —
+   * the corner's own foothold question, asked on the new surface, so an
+   * ordinary swing can renew a crossed foot without going through the
+   * queue.
+   *
+   * This is what makes transfers overlap: re-steps used to be scheduled
+   * one at a time between crossings (each a full careful swing with the
+   * body parked at the clip), and taking them off the queue lets the
+   * stance renew itself while a genuine crossing is in the air. The
+   * scheduler still owns every OLD→NEW transfer; this only answers where
+   * a NEW foot's next ordinary step lands, in the frame `nearest` cannot
+   * measure in.
+   */
+  restepAim(
+    leg: CornerLeg, body: CornerBody, ground: CornerGround, into: SurfaceContact,
+  ): boolean {
+    if (!this.active) return false;
+    return this.footholdFor(leg, body, ground, into);
+  }
+
   get active(): boolean { return this.state !== 'normal'; }
 
   /** The target surface's normal, for whoever wants to draw or test it. */
@@ -711,13 +759,23 @@ export class CornerTurn {
        * ENTER FROM A STANDING START, not from mid-stride.
        *
        * The ordinary gait has three feet in the air for a good part of every
-       * cycle, and arming on one of those frames means the queue's first
-       * release takes her to three planted — the transition would begin by
-       * making her less stable than walking. Waiting costs at most one swing
-       * (0.16 s, well inside the reachable window), which is what "let the
-       * current normal swing finish" buys.
+       * cycle, and arming on one of those frames used to be refused
+       * outright. The refusal is now only the scheduler's own support
+       * floor, for a measured reason: the strict all-six gate made the
+       * descent's entry window a couple of frames wide — the fold is
+       * reachable for barely a gait cycle, the tripod was mid-swing across
+       * exactly those frames, and she walked straight into the floor and
+       * let the walker's embedded-rescue fold her (a 58 mm/s body spike
+       * and 0.6 mm of penetration). Arming with feet in flight is safe
+       * because arming RELEASES nothing: the queue's own support gate
+       * refuses a first release until every foot is down, so the only
+       * thing that starts sooner is the hold plane — which is precisely
+       * the thing that stops her outwalking the corner. (Even a support
+       * floor here was too strict: the ordinary tripod holds three feet in
+       * the air across exactly the frames the descent's fold is reachable,
+       * and the reachability test below already demands a PLANTED leading
+       * foot with a real grip in reach.)
        */
-      if (planted < legs.length) return idle;
       if (!this.look(body, ground, legs)) return idle;
 
       /*
@@ -804,6 +862,21 @@ export class CornerTurn {
       for (const leg of legs) {
         if (leg.planted || this.owner.get(leg.slot) !== 'new') continue;
         /*
+         * A new foot in the air that is NOT groping is the drive re-stepping
+         * it through `restepAim` — an ordinary swing to a found spot on the
+         * new surface, off the queue by design. Adopting it would put it
+         * back ON the queue, which is the serialisation this exists to end.
+         * Only a foot that has genuinely lost the surface — groping — needs
+         * the scheduler to take it over.
+         *
+         * The exemption holds only in the phases where the drive is allowed
+         * to re-step at all — past the front row. In `acquireFront` a
+         * dragged-off front grip must come back through the queue's careful
+         * clock, exactly as it always did.
+         */
+        if (!leg.groping
+          && this.state !== 'acquireFront' && this.state !== 'recover') continue;
+        /*
          * ADOPT IT, do not disown it. A foot the spread rule lifted off the
          * new surface is still a foot that belongs on the new surface, and
          * the ordinary swing would put it wherever `nearest` says — which is
@@ -824,6 +897,10 @@ export class CornerTurn {
      * it properly. */
     for (const leg of legs) {
       if (leg.planted || leg.slot === this.swinging) continue;
+      /* Same exemption, same phase bounds: a drive re-step in flight still
+       * belongs to the new surface. Only a groping foot has lost it. */
+      if (!leg.groping
+        && this.state !== 'acquireFront' && this.state !== 'recover') continue;
       if (this.owner.get(leg.slot) === 'new') this.owner.set(leg.slot, 'old');
     }
     /*
@@ -973,8 +1050,46 @@ export class CornerTurn {
      * release is authorised until the gait has put it back.
      */
     if (planted < legs.length) {
-      if (planted < this.tune.minPlanted) this.state = 'recover';
-      return cmd;
+      if (planted < this.tune.minPlanted) { this.state = 'recover'; return cmd; }
+      /*
+       * OVERLAP, HALF ONE: a release may go out over ONE ordinary creep.
+       *
+       * Waiting for an empty sky between grips is what made the corner
+       * strictly sequential — grip, wait, creep, wait, grip — and the wait
+       * is most of the lost speed. One creep step in the air is the gait's
+       * own steady state (a swing is in the air most of every cycle), so a
+       * crossing released across it leaves four planted, which is the same
+       * support the tuning already accepts as its floor. Anything else in
+       * the air — two feet, a groping foot, a foot the scheduler put on the
+       * new surface and lost — is not that steady state, and the queue
+       * waits exactly as it always did.
+       */
+      const airborne = legs.filter((l) => !l.planted);
+      /*
+       * The one airborne foot may be either kind of ordinary step: an OLD
+       * foot creeping (only while the middle row is going — creeping a rear
+       * foot that should be transferring stalled the rear row for forty
+       * frames at a stretch), or a NEW foot the drive is re-stepping through
+       * `restepAim` (fine under any transfer, it renews the stance the body
+       * is folding over). A groping foot is neither — that is a foot in
+       * trouble, and the queue waits.
+       */
+      const creepOnly = airborne.length === 1
+        && !airborne[0].groping
+        && (this.owner.get(airborne[0].slot) === 'new'
+          || this.labelFor(this.row) === 'transferMiddle');
+      /*
+       * NEVER while the leading row is still going on. The front grips are
+       * the fragile part of the whole manoeuvre — the body has to fold onto
+       * the new face before a front foot's hold is real, and every attempt
+       * to hurry that phase has jammed it (measured three separate ways: a
+       * fast clock, a near-home gate, and this very overlap ungated — all
+       * ended with the grip dragged back off and the corner re-acquiring
+       * for hundreds of frames). Past the front row her attitude is
+       * committed and a grip is just a grip.
+       */
+      if (this.row === 0 || !creepOnly
+        || planted - 1 < this.tune.minPlanted) return cmd;
     }
     if (this.state === 'recover') this.state = this.labelFor(this.row);
 

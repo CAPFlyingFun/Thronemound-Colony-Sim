@@ -378,6 +378,11 @@ export const HANDOFF_GRACE = 2 / 60;
 /** Where a scheduled swing is aiming, this frame. Copied out immediately. */
 const SCRATCH_AIM = new THREE.Vector3();
 
+/** A re-step's foothold on the new surface. Copied out immediately. */
+const SCRATCH_CONTACT: SurfaceContact = {
+  point: new THREE.Vector3(), normal: new THREE.Vector3(),
+};
+
 export class LegDrive {
   private readonly legs: Leg[] = [];
   /** Mean distance of a foot from her turn axis. See `radius`. */
@@ -744,6 +749,25 @@ export class LegDrive {
      */
     let strain = 0;
     let spentest: Leg | null = null;
+    /*
+     * The most-spent foot the OVERLAP may take while a crossing is in the
+     * air. A foot already across may renew itself under any transfer past
+     * the front row — the drive lands it through the corner's own foothold
+     * probe, see `restepAim`. A foot still on the old surface may creep only
+     * while the MIDDLE row is going: in `transferRear` the only old feet
+     * left are the rear pair themselves, and creeping one along the surface
+     * it should be leaving stalled the rear row for forty-frame stretches.
+     */
+    let strainOv = -Infinity;
+    let spentestOv: Leg | null = null;
+    const phase = this.corner.phase;
+    const overlapOk = (leg: Leg): boolean => {
+      if (!this.corner.active) return false;
+      if (phase === 'acquireFront' || phase === 'recover' || phase === 'settle') return false;
+      return this.corner.ownerOf(leg.slot) === 'new'
+        ? true
+        : phase === 'transferMiddle';
+    };
     let inTransit = false;
     /* Counted HERE rather than reused from step 2: the releases above have
      * happened since, and a stale count is how a rule that says "only with
@@ -775,6 +799,10 @@ export class LegDrive {
       if (!spentest || spent > strain) {
         strain = spent;
         spentest = leg;
+      }
+      if (overlapOk(leg) && spent > strainOv) {
+        strainOv = spent;
+        spentestOv = leg;
       }
     }
     /*
@@ -829,6 +857,43 @@ export class LegDrive {
       spentest.planted = false;
       spentest.t = 0;
       spentest.from.copy(spentest.at);
+    } else if (
+      /*
+       * OVERLAP: a creep may go out UNDER a crossing in flight.
+       *
+       * The strictly sequential corner parked her at the clip for the whole
+       * of every 0.16 s cross-surface swing — five stance feet all spent, no
+       * renewal allowed, nothing able to move. A stance leg taking its
+       * ordinary step on its own surface while the grip crosses is what a
+       * real ant does, and it is the ONLY overlap allowed, on four gates:
+       *
+       * - strictly while the corner itself is live, never the handoff grace
+       *   (the tripods are re-forming there);
+       * - never during `acquireFront` or `recover` — the front grips are the
+       *   fragile part, the body has to fold before a hold is real, and
+       *   every attempt to hurry that phase has jammed it;
+       * - strictly under a genuine crossing, never a returning foot (that is
+       *   a recovery already in progress);
+       * - and only a foot the ledger still has on the OLD surface. A foot
+       *   already across must never take a creep step: `nearest` measures
+       *   along an up that belongs to the floor, and worse, a second
+       *   airborne foot cannot be adopted while a crossing is in flight, so
+       *   the label comes off and the corner can never again observe itself
+       *   finished. Measured — armed for an entire 700-frame descent, one
+       *   ground foot forever flapping back to 'old'.
+       *
+       * Four planted is the floor, the same one the scheduler holds itself
+       * to when it releases across a creep. See `CornerTurn.update`.
+       */
+      this.corner.crossingSlot !== null
+      && !corner.release
+      && spentestOv && strainOv >= 0.7
+      && onFoot >= this.legs.length - 1
+      && onFoot - 1 >= CORNER_TUNING.minPlanted
+    ) {
+      spentestOv.planted = false;
+      spentestOv.t = 0;
+      spentestOv.from.copy(spentestOv.at);
     }
 
     /*
@@ -868,10 +933,37 @@ export class LegDrive {
        * because the world was probed and answered, or it does not arrive.
        */
       const scheduled = corner.aimSlot === leg.slot ? corner.aim : null;
+      /*
+       * A foot ALREADY ACROSS, re-stepping off the queue, lands where the
+       * corner's own foothold probe says — `nearest` measures along an up
+       * that still belongs to the old surface and would quietly walk it
+       * back off the wall. Re-aimed every frame, like a scheduled swing,
+       * because the body moves under it. See `CornerTurn.restepAim`.
+       */
+      const restep = !scheduled
+        && this.corner.active
+        /*
+         * NEVER while the front row is still going. On the descent the
+         * first front foot grips the ground while the body is still high
+         * on the wood; a fast off-queue re-land puts it down before the
+         * body has folded, the spread rule drags it straight back off, and
+         * she loops there — the same five-hundred-frame jam every other
+         * attempt to hurry `acquireFront` has produced. The scheduler's
+         * careful clock owns that phase.
+         */
+        && this.corner.phase !== 'acquireFront'
+        && this.corner.phase !== 'recover'
+        && this.corner.swingingSlot !== leg.slot
+        && this.corner.ownerOf(leg.slot) === 'new'
+        && cornerGround !== null
+        && this.corner.restepAim(leg, body, cornerGround, SCRATCH_CONTACT);
       const hit = scheduled
         ? SCRATCH_AIM.copy(scheduled.point)
           .addScaledVector(scheduled.normal, FOOT_CLEARANCE_MM / MM)
-        : ground.nearest(ahead, body.up, leg.down, REACH_UP_MM / MM);
+        : restep
+          ? SCRATCH_AIM.copy(SCRATCH_CONTACT.point)
+            .addScaledVector(SCRATCH_CONTACT.normal, FOOT_CLEARANCE_MM / MM)
+          : ground.nearest(ahead, body.up, leg.down, REACH_UP_MM / MM);
       if (!hit) {
         /*
          * Nothing to stand on. She keeps the leg raised and keeps reaching —

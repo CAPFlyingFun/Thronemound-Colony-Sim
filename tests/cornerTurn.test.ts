@@ -297,21 +297,59 @@ describe('the queue', () => {
     }
   });
 
-  it('plants the first foot before the second is allowed to go', () => {
+  /*
+   * The queue's discipline is judged from its FIRST RELEASE, not from the
+   * arming frame. Arming no longer waits for a standing start — the fold is
+   * reachable for barely a gait cycle on the way down, and the old all-six
+   * gate meant the tripod could carry her straight past it into the floor —
+   * so the first armed frames may inherit up to three ordinary swings
+   * mid-flight. The queue releases nothing until every one of them is down;
+   * from that release onward the old contract holds untouched.
+   */
+  const afterFirstRelease = (track: ReturnType<typeof walkAt>['track']) => {
+    const first = track.findIndex((s) => s.phase !== 'normal' && s.released.length > 0);
+    expect(first, 'the queue never released a foot').toBeGreaterThanOrEqual(0);
+    return track.slice(first);
+  };
+
+  it('flies at most the crossing and one companion — and crosses the front alone', () => {
+    /*
+     * The overlap contract. A crossing may carry ONE ordinary step under it
+     * — that is what buys back the corner's speed — but never two, and
+     * never while the front row is still being acquired: hurrying
+     * `acquireFront` is the one thing every attempt has shown jams her on
+     * the descent.
+     */
     const { track } = walkAt({ frames: 600 });
-    for (const s of track) {
+    for (const s of afterFirstRelease(track)) {
       if (s.phase === 'normal') continue;
       const up = Object.values(s.state).filter((v) => v !== 'PLANT').length;
-      expect(up, `${up} feet in the air at frame ${s.frame}`).toBeLessThanOrEqual(1);
+      const cap = s.phase === 'acquireFront' || s.phase === 'recover' ? 1 : 2;
+      expect(up, `${up} feet in the air in ${s.phase} at frame ${s.frame}`)
+        .toBeLessThanOrEqual(cap);
     }
   });
 
   it('keeps at least four feet on a surface, always', () => {
     const { track } = walkAt({ frames: 600 });
-    for (const s of track) {
+    for (const s of afterFirstRelease(track)) {
       if (s.phase === 'normal') continue;
       expect(s.planted, `only ${s.planted} down at frame ${s.frame}`)
         .toBeGreaterThanOrEqual(4);
+    }
+  });
+
+  it('inherits mid-flight feet at arming but releases nothing until they land', () => {
+    /* The relaxation itself, held: any armed frame with more than TWO feet
+     * in the air (the crossing plus its one companion) is carrying
+     * INHERITED swings — the queue must not have let go of anything yet. */
+    const { track } = walkAt({ frames: 600 });
+    let released = 0;
+    for (const s of track) {
+      if (s.phase === 'normal') continue;
+      released += s.released.length;
+      const up = Object.values(s.state).filter((v) => v !== 'PLANT').length;
+      if (up > 2) expect(released, `released under ${up} airborne at ${s.frame}`).toBe(0);
     }
   });
 
@@ -539,7 +577,11 @@ describe('the frame', () => {
     const armed = track.find((s) => s.phase !== 'normal');
     expect(armed, 'never armed off the world floor').toBeTruthy();
     expect(reached(track, 2), 'never got the leading row across').toBeTruthy();
-    for (const s of track) {
+    /* From the queue's first release — the armed frames before it may still
+     * carry the ordinary gait's inherited swings; see "the queue" above. */
+    const first = track.findIndex((s) => s.phase !== 'normal' && s.released.length > 0);
+    expect(first, 'the queue never released a foot').toBeGreaterThanOrEqual(0);
+    for (const s of track.slice(first)) {
       if (s.phase === 'normal') continue;
       expect(s.released.length).toBeLessThanOrEqual(1);
       expect(s.planted).toBeGreaterThanOrEqual(4);
