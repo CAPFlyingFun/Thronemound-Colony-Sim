@@ -74,6 +74,24 @@ const IK_MIN_MOBILITY = 0.25;
  */
 const IK_ATTEMPTS = 3;
 
+/**
+ * WHERE THE EYE SITS ON THE HEAD, as fractions of the head's own measured
+ * radius. Fractions rather than millimetres so a major's bigger skull puts
+ * its eyes further out without anyone editing a number.
+ */
+const EYE_ON_HEAD = 0.55;
+const EYE_AHEAD_OF_HEAD = 0.35;
+
+/** The model's own forward and up, before any bone is consulted. */
+const MODEL_FORWARD = new THREE.Vector3(0, 0, 1);
+const MODEL_UP = new THREE.Vector3(0, 1, 0);
+
+const EYE_UP_SCRATCH = new THREE.Vector3();
+const EYE_FWD_SCRATCH = new THREE.Vector3();
+const AXIS_WANT = new THREE.Vector3();
+const AXIS_TRY = new THREE.Vector3();
+const AXIS_TURN = new THREE.Quaternion();
+
 /* Scratch, so a per-frame solve over six legs allocates nothing. */
 const FOOT = new THREE.Vector3();
 const JOINT = new THREE.Vector3();
@@ -1166,6 +1184,94 @@ export class QueenModel {
   jawPosition(into: THREE.Vector3): boolean {
     const jaw = this.jawBone();
     return jaw !== undefined && this.boneWorldPosition(jaw, into);
+  }
+
+  /* --------------------------------------------------------------- the eye */
+
+  /**
+   * WHERE HER EYES ARE, in world space — the anchor a first-person camera
+   * should ride.
+   *
+   * Not a point invented from her root. The island had been building one
+   * as `root + up * EYE_RISE`, which is a guess about a body it never
+   * looked at, and it inherits every sub-millimetre correction the walker
+   * makes to that root without any of the skeleton's own damping. This is
+   * the HEAD JOINT, raised by the head's own measured radius so the lens
+   * sits on top of her head rather than inside it, and pushed forward along
+   * the head's own axis so it is at her face and not her neck.
+   *
+   * Derived rather than named, because no rig in this project has eye
+   * bones: the queen's auto-rig left out her mandibles, so it was never
+   * going to give us eyes. `limbRadius` is measured off the mesh at load,
+   * so this stays true across castes and re-exports.
+   *
+   * False when the model has not loaded, and the caller must fall back.
+   */
+  eyeWorldPosition(into: THREE.Vector3): boolean {
+    const head = this.headBoneName();
+    if (head === undefined) return false;
+    const bone = this.bones.get(head);
+    if (!bone) return false;
+    bone.updateWorldMatrix(true, false);
+    into.setFromMatrixPosition(bone.matrixWorld);
+    const lift = this.limbRadius.get(head) ?? 0;
+    if (lift > 0) {
+      this.eyeUpWorld(EYE_UP_SCRATCH);
+      into.addScaledVector(EYE_UP_SCRATCH, lift * EYE_ON_HEAD);
+      this.eyeForwardWorld(EYE_FWD_SCRATCH);
+      into.addScaledVector(EYE_FWD_SCRATCH, lift * EYE_AHEAD_OF_HEAD);
+    }
+    return true;
+  }
+
+  /**
+   * Which way her head is FACING, in world space.
+   *
+   * Picked by measurement rather than convention: whichever of the bone's
+   * three axes lies closest to the model's own forward is the one that
+   * points out of her face. An auto-rigger's axis choice is arbitrary and
+   * differs between castes, and a hard-coded +Y here would be a bug that
+   * only showed up on the second model.
+   */
+  eyeForwardWorld(into: THREE.Vector3): boolean {
+    return this.headAxis(MODEL_FORWARD, into);
+  }
+
+  /** Which way is UP out of the top of her head, in world space. */
+  eyeUpWorld(into: THREE.Vector3): boolean {
+    return this.headAxis(MODEL_UP, into);
+  }
+
+  /** The head end of the thorax chain — see `RigMap.thorax`. */
+  private headBoneName(): string | undefined {
+    return this.rig.thorax[0];
+  }
+
+  /**
+   * The head bone's axis that best matches a direction in the MODEL's own
+   * frame, expressed in world space.
+   */
+  private headAxis(local: THREE.Vector3, into: THREE.Vector3): boolean {
+    const head = this.headBoneName();
+    const bone = head === undefined ? undefined : this.bones.get(head);
+    if (!bone) return false;
+    bone.updateWorldMatrix(true, false);
+    /* The model's axis, carried into the world by the ROOT — which is the
+     * frame the caller thinks in — then matched against the bone's own. */
+    AXIS_WANT.copy(local).applyQuaternion(this.root.getWorldQuaternion(AXIS_TURN));
+    const m = bone.matrixWorld.elements;
+    let best = -Infinity;
+    for (let i = 0; i < 3; i += 1) {
+      AXIS_TRY.set(m[i * 4]!, m[i * 4 + 1]!, m[i * 4 + 2]!);
+      const len = AXIS_TRY.length();
+      if (len < 1e-9) continue;
+      AXIS_TRY.divideScalar(len);
+      for (const sign of [1, -1]) {
+        const dot = sign * AXIS_TRY.dot(AXIS_WANT);
+        if (dot > best) { best = dot; into.copy(AXIS_TRY).multiplyScalar(sign); }
+      }
+    }
+    return best > -Infinity;
   }
 
   dispose(): void {

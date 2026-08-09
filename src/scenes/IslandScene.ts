@@ -185,6 +185,10 @@ const RIDE = 1.3 / MM;
 const S_PERP = new THREE.Vector3();
 const S_RAD = new THREE.Vector3();
 const S_CENTER = new THREE.Vector3();
+/** The first-person lens's roll axis. Its OWN scratch: it is read after
+ *  `S_UP` has been filled with her surface normal in the same block, and
+ *  sharing one would have quietly clobbered the other. */
+const S_ROLL = new THREE.Vector3();
 const S_TARGET = new THREE.Vector3();
 /** The ghost's own, so it cannot be trampled by whatever the cameras are
  *  doing with the shared scratch in the same frame. */
@@ -370,6 +374,42 @@ const EYE_FORWARD = 1.3 / MM;
  * ("a little taller"). Her head is the top of her, so the eye goes there.
  */
 const EYE_RISE = 1.1 / MM;
+
+/**
+ * HOW THE FIRST-PERSON LENS FOLLOWS HER HEAD.
+ *
+ * Rates in hertz, turned into an exponential rate below. Position follows
+ * faster than roll because a lag in WHERE the lens is reads as swimming,
+ * while a lag in which way is up reads as nothing at all — the surface
+ * normal only changes when she crosses onto something new.
+ *
+ * These filter LOCOMOTION only. The look direction is taken straight off
+ * the aim and never smoothed, so turning has no lag whatever these are set
+ * to. That split is deliberate: filter the body, never the intent.
+ */
+const EYE_FOLLOW_HZ = 15;
+const EYE_ROLL_HZ = 10;
+const EYE_FOLLOW_RATE = EYE_FOLLOW_HZ * 2 * Math.PI;
+const EYE_ROLL_RATE = EYE_ROLL_HZ * 2 * Math.PI;
+
+/**
+ * Past this, the lens SNAPS instead of chasing.
+ *
+ * A filter is for noise. A respawn, a rail grab or an embed rescue moves
+ * her metres in a frame, and easing across that would fly the camera
+ * through the island. Three millimetres is a third of her body — far more
+ * than any step, far less than any teleport.
+ */
+const EYE_SNAP = 3 / MM;
+
+/**
+ * How finely the eye's retreat from a wall is resolved.
+ *
+ * Ten halvings of `EYE_FORWARD` is about a thousandth of it, which is well
+ * under anything visible. The number that mattered was that it is a
+ * BISECTION at all: the five fixed steps it replaced were the shake.
+ */
+const EYE_BISECTIONS = 10;
 
 /** How far past her centre the jaws reach when the model has not loaded. */
 const NOSE_REACH = 4.5 / MM;
@@ -887,6 +927,11 @@ export class IslandScene {
   private camLook: THREE.Vector3 | null = null;
 
   private camRoll = new THREE.Vector3(0, 1, 0);
+
+  /** The first-person lens's own filtered state — see `settleEye`. */
+  private eyeAt: THREE.Vector3 | null = null;
+
+  private readonly eyeRoll = new THREE.Vector3(0, 1, 0);
 
   private firstPerson = false;
 
@@ -3219,18 +3264,62 @@ export class IslandScene {
        * out of her chest. On a ceiling that rise points at the floor, which
        * is where the top of her head actually is.
        */
-      const base = S_CENTER.copy(this.at).addScaledVector(upv, EYE_RISE);
-      const eye = base.clone();
-      for (let t = 1; t > 0.001; t -= 0.2) {
+      /*
+       * THE ANCHOR IS HER HEAD, not a point invented from her root.
+       *
+       * `root + up * EYE_RISE` inherits every sub-millimetre re-seat the
+       * walker makes, undamped, and knows nothing about where her face
+       * actually is. The rig does. `eyeWorldPosition` is the head joint
+       * raised and pushed forward by the head's own measured radius; the
+       * old sum stays as the fallback for the second before the model has
+       * loaded, which is the only time it is right about anything.
+       */
+      const base = S_CENTER;
+      if (!(this.queenReady && this.queen.eyeWorldPosition(base))) {
+        base.copy(this.at).addScaledVector(upv, EYE_RISE);
+      }
+      /*
+       * THE RETREAT IS CONTINUOUS NOW, and that was a real bug.
+       *
+       * It used to step `t` down from 1 in fifths, so the lens had five
+       * legal positions and near a wall the accepted one flipped between
+       * neighbours frame to frame — a hard pop of a fifth of `EYE_FORWARD`,
+       * every frame, which is the shaking AND the ground coming through the
+       * lens. Bisecting finds the furthest clear point on the line instead,
+       * so the eye slides in and out of cover smoothly and lands somewhere
+       * different only when the world is actually different.
+       */
+      const eye = S_TARGET.copy(base);
+      const clearAt = (t: number): boolean => {
         const px = base.x + dir.x * EYE_FORWARD * t;
         const py = base.y + dir.y * EYE_FORWARD * t;
         const pz = base.z + dir.z * EYE_FORWARD * t;
-        const blocked = this.soilDensityAt(px, py, pz) > 0
-          || this.soilDensityAt(px + dir.x * EYE_SKIN, py + dir.y * EYE_SKIN,
-            pz + dir.z * EYE_SKIN) > 0;
-        if (!blocked) { eye.set(px, py, pz); break; }
+        return this.soilDensityAt(px, py, pz) <= 0
+          && this.soilDensityAt(px + dir.x * EYE_SKIN, py + dir.y * EYE_SKIN,
+            pz + dir.z * EYE_SKIN) <= 0;
+      };
+      if (clearAt(1)) {
+        eye.addScaledVector(dir, EYE_FORWARD);
+      } else {
+        let lo = 0;
+        let hi = 1;
+        for (let i = 0; i < EYE_BISECTIONS; i += 1) {
+          const mid = (lo + hi) / 2;
+          if (clearAt(mid)) lo = mid; else hi = mid;
+        }
+        eye.addScaledVector(dir, EYE_FORWARD * lo);
       }
-      this.camera.position.copy(eye);
+      /*
+       * AND THEN IT IS FILTERED — the POSITION only.
+       *
+       * Her root is re-seated against a lattice every frame and her up is a
+       * density gradient, so the eye target carries sub-millimetre noise
+       * however good the anchor is. A short lag on the position removes it.
+       * The LOOK is not filtered at all: it comes straight off the aim,
+       * which is player input, so turning stays instant. That split is the
+       * whole design — filter the body, never the intent.
+       */
+      this.settleEye(eye, dt);
       /*
        * THE EYE'S OWN UP, TURNED WITH THE PITCH — not the world's.
        *
@@ -3252,8 +3341,14 @@ export class IslandScene {
        * roll. Measured with the dial at ninety, up and look were PARALLEL,
        * which is the degenerate case it was written to avoid. One number.
        */
+      /* The ROLL is filtered too, and more slowly than the position: it
+       * only ever changes when the surface under her does, so a lag there
+       * costs nothing and a jitter there is the whole picture rocking. */
+      this.eyeRoll.lerp(upv, 1 - Math.exp(-EYE_ROLL_RATE * dt));
+      if (this.eyeRoll.lengthSq() < 1e-9) this.eyeRoll.copy(upv);
+      const roll = S_ROLL.copy(this.eyeRoll).normalize();
       this.camera.up.copy(fwd).multiplyScalar(-Math.sin(this.aimPitch))
-        .addScaledVector(upv, Math.cos(this.aimPitch));
+        .addScaledVector(roll, Math.cos(this.aimPitch));
       this.liftCameraClear();
       /* Aim from where the lens ACTUALLY ended up. The guard above may have
        * nudged it out of a roof, and looking at a target measured from the
