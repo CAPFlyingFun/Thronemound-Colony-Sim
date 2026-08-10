@@ -226,6 +226,10 @@ interface Leg {
   at: THREE.Vector3;
   /** True while it is reaching and has found nothing: held up. */
   groping: boolean;
+  /** The leg's straight hip-to-sole maximum, world units — handed to the
+   *  corner so cross-crease footholds may use the reach the leg really
+   *  has instead of the flat-surface spread. */
+  straightReach: number;
   /** Spare downward reach, in world units. See `REACH_DOWN_MM`. */
   down: number;
   /**
@@ -416,6 +420,7 @@ export class LegDrive {
         // `reach` arrives in world units: the rig is scaled before it is
         // measured, so it is already in the same units as `home`.
         spread: spread(leg.reach || leg.home.length(), spare),
+        straightReach: (leg.reach || leg.home.length()) + spare,
         dir: new THREE.Vector3(0, 0, 1),
         crossing: false,
         crossNormal: new THREE.Vector3(),

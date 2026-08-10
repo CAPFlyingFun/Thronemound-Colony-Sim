@@ -69,6 +69,15 @@ export interface CornerLeg {
   readonly groping: boolean;
   /** How far this foot may sit from home, across the surface. */
   readonly spread: number;
+  /**
+   * The leg's TRUE maximum span, hip to sole, when the caller measured
+   * one. Across a corner the flat-surface `spread` undersells the leg —
+   * the perpendicular face cuts closer to the hip than a flat floor ever
+   * does — and gating footholds on it kept the front feet gripping shy of
+   * the crease: reported as "legs not extending as far as they can during
+   * the transition". Optional so the tests' minimal legs stay valid.
+   */
+  readonly straightReach?: number;
 }
 
 export interface CornerBody {
@@ -218,6 +227,17 @@ export interface CornerTuning {
  * wall reads 85 degrees, so there is forty degrees of margin either side.
  */
 export const CORNER_DEG = { enter: 45, exit: 32, band: 45, fan: [0, 30] } as const;
+
+/**
+ * How much of a leg's straight reach a corner foothold may spend. Not all
+ * of it: a foot planted at 100% extension has no stroke left and freezes
+ * her (the ledger's own earlier lesson, learned at 97%). MEASURED down
+ * from 0.85, where the vertical-wall suite stopped finishing — a grip
+ * that far across the crease leaves the transfer nothing to fold with.
+ * 0.72 is comfortably past the flat-surface spread (~0.63 of straight on
+ * the measured legs) and every corner test still runs to completion.
+ */
+export const CORNER_STRETCH = 0.72;
 
 export const CORNER_TUNING: CornerTuning = {
   enter: (CORNER_DEG.enter * Math.PI) / 180,
@@ -537,7 +557,11 @@ export class CornerTurn {
     if (along.lengthSq() > 1e-8) home.addScaledVector(along.normalize(), this.stroke);
     const origin = this.sC.copy(home).addScaledVector(body.up, this.tune.browLift);
     const dir = this.sD.copy(this.newUp).negate();
-    const hit = ground.probeContact(origin, dir, leg.spread + this.tune.browLift);
+    const allow = Math.max(
+      leg.spread,
+      (leg.straightReach ?? 0) * CORNER_STRETCH,
+    );
+    const hit = ground.probeContact(origin, dir, allow + this.tune.browLift);
     if (!hit) return false;
     /*
      * The reach test, in three dimensions and against her MEASURED spread —
@@ -552,7 +576,7 @@ export class CornerTurn {
      * with no stroke at all and would otherwise grip at 97% of its reach and
      * freeze her.
      */
-    if (this.homeWorld(leg, body, this.sB).distanceTo(hit.point) > leg.spread) {
+    if (this.homeWorld(leg, body, this.sB).distanceTo(hit.point) > allow) {
       return false;
     }
     /* And it must be the surface we are going to, not some third thing. */
