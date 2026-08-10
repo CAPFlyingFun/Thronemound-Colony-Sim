@@ -50,6 +50,15 @@ export interface TelemetrySample {
   allowed: number;
   clearanceMm: number;
   /**
+   * How far the SurfaceWalker re-seated her along her up this frame, in mm.
+   *
+   * Positive is upward. Her legs and the walker are two authorities over one
+   * body; without this column a bob is unattributable, and the fix for "the
+   * legs bounced her" is nothing like the fix for "the seating chased a
+   * surface it kept missing".
+   */
+  seatMm: number;
+  /**
    * How long this frame took, in milliseconds.
    *
    * Motion scaled by dt is correct at any frame rate, but it does not LOOK
@@ -182,7 +191,7 @@ export class TelemetryRecorder {
     lines.push('');
     lines.push('PER SECOND  (upMax = fastest body rotation in that second)');
     lines.push('   t     x      y      z   stick  req   act  held  plant grope '
-      + 'upMax  strain   ms lo/hi  phase');
+      + 'upMax  strain  seat+/-   ms lo/hi  phase');
     for (let sec = 0; sec <= Math.floor(this.elapsed); sec += 1) {
       const inSec = this.samples.filter((s) => Math.floor(s.t) === sec);
       if (!inSec.length) continue;
@@ -200,7 +209,9 @@ export class TelemetryRecorder {
         + `${n(avg((s) => s.reqMmS), 5)} ${n(avg((s) => s.actMmS), 5)} `
         + `${n(avg((s) => s.heldBackMm), 5, 2)} `
         + `${n(avg((s) => s.planted), 5, 1)} ${n(avg((s) => s.groping), 5, 1)} `
-        + `${n(upMax, 6, 0)} ${n(avg((s) => s.strain), 6, 2)}  `
+        + `${n(upMax, 6, 0)} ${n(avg((s) => s.strain), 6, 2)} `
+        + `${n(Math.max(...inSec.map((s) => s.seatMm)), 5, 2)}/`
+        + `${n(Math.min(...inSec.map((s) => s.seatMm)), 5, 2)} `
         + `${n(Math.min(...inSec.map((s) => s.dtMs)), 3, 0)}/`
         + `${n(Math.max(...inSec.map((s) => s.dtMs)), 3, 0)}  ${phases}`);
     }
@@ -215,7 +226,7 @@ export class TelemetryRecorder {
       lines.push('');
       lines.push(`-- frame ${ev.at} @ ${this.samples[ev.at]!.t.toFixed(2)}s: ${ev.why}`);
       lines.push('     t  stick  req   act  held  plant grope  upRate  turn  cand '
-        + 'new old  clear  phase');
+        + 'new old  clear   seat  phase');
       for (let i = from; i <= to; i += 1) {
         const s = this.samples[i]!;
         lines.push(`${i === ev.at ? '>' : ' '}${n(s.t, 6, 2)} `
@@ -223,7 +234,7 @@ export class TelemetryRecorder {
           + `${n(s.reqMmS, 5)} ${n(s.actMmS, 5)} ${n(s.heldBackMm, 5, 2)} `
           + `${n(s.planted, 5, 0)} ${n(s.groping, 5, 0)} ${n(s.upRateDeg, 7, 0)} `
           + `${n(s.turnDeg, 5, 0)} ${n(s.candidateMm, 5, 1)} `
-          + `${n(s.onNew, 3, 0)} ${n(s.onOld, 3, 0)} ${n(s.clearanceMm, 6, 2)}  ${s.phase}`);
+          + `${n(s.onNew, 3, 0)} ${n(s.onOld, 3, 0)} ${n(s.clearanceMm, 6, 2)} ${n(s.seatMm, 6, 2)}  ${s.phase}`);
       }
     }
 

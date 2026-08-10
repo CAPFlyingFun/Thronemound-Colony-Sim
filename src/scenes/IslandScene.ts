@@ -941,6 +941,12 @@ export class IslandScene {
 
   private telemetryChip: HTMLButtonElement | null = null;
 
+  /** Scratch for the seating measurement — no per-frame allocation. */
+  private readonly seatFrom = new THREE.Vector3();
+
+  /** How far the walker re-seated her along her up, this frame, in mm. */
+  private seatLiftMm = 0;
+
   /** How high her body rides, taken from her own rig once it has loaded. */
   private legRide = RIDE;
 
@@ -2773,7 +2779,20 @@ export class IslandScene {
     /* One height law everywhere now: her legs' own rest plane, plus the
      * hundredth of a millimetre of air that keeps her out of the ground. */
     (walker.tune as { ride: number }).ride = this.legRide + FOOT_AIR;
+    /*
+     * THE SEATING, MEASURED — how much the WALKER moved her this frame, as
+     * distinct from how much her legs did.
+     *
+     * The two are separate authorities over the same body: the legs drive her
+     * along the ground and the walker re-seats her onto it, easing toward the
+     * seat point every frame. A recording that only shows clearance cannot say
+     * which of them produced a bob, and "she sinks and pops back" is a
+     * completely different bug depending on the answer. So the position is
+     * snapped either side of the call and the difference along her up is kept.
+     */
+    this.seatFrom.copy(this.at);
     walker.settle({ at: this.at, up: this.up, forward: this.fwd }, dt, aimDt);
+    this.seatLiftMm = this.seatFrom.sub(this.at).dot(this.up) * -VOXEL_MM;
 
     /*
      * The safety net is smaller than it was, because most of what it caught
@@ -4539,6 +4558,7 @@ export class IslandScene {
       strain: r?.strain ?? 0,
       allowed: r?.allowed ?? 1,
       clearanceMm: r?.clearanceMm ?? 0,
+      seatMm: this.seatLiftMm,
       phase: r?.corner.phase ?? 'none',
       turnDeg: r?.corner.turnDeg ?? 0,
       candidateMm: r?.corner.candidateMm ?? 0,

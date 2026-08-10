@@ -1063,6 +1063,20 @@ export class LegDrive {
      */
     const settle = input.settle ?? true;
     const under = ground.nearest(body.at, body.up, 6 / MM, 0.6 / MM);
+    /*
+     * THE GAUGE, WIDENED — measurement only, and deliberately a second query.
+     *
+     * The seating probe above looks 6 mm below her and only 0.6 mm ABOVE, so
+     * the moment she is more than 0.6 mm under the surface it saturates and
+     * every frame reports exactly -0.60. A flight recording full of -0.60 was
+     * read as "she sinks 0.6 mm"; what it actually said was "she sinks at
+     * least 0.6 mm and this instrument cannot see the bottom".
+     *
+     * Widening the SEATING probe would change how far the ride-height lift
+     * hauls her on the rooms that use it, so the depth gets its own call and
+     * the behaviour is untouched. One extra ground query against the six the
+     * legs already make, and it is the difference between a gauge and a guess.
+     */
     let clearance = Infinity;
     if (under) {
       clearance = body.at.clone().sub(under).dot(body.up);
@@ -1074,13 +1088,16 @@ export class LegDrive {
         clearance += lift;
       }
     }
+    /* Read AFTER any lift, so the number is where she ended the frame. */
+    const deep = ground.nearest(body.at, body.up, 6 / MM, 6 / MM);
+    const measured = deep ? body.at.clone().sub(deep).dot(body.up) : clearance;
 
     return {
       movedMm: moved * MM,
       heldBackMm: Math.max(0, wanted - moved) * MM,
       planted,
       groping,
-      clearanceMm: Number.isFinite(clearance) ? clearance * MM : -1,
+      clearanceMm: Number.isFinite(measured) ? measured * MM : -1,
       strain,
       allowed,
       corner: this.corner.report(this.legs, body.up),
