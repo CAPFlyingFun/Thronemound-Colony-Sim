@@ -121,7 +121,7 @@ const TURN_RATE = 2.53;
 /**
  * THE CAMERA MOVES THE CAMERA. It used to move HER.
  *
- * A pan was read as a side step every frame — `strafe = -camYaw * gain` —
+ * A pan was read as a side step every frame — `strafe = -lookYaw * gain` —
  * which meant you could not look at anything without travelling toward it,
  * and letting go left her gliding while the view swung home. It went
  * through three rounds of gating (idle stick, finger down) and each one made
@@ -129,7 +129,7 @@ const TURN_RATE = 2.53;
  * looking is not moving.
  *
  * A deliberate GESTURE moves her instead — see `dodge.ts`. Nothing here
- * reads `camYaw` for movement any more.
+ * reads `lookYaw` for movement any more.
  */
 
 /**
@@ -262,6 +262,9 @@ const STAND_REACH_MM = 5000;
 const S_FWD = new THREE.Vector3();
 const S_UP = new THREE.Vector3();
 const S_RIGHT = new THREE.Vector3();
+/* Her head's own forward and up, read off the bone each frame. */
+const S_HEAD_FWD = new THREE.Vector3();
+const S_HEAD_UP = new THREE.Vector3();
 const S_MAT = new THREE.Matrix4();
 
 /*
@@ -435,6 +438,30 @@ const EYE_BISECTIONS = 10;
  * the surface nets can build, so a wall cannot fit between two samples.
  */
 const EYE_MARCH_STEPS = 8;
+
+/**
+ * THE PAN COMES HOME.
+ *
+ * A swipe moves the view off neutral and, three seconds after the finger
+ * lifts, it eases back — behind her in third person, along her nose in
+ * first. The hold is what makes it usable rather than fidgety: long enough
+ * to look at something, short enough that you never have to put the camera
+ * away by hand.
+ *
+ * Held indefinitely while DIGGING, because there the look is the aim and an
+ * aim that drifts home on its own is a shovel that will not stay pointed.
+ */
+const LOOK_HOLD_S = 3;
+const LOOK_RETURN_RATE = 2.4;
+
+/**
+ * Where the chase arm sits when nothing is asking otherwise: a little above
+ * her, directly off her tail. It used to be `0.28 - aimPitch`, which is why
+ * the third-person view could not be brought behind her — see `orbitBack`.
+ */
+const CHASE_PITCH = 0.28;
+const CHASE_PITCH_MIN = -0.35;
+const CHASE_PITCH_MAX = 1.35;
 
 /**
  * How far a shell clearance probe looks before calling it clear.
@@ -1005,7 +1032,27 @@ export class IslandScene {
 
   /** How far the third-person camera is swung off her tail by a drag; it
    *  decays back to zero, which is how the view returns behind her. */
-  private camYaw = 0;
+  /**
+   * THE PLAYER'S PAN, as an offset from neutral in her own frame.
+   *
+   * Not a world bearing and not the aim. Both decay to zero after
+   * `LOOK_HOLD_S`, which is what makes the camera come home; and being HER
+   * frame is what lets them keep meaning something on a wall, where a world
+   * bearing stops meaning anything at all.
+   */
+  private lookYaw = 0;
+  private lookPitch = 0;
+  /** Seconds since the last look drag. Reset while a finger is down. */
+  private lookIdle = 0;
+  /**
+   * The direction the first-person lens actually looks, in world space.
+   *
+   * Published because the DIG reads it: the crosshair sits at the centre of
+   * the frame, so the cut has to happen along the line the frame is built
+   * on or the two disagree the moment her head is not level with her body.
+   */
+  private readonly lookDir = new THREE.Vector3(0, 0, 1);
+
 
   private camPitch = 0.5;
 
@@ -2346,10 +2393,10 @@ export class IslandScene {
     /*
      * THE VIEW SIDE-STEPS HER; THE STICK TURNS HER.
      *
-     * `camYaw` is the orbit arm's swing off her tail, and it decays back to
-     * zero by itself — so holding the view dragged slides her that way and
+     * `lookYaw` is the orbit arm's swing off her tail, and it comes back to
+     * zero on its own — so holding the view dragged slides her that way and
      * letting go stops her, with no latch and no mode. Negated because a
-     * rightward drag DECREASES camYaw (`camYaw -= movementX`) while a
+     * rightward drag DECREASES lookYaw (`lookYaw -= movementX`) while a
      * positive strafe is screen-right.
      */
     const bore = this.bore.step(dt, {
@@ -2980,6 +3027,22 @@ export class IslandScene {
      * Nose-first up a trunk then reads +90 on the dial, which is exactly
      * what was asked for — the number is world, the stick is hers.
      */
+    /*
+     * IN HER EYES, THE CUT IS WHATEVER THE CROSSHAIR COVERS.
+     *
+     * The crosshair sits at the centre of the frame, and the frame is now
+     * built on her HEAD's forward rather than her body's — so the cut has
+     * to run down that same line or the two disagree by the whole of the
+     * spine's lean the moment she is on a slope. `lookDir` is the vector
+     * the lens was actually built from, written by `aimCamera` each frame
+     * it draws a first-person view.
+     *
+     * Third person keeps the body-frame aim: there the crosshair is hidden
+     * and the shovel's line is hers, not the camera's.
+     */
+    if (this.firstPerson && this.lookDir.lengthSq() > 1e-9) {
+      return new THREE.Vector3().copy(this.lookDir).normalize();
+    }
     const cp = Math.cos(this.aimPitch);
     return new THREE.Vector3().copy(this.fwd).multiplyScalar(cp)
       .addScaledVector(this.up, Math.sin(this.aimPitch));
@@ -3528,8 +3591,8 @@ export class IslandScene {
        */
       /* Left and right were backwards — reported, and the sign lives here
        * and nowhere else. Her pitch was already right, so only this flips. */
-      headYaw: this.firstPerson ? 0 : this.camYaw,
-      headPitch: this.aimPitch,
+      headYaw: this.firstPerson ? 0 : this.lookYaw,
+      headPitch: this.lookPitch,
       /* The ground's own posture, kept entirely separate from the aim above
        * — see `readSpine`. */
       spine: this.readSpine(dt),
@@ -3647,23 +3710,40 @@ export class IslandScene {
     this.queen.root.visible = this.queenReady && !this.firstPerson;
     this.crosshair.style.display = this.firstPerson ? '' : 'none';
     /*
-     * THE ORBIT'S PITCH IS EASED ONCE, FOR EVERY VIEW.
-     *
-     * It used to be computed at the BOTTOM of this function, past both the
-     * first-person and the underground returns — so underground, the orbit
-     * drag turned the yaw and the pitch stayed at whatever it was last
-     * left at on the surface. One place, before the branches, and every
-     * camera that reads `camPitch` reads a live one.
-     *
-     * The camera FOLLOWS the aim, in both directions and at full gain.
-     * It was `0.28 + max(0, -aimPitch)`: point her down and the view
-     * climbs so you are looking along the line she will cut — right, and
-     * only half the job, because that `max(0, …)` threw away every upward
-     * aim. Dropping the clamp (and NOT rescaling) keeps downward feeling
-     * exactly as it always did and gives upward the same one back.
+     * THE ORBIT'S PITCH IS EASED ONCE, FOR EVERY VIEW — before either the
+     * first-person or the underground return, so every camera that reads
+     * `camPitch` reads a live one.
      */
-    const wantPitch = Math.min(1.35, Math.max(0.06, 0.28 - this.aimPitch));
-    this.camPitch += (wantPitch - this.camPitch) * Math.min(1, dt * 3);
+    /*
+     * THE PAN DECAYS, and the camera's elevation is its OWN number.
+     *
+     * It used to be `0.28 - aimPitch`, which tied the chase arm's height to
+     * the dig aim — and `aimPitch` never returns to anything, so a single
+     * vertical drag left the third-person view permanently off its neutral
+     * with no way back. Reported as being locked at a few degrees and
+     * unable to sit directly behind her. The pan is now an offset that
+     * comes home; the aim is left to the shovel.
+     *
+     * Digging holds the pan indefinitely: there the look IS the aim.
+     */
+    if (this.lookPointer !== null || this.digMode) this.lookIdle = 0;
+    else this.lookIdle += dt;
+    if (this.lookIdle > LOOK_HOLD_S) {
+      const home = 1 - Math.exp(-LOOK_RETURN_RATE * dt);
+      this.lookYaw -= this.lookYaw * home;
+      this.lookPitch -= this.lookPitch * home;
+    }
+    /*
+     * ONE ANGLE, ONE OWNER. `aimPitch` is what her head is POSED with and
+     * what the third-person shovel cuts along; the pan is what the player
+     * asked for. Keeping them equal here means there is exactly one place
+     * the number is decided, and her head visibly follows the look in both
+     * views instead of staring level while the camera tips.
+     */
+    this.aimPitch = this.lookPitch;
+    const wantPitch = Math.min(CHASE_PITCH_MAX,
+      Math.max(CHASE_PITCH_MIN, CHASE_PITCH + this.lookPitch));
+    this.camPitch += (wantPitch - this.camPitch) * Math.min(1, dt * 6);
     if (this.firstPerson) {
       /* Her own eyes: at the head, looking where she faces; the mouse (or
        * right-half drag) turns HER, and pitch is a look, not an orbit. On
@@ -3689,8 +3769,31 @@ export class IslandScene {
        * her. Reported exactly that way. The dial still reads against the
        * world; only the picture rides her body.
        */
+      /*
+       * ON THE HEAD BONE, not on her body.
+       *
+       * The lens was already POSITIONED at the head — `eyeWorldPosition` —
+       * but oriented off the body frame, so her head could turn and tilt
+       * underneath a camera that did not. Cresting a rise or rounding onto
+       * a trunk, the two disagreed by the whole of the spine's lean, which
+       * is the view feeling detached from the animal and part of why the
+       * lens ended up somewhere her head could never be.
+       *
+       * The head's own axes are measured off the bone rather than assumed
+       * — an auto-rigger's axis choice differs between castes — so this is
+       * the same forward and up her face actually has. Her body is the
+       * fallback for the second before her model arrives.
+       */
       const fwd = S_FWD.copy(this.fwd);
       const upv = S_UP.copy(this.up);
+      if (this.queenReady) {
+        const headFwd = S_HEAD_FWD;
+        const headUp = S_HEAD_UP;
+        if (this.queen.eyeForwardWorld(headFwd) && this.queen.eyeUpWorld(headUp)) {
+          fwd.copy(headFwd);
+          upv.copy(headUp);
+        }
+      }
       /*
        * THE BODY IS FILTERED; THE AIM IS NOT. This is where the shake
        * actually was.
@@ -3715,8 +3818,24 @@ export class IslandScene {
       const steadyFwd = S_NOSE.copy(this.eyeFwd).normalize();
       const steadyUp = S_ROLL.copy(this.eyeRoll)
         .addScaledVector(steadyFwd, -this.eyeRoll.dot(steadyFwd)).normalize();
-      const dir = S_RAD.copy(steadyFwd).multiplyScalar(Math.cos(this.aimPitch))
-        .addScaledVector(steadyUp, Math.sin(this.aimPitch));
+      /*
+       * HER HEAD ALREADY CARRIES THE AIM — `look()` is handed `aimPitch` as
+       * the head's pitch every frame — so adding `aimPitch` again here
+       * would apply it twice. What is left to add is the player's own pan,
+       * which is a look and not a posture: yaw about the head's up, pitch
+       * about the head's right.
+       */
+      /*
+       * NOTHING IS ADDED HERE. Her head is posed with the pan every frame —
+       * `look()` is handed `lookPitch` as its head pitch — so the bone this
+       * frame is read from has already turned. Rotating again would double
+       * every glance, and in first person the horizontal drag turns her
+       * BODY rather than panning, so there is no yaw offset either.
+       */
+      const dir = S_RAD.copy(steadyFwd).normalize();
+      /* The dig reads this: the crosshair is the centre of the frame, so
+       * the cut has to run down the line the frame was built on. */
+      this.lookDir.copy(dir);
       /*
        * Forward of her centre so her own back does not fill the frame —
        * but ALONG THE AIM, so the eye stays on the cut's line. And never
@@ -3826,10 +3945,13 @@ export class IslandScene {
        * roll. Measured with the dial at ninety, up and look were PARALLEL,
        * which is the degenerate case it was written to avoid. One number.
        */
-      /* Built from the same filtered frame, so up and look cannot disagree
-       * about which body they belong to. */
-      this.camera.up.copy(steadyFwd).multiplyScalar(-Math.sin(this.aimPitch))
-        .addScaledVector(steadyUp, Math.cos(this.aimPitch));
+      /*
+       * Built from the same head frame and turned by the same pan, so up
+       * and look cannot disagree about which body they belong to — and her
+       * head's roll IS the camera's roll, which is what makes rounding onto
+       * a trunk read as her leaning rather than the world tipping.
+       */
+      this.camera.up.copy(steadyUp);
       this.liftCameraClear();
       /* Aim from where the lens ACTUALLY ended up. The guard above may have
        * nudged it out of a roof, and looking at a target measured from the
@@ -3842,7 +3964,8 @@ export class IslandScene {
     /* The drag swings the arm off her tail and it decays back to zero, so
      * the camera returns behind her without ever holding an absolute world
      * bearing — which is the thing that stops meaning anything on a wall. */
-    if (this.lookPointer === null) this.camYaw -= this.camYaw * Math.min(1, dt * 2.4);
+    /* The pan's own return is handled once, for both views, in `aimCamera`
+     * — it holds for `LOOK_HOLD_S` first, which this did not. */
     this.chaseCamera(dt);
   }
 
@@ -4034,13 +4157,13 @@ export class IslandScene {
    * The orbit arm, built in HER frame: back along her nose, swung off it by
    * the drag, and raised by the pitch — all about her own up.
    *
-   * The old arm was `(sin camYaw, 0, cos camYaw)` with a world-vertical
+   * The old arm was `(sin lookYaw, 0, cos lookYaw)` with a world-vertical
    * rise, which is a rig bolted to the horizon. Underground the horizon is
    * not a thing she has: in a shaft her up is horizontal, and a camera that
    * insists on world vertical sits in the wall looking at dirt.
    */
   private orbitBack(into: THREE.Vector3): THREE.Vector3 {
-    const nose = S_NOSE.copy(this.fwd).applyAxisAngle(this.up, this.camYaw);
+    const nose = S_NOSE.copy(this.fwd).applyAxisAngle(this.up, this.lookYaw);
     return into.copy(nose).negate().multiplyScalar(Math.cos(this.camPitch))
       .addScaledVector(this.up, Math.sin(this.camPitch)).normalize();
   }
@@ -4381,8 +4504,17 @@ export class IslandScene {
            * ceiling turns her along the ceiling. Writing `facing` here as
            * well would fight that for a frame. */
           this.bore.turn(-e.movementX * 0.004);
-          this.aimPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
-            this.aimPitch - e.movementY * 0.004));
+          /*
+           * PITCH IS A LOOK, and a look comes home. It used to write
+           * `aimPitch` directly, which is the shovel's angle and has no
+           * neutral to return to — so first person opened at whatever the
+           * last drag left, in either view, instead of along her nose.
+           * While DIGGING the pan is held rather than decayed, so this is
+           * still exactly the aim when it needs to be.
+           */
+          this.lookPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
+            this.lookPitch - e.movementY * 0.004));
+          this.lookIdle = 0;
         } else {
           // Third person: the drag pans the view — above ground a full
           // orbit, underground a tight override the trail cam resumes from
@@ -4392,10 +4524,18 @@ export class IslandScene {
            * always the line she will cut. */
           /* An OFFSET off her tail, bounded to half a turn either way — it
            * decays back to zero, which is how the view swings home. */
-          this.camYaw = Math.max(-Math.PI, Math.min(Math.PI,
-            this.camYaw - e.movementX * 0.005));
-          this.aimPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
-            this.aimPitch - e.movementY * 0.004));
+          /*
+           * BOTH AXES ARE A PAN NOW. The vertical drag used to aim the
+           * SHOVEL and let the camera's elevation follow it, which is why
+           * the third-person view could be left tilted with no way back:
+           * an aim has no neutral. A pan does, and reaches it three
+           * seconds after the finger lifts.
+           */
+          this.lookYaw = Math.max(-Math.PI, Math.min(Math.PI,
+            this.lookYaw - e.movementX * 0.005));
+          this.lookPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
+            this.lookPitch - e.movementY * 0.004));
+          this.lookIdle = 0;
         }
       }
     });
@@ -4750,7 +4890,19 @@ export class IslandScene {
     };
   }
 
-  aimPitchForTest(radians: number): void { this.aimPitch = radians; }
+  /**
+   * Point the shovel, from a probe.
+   *
+   * It writes the LOOK, because that is the input now: `aimPitch` is
+   * derived from it every frame, so setting the derived value alone lasted
+   * exactly until the next camera update. Both are set so the very next
+   * `boreAim()` — before any frame has run — already reads the new angle.
+   */
+  aimPitchForTest(radians: number): void {
+    this.lookPitch = radians;
+    this.aimPitch = radians;
+    this.lookIdle = 0;
+  }
 
   /**
    * TURN THE LEG SOLVER OFF, to tell a gait fault from a solver fault.
