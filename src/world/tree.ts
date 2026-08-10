@@ -67,7 +67,26 @@ export type BarkName = (typeof BARKS)[number];
  * library sets do; a photograph of a tree does not, which is exactly why the
  * originals are mirrored.
  */
-export const PBR_BARKS: ReadonlySet<string> = new Set<BarkName>(['bark-ridged']);
+export const PBR_BARKS: ReadonlySet<string> = new Set<BarkName>(BARKS);
+
+/**
+ * The barks whose own edges genuinely meet, and which may therefore be
+ * wrapped with ordinary REPEAT.
+ *
+ * Everything else is a photograph of a real tree, which does not tile, and
+ * is mirrored so every join is continuous whatever the edges do. That is a
+ * separate question from whether a bark has depth maps, and conflating the
+ * two was a mistake: it left five of the six barks flat because they could
+ * not be given the repeat wrap that `PBR_BARKS` used to imply.
+ *
+ * Mirroring a normal map is safe here, and that is a property of how the
+ * tangent frame is built rather than luck. With no tangent attribute on the
+ * geometry, three.js derives the frame from the UV's own screen-space
+ * derivatives — and on a mirrored tile that derivative is negated too, so
+ * the frame flips with the image and the map's X lands the right way round.
+ * Verified on the trunk: ridges light as ridges in both parities.
+ */
+export const TILING_BARKS: ReadonlySet<string> = new Set<BarkName>(['bark-ridged']);
 
 export interface TreeSpec {
   /** Trunk diameter at the ground, in world units. */

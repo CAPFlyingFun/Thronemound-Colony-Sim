@@ -57,7 +57,7 @@ import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
 import { SurfaceWalker } from '../world/surfaceWalk';
 import {
-  BARKS, PBR_BARKS, bakeTree, buildTree, sidesAt, trunkProfile,
+  BARKS, PBR_BARKS, TILING_BARKS, bakeTree, buildTree, sidesAt, trunkProfile,
   type BuiltTree, type TreeSpec,
   type TrunkProfile,
 } from '../world/tree';
@@ -1522,7 +1522,9 @@ export class IslandScene {
      */
     const aspect = map.image && map.image.height
       ? map.image.width / map.image.height : 1;
-    const wrap = pbr ? THREE.RepeatWrapping : THREE.MirroredRepeatWrapping;
+    /* Whether it TILES, not whether it has depth — see `TILING_BARKS`. */
+    const wrap = TILING_BARKS.has(bark)
+      ? THREE.RepeatWrapping : THREE.MirroredRepeatWrapping;
     for (const tex of [map, normalMap, roughnessMap]) {
       if (!tex) continue;
       tex.wrapS = wrap;

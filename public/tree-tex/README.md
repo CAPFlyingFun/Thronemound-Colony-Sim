@@ -41,6 +41,11 @@ this one is, and at this scale the normal map is doing that work already.
   continuous whatever the edges do. (Healing a non-tiling image by blending
   its edges together was tried and is worse — it trades a hard seam for a
   blurred stripe down the middle of every tile.)
+- **It does not need depth maps either.** `scripts/makePbr.py` derives a
+  normal and a roughness from the colour, in GL convention and wrapping, so
+  a new bark gets relief without anyone painting one:
+  `python3 scripts/makePbr.py public/tree-tex --only <name>`. Add the name
+  to `PBR_BARKS`; add it to `TILING_BARKS` only if its edges genuinely meet.
 - **Evenly lit.** A photograph with the sun down one side tiles into stripes.
 - **1024 is plenty.** The tiling puts about half a millimetre of trunk on a
   texel already; a larger image mostly costs download.
