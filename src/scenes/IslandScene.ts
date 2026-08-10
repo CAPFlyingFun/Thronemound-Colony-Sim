@@ -57,7 +57,8 @@ import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
 import { SurfaceWalker } from '../world/surfaceWalk';
 import {
-  BARKS, bakeTree, buildTree, sidesAt, trunkProfile, type BuiltTree, type TreeSpec,
+  BARKS, PBR_BARKS, bakeTree, buildTree, sidesAt, trunkProfile,
+  type BuiltTree, type TreeSpec,
   type TrunkProfile,
 } from '../world/tree';
 import {
@@ -1407,13 +1408,40 @@ export class IslandScene {
 
   private async plantTree(): Promise<void> {
     const seed = Math.floor(this.at.x * 7919 + this.at.z * 104729) >>> 0;
-    const bark = BARKS[seed % BARKS.length]!;
+    /*
+     * `?bark=bark-ridged` — look at ONE of them.
+     *
+     * Which bark a tree wears is a hash of where it stands, which is right
+     * for the world and useless for judging a new texture: the only way to
+     * see the one you just added is to keep reloading until the island hands
+     * it to you. An unknown name falls through to the seed rather than
+     * leaving a tree with no bark.
+     */
+    const asked = new URLSearchParams(window.location.search).get('bark');
+    const bark = (asked && (BARKS as readonly string[]).includes(asked)
+      ? asked as typeof BARKS[number]
+      : BARKS[seed % BARKS.length]!);
+    const loader = new THREE.TextureLoader();
+    const barkUrl = (suffix: string) => (
+      `${import.meta.env.BASE_URL}tree-tex/${bark}${suffix}.jpg`
+    );
     let map: THREE.Texture;
     try {
-      map = await new THREE.TextureLoader().loadAsync(`${import.meta.env.BASE_URL}tree-tex/${bark}.jpg`);
+      map = await loader.loadAsync(barkUrl(''));
     } catch {
       return; // A missing bark is not worth failing the island over.
     }
+    /*
+     * The depth maps, for the barks that have them. A failure here costs the
+     * relief and not the tree.
+     */
+    const pbr = PBR_BARKS.has(bark);
+    const [normalMap, roughnessMap] = pbr
+      ? await Promise.all([
+        loader.loadAsync(barkUrl('_normal')).catch(() => undefined),
+        loader.loadAsync(barkUrl('_rough')).catch(() => undefined),
+      ])
+      : [undefined, undefined];
     /*
      * MIRRORED BOTH WAYS, and that is a decision rather than a default.
      *
@@ -1430,19 +1458,37 @@ export class IslandScene {
      * It also means a new bark has to satisfy nothing at all beyond being
      * square.
      */
-    map.wrapS = THREE.MirroredRepeatWrapping;
-    map.wrapT = THREE.MirroredRepeatWrapping;
-    map.colorSpace = THREE.SRGBColorSpace;
     /* Sixteen, not eight: the trunk is almost always seen at a grazing
      * angle — she is standing on it — and grazing angles are exactly what
      * anisotropy is for. Free on anything made this decade. */
-    map.anisotropy = Math.min(16, this.renderer.capabilities.getMaxAnisotropy());
+    const aniso = Math.min(16, this.renderer.capabilities.getMaxAnisotropy());
+    /*
+     * A NON-SQUARE bark would otherwise be stretched. The wrap gives one unit
+     * of U and one of V the same number of world millimetres, which is right
+     * for the square photographs and wrong for a 512x1024 library tile: its
+     * texels would be twice as dense up the trunk as around it and the grain
+     * would read squashed. Scaling V by the image's own aspect makes a texel
+     * square again whatever shape the file is, and leaves 1:1 images alone.
+     */
+    const aspect = map.image && map.image.height
+      ? map.image.width / map.image.height : 1;
+    const wrap = pbr ? THREE.RepeatWrapping : THREE.MirroredRepeatWrapping;
+    for (const tex of [map, normalMap, roughnessMap]) {
+      if (!tex) continue;
+      tex.wrapS = wrap;
+      tex.wrapT = wrap;
+      tex.anisotropy = aniso;
+      if (aspect !== 1) tex.repeat.set(1, aspect);
+    }
+    /* Colour is the only one that is colour: a normal map is a direction and
+     * a roughness map is a number, and sRGB-decoding either corrupts it. */
+    map.colorSpace = THREE.SRGBColorSpace;
 
     this.tree = buildTree({
       girth: TREE_GIRTH_MM / MM,
       height: TREE_HEIGHT_MM / MM,
       seed,
-    }, map, bark);
+    }, map, bark, { normalMap, roughnessMap });
 
     /*
      * SEVEN HUNDRED MILLIMETRES OUT — but WHICH WAY matters.

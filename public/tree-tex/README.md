@@ -11,6 +11,28 @@ so a given tree wears the same bark on every load.
 Nothing else changes. The mesh derives its tiling from the trunk's own
 girth, so the image does not need to know how big the tree is.
 
+## Depth maps (optional)
+
+A bark may ship `<name>_normal.jpg` and `<name>_rough.jpg` beside the colour.
+List it in `PBR_BARKS` in `src/world/tree.ts` as well as `BARKS`; a test checks
+the two agree.
+
+Two rules come with them, and both are forced rather than chosen:
+
+- **Use the OpenGL normal map, not DirectX.** Library sets ship both. Three.js
+  reads the GL convention; the DX one has its green channel inverted, which
+  lights every ridge as a groove.
+- **It has to tile on its own edges.** The flat photographs are mirrored, and a
+  mirrored tile runs its U backwards — a tangent-space normal read backwards
+  has its X inverted, so alternate tiles would light back to front. A bark with
+  a normal map is therefore wrapped with plain repeat, and has to earn it.
+
+Non-square is fine: the V repeat is scaled by the image's own aspect, so a
+512x1024 tile keeps square texels instead of a squashed grain.
+
+Displacement maps are ignored. They need a trunk tessellated far past what
+this one is, and at this scale the normal map is doing that work already.
+
 ## What makes a good one
 
 - **Square.** It is wrapped several times round the trunk, so a portrait

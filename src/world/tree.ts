@@ -46,9 +46,28 @@ import * as THREE from 'three';
  */
 export const BARKS = [
   'bark-grey', 'bark-lichen', 'bark-craggy', 'bark-fissured', 'bark-mossy',
+  'bark-ridged',
 ] as const;
 
 export type BarkName = (typeof BARKS)[number];
+
+/**
+ * The barks that ship a normal and roughness map beside the colour, as
+ * `<name>_normal.jpg` and `<name>_rough.jpg`.
+ *
+ * Listed rather than discovered, because discovery means requesting a file
+ * that is usually absent and reading the 404 as an answer — five spurious
+ * console errors on every load, and a slower first tree for nothing.
+ *
+ * A bark in here is wrapped with ordinary REPEAT, not the mirroring the flat
+ * photographs get, and that is forced rather than chosen: mirroring a tile
+ * reverses its U, and a tangent-space normal map read backwards has its X
+ * inverted — so every second tile would light its ridges as grooves. A bark
+ * with a normal map therefore has to tile honestly on its own edges. The
+ * library sets do; a photograph of a tree does not, which is exactly why the
+ * originals are mirrored.
+ */
+export const PBR_BARKS: ReadonlySet<string> = new Set<BarkName>(['bark-ridged']);
 
 export interface TreeSpec {
   /** Trunk diameter at the ground, in world units. */
@@ -900,8 +919,18 @@ export interface BuiltTree {
  * the right way round, though: what you can see in detail is what is next
  * to you, and what is next to you at the foot of a tree is the trunk.
  */
+/**
+ * The extra maps a bark may ship, when it is a photographed PBR set rather
+ * than a flat photograph. Both optional: the five original barks have neither
+ * and must keep working untouched.
+ */
+export interface BarkMaps {
+  normalMap?: THREE.Texture;
+  roughnessMap?: THREE.Texture;
+}
+
 export function buildTree(
-  spec: TreeSpec, bark: THREE.Texture, barkName: BarkName,
+  spec: TreeSpec, bark: THREE.Texture, barkName: BarkName, maps: BarkMaps = {},
 ): BuiltTree {
   /*
    * A tile of bark is half the trunk's own girth square. On a metre-thick
@@ -922,7 +951,17 @@ export function buildTree(
   const owned: (THREE.BufferGeometry | THREE.Material)[] = [];
 
   const woodMat = new THREE.MeshStandardMaterial({
-    map: bark, roughness: 0.95, metalness: 0,
+    map: bark,
+    /*
+     * A NORMAL MAP IS THE DEPTH, and the roughness map is what stops it
+     * reading as printed-on. Both are optional so the five flat barks are
+     * unchanged; where a set supplies them, the flat 0.95 roughness gives way
+     * to the measured one, because a uniform roughness is what makes bark
+     * look like wallpaper under a moving sun.
+     */
+    ...(maps.normalMap ? { normalMap: maps.normalMap } : {}),
+    ...(maps.roughnessMap ? { roughnessMap: maps.roughnessMap } : {}),
+    roughness: 0.95, metalness: 0,
     /*
      * NO FOG ON THE TREE. The island's fog starts at 1,200 units, which is
      * tuned for a fifty-six kilometre landscape and is six metres in a

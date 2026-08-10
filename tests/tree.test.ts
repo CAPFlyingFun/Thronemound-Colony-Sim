@@ -11,7 +11,7 @@ import { existsSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import {
-  BARKS, buildTree, growTree, ringFactor, sidesAt, TreeSolid, type TreeSpec,
+  BARKS, PBR_BARKS, buildTree, growTree, ringFactor, sidesAt, TreeSolid, type TreeSpec,
 } from '../src/world/tree';
 
 const SPEC: TreeSpec = { girth: 200, height: 5200, seed: 12345 };
@@ -86,6 +86,19 @@ describe('the tree', () => {
      * file is a tree with no bark at all. */
     expect(BARKS).not.toContain('bark-pale');
     expect(BARKS).not.toContain('bark-oak');
+  });
+
+  /*
+   * A bark that claims companion maps but is not itself on offer would load
+   * three files for a tree nobody can be given, and — worse — a bark listed
+   * in BARKS whose files are missing is a tree with no bark at all. The set
+   * is small enough to check by hand and exactly the kind of thing that is
+   * edited in a hurry.
+   */
+  it('only promises depth maps for barks it actually offers', () => {
+    for (const name of PBR_BARKS) {
+      expect(BARKS).toContain(name as (typeof BARKS)[number]);
+    }
   });
 
   it('has a file on disk for every bark it lists', () => {
