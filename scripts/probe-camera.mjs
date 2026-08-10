@@ -104,8 +104,28 @@ const out = await page.evaluate(() => {
   const eye = new (s.up.constructor)();
   const onHead = s.queen.eyeWorldPosition(eye);
   const eyeOffMm = onHead ? eye.distanceTo(s.camera.position) * 5 : -1;
+  /*
+   * TRUE ROLL, measured ABOUT THE VIEW AXIS — not a bare up-vs-up angle.
+   * The idle lens now follows her head bone's nod (asked for by name), and
+   * a nodded view necessarily tips its up by the same pitch; that is not a
+   * rolled horizon. So both ups are projected onto the plane perpendicular
+   * to the look and compared there, where only genuine roll survives.
+   */
+  const lookV = { x: 0, y: 0, z: -1 };
+  const lv = ((v) => {
+    const e = s.camera.matrixWorld.elements;
+    return {
+      x: -e[8], y: -e[9], z: -e[10],
+    };
+  })(lookV);
+  const flatOn = (v) => {
+    const d = dot(v, lv);
+    const o = { x: v.x - lv.x * d, y: v.y - lv.y * d, z: v.z - lv.z * d };
+    const len = Math.hypot(o.x, o.y, o.z) || 1;
+    return { x: o.x / len, y: o.y / len, z: o.z / len };
+  };
   const camUpVsBody = Math.acos(Math.max(-1, Math.min(1,
-    dot(s.camera.up, s.up)))) * DEG;
+    dot(flatOn(s.camera.up), flatOn(s.up))))) * DEG;
 
   /* (4) Digging holds the pan. */
   s.digMode = true;

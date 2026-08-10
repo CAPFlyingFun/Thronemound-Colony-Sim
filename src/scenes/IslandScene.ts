@@ -192,6 +192,13 @@ const RIDE = 1.3 / MM;
 const S_PERP = new THREE.Vector3();
 const S_RAD = new THREE.Vector3();
 const S_CENTER = new THREE.Vector3();
+/** Head-clearance and bone-follow scratches — theirs alone, read across
+ *  frames of the pose and never shared with the S_ pool. */
+const HEAD_PROBE_AT = new THREE.Vector3();
+const HEAD_PROBE_DIR = new THREE.Vector3();
+const HEAD_PROBE_RIGHT = new THREE.Vector3();
+const BONE_FWD = new THREE.Vector3();
+
 /** The first-person lens's roll axis. Its OWN scratch: it is read after
  *  `S_UP` has been filled with her surface normal in the same block, and
  *  sharing one would have quietly clobbered the other. */
@@ -457,9 +464,25 @@ const LOOK_RETURN_RATE = 2.4;
  * the third-person view could not be brought behind her — see `orbitBack`.
  */
 const CHASE_PITCH = 0.28;
-/* Never below her: a chase camera looks slightly down on its subject. */
-const CHASE_PITCH_MIN = 0.06;
+/*
+ * The FULL dial again: down past her flank to nearly under her, up to
+ * nearly overhead. The 0.06 floor was the reported limiter — the orbit
+ * could never drop below a polite hover, so "swing around and look UP at
+ * her on the trunk" was unreachable. What keeps the lens out of the dirt
+ * is not this clamp; it is the ground ride below (`chaseCamera`) and
+ * `liftCameraClear`, which are made for exactly that job.
+ */
+const CHASE_PITCH_MIN = -1.35;
 const CHASE_PITCH_MAX = 1.35;
+
+/** Third person never sits closer to the ground than this, in wu — the
+ *  classic chase-camera floor: when terrain rises into the shot, the lens
+ *  rides a fixed height over it and slides in toward her instead. */
+const CHASE_GROUND_CLEAR = 1.6;
+
+/** The arm lengths the chase tries, longest first — full distance unless
+ *  a ridge blocks the sight line, then progressively closer to her. */
+const CHASE_REACH = [1, 0.75, 0.55, 0.4, 0.25, 0.14] as const;
 
 /**
  * How far a shell clearance probe looks before calling it clear.
@@ -3590,7 +3613,7 @@ export class IslandScene {
       /* Left and right were backwards — reported, and the sign lives here
        * and nowhere else. Her pitch was already right, so only this flips. */
       headYaw: this.firstPerson ? 0 : this.lookYaw,
-      headPitch: this.lookPitch,
+      headPitch: this.clampedHeadPitch(),
       /* The ground's own posture, kept entirely separate from the aim above
        * — see `readSpine`. */
       spine: this.readSpine(dt),
@@ -3794,6 +3817,27 @@ export class IslandScene {
        */
       const fwd = S_FWD.copy(this.fwd);
       const upv = S_UP.copy(this.up);
+      /*
+       * THE BONE TAKES THE WHEEL WHEN THE THUMB LETS GO. Left alone for
+       * `LOOK_HOLD_S`, the lens's frame eases from the body's onto the
+       * HEAD BONE's own facing and up — so her gait's nod, the climb's
+       * tilt, the spine's posture all reach the picture — through the
+       * same exponential filters that already keep the bone's shake out.
+       * The moment the player drags, the share collapses to zero: the
+       * look is theirs, and her head is POSED to follow it (the pose
+       * reads the same angles), which is the exact handshake asked for —
+       * head drives camera at rest, camera drives head under a thumb.
+       */
+      const boneShare = Math.min(1, Math.max(0,
+        (this.lookIdle - LOOK_HOLD_S) / 0.8));
+      if (boneShare > 0 && this.queenReady
+        && this.queen.eyeForwardWorld(BONE_FWD)) {
+        /* The bone's FACING only — its nod and its glance. Its roll stays
+         * the body's: the head's up is the surface normal under her, and
+         * following it tips the horizon on every slope (the v0.0.64
+         * report, and the probe still pins it). */
+        fwd.lerp(BONE_FWD, boneShare).normalize();
+      }
       this.eyeFwd.lerp(fwd, 1 - Math.exp(-EYE_ROLL_RATE * dt));
       if (this.eyeFwd.lengthSq() < 1e-9) this.eyeFwd.copy(fwd);
       this.eyeRoll.lerp(upv, 1 - Math.exp(-EYE_ROLL_RATE * dt));
@@ -3990,6 +4034,47 @@ export class IslandScene {
      * right and refuse to pitch. If the arm the player actually asked for
      * is clear, it is the answer, and the search never runs.
      */
+    /*
+     * ABOVE GROUND the chase is the classic one, and only that: the arm
+     * the player asked for, shortened to whatever run is actually clear
+     * (blocked means CLOSER to her, never a different direction), and
+     * then ridden at a fixed height over the terrain — the standard
+     * third-person ground rule the field asked for by name. The fan is
+     * a tunnel instrument; in open country its ground-hugging rays vetoed
+     * every downward pitch, which was the "limited, won't go around"
+     * report.
+     */
+    if (!this.underground) {
+      /*
+       * FULL ARM FIRST, then lifted, then shortened — that order is the
+       * whole fix. Shortening to the first soil hit collapsed the camera
+       * onto her back whenever the ground rose behind her (which on a
+       * mound is always), and the pan read as nearly dead. Instead the
+       * arm keeps the distance the player owns, rides a fixed clearance
+       * over whatever terrain stands under it, and only slides in toward
+       * her when a ridge actually blocks the SIGHT LINE between them.
+       */
+      const pos = S_TARGET;
+      for (const t of CHASE_REACH) {
+        pos.copy(this.at).addScaledVector(ideal, this.camDist * t);
+        const floor = this.walkGroundAt(pos.x, pos.z) + CHASE_GROUND_CLEAR;
+        if (pos.y < floor) pos.y = floor;
+        /* Sight line: her head to the lens, sampled past her own body. */
+        let open = true;
+        for (let i = 3; i <= 12; i += 1) {
+          const k = i / 12;
+          if (this.soilSolidAt(
+            this.at.x + (pos.x - this.at.x) * k,
+            this.at.y + 0.4 + (pos.y - this.at.y - 0.4) * k,
+            this.at.z + (pos.z - this.at.z) * k,
+          )) { open = false; break; }
+        }
+        if (open) break;
+      }
+      this.settleChase(pos, dt);
+      return;
+    }
+
     const straight = this.clearRun(ideal, this.camDist);
     if (straight > this.camDist * 0.92) {
       this.settleChase(S_TARGET.copy(this.at).addScaledVector(ideal, straight), dt);
@@ -4120,6 +4205,35 @@ export class IslandScene {
    * How far a ray out of her centre gets before it meets something, capped
    * at `max`. Her own centre is always air, so this always has an answer.
    */
+  /**
+   * Her head follows the look — but never INTO the hill or the bark.
+   * Climbing tips her frame until "ahead" can point straight at the
+   * surface she stands on, and posing the neck with the raw look then
+   * buries her face in it — reported from the trunk and from cresting a
+   * hole. Probe a face-length along the would-be look from her eyes
+   * (soil, trunk and scrub all answer through `soilDensityAt`) and back
+   * the pitch off by halves until that point is air.
+   */
+  private clampedHeadPitch(): number {
+    let pitch = this.lookPitch;
+    if (!this.queenReady || !this.queen.eyeWorldPosition(HEAD_PROBE_AT)) {
+      return pitch;
+    }
+    HEAD_PROBE_RIGHT.crossVectors(this.fwd, this.up);
+    if (HEAD_PROBE_RIGHT.lengthSq() < 1e-8) return pitch;
+    HEAD_PROBE_RIGHT.normalize();
+    for (let i = 0; i < 4 && Math.abs(pitch) > 0.04; i += 1) {
+      HEAD_PROBE_DIR.copy(this.fwd).applyAxisAngle(HEAD_PROBE_RIGHT, pitch);
+      if (this.soilDensityAt(
+        HEAD_PROBE_AT.x + HEAD_PROBE_DIR.x * 0.5,
+        HEAD_PROBE_AT.y + HEAD_PROBE_DIR.y * 0.5,
+        HEAD_PROBE_AT.z + HEAD_PROBE_DIR.z * 0.5,
+      ) <= 0) break;
+      pitch *= 0.5;
+    }
+    return pitch;
+  }
+
   private clearRun(dir: THREE.Vector3, max: number): number {
     const step = CELL_SIZE * 0.6;
     for (let d = step; d <= max; d += step) {
