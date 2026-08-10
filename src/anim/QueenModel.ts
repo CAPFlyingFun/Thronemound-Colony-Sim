@@ -1408,27 +1408,61 @@ export class QueenModel {
    * The head bone's axis that best matches a direction in the MODEL's own
    * frame, expressed in world space.
    */
+  /**
+   * WHICH AXIS IS DECIDED ONCE, NOT EVERY FRAME.
+   *
+   * The rigger's choice of which bone axis points out of her face is a fact
+   * about the RIG. Re-deciding it from the live pose made it a fact about
+   * how her head happened to be turned — and once her head leans far
+   * enough, a different axis becomes the closest one and the answer JUMPS,
+   * by up to ninety degrees, between one frame and the next.
+   *
+   * Harmless while only the antennae read it. Not harmless once the
+   * first-person camera was mounted on the same vector: measured at a
+   * 24.6-degree swing in a single frame while walking, against a mean of
+   * 0.96 — reported as the view shaking with the animation. Damping would
+   * only have smeared the jump over a few frames.
+   *
+   * So the search runs on the first call, when nothing has posed her yet
+   * and the bone is at its rest orientation, and the index and sign it
+   * finds are kept. Every frame after reads that axis straight off the
+   * bone's live matrix, so the vector still follows her head exactly — it
+   * just can never change its mind about which column to read.
+   */
+  private readonly headAxisPick = new Map<string, { column: number; sign: number }>();
+
   private headAxis(local: THREE.Vector3, into: THREE.Vector3): boolean {
     const head = this.headBoneName();
     const bone = head === undefined ? undefined : this.bones.get(head);
     if (!bone) return false;
     bone.updateWorldMatrix(true, false);
-    /* The model's axis, carried into the world by the ROOT — which is the
-     * frame the caller thinks in — then matched against the bone's own. */
-    AXIS_WANT.copy(local).applyQuaternion(this.root.getWorldQuaternion(AXIS_TURN));
     const m = bone.matrixWorld.elements;
-    let best = -Infinity;
-    for (let i = 0; i < 3; i += 1) {
-      AXIS_TRY.set(m[i * 4]!, m[i * 4 + 1]!, m[i * 4 + 2]!);
-      const len = AXIS_TRY.length();
-      if (len < 1e-9) continue;
-      AXIS_TRY.divideScalar(len);
-      for (const sign of [1, -1]) {
-        const dot = sign * AXIS_TRY.dot(AXIS_WANT);
-        if (dot > best) { best = dot; into.copy(AXIS_TRY).multiplyScalar(sign); }
+    const key = `${head}|${local.x},${local.y},${local.z}`;
+    let pick = this.headAxisPick.get(key);
+    if (!pick) {
+      /* The model's axis, carried into the world by the ROOT — which is the
+       * frame the caller thinks in — then matched against the bone's own. */
+      AXIS_WANT.copy(local).applyQuaternion(this.root.getWorldQuaternion(AXIS_TURN));
+      let best = -Infinity;
+      for (let i = 0; i < 3; i += 1) {
+        AXIS_TRY.set(m[i * 4]!, m[i * 4 + 1]!, m[i * 4 + 2]!);
+        const len = AXIS_TRY.length();
+        if (len < 1e-9) continue;
+        AXIS_TRY.divideScalar(len);
+        for (const sign of [1, -1]) {
+          const dot = sign * AXIS_TRY.dot(AXIS_WANT);
+          if (dot > best) { best = dot; pick = { column: i, sign }; }
+        }
       }
+      if (!pick) return false;
+      this.headAxisPick.set(key, pick);
     }
-    return best > -Infinity;
+    const c = pick.column * 4;
+    into.set(m[c]!, m[c + 1]!, m[c + 2]!);
+    const len = into.length();
+    if (len < 1e-9) return false;
+    into.divideScalar(len).multiplyScalar(pick.sign);
+    return true;
   }
 
   dispose(): void {

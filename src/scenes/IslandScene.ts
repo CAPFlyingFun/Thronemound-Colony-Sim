@@ -266,6 +266,14 @@ const S_RIGHT = new THREE.Vector3();
 const S_HEAD_FWD = new THREE.Vector3();
 const S_HEAD_UP = new THREE.Vector3();
 const S_MAT = new THREE.Matrix4();
+/* Frames, for the head-mounted lens: her body's, her head's, and the basis
+ * each is built from. */
+const S_QBODY = new THREE.Quaternion();
+const S_QHEAD = new THREE.Quaternion();
+const S_QLOCAL = new THREE.Quaternion();
+const S_BX = new THREE.Vector3();
+const S_BY = new THREE.Vector3();
+const S_BZ = new THREE.Vector3();
 
 /*
  * A ledge she may step up, and the rate she scaled a wall at, both gone.
@@ -410,9 +418,27 @@ const EYE_RISE = 1.1 / MM;
  * feel as lag on something the size of a head.
  */
 const EYE_FOLLOW_MS = 45;
-const EYE_AIM_MS = 70;
+/*
+ * The ROLL damper, now that it damps only roll. It used to filter the
+ * lens's whole orientation, where a big number would have been lag on
+ * steering; roll has no such cost, so it can be slow enough to actually
+ * flatten the horizon.
+ */
+const EYE_AIM_MS = 190;
 const EYE_FOLLOW_RATE = 1000 / EYE_FOLLOW_MS;
 const EYE_ROLL_RATE = 1000 / EYE_AIM_MS;
+/**
+ * The damper on her head's motion relative to her body, as a time constant.
+ *
+ * Generous, because nothing the player does arrives through this path: a
+ * turn is her body, and a look-swipe is a deliberate movement that reads
+ * fine slightly smoothed. What DOES arrive here is the gait's head
+ * movement, at a few hertz, which is exactly what wants removing.
+ */
+const EYE_HEAD_MS = 130;
+const EYE_HEAD_RATE = 1000 / EYE_HEAD_MS;
+/** Past this the damper gives up and snaps — a respawn, or her model arriving. */
+const EYE_HEAD_SNAP = (50 * Math.PI) / 180;
 
 /**
  * Past this, the lens SNAPS instead of chasing.
@@ -1088,6 +1114,19 @@ export class IslandScene {
 
   /** Her NOSE, filtered — the body half of the first-person look. */
   private readonly eyeFwd = new THREE.Vector3(0, 0, 1);
+  /**
+   * Her head's orientation RELATIVE TO HER BODY, damped.
+   *
+   * Filtering the head's WORLD frame — which is what the lens used to do —
+   * cannot tell turning from shaking: both are the same vector moving, so
+   * any filter strong enough to eat the gait's head bob also makes turning
+   * feel like steering a boat. Relative to her body the two separate
+   * cleanly. Her body's own frame passes through instantly, so a turn is
+   * instant and rounding onto a trunk still rolls the view at once; what is
+   * damped is only the head's motion ON that body, which is the animation.
+   */
+  private readonly eyeLocal = new THREE.Quaternion();
+  private eyeLocalSet = false;
 
   /** Last frame's ground-guard lift, in world units. Diagnostics only. */
   private guardLift = 0;
@@ -3811,12 +3850,72 @@ export class IslandScene {
        * `boreAim()` is untouched, so the shovel still cuts along her true
        * frame — the filter moves the picture, never the dig.
        */
-      this.eyeFwd.lerp(fwd, 1 - Math.exp(-EYE_ROLL_RATE * dt));
-      if (this.eyeFwd.lengthSq() < 1e-9) this.eyeFwd.copy(fwd);
-      this.eyeRoll.lerp(upv, 1 - Math.exp(-EYE_ROLL_RATE * dt));
-      if (this.eyeRoll.lengthSq() < 1e-9) this.eyeRoll.copy(upv);
+      /*
+       * DAMPED IN HER BODY'S FRAME, which is the whole trick.
+       *
+       * A filter on the head's WORLD orientation cannot tell a turn from a
+       * shake — both are that vector moving — so anything strong enough to
+       * eat the gait's head bob also puts lag on steering. Taken relative
+       * to her body the two come apart: her body passes through untouched,
+       * so turning is instant and rolling onto a trunk still carries the
+       * view over at once, and the damper is left holding only her head's
+       * movement ON that body. That is the animation, and it is the thing
+       * that was shaking.
+       */
+      const orient = (
+        f: THREE.Vector3, u: THREE.Vector3, into: THREE.Quaternion,
+      ): void => {
+        S_BZ.copy(f).normalize();
+        S_BX.crossVectors(u, S_BZ);
+        if (S_BX.lengthSq() < 1e-9) S_BX.set(S_BZ.z, S_BZ.x, S_BZ.y).cross(S_BZ);
+        S_BX.normalize();
+        S_BY.crossVectors(S_BZ, S_BX).normalize();
+        into.setFromRotationMatrix(S_MAT.makeBasis(S_BX, S_BY, S_BZ));
+      };
+      orient(this.fwd, this.up, S_QBODY);
+      orient(fwd, upv, S_QHEAD);
+      /* head, expressed in her body: bodyQuat⁻¹ * headQuat */
+      S_QLOCAL.copy(S_QBODY).invert().multiply(S_QHEAD);
+      if (!this.eyeLocalSet) {
+        this.eyeLocal.copy(S_QLOCAL);
+        this.eyeLocalSet = true;
+      } else if (this.eyeLocal.angleTo(S_QLOCAL) > EYE_HEAD_SNAP) {
+        /* Her model arriving, or a respawn — easing across that would swing
+         * the view through her whole body. */
+        this.eyeLocal.copy(S_QLOCAL);
+      } else {
+        this.eyeLocal.slerp(S_QLOCAL, 1 - Math.exp(-EYE_HEAD_RATE * dt));
+      }
+      S_QHEAD.copy(S_QBODY).multiply(this.eyeLocal);
+      this.eyeFwd.set(0, 0, 1).applyQuaternion(S_QHEAD);
       const steadyFwd = S_NOSE.copy(this.eyeFwd).normalize();
-      const steadyUp = S_ROLL.copy(this.eyeRoll)
+      /*
+       * AND ROLL IS DAMPED ON TOP, on its own.
+       *
+       * What is left after the head is damped is her BODY rolling, which
+       * passes through untouched on purpose — a turn has to be instant. But
+       * ROLL is not a turn: it is the horizon tilting, it carries nothing
+       * the player is steering by, and her body's roll is the surface
+       * normal, which steps as she crosses the lattice. Measured while
+       * walking on open ground: 0.63 degrees a frame of it, peaking at 5.5.
+       *
+       * So the up is carried between frames rather than rebuilt: squared
+       * against the new forward — which keeps yaw and pitch perfectly
+       * instant, because both live in the forward — and only then eased
+       * toward where the head says up is. A trunk still rolls the view all
+       * the way over; it takes a few frames longer to get there.
+       */
+      S_UP.set(0, 1, 0).applyQuaternion(S_QHEAD);
+      const wantUp = S_UP.addScaledVector(steadyFwd, -S_UP.dot(steadyFwd));
+      if (wantUp.lengthSq() < 1e-9) wantUp.copy(this.up);
+      wantUp.normalize();
+      this.eyeRoll.addScaledVector(steadyFwd, -this.eyeRoll.dot(steadyFwd));
+      if (this.eyeRoll.lengthSq() < 1e-9 || !this.eyeLocalSet) this.eyeRoll.copy(wantUp);
+      else {
+        this.eyeRoll.normalize().lerp(wantUp, 1 - Math.exp(-EYE_ROLL_RATE * dt));
+        if (this.eyeRoll.lengthSq() < 1e-9) this.eyeRoll.copy(wantUp);
+      }
+      const steadyUp = S_ROLL.copy(this.eyeRoll.normalize())
         .addScaledVector(steadyFwd, -this.eyeRoll.dot(steadyFwd)).normalize();
       /*
        * HER HEAD ALREADY CARRIES THE AIM — `look()` is handed `aimPitch` as
