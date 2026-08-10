@@ -1469,6 +1469,10 @@ export class IslandScene {
         gripReach: 9 / MM,
         align: 12,
         maxTiltRate: (240 * Math.PI) / 180,
+        /* The fold is a trapezoid now, not a switch — see `aimUp`. This
+         * accel keeps the corner inside its measured timing while taking
+         * the slam off both ends of the turn. */
+        tiltAccel: (2400 * Math.PI) / 180,
         snap: 14,
         /* 0.3 mm: the stand-still dead-band — see SurfaceWalkTuning. */
         deadband: 0.06,

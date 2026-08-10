@@ -58,6 +58,20 @@ export interface SurfaceWalkTuning {
   align: number;
   /** The ceiling on that, in radians per second. A body cannot snap. */
   maxTiltRate: number;
+  /**
+   * How fast the tilt RATE itself may change, per second squared.
+   *
+   * The cap alone is bang-bang: an 87° corner arrives as a step goal, the
+   * easing saturates immediately, and she snaps from stationary to 240°/s
+   * and back — read from the phone as "jumps around the corner", and the
+   * telemetry agrees (upMax pinned at exactly the cap through every
+   * transfer). A slewed rate makes the fold a motion instead of a switch:
+   * it builds, cruises, and — because the allowed rate also shrinks as the
+   * remaining angle does, like any braking curve — lands soft. Ordinary
+   * terrain following never notices: a two-degree correction reaches its
+   * braking-curve rate in a frame.
+   */
+  tiltAccel: number;
   /** How fast she is drawn onto the seat, per second. */
   snap: number;
   /**
@@ -91,6 +105,7 @@ export const DEFAULT_WALK_TUNING: SurfaceWalkTuning = {
   gripReach: 1.8,
   align: 12,
   maxTiltRate: (240 * Math.PI) / 180,
+  tiltAccel: (2400 * Math.PI) / 180,
   snap: 14,
   deadband: 0.06,
   gravity: 9,
@@ -277,11 +292,34 @@ export class SurfaceWalker {
    * Pass `dt = 0` to freeze the attitude for a frame — what active digging
    * wants, because there the normal feeds back into the cast that produced it.
    */
+  /** The tilt's own speed, slewed — the state a motion profile needs. */
+  private tiltRate = 0;
+
   aimUp(frame: WalkFrame, goal: THREE.Vector3, dt: number): void {
     const eased = this.scratchA.copy(frame.up)
       .lerp(goal, 1 - Math.exp(-this.tune.align * dt)).normalize();
     const swing = Math.acos(THREE.MathUtils.clamp(frame.up.dot(eased), -1, 1));
-    const cap = this.tune.maxTiltRate * dt;
+    if (dt <= 0) {
+      if (swing < 1e-9) frame.up.copy(eased);
+      return;
+    }
+    /*
+     * A TRAPEZOID, NOT A SWITCH. The rate builds at `tiltAccel`, holds at
+     * the cap, and obeys a braking curve into the remaining angle — so a
+     * big fold starts gently, commits, and settles instead of slamming
+     * between zero and the cap in one frame. The braking term uses the
+     * angle TO THE GOAL, not to this frame's eased step, or the profile
+     * would brake for the easing rather than for the corner.
+     */
+    const toGoal = Math.acos(THREE.MathUtils.clamp(frame.up.dot(goal), -1, 1));
+    const brake = Math.sqrt(2 * this.tune.tiltAccel * Math.max(0, toGoal));
+    const want = Math.min(this.tune.maxTiltRate, brake);
+    if (want > this.tiltRate) {
+      this.tiltRate = Math.min(want, this.tiltRate + this.tune.tiltAccel * dt);
+    } else {
+      this.tiltRate = Math.max(want, this.tiltRate - this.tune.tiltAccel * dt);
+    }
+    const cap = this.tiltRate * dt;
     if (swing <= cap || swing < 1e-9) {
       frame.up.copy(eased);
       return;
