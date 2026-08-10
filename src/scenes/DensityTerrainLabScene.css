@@ -122,6 +122,38 @@
   pointer-events: none;
 }
 
+/*
+ * The flight recorder's three buttons share one rail slot — see the note
+ * in IslandScene where they are built. The row is air like the rail; only
+ * the buttons take the finger.
+ */
+.tm-log-row {
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  align-items: center;
+  pointer-events: none;
+}
+
+.tm-log-row > * {
+  pointer-events: auto;
+}
+
+/*
+ * A short landscape phone is the tight case: the rail is bottom-anchored
+ * and grows upward, and in dig mode it carries the most chips it ever
+ * will. Squeezing the gaps keeps the DIG toggle — the way out — on
+ * screen instead of pushed past the top edge.
+ */
+@media (max-height: 480px) {
+  .density-lab-actions {
+    gap: 7px;
+  }
+  .density-lab-actions .density-lab-button {
+    padding: 8px 12px;
+  }
+}
+
 .density-lab-actions > * {
   pointer-events: auto;
 }

@@ -429,6 +429,12 @@ const EYE_SNAP = 3 / MM;
  * BISECTION at all: the five fixed steps it replaced were the shake.
  */
 const EYE_BISECTIONS = 10;
+/*
+ * The march that keeps the eye on HER side of every wall: EYE_FORWARD is
+ * 1.3 mm, so eight steps test roughly every 0.16 mm — finer than any crust
+ * the surface nets can build, so a wall cannot fit between two samples.
+ */
+const EYE_MARCH_STEPS = 8;
 
 /**
  * How far a shell clearance probe looks before calling it clear.
@@ -3044,16 +3050,43 @@ export class IslandScene {
     // Work done at depth is chamber-building, whatever she calls it.
     if (this.depthMm() >= QUEST_DEPTH_MM * 0.7) this.deepCarved += touched;
 
-    // One remesh for the whole face, not seven.
+    /*
+     * THE CUT IS DRAWN THIS FRAME, NOT WHEN THE QUEUE GETS ROUND TO IT.
+     *
+     * The density changes the instant the scoop lands, and her body and
+     * feet answer to the density — she steps down onto the new floor at
+     * once. The PICTURE used to answer to the queue, and while digging the
+     * queue runs one to two HUNDRED chunks deep (measured 140-213), which
+     * at three to twelve chunks a frame is up to a second and a half of
+     * lag. For that second the screen still draws the floor she just
+     * removed, with her standing the best part of a scoop below it —
+     * reported as "falls halfway into the terrain", with her legs planted
+     * on ground the picture claims is solid. The physics was measured
+     * clean the whole time (worst 0.4 mm); only the drawing was late.
+     *
+     * A scoop touches a couple of dozen chunks at most, so they are meshed
+     * HERE, synchronously — the backlog behind them can take its time, but
+     * what the shovel just changed is never allowed to be stale.
+     */
     const lo = (v: number) => Math.max(0, Math.floor((v - 1) / CH));
     const hi = (v: number, max: number) => Math.min(max - 1, Math.floor((v + 1) / CH));
     for (let cz = lo(minZ); cz <= hi(maxZ, CHUNKS_XZ); cz += 1) {
       for (let cy = lo(minY); cy <= hi(maxY, CHUNKS_Y); cy += 1) {
         for (let cx = lo(minX); cx <= hi(maxX, CHUNKS_XZ); cx += 1) {
-          this.enqueue(cx, cy, cz);
+          const key = this.key(cx, cy, cz);
+          if (this.queued.has(key)) {
+            /* Already waiting in line: pull it out — it is done now. */
+            this.queued.delete(key);
+            const at = this.queue.findIndex(
+              (j) => j.cx === cx && j.cy === cy && j.cz === cz,
+            );
+            if (at >= 0) this.queue.splice(at, 1);
+          }
+          this.meshChunk(cx, cy, cz);
         }
       }
     }
+    this.reveal();
   }
 
   /**
@@ -3710,11 +3743,31 @@ export class IslandScene {
           && this.soilDensityAt(px + dir.x * EYE_SKIN, py + dir.y * EYE_SKIN,
             pz + dir.z * EYE_SKIN) <= 0;
       };
-      if (clearAt(1)) {
+      /*
+       * MARCHED, NOT JUST TESTED AT THE END — the lens must stay in HER air.
+       *
+       * `clearAt(1)` alone asks only whether the far END of the line is in
+       * air, and through the thin wall of a bore the answer is yes: the line
+       * punches the crust and lands in the open air beyond it, the camera
+       * sets up outside the world looking back in, and the player sees the
+       * sky box through the dirt — reported, with a screenshot, from inside
+       * a dig. So the line is walked in short steps from her head outward
+       * and stops at the last clear point BEFORE the first solid one; the
+       * bisection then only sharpens that boundary. The eye can no longer
+       * be anywhere she could not poke her own head.
+       */
+      let lastClear = 0;
+      let firstBlocked = -1;
+      for (let i = 1; i <= EYE_MARCH_STEPS; i += 1) {
+        const t = i / EYE_MARCH_STEPS;
+        if (clearAt(t)) lastClear = t;
+        else { firstBlocked = t; break; }
+      }
+      if (firstBlocked < 0) {
         eye.addScaledVector(dir, EYE_FORWARD);
       } else {
-        let lo = 0;
-        let hi = 1;
+        let lo = lastClear;
+        let hi = firstBlocked;
         for (let i = 0; i < EYE_BISECTIONS; i += 1) {
           const mid = (lo + hi) / 2;
           if (clearAt(mid)) lo = mid; else hi = mid;
@@ -4134,6 +4187,18 @@ export class IslandScene {
      * Tapping REC once it has stopped clears it and re-arms, so a second
      * attempt does not need a page reload.
      */
+    /*
+     * ONE ROW, NOT THREE. As three stacked buttons these pushed the rail
+     * off the top of a phone in dig mode — the DIG toggle, which is also
+     * the way OUT of dig mode, went with it. Reported as "I can't get out
+     * of dig mode". The rail is bottom-anchored and grows upward, so every
+     * chip added anywhere costs headroom exactly where the dig controls
+     * live; the recorder's three buttons now share one slot.
+     */
+    const logRow = document.createElement('div');
+    logRow.className = 'tm-log-row';
+    actions.appendChild(logRow);
+
     this.telemetryChip = document.createElement('button');
     this.telemetryChip.className = 'density-lab-button density-lab-mode';
     this.telemetryChip.textContent = 'REC';
@@ -4142,7 +4207,7 @@ export class IslandScene {
       e.preventDefault();
       this.telemetry.reset();
     });
-    actions.appendChild(this.telemetryChip);
+    logRow.appendChild(this.telemetryChip);
 
     const logStop = document.createElement('button');
     logStop.className = 'density-lab-button';
@@ -4151,7 +4216,7 @@ export class IslandScene {
       e.preventDefault();
       this.telemetry.stop();
     });
-    actions.appendChild(logStop);
+    logRow.appendChild(logStop);
 
     const logCopy = document.createElement('button');
     logCopy.className = 'density-lab-button';
@@ -4179,7 +4244,7 @@ export class IslandScene {
         done(false);
       }
     });
-    actions.appendChild(logCopy);
+    logRow.appendChild(logCopy);
 
     /*
      * WASD for the PC hand (playtest: "I was having trouble moving"):
