@@ -41,7 +41,14 @@ export interface TelemetrySample {
   sprint: boolean;
   /** What the stick asked for, in millimetres per second. */
   reqMmS: number;
-  /** What the feet actually delivered. */
+  /**
+   * How fast her body ACTUALLY moved along her nose — measured off her world
+   * position, after everything: drive, walker, guards. It used to be the
+   * drive's own claim, and the drive can be wrong: pinned against the
+   * anti-embed guard's snap-back she reported full speed for seventeen
+   * seconds while her position never changed. Signed — a snap backward
+   * reads negative, which is exactly the sawtooth it exists to expose.
+   */
   actMmS: number;
   heldBackMm: number;
   planted: number;

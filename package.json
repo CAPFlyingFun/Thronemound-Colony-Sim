@@ -1,7 +1,7 @@
 {
   "name": "thronemound-colony-sim",
   "private": true,
-  "version": "0.0.56",
+  "version": "0.0.57",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -28,6 +28,7 @@
     "smoke:pwa": "node scripts/smoke-pwa.mjs",
     "probe:context": "node scripts/probe-context-loss.mjs",
     "probe:standstill": "node scripts/probe-standstill.mjs",
+    "probe:treadmill": "node scripts/probe-treadmill.mjs",
     "icons": "node scripts/make-icons.mjs"
   },
   "dependencies": {

@@ -2889,14 +2889,24 @@ export class IslandScene {
      * and this only backs up.
      */
     /*
-     * Tested a little ABOVE her origin, because her origin is not the
-     * lowest part of her — the rig puts its sole plane through it, so a
-     * correctly seated ant has her root a fraction inside the surface and
-     * testing exactly there calls every properly planted step a burial.
-     * Half a millimetre up is clear of the soles and still deep inside
-     * anything that has actually swallowed her.
+     * Tested WELL above her origin, because her origin is not the lowest
+     * part of her — the rig puts its sole plane through it, so a correctly
+     * seated ant has her root a fraction inside the surface — AND because
+     * the surface itself is a millimetre lattice. Walking up even a gentle
+     * slope, the density surface under her jumps by whole cell steps as she
+     * crosses cell boundaries, so a healthy seated origin transiently sits
+     * over a millimetre deep. The old half-millimetre probe read every such
+     * step as a burial: three frames of it and she was snapped back to
+     * lastSafe, which on a slope she is walking UP means snapped backward —
+     * a permanent treadmill, felt as "stuck for some reason", eighteen
+     * millimetres from spawn, with the drive reporting full speed the whole
+     * time. Reproduced deterministically and gone at two millimetres.
+     *
+     * Two millimetres is still far inside anything that has actually
+     * swallowed her: a collapse or a fall into soil buries the whole body,
+     * and her trunk is four millimetres through.
      */
-    const probeUp = 0.5 / MM;
+    const probeUp = 2 / MM;
     if (this.soilDensityAt(
       this.at.x + this.up.x * probeUp,
       this.at.y + this.up.y * probeUp,
@@ -4693,6 +4703,9 @@ export class IslandScene {
    * Everything here is state the scene already holds — the cost is a small
    * object per frame and nothing at all once sixty seconds are up.
    */
+  private readonly telemPrev = new THREE.Vector3();
+  private telemHasPrev = false;
+
   private recordTelemetry(dt: number): void {
     const r = this.driveReport;
     this.telemetry.offer({
@@ -4703,8 +4716,16 @@ export class IslandScene {
       strafe: this.input.strafe,
       sprint: this.input.sprint,
       reqMmS: this.velocity.length() * VOXEL_MM,
-      /* movedMm is this frame's displacement, so the rate needs the step. */
-      actMmS: r && dt > 1e-6 ? r.movedMm / dt : 0,
+      /*
+       * MEASURED, NOT CLAIMED. r.movedMm is what the drive believes it did,
+       * and against the anti-embed treadmill the drive believed 7.5 mm/s
+       * while the body was pinned to the millimetre for seventeen seconds —
+       * the one log column that could have named the bug read healthy.
+       * Forward-projected so a snap backward shows as negative.
+       */
+      actMmS: dt > 1e-6 && this.telemHasPrev
+        ? (S_SPOT.copy(this.at).sub(this.telemPrev).dot(this.fwd) * VOXEL_MM) / dt
+        : 0,
       heldBackMm: r?.heldBackMm ?? 0,
       planted: r?.planted ?? 0,
       groping: r?.groping ?? 0,
@@ -4718,6 +4739,8 @@ export class IslandScene {
       onNew: r?.corner.onNew ?? 0,
       onOld: r?.corner.onOld ?? 0,
     }, dt);
+    this.telemPrev.copy(this.at);
+    this.telemHasPrev = true;
     if (this.telemetryChip) {
       const st = this.telemetry.status;
       this.telemetryChip.textContent = st === 'recording'
