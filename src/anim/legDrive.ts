@@ -96,7 +96,7 @@
 import * as THREE from 'three';
 import {
   CORNER_TUNING, CornerTurn, rowsFromHomes,
-  type CornerGround, type CornerReport, type SurfaceContact,
+  type CornerReport, type SurfaceContact,
 } from './cornerTurn';
 
 export type { SurfaceContact } from './cornerTurn';
@@ -226,10 +226,6 @@ interface Leg {
   at: THREE.Vector3;
   /** True while it is reaching and has found nothing: held up. */
   groping: boolean;
-  /** The leg's straight hip-to-sole maximum, world units — handed to the
-   *  corner so cross-crease footholds may use the reach the leg really
-   *  has instead of the flat-surface spread. */
-  straightReach: number;
   /** Spare downward reach, in world units. See `REACH_DOWN_MM`. */
   down: number;
   /**
@@ -243,17 +239,6 @@ interface Leg {
    * stroke it was actually placed for.
    */
   dir: THREE.Vector3;
-  /**
-   * Is this swing bound for the NEW surface? STICKY for the length of the
-   * swing: once the corner has answered yes, a frame where the re-ask fails
-   * keeps the last found target rather than falling back to the old-surface
-   * probe. The fallback was measured undoing the corner — a front grip
-   * re-stepped mid-fold lost the face for two frames and landed back on the
-   * floor it had already left, and the transition never finished.
-   */
-  crossing: boolean;
-  /** The normal at the last found new-surface target. Valid while crossing. */
-  crossNormal: THREE.Vector3;
 }
 
 export interface BodyPose {
@@ -368,18 +353,30 @@ function spread(reach: number, spare: number): number {
   return Math.sqrt(Math.max(0, straight * straight - reach * reach));
 }
 
-/** Where a swing is aiming, this frame. Copied out immediately. */
-const SCRATCH_AIM = new THREE.Vector3();
+/**
+ * How long the ordinary tripod trigger stays muzzled after a corner.
+ *
+ * TWO FRAMES, and it was two swings — thirty-two hundredths of a second —
+ * on the reasoning that coming off a transition her homes are computed in a
+ * body frame that has swung ninety degrees, so every excursion is large at
+ * once and the first ordinary frame could read a spent tripod and lift three
+ * feet together. The risk is real; the length was over-insurance, and it
+ * cost something measurable. Over the sixty frames after the handoff she
+ * covered 6.86 mm/s of a commanded 7.50 with the long muzzle and the full
+ * 7.50 with this one, and the first ordinary tripod came at frame 8 instead
+ * of frame 26. Neither setting ever released more than one foot on the two
+ * frames that matter.
+ *
+ * Narrowing this came from the `chatgpt/continuous-corner-climb` branch. Two
+ * frames rather than the one it used because this counter is in SECONDS and
+ * is decremented on the same frame it is set: a single frame's worth is
+ * already zero by the first ordinary frame, which is precisely the frame it
+ * exists to guard.
+ */
+export const HANDOFF_GRACE = 2 / 60;
 
-/* Scratch for the release gate's destination dry-run — the gate runs while
- * the step loop's own scratch is idle, but sharing would be a trap waiting
- * for the next refactor to spring. */
-const DEST_HOME = new THREE.Vector3();
-const DEST_DIR = new THREE.Vector3();
-const DEST_AHEAD = new THREE.Vector3();
-const DEST_CONTACT: SurfaceContact = {
-  point: new THREE.Vector3(), normal: new THREE.Vector3(),
-};
+/** Where a scheduled swing is aiming, this frame. Copied out immediately. */
+const SCRATCH_AIM = new THREE.Vector3();
 
 /* Probe pose for the lean's hold-plane cap — see `step`. */
 const LEAN_PROBE: BodyPose = {
@@ -403,6 +400,9 @@ export class LegDrive {
    */
   private readonly corner: CornerTurn;
 
+  /** Seconds left of the post-corner muzzle. See `HANDOFF_GRACE`. */
+  private grace = 0;
+
   constructor(setup: LegSetup[]) {
     for (const leg of setup) {
       const spare = (REACH_DOWN_MM[leg.slot] ?? 1) / MM;
@@ -420,10 +420,7 @@ export class LegDrive {
         // `reach` arrives in world units: the rig is scaled before it is
         // measured, so it is already in the same units as `home`.
         spread: spread(leg.reach || leg.home.length(), spare),
-        straightReach: (leg.reach || leg.home.length()) + spare,
         dir: new THREE.Vector3(0, 0, 1),
-        crossing: false,
-        crossNormal: new THREE.Vector3(),
       });
     }
     /*
@@ -528,59 +525,6 @@ export class LegDrive {
   }
 
   /**
-   * WOULD THIS LEG HAVE SOMEWHERE REAL TO LAND, if its tripod lifted now?
-   *
-   * The release gate's question at a corner, asked with the same probes the
-   * swing itself will use one frame later: the corner's foothold on the new
-   * surface first, the ordinary `nearest` on the old one second. A tripod
-   * is released only when all three of its feet answer yes — a missing
-   * foothold pauses the pending step safely rather than lifting a foot
-   * with nowhere to go.
-   */
-  private destinationFor(
-    leg: Leg, body: BodyPose, input: DriveInput, ground: Ground,
-    cornerGround: CornerGround | null, radius: number,
-  ): boolean {
-    if (cornerGround
-      && this.corner.stepAim(leg, body, cornerGround, DEST_CONTACT)) return true;
-    const home = this.homeWorld(leg, body, DEST_HOME);
-    const speed = this.travel(leg, body, input, DEST_DIR);
-    if (speed <= 1e-9) DEST_DIR.copy(leg.dir);
-    const ahead = DEST_AHEAD.copy(home)
-      .addScaledVector(DEST_DIR, speed > 1e-9 ? radius : 0);
-    return ground.nearest(ahead, body.up, leg.down, REACH_UP_MM / MM) !== null;
-  }
-
-  /**
-   * Would this leg's ordinary step actually take it anywhere — across to
-   * the new surface, or a real fraction of a stride from where it stands?
-   *
-   * The early-turn question at a clamped corner. `destinationFor` asks
-   * whether a landing EXISTS; this asks whether it is WORTH TAKING, which
-   * is what keeps a parked body from marching a tripod up and down on the
-   * spot: the foot that just stepped finds its own anchor where the next
-   * landing would be, answers no, and the turn waits for something real.
-   */
-  private stepGoesSomewhere(
-    leg: Leg, body: BodyPose, input: DriveInput, ground: Ground,
-    cornerGround: CornerGround | null, radius: number,
-  ): boolean {
-    if (cornerGround
-      && this.corner.stepAim(leg, body, cornerGround, DEST_CONTACT)
-      && DEST_CONTACT.point.distanceTo(leg.anchor) > radius * 0.35) return true;
-    /* A crossed foot's only worthwhile step is a renewal on the face. */
-    if (this.corner.ownerOf(leg.slot) === 'new') return false;
-    const home = this.homeWorld(leg, body, DEST_HOME);
-    const speed = this.travel(leg, body, input, DEST_DIR);
-    if (speed <= 1e-9) DEST_DIR.copy(leg.dir);
-    const ahead = DEST_AHEAD.copy(home)
-      .addScaledVector(DEST_DIR, speed > 1e-9 ? radius : 0);
-    const hit = ground.nearest(ahead, body.up, leg.down, REACH_UP_MM / MM);
-    if (!hit) return false;
-    return hit.distanceTo(leg.anchor) > radius * 0.35;
-  }
-
-  /**
    * Put every foot on the ground under its home. Call once, on spawn.
    *
    * The tripods are STAGGERED by half a stroke — 1-4-5 under their homes,
@@ -594,6 +538,7 @@ export class LegDrive {
     /* A fresh plant is a respawn or a teleport, and both invalidate the two
      * surfaces a transition is held between. See `CornerTurn.reset`. */
     this.corner.reset();
+    this.grace = 0;
     const home = new THREE.Vector3();
     const lead = STRIDE_MM.walk / 2 / MM;
     for (const leg of this.legs) {
@@ -667,12 +612,19 @@ export class LegDrive {
     const corner = this.corner.update(
       dt, body, { ...input, radius }, cornerGround, this.legs,
     );
-    /*
-     * `handedOff` marks the observable finish frame; nothing needs doing
-     * with it here any more. The gait was never paused, so there is no
-     * grace, no re-forming, and nothing to hand back — the corner only
-     * stops answering `stepAim` and the ordinary steps carry on.
-     */
+    if (corner.handedOff) this.grace = HANDOFF_GRACE;
+    this.grace = Math.max(0, this.grace - dt);
+    /** Is the corner scheduler, or its aftermath, in charge of the queue? */
+    const staged = corner.active || this.grace > 0;
+
+    if (corner.release) {
+      const leg = this.legs.find((l) => l.slot === corner.release);
+      if (leg?.planted) {
+        leg.planted = false;
+        leg.t = 0;
+        leg.from.copy(leg.at);
+      }
+    }
 
     /*
      * 2. A FOOT THAT IS OUT OF LEG LETS GO.
@@ -717,7 +669,7 @@ export class LegDrive {
       this.homeWorld(leg, body, home);
       const over = this.excursion(leg, home, body.up).length() - leg.spread;
       if (over <= 0) continue;
-      if (!this.corner.active) {
+      if (!staged) {
         leg.planted = false;
         leg.t = 0;
         leg.from.copy(leg.at);
@@ -743,19 +695,7 @@ export class LegDrive {
     const limits: Array<{ leg: Leg; limit: number }> = [];
     for (const leg of this.legs) {
       if (!leg.planted) continue;
-      /*
-       * A crossed foot gets HEADROOM, for the same reason it is not a strain
-       * candidate: its excursion is measured from a home in a body frame
-       * that still belongs to the old surface, and the frame lies about
-       * wall feet. Measured on the vertical wall, the un-tilted frame read
-       * the front grips a few percent over their limit and clamped the
-       * body a quarter-millimetre short of the crease — the exact distance
-       * at which the walker would have begun the fold that swings those
-       * same homes back toward their anchors and makes the number honest
-       * again. The hold plane still caps how far she can actually go.
-       */
-      const wall = this.corner.active && this.corner.ownerOf(leg.slot) === 'new';
-      limits.push({ leg, limit: wall ? leg.spread * 1.35 : leg.spread });
+      limits.push({ leg, limit: leg.spread });
     }
     const probe: BodyPose = {
       at: new THREE.Vector3(), up: body.up, forward: new THREE.Vector3(),
@@ -864,8 +804,32 @@ export class LegDrive {
      */
     let strain = 0;
     let spentest: Leg | null = null;
+    /*
+     * The most-spent foot the OVERLAP may take while a crossing is in the
+     * air. A foot already across may renew itself under any transfer past
+     * the front row — the drive lands it through the corner's own foothold
+     * probe, see `restepAim`. A foot still on the old surface may creep only
+     * while the MIDDLE row is going: in `transferRear` the only old feet
+     * left are the rear pair themselves, and creeping one along the surface
+     * it should be leaving stalled the rear row for forty-frame stretches.
+     */
+    let strainOv = -Infinity;
+    let spentestOv: Leg | null = null;
+    const phase = this.corner.phase;
+    const overlapOk = (leg: Leg): boolean => {
+      if (!this.corner.active) return false;
+      if (phase === 'acquireFront' || phase === 'recover' || phase === 'settle') return false;
+      return this.corner.ownerOf(leg.slot) === 'new'
+        ? true
+        : phase === 'transferMiddle';
+    };
     let inTransit = false;
+    /* Counted HERE rather than reused from step 2: the releases above have
+     * happened since, and a stale count is how a rule that says "only with
+     * an empty sky" ends up firing with a foot already in it. */
+    let onFoot = 0;
     for (const leg of this.legs) {
+      if (leg.planted) onFoot += 1;
       if (!leg.planted) {
         /*
          * A leg on its way to a spot it has FOUND blocks the swap — she may
@@ -880,17 +844,6 @@ export class LegDrive {
         if (!leg.groping) inTransit = true;
         continue;
       }
-      /*
-       * A FOOT ALREADY ON THE NEW SURFACE IS NOT A CANDIDATE. Its excursion
-       * is measured against a home in a body frame that still belongs to
-       * the old surface, and the frame lies about wall feet: measured, a
-       * front grip read most-spent fifteen frames after crossing and set
-       * the gait's whole rhythm by a number that meant nothing. Crossed
-       * feet still take their turns — see the release below, where they
-       * renew WITH their group whenever the face answers — they just do
-       * not get to call them.
-       */
-      if (this.corner.active && this.corner.ownerOf(leg.slot) === 'new') continue;
       this.homeWorld(leg, body, home);
       const speed = this.travel(leg, body, input, dir);
       // Where she is going now; only when she is going nowhere, where it was
@@ -902,26 +855,23 @@ export class LegDrive {
         strain = spent;
         spentest = leg;
       }
+      if (overlapOk(leg) && spent > strainOv) {
+        strainOv = spent;
+        spentestOv = leg;
+      }
     }
     /*
-     * PARKED AT THE FACE, THE GAIT IS STILL THE TRIGGER'S CLOCK.
+     * PAUSED, NOT DESTROYED — and the pause has two reasons behind it.
      *
-     * Strain is made by the body moving over planted feet, and at a corner
-     * the hold plane stops the body on purpose — so a strain-only trigger
-     * deadlocks there: she cannot move until a foot crosses, and no foot
-     * can cross until she moves. Measured in the harness: armed, parked,
-     * strain frozen at 0.6, benched by her own stall guard two seconds
-     * later, forever.
-     *
-     * So while the corner is holding her back, the due tripod may take its
-     * turn early — but ONLY if that turn puts a foot on the new surface.
-     * An early turn that would merely lift three feet and set them down
-     * where they stand is marching in place, and she does not march in
-     * place. Alternation is preserved by construction: the group that just
-     * stepped is fresh, so the most-spent foot is always in the other one.
+     * During a transition the whole point is that one foot moves at a time,
+     * and "the most-spent foot releases its entire tripod" would take three
+     * at once, two of which have nowhere to go. After one, the homes have
+     * been recomputed in a body frame that swung ninety degrees, so every
+     * excursion is large SIMULTANEOUSLY and the first normal frame would
+     * read a spent tripod and lift three feet together. The grace lets the
+     * spread rule bring them back one at a time instead. See `HANDOFF_GRACE`.
      */
-    const held = this.corner.active && wanted > 1e-9 && moved < wanted * 0.25;
-    if (!inTransit && spentest) {
+    if (!staged && !inTransit && spentest && strain >= 1) {
       /*
        * Lift the tripod that the most-spent foot belongs to. Alternation is
        * not bookkept: a group that has just stepped is fresh by definition,
@@ -930,87 +880,75 @@ export class LegDrive {
        * to go instead of taking a blind turn.
        */
       const group = TRIPOD_A.includes(spentest.slot) ? TRIPOD_A : TRIPOD_B;
-      let due = strain >= 1;
-      if (!due && held) {
-        /*
-         * Clamped, a turn is due when it would actually GO somewhere. Full
-         * strain is made by the body moving, and here the body cannot move
-         * — either the hold plane has her parked at the face, or her own
-         * stretched old-surface feet are the clip's binding constraint.
-         * Both are the same knot: the body waits on a step that waits on
-         * strain that waits on the body. (Strain cannot cut it: measured at
-         * the crease of a sixty-degree ramp, the clamped rears read 0.15 in
-         * the mid-fold frame while the spread rule tore a GRIPPING front
-         * foot off instead.) So the question is asked directly, per foot:
-         * would this step cross to the new surface, or land a real fraction
-         * of a stride from where the foot already stands? A foot that just
-         * stepped answers no to both, which is why this cannot march in
-         * place.
-         */
-        for (const leg of this.legs) {
-          if (!group.includes(leg.slot) || !leg.planted) continue;
-          if (this.stepGoesSomewhere(leg, body, input, ground, cornerGround, radius)) {
-            due = true;
-            break;
-          }
-        }
+      for (const leg of this.legs) {
+        if (!group.includes(leg.slot) || !leg.planted) continue;
+        leg.planted = false;
+        leg.t = 0;
+        leg.from.copy(leg.at);
       }
-      if (due) {
-        /*
-         * ONE GAIT, THROUGH THE CORNER TOO — gated, never re-sequenced.
-         *
-         * The corner used to muzzle this trigger and run a cadence of its
-         * own, one foot at a time; the stop-start motion at the fold was
-         * that second cadence. Now the same alternating tripod runs straight
-         * through, and the corner only tightens the RELEASE RULE: the other
-         * tripod must be a full stance (three planted — this is a wall, not
-         * a lip), and every foot about to lift must already have somewhere
-         * real to land, on whichever surface answers. A missing foothold
-         * PAUSES the step — the strain simply carries over and asks again
-         * next frame — it does not reorder, reverse, or shrink the tripod.
-         */
-        let go = true;
-        if (this.corner.active) {
-          for (const leg of this.legs) {
-            if (!group.includes(leg.slot) && !leg.planted) { go = false; break; }
-          }
-          if (go) {
-            /* Only OLD feet can veto the turn: a crossed foot that cannot
-             * re-reach the face this frame simply keeps its grip (below)
-             * rather than pausing everyone else's step. */
-            for (const leg of this.legs) {
-              if (!group.includes(leg.slot) || !leg.planted) continue;
-              if (this.corner.ownerOf(leg.slot) === 'new') continue;
-              if (!this.destinationFor(leg, body, input, ground, cornerGround, radius)) {
-                go = false;
-                break;
-              }
-            }
-          }
-        }
-        if (go) {
-          for (const leg of this.legs) {
-            if (!group.includes(leg.slot) || !leg.planted) continue;
-            /*
-             * A crossed foot renews with its group ONLY when the face
-             * answers its foothold question right now — a grip is never
-             * traded for a maybe. Everything the clip knows stays
-             * consistent: the foot either steps to a found wall contact or
-             * keeps standing on the one it has.
-             */
-            if (this.corner.active && this.corner.ownerOf(leg.slot) === 'new') {
-              if (!cornerGround
-                || !this.corner.stepAim(leg, body, cornerGround, DEST_CONTACT)
-                || DEST_CONTACT.point.distanceTo(leg.anchor) <= radius * 0.35) {
-                continue;
-              }
-            }
-            leg.planted = false;
-            leg.t = 0;
-            leg.from.copy(leg.at);
-          }
-        }
-      }
+    } else if (
+      staged && !inTransit && !corner.release && spentest && strain >= 0.7
+      && onFoot >= this.legs.length
+    ) {
+      /*
+       * AND DURING A TRANSITION, THE SAME TRIGGER — ONE FOOT, NOT THREE.
+       *
+       * Without this she stops dead the moment the leading pair grip, and
+       * the measurement is unambiguous: two front feet on the bark, four on
+       * the soil, all six inside their limits, `allowed` clipped to nothing,
+       * and eight hundred and thirty frames in which her gap to the trunk
+       * went from 3.98 mm to 3.81. Every foot was AT its boundary, which is
+       * where the clip parks them, so the spread rule never fired either —
+       * nothing exceeded anything, and nothing could move.
+       *
+       * The escape on flat ground is this same trigger lifting a tripod. A
+       * corner cannot afford three, but it can afford one: the most-spent
+       * foot takes an ordinary step on the surface it is already on, with
+       * the ordinary swing and the ordinary `nearest`. She creeps into the
+       * corner on five feet while the leading pair hold the wall, which is
+       * what carries her body round — no pull on the root, nothing bypassing
+       * the clip, and no motion that some foot did not first make room for.
+       */
+      spentest.planted = false;
+      spentest.t = 0;
+      spentest.from.copy(spentest.at);
+    } else if (
+      /*
+       * OVERLAP: a creep may go out UNDER a crossing in flight.
+       *
+       * The strictly sequential corner parked her at the clip for the whole
+       * of every 0.16 s cross-surface swing — five stance feet all spent, no
+       * renewal allowed, nothing able to move. A stance leg taking its
+       * ordinary step on its own surface while the grip crosses is what a
+       * real ant does, and it is the ONLY overlap allowed, on four gates:
+       *
+       * - strictly while the corner itself is live, never the handoff grace
+       *   (the tripods are re-forming there);
+       * - never during `acquireFront` or `recover` — the front grips are the
+       *   fragile part, the body has to fold before a hold is real, and
+       *   every attempt to hurry that phase has jammed it;
+       * - strictly under a genuine crossing, never a returning foot (that is
+       *   a recovery already in progress);
+       * - and only a foot the ledger still has on the OLD surface. A foot
+       *   already across must never take a creep step: `nearest` measures
+       *   along an up that belongs to the floor, and worse, a second
+       *   airborne foot cannot be adopted while a crossing is in flight, so
+       *   the label comes off and the corner can never again observe itself
+       *   finished. Measured — armed for an entire 700-frame descent, one
+       *   ground foot forever flapping back to 'old'.
+       *
+       * Four planted is the floor, the same one the scheduler holds itself
+       * to when it releases across a creep. See `CornerTurn.update`.
+       */
+      this.corner.crossingSlot !== null
+      && !corner.release
+      && spentestOv && strainOv >= 0.7
+      && onFoot >= this.legs.length - 1
+      && onFoot - 1 >= CORNER_TUNING.minPlanted
+    ) {
+      spentestOv.planted = false;
+      spentestOv.t = 0;
+      spentestOv.from.copy(spentestOv.at);
     }
 
     /*
@@ -1038,36 +976,49 @@ export class LegDrive {
       if (speed <= 1e-9) dir.copy(leg.dir);
       const ahead = home.clone().addScaledVector(dir, speed > 1e-9 ? radius : 0);
       /*
-       * WHILE A TRANSITION IS TRACKED, EVERY SWING ASKS THE CORNER FIRST.
+       * A SCHEDULED foot aims where the scheduler found real wood, and every
+       * other foot asks the ground the same question it always did.
        *
-       * `stepAim` answers where this leg's ordinary step would land on the
-       * NEW surface, if the new surface is inside the leg's own workspace
-       * at all — re-asked every frame because the body moves under the
-       * swing. Front feet get a yes first because they are in front;
-       * middles and rears get theirs on later tripod turns as the fold
-       * brings the face into reach. A no means the ordinary `nearest`
-       * answers instead, exactly as on open ground. There is no queue, no
-       * row order, and no scheduled foot: which feet cross on which turn
-       * is decided by geometry, so whichever tripod arrives first leads.
-       *
-       * The contact is offset along ITS OWN normal rather than along her
-       * up, which is the whole difference between a claw resting on bark
-       * and one hovering a hundredth of a millimetre off it in the wrong
-       * direction. A foot arrives because the world was probed and
-       * answered, or it does not arrive.
+       * The contact is offset along ITS OWN normal rather than along her up,
+       * which is the whole difference between a claw resting on bark and one
+       * hovering a hundredth of a millimetre off it in the wrong direction.
+       * Everything after this line — the arc, the lock, the anchor, the
+       * stored travel direction — is the ordinary swing, untouched. There is
+       * no reach animation here and there must never be one: a foot arrives
+       * because the world was probed and answered, or it does not arrive.
        */
-      if (leg.t === 0) leg.crossing = false;
-      const fresh = this.corner.active
+      const scheduled = corner.aimSlot === leg.slot ? corner.aim : null;
+      /*
+       * A foot ALREADY ACROSS, re-stepping off the queue, lands where the
+       * corner's own foothold probe says — `nearest` measures along an up
+       * that still belongs to the old surface and would quietly walk it
+       * back off the wall. Re-aimed every frame, like a scheduled swing,
+       * because the body moves under it. See `CornerTurn.restepAim`.
+       */
+      const restep = !scheduled
+        && this.corner.active
+        /*
+         * NEVER while the front row is still going. On the descent the
+         * first front foot grips the ground while the body is still high
+         * on the wood; a fast off-queue re-land puts it down before the
+         * body has folded, the spread rule drags it straight back off, and
+         * she loops there — the same five-hundred-frame jam every other
+         * attempt to hurry `acquireFront` has produced. The scheduler's
+         * careful clock owns that phase.
+         */
+        && this.corner.phase !== 'acquireFront'
+        && this.corner.phase !== 'recover'
+        && this.corner.swingingSlot !== leg.slot
+        && this.corner.ownerOf(leg.slot) === 'new'
         && cornerGround !== null
-        && this.corner.stepAim(leg, body, cornerGround, SCRATCH_CONTACT);
-      if (fresh) {
-        leg.crossing = true;
-        leg.crossNormal.copy(SCRATCH_CONTACT.normal);
-      }
-      const hit = fresh
-        ? SCRATCH_AIM.copy(SCRATCH_CONTACT.point)
-          .addScaledVector(SCRATCH_CONTACT.normal, FOOT_CLEARANCE_MM / MM)
-        : (leg.crossing ? leg.to : ground.nearest(ahead, body.up, leg.down, REACH_UP_MM / MM));
+        && this.corner.restepAim(leg, body, cornerGround, SCRATCH_CONTACT);
+      const hit = scheduled
+        ? SCRATCH_AIM.copy(scheduled.point)
+          .addScaledVector(scheduled.normal, FOOT_CLEARANCE_MM / MM)
+        : restep
+          ? SCRATCH_AIM.copy(SCRATCH_CONTACT.point)
+            .addScaledVector(SCRATCH_CONTACT.normal, FOOT_CLEARANCE_MM / MM)
+          : ground.nearest(ahead, body.up, leg.down, REACH_UP_MM / MM);
       if (!hit) {
         /*
          * Nothing to stand on. She keeps the leg raised and keeps reaching —
@@ -1081,9 +1032,55 @@ export class LegDrive {
       }
       leg.groping = false;
       leg.to.copy(hit);
-      /* One clock for every step, corner or none — a second cadence is
-       * exactly what the corner no longer owns. */
-      leg.t = Math.min(1, leg.t + dt / SWING_SECONDS);
+      /*
+       * A CORNER SWING KEEPS HER PACE.
+       *
+       * The 0.16 s swing clock is tuned for the ordinary tripod, where three
+       * feet cross together and the stance carries her meanwhile. At a
+       * corner the queue makes every step SEQUENTIAL — one foot at a time,
+       * body waiting on each — so the fixed clock becomes the speed limit:
+       * measured at full sprint she dropped from 22.8 to ~12 mm/s across
+       * twenty millimetres either side of the fold, all of it spent parked
+       * at the clip while a swing finished. So while the scheduler (or its
+       * grace) owns the queue, an ORDINARY step takes the time her own gait
+       * implies at the commanded pace — one stroke diameter of travel — and
+       * never more than the ordinary clock. The floor keeps a step a step
+       * rather than a teleport at silly speeds.
+       *
+       * A SCHEDULED swing keeps the full clock. Those are the cross-surface
+       * grips, and hurrying one is not free: measured on the way DOWN the
+       * trunk, fast-clocking the scheduled front foot landed it before the
+       * body had folded, the spread rule dragged it straight back off, and
+       * she sat in `acquireFront` for five hundred frames four millimetres
+       * above the soil. Only the creep steps — same surface, same `nearest`,
+       * nothing delicate about them — get the fast clock.
+       */
+      const paced = input.speed > 1e-9
+        ? (2 * radius) / input.speed
+        : SWING_SECONDS;
+      /*
+       * A SCHEDULED swing keeps the full clock, always. Those are the
+       * cross-surface grips, and hurrying one is not free: measured on the
+       * way DOWN the trunk, fast-clocking the scheduled front foot landed
+       * it before the body had folded, the spread rule dragged it straight
+       * back off, and she sat in `acquireFront` for five hundred frames
+       * four millimetres above the soil — intermittently, which is worse
+       * than slow. (A "hurry only when the aim is near home" gate was
+       * tried and jammed the same way.) Only the creep steps — same
+       * surface, same `nearest`, nothing delicate about them — hurry.
+       *
+       * "Scheduled" is asked of the SCHEDULER, not of this frame's command:
+       * on a frame the foothold re-probe fails, `aimSlot` goes null while
+       * the crossing is still in progress, and reading the command alone
+       * would hand that foot the fast clock mid-cross — the exact jam the
+       * slow clock exists to prevent, on the one frame it matters.
+       */
+      const crossing = scheduled !== null
+        || this.corner.swingingSlot === leg.slot;
+      const swingSeconds = staged && !crossing
+        ? Math.max(0.06, Math.min(SWING_SECONDS, paced))
+        : SWING_SECONDS;
+      leg.t = Math.min(1, leg.t + dt / swingSeconds);
       /*
        * The swing LANDS where it lifts off, with no jump at the end.
        *
@@ -1103,13 +1100,6 @@ export class LegDrive {
         leg.anchor.copy(leg.to);
         leg.at.copy(leg.anchor);
         leg.dir.copy(dir);
-        /* A landing is the one place surface ownership changes hands. */
-        if (this.corner.active) {
-          this.corner.landed(
-            leg.slot, leg.crossing, leg.crossing ? leg.crossNormal : null, dt,
-          );
-        }
-        leg.crossing = false;
         planted += 1;
       }
     }

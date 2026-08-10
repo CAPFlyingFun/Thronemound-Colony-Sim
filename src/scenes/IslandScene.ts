@@ -2896,23 +2896,6 @@ export class IslandScene {
           S_SPOT.x + fwd.x * d, S_SPOT.y + fwd.y * d, S_SPOT.z + fwd.z * d,
         )) { clear = Math.min(clear, d - shell); break; }
       }
-    } else {
-      /*
-       * THE GASTER LOOKS WHERE IT TRAILS — the head's own fix, mirrored.
-       * "What it drags over is always beneath it" is true in steady state
-       * and false in the one manoeuvre that clips it: mid-fold her frame
-       * has already rotated onto the new face, so the floor the tail is
-       * still sweeping lies AFT along -forward, not below — the same
-       * cliff-not-ramp blindness the head's second probe cured, arriving
-       * from behind. Reported as the abdomen clipping through the ground
-       * during the transition, which is exactly this probe's blind spot.
-       */
-      const fwd = this.fwd;
-      for (let d = 0; d <= reach; d += step) {
-        if (this.soilSolidAt(
-          S_SPOT.x - fwd.x * d, S_SPOT.y - fwd.y * d, S_SPOT.z - fwd.z * d,
-        )) { clear = Math.min(clear, d - shell); break; }
-      }
     }
     return clear;
   }
