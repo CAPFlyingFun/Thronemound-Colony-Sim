@@ -9,6 +9,7 @@ import {
 const still = (over: Partial<Omit<TelemetrySample, 't' | 'upRateDeg'>> = {}) => ({
   x: 0, y: 0, z: 0,
   upX: 0, upY: 1, upZ: 0,
+  walk: 0, yaw: 0, strafe: 0, sprint: false,
   reqMmS: 0, actMmS: 0, heldBackMm: 0,
   planted: 6, groping: 0, strain: 0, allowed: 1, clearanceMm: 1,
   phase: 'none', turnDeg: 0, candidateMm: 0, onNew: 0, onOld: 6,
@@ -102,6 +103,22 @@ describe('telemetry recorder', () => {
     rec.offer({ ...move, planted: 0 }, 0.016);
     rec.offer({ ...move, planted: 0 }, 0.016);
     expect(rec.report('h')).toMatch(/frames with no foot down: 2/);
+  });
+
+  /*
+   * The distinction the stick was added for: a thumb coming off the stick and
+   * the game refusing a held stick must never read the same.
+   */
+  it('separates a released stick from a refused one', () => {
+    const released = new TelemetryRecorder();
+    released.offer(still({ walk: 1, reqMmS: 22, actMmS: 22 }), 0.016);
+    released.offer(still({ walk: 0, reqMmS: 0, actMmS: 0 }), 0.016);
+    expect(released.report('h')).not.toContain('stick down, going nowhere');
+
+    const jammed = new TelemetryRecorder();
+    jammed.offer(still({ walk: 1, reqMmS: 22, actMmS: 22 }), 0.016);
+    jammed.offer(still({ walk: 1, reqMmS: 22, actMmS: 0 }), 0.016);
+    expect(jammed.report('h')).toContain('stick down, going nowhere: 1 frames');
   });
 
   it('says so plainly when nothing was recorded', () => {

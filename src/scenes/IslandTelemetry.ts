@@ -26,7 +26,20 @@ export interface TelemetrySample {
   upX: number; upY: number; upZ: number;
   /** How fast that up is swinging. This is the snap, as a number. */
   upRateDeg: number;
-  /** What the stick asked for. */
+  /**
+   * THE STICK ITSELF, not what the stick was turned into.
+   *
+   * `reqMmS` is already downstream of the stick, and on a per-second average
+   * the two can disagree enough to lose an argument: a second where she was
+   * jammed against a trunk at full throttle and a second where a thumb came
+   * off the stick both end up as "she stopped". Logging the raw axes means
+   * "I let go" and "the game refused" are never the same row.
+   */
+  walk: number;
+  yaw: number;
+  strafe: number;
+  sprint: boolean;
+  /** What the stick asked for, in millimetres per second. */
   reqMmS: number;
   /** What the feet actually delivered. */
   actMmS: number;
@@ -36,6 +49,15 @@ export interface TelemetrySample {
   strain: number;
   allowed: number;
   clearanceMm: number;
+  /**
+   * How long this frame took, in milliseconds.
+   *
+   * Motion scaled by dt is correct at any frame rate, but it does not LOOK
+   * correct when dt swings: a step of 16 ms followed by one of 40 ms moves her
+   * two and a half times as far in the same apparent instant. If she reads as
+   * jerky while every speed number is nominal, this is the column that says so.
+   */
+  dtMs: number;
   /** Corner scheduler state, or 'none'. */
   phase: string;
   turnDeg: number;
@@ -91,7 +113,7 @@ export class TelemetryRecorder {
    * scene loads, so the buffer is 60 seconds of walking instead of 60 seconds
    * of somebody deciding where to walk. Stops itself at the cap.
    */
-  offer(frame: Omit<TelemetrySample, 't' | 'upRateDeg'>, dt: number): void {
+  offer(frame: Omit<TelemetrySample, 't' | 'upRateDeg' | 'dtMs'>, dt: number): void {
     if (this.state === 'stopped') return;
     if (this.state === 'idle') {
       if (frame.actMmS < ARM_MM_S && frame.reqMmS < ARM_MM_S) return;
@@ -113,7 +135,7 @@ export class TelemetryRecorder {
       upRateDeg = (Math.acos(dot) * 180) / Math.PI / dt;
     }
     this.lastUp = up;
-    this.samples.push({ ...frame, t, upRateDeg });
+    this.samples.push({ ...frame, t, upRateDeg, dtMs: dt * 1000 });
   }
 
   stop(): void { if (this.state === 'recording') this.state = 'stopped'; }
@@ -159,8 +181,8 @@ export class TelemetryRecorder {
     /* ---- per second, so the shape of the run is readable at a glance ---- */
     lines.push('');
     lines.push('PER SECOND  (upMax = fastest body rotation in that second)');
-    lines.push('   t     x      y      z    req   act  held  plant grope '
-      + 'upMax  strain  phase');
+    lines.push('   t     x      y      z   stick  req   act  held  plant grope '
+      + 'upMax  strain   ms lo/hi  phase');
     for (let sec = 0; sec <= Math.floor(this.elapsed); sec += 1) {
       const inSec = this.samples.filter((s) => Math.floor(s.t) === sec);
       if (!inSec.length) continue;
@@ -170,11 +192,17 @@ export class TelemetryRecorder {
       );
       const upMax = Math.max(...inSec.map((s) => s.upRateDeg));
       const phases = [...new Set(inSec.map((s) => s.phase))].join('/');
+      /* The lowest stick in the second, because a dip to zero is the thing
+       * worth seeing and an average would smear it away. */
+      const stickMin = Math.min(...inSec.map((s) => Math.abs(s.walk)));
       lines.push(`${n(sec, 4, 0)} ${n(mid.x)} ${n(mid.y)} ${n(mid.z)} `
+        + `${n(stickMin, 5, 2)} `
         + `${n(avg((s) => s.reqMmS), 5)} ${n(avg((s) => s.actMmS), 5)} `
         + `${n(avg((s) => s.heldBackMm), 5, 2)} `
         + `${n(avg((s) => s.planted), 5, 1)} ${n(avg((s) => s.groping), 5, 1)} `
-        + `${n(upMax, 6, 0)} ${n(avg((s) => s.strain), 6, 2)}  ${phases}`);
+        + `${n(upMax, 6, 0)} ${n(avg((s) => s.strain), 6, 2)}  `
+        + `${n(Math.min(...inSec.map((s) => s.dtMs)), 3, 0)}/`
+        + `${n(Math.max(...inSec.map((s) => s.dtMs)), 3, 0)}  ${phases}`);
     }
 
     /* ---- and the moments that a per-second row would have hidden ---- */
@@ -186,11 +214,12 @@ export class TelemetryRecorder {
       const to = Math.min(this.samples.length - 1, ev.at + WINDOW);
       lines.push('');
       lines.push(`-- frame ${ev.at} @ ${this.samples[ev.at]!.t.toFixed(2)}s: ${ev.why}`);
-      lines.push('     t    req   act  held  plant grope  upRate  turn  cand '
+      lines.push('     t  stick  req   act  held  plant grope  upRate  turn  cand '
         + 'new old  clear  phase');
       for (let i = from; i <= to; i += 1) {
         const s = this.samples[i]!;
         lines.push(`${i === ev.at ? '>' : ' '}${n(s.t, 6, 2)} `
+          + `${n(s.walk, 5, 2)}${s.sprint ? '*' : ' '}`
           + `${n(s.reqMmS, 5)} ${n(s.actMmS, 5)} ${n(s.heldBackMm, 5, 2)} `
           + `${n(s.planted, 5, 0)} ${n(s.groping, 5, 0)} ${n(s.upRateDeg, 7, 0)} `
           + `${n(s.turnDeg, 5, 0)} ${n(s.candidateMm, 5, 1)} `
@@ -213,6 +242,30 @@ export class TelemetryRecorder {
         + `${((1 - worstDrag.actMmS / worstDrag.reqMmS) * 100).toFixed(0)}% `
         + `(${worstDrag.actMmS.toFixed(1)} of ${worstDrag.reqMmS.toFixed(1)} mm/s) `
         + `at t=${worstDrag.t.toFixed(2)}s (phase ${worstDrag.phase})`);
+    }
+    /*
+     * A stall is only interesting if she was ASKING to move. Separating the
+     * two is the whole reason the stick is in the record: this line can now
+     * say "held down and going nowhere" instead of "stopped".
+     */
+    const stalls = this.samples.filter((s) => Math.abs(s.walk) > 0.5 && s.actMmS < 0.5);
+    if (stalls.length) {
+      const secs = stalls.reduce((a, s, i, arr) => (
+        i > 0 ? a + Math.min(0.1, s.t - arr[i - 1]!.t) : a
+      ), 0);
+      lines.push(`  stick down, going nowhere: ${stalls.length} frames `
+        + `(~${secs.toFixed(1)}s), first at t=${stalls[0]!.t.toFixed(2)}s `
+        + `(phase ${stalls[0]!.phase})`);
+    }
+    /* Frame pacing, because a steady 40 fps and a 40 fps that alternates
+     * 16 ms with 40 ms feel completely different and average the same. */
+    const dts = this.samples.map((s) => s.dtMs).filter((v) => v > 0);
+    if (dts.length > 1) {
+      const mean = dts.reduce((a, v) => a + v, 0) / dts.length;
+      const jumps = dts.filter((v, i) => i > 0 && Math.abs(v - dts[i - 1]!) > 8).length;
+      lines.push(`  frame time            : ${mean.toFixed(1)} ms avg `
+        + `(${Math.min(...dts).toFixed(0)}-${Math.max(...dts).toFixed(0)} ms, `
+        + `${(1000 / mean).toFixed(0)} fps), ${jumps} jumps over 8 ms`);
     }
     const airborne = this.samples.filter((s) => s.planted === 0);
     lines.push(`  frames with no foot down: ${airborne.length}`

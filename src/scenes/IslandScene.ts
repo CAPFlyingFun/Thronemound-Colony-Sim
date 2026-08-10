@@ -4526,6 +4526,10 @@ export class IslandScene {
     this.telemetry.offer({
       x: this.at.x * VOXEL_MM, y: this.at.y * VOXEL_MM, z: this.at.z * VOXEL_MM,
       upX: this.up.x, upY: this.up.y, upZ: this.up.z,
+      walk: this.input.walk,
+      yaw: this.input.yaw,
+      strafe: this.input.strafe,
+      sprint: this.input.sprint,
       reqMmS: this.velocity.length() * VOXEL_MM,
       /* movedMm is this frame's displacement, so the rate needs the step. */
       actMmS: r && dt > 1e-6 ? r.movedMm / dt : 0,
