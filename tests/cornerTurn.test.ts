@@ -505,6 +505,37 @@ describe('the player, and giving up', () => {
     expect(freed / 60).toBeLessThan(3.5);
   });
 
+  it('does not read a respawn as drift', () => {
+    /*
+     * The slip detector's blind spot: a teleport read as one frame of
+     * velocity poisons the low-pass for seconds, and a genuinely stationary
+     * hands-off pause right after arriving would bench as a "drift".
+     * `reset()` (which every fresh plant calls) must forget where she was.
+     * The wall is an infinite plane, so a huge SIDEWAYS hop keeps the
+     * corner exactly as reachable as before it.
+     */
+    const r = rig();
+    /* A life before the hop, so there is a remembered position to poison. */
+    for (let i = 0; i < 30; i += 1) tick(r);
+    const aside = r.world.up.clone().cross(r.world.ahead).normalize();
+    r.body.at.addScaledVector(aside, 300000 / MM);
+    r.drive.plantAll(r.body, r.world.ground);
+
+    /* Pause the moment it ARMS — the earliest a pause can exist, and the
+     * window where a poisoned filter is still hot enough to bench it. */
+    let report = tick(r);
+    for (let i = 0; i < 600 && report.corner.phase === 'normal'; i += 1) report = tick(r);
+    expect(report.corner.phase, 'never re-armed after the hop').not.toBe('normal');
+
+    /* Thumb off, feet planted, body still: the pause by design. */
+    r.input.walk = 0;
+    for (let i = 0; i < 240; i += 1) {
+      report = tick(r);
+      expect(report.corner.phase, `benched a stationary pause at frame ${i}`)
+        .not.toBe('normal');
+    }
+  });
+
   it('recovers to the old surface when she reverses before committing', () => {
     const r = rig();
     let report = tick(r);

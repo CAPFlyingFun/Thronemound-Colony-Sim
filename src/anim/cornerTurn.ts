@@ -752,7 +752,19 @@ export class CornerTurn {
    * Measured: after a teleport the corner stayed armed for the whole of the
    * next run, twelve millimetres from anything it could reach.
    */
-  reset(): void { this.stand(); }
+  /*
+   * A reset also FORGETS WHERE SHE WAS. `stand()` deliberately keeps the
+   * slip history — a bench mid-drift must not launder the very motion that
+   * benched it — but a reset is a teleport or a respawn, and reading the
+   * jump as one frame of velocity left the low-pass above the stall
+   * threshold for seconds: a genuinely stationary hands-off pause right
+   * after arriving would have been benched as a drift.
+   */
+  reset(): void {
+    this.stand();
+    this.haveWasAt = false;
+    this.slipMms = 0;
+  }
 
   /** The phase label for a row index, so the report reads as anatomy. */
   private labelFor(row: number): CornerPhase {
@@ -772,7 +784,9 @@ export class CornerTurn {
       active: false, release: null, aim: null, aimSlot: null,
       handedOff: false, hold: null,
     };
-    if (!ground) { if (this.active) this.stand(); return idle; }
+    /* No ground, no sample: the next measured frame must not read the whole
+     * airborne interval as one frame of velocity. */
+    if (!ground) { this.haveWasAt = false; if (this.active) this.stand(); return idle; }
 
     const planted = legs.reduce((n, l) => n + (l.planted ? 1 : 0), 0);
     const forward = input.walk > 0;
