@@ -93,12 +93,19 @@ const out = await page.evaluate(() => {
   const look = { x: s.lookDir.x, y: s.lookDir.y, z: s.lookDir.z };
   const noseErr = Math.acos(Math.max(-1, Math.min(1, dot(look, s.fwd)))) * DEG;
 
-  /* (3) The lens rides her head: its up must track the HEAD's up, not the
-   * body's, and on a slope those differ. */
-  const headUp = new (s.up.constructor)();
-  const onHead = s.queen.eyeUpWorld(headUp);
-  const camUpVsHead = onHead
-    ? Math.acos(Math.max(-1, Math.min(1, dot(s.camera.up, headUp)))) * DEG : -1;
+  /*
+   * (3) The lens is PLACED on her head and oriented off her BODY.
+   *
+   * Orienting it off the head as well was an over-reach: her head carries
+   * the gait, which shook the view, and her head's up is the surface normal,
+   * which rolled the horizon on every slope. So what is pinned is the pair —
+   * the lens sits at her eyes, and its roll follows her body.
+   */
+  const eye = new (s.up.constructor)();
+  const onHead = s.queen.eyeWorldPosition(eye);
+  const eyeOffMm = onHead ? eye.distanceTo(s.camera.position) * 5 : -1;
+  const camUpVsBody = Math.acos(Math.max(-1, Math.min(1,
+    dot(s.camera.up, s.up)))) * DEG;
 
   /* (4) Digging holds the pan. */
   s.digMode = true;
@@ -110,7 +117,7 @@ const out = await page.evaluate(() => {
 
   return {
     settled, panned, returned, restYaw, restPitch,
-    fpYaw, fpPitch, noseErr, camUpVsHead, heldWhileDigging,
+    fpYaw, fpPitch, noseErr, eyeOffMm, camUpVsBody, heldWhileDigging,
   };
 });
 
@@ -121,7 +128,8 @@ console.log(`six seconds later          : ${n(out.returned)}° off her tail `
   + `(pan ${n(out.restYaw)}, ${n(out.restPitch)})`);
 console.log(`first person, pan on entry : yaw ${n(out.fpYaw)}, pitch ${n(out.fpPitch)}`);
 console.log(`lens vs her nose           : ${n(out.noseErr)}°`);
-console.log(`lens roll vs her head's up : ${n(out.camUpVsHead)}°`);
+console.log(`lens vs her eye position    : ${n(out.eyeOffMm)} mm`);
+console.log(`lens roll vs her body's up : ${n(out.camUpVsBody)}°`);
 console.log(`pitch held while digging   : ${n(out.heldWhileDigging)} (asked for -0.70)`);
 
 const fail = [];
@@ -146,9 +154,14 @@ if (Math.abs(out.fpPitch) > 0.05) {
   fail.push(`first person kept the old pan (pitch ${n(out.fpPitch)})`);
 }
 if (out.noseErr > 15) fail.push(`the lens looks ${n(out.noseErr)}° off her nose at rest`);
-if (out.camUpVsHead < 0) fail.push('could not read her head bone at all');
-else if (out.camUpVsHead > 1) {
-  fail.push(`lens roll is ${n(out.camUpVsHead)}° off her head — it is not on the bone`);
+if (out.eyeOffMm < 0) fail.push('could not read her head bone at all');
+/* Placed at her eyes: the lens steps forward along the aim from the eye
+ * anchor, so it is near it rather than on it — but nowhere else. */
+else if (out.eyeOffMm > 3) {
+  fail.push(`lens sits ${n(out.eyeOffMm)} mm from her eyes — it is not on the bone`);
+}
+if (out.camUpVsBody > 1) {
+  fail.push(`lens roll is ${n(out.camUpVsBody)}° off her body — the horizon will tilt`);
 }
 if (Math.abs(out.heldWhileDigging + 0.7) > 0.01) {
   fail.push(`the aim drifted while digging (${n(out.heldWhileDigging)})`);

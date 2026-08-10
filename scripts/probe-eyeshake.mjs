@@ -2,9 +2,11 @@
  * HOW MUCH DOES THE FIRST-PERSON LENS SHAKE, AND WITH WHAT?
  *
  * Reported after the lens was put on the head bone: it shakes with each
- * animation. It would — her head is animated, and the camera now reads the
- * bone directly, so the gait's head movement arrives at the lens at full
- * amplitude where before the camera rode the much calmer body frame.
+ * animation. It did, and for the obvious reason — her head is animated, so
+ * reading the bone for ORIENTATION fed the gait straight into the view.
+ * That mounting has since been pulled back to placement only, which is what
+ * it was asked for; this stays as the instrument that measures the cost of
+ * ever pointing the lens at an animated thing again.
  *
  * The number that matters is not how far the view moves, which is supposed
  * to move: it is how much of that movement REVERSES every frame. A camera
