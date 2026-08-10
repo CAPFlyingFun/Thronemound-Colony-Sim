@@ -1309,7 +1309,10 @@ export class IslandScene {
     const url = `${import.meta.env.BASE_URL}kauai-1025.bin`;
     const [raw, textures] = await Promise.all([
       (await fetch(url)).arrayBuffer(),
-      loadBiomeTextures(import.meta.env.BASE_URL),
+      loadBiomeTextures(
+        import.meta.env.BASE_URL,
+        Math.min(16, this.renderer.capabilities.getMaxAnisotropy()),
+      ),
     ]);
     this.loading.setStatus('Raising the island…');
     this.heights = new Int16Array(raw);

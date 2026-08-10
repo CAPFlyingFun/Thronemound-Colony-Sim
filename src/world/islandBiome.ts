@@ -32,7 +32,16 @@ export const BIOME_TEXTURES = [
 
 export type BiomeTextureSet = Record<(typeof BIOME_TEXTURES)[number], THREE.Texture>;
 
-export async function loadBiomeTextures(baseUrl: string): Promise<BiomeTextureSet> {
+/**
+ * @param aniso Anisotropic filtering, from the renderer's own ceiling.
+ *   The trees ask for sixteen because a trunk is seen at a grazing angle —
+ *   she is standing on it. The GROUND is the surface she is standing on
+ *   every frame of the game, and it was the one still asking for four: the
+ *   default here is only what a caller with no renderer to ask gets.
+ */
+export async function loadBiomeTextures(
+  baseUrl: string, aniso = 4,
+): Promise<BiomeTextureSet> {
   const loader = new THREE.TextureLoader();
   const out = {} as Record<string, THREE.Texture>;
   await Promise.all(BIOME_TEXTURES.map(async (name) => {
@@ -40,7 +49,7 @@ export async function loadBiomeTextures(baseUrl: string): Promise<BiomeTextureSe
     tex.wrapS = THREE.RepeatWrapping;
     tex.wrapT = THREE.RepeatWrapping;
     tex.colorSpace = THREE.SRGBColorSpace;
-    tex.anisotropy = 4;
+    tex.anisotropy = aniso;
     out[name] = tex;
   }));
   return out as BiomeTextureSet;
