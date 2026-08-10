@@ -229,7 +229,17 @@ export function posture(
   return {
     head: clamp(ahead + headBias + (fold * 2) / 3, limits.headMax),
     thorax: clamp(through + fold / 3, limits.thoraxMax),
-    gaster: clamp(behind + gasterBias - fold / 3, limits.gasterMax),
+    /*
+     * SUBTRACTED, unlike the head's, because the two escape in opposite
+     * signs. Positive pitch is nose-up: on the head that lifts the face
+     * AWAY from ground beneath it, on the gaster it presses the tip INTO
+     * it — tail-up is negative, as the cresting behaviour above and its
+     * test both say. This bias shipped ADDED, so the abdomen's emergency
+     * lift spent its whole authority pitching the abdomen into the hill it
+     * was already touching. Seen from the outside as: her abdomen buries
+     * itself on any uphill-behind slope, and nothing seems to care.
+     */
+    gaster: clamp(behind - gasterBias - fold / 3, limits.gasterMax),
   };
 }
 

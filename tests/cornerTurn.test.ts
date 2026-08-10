@@ -89,7 +89,8 @@ function corner(wallMm: number, opts: {
 
   const walker = new SurfaceWalker(density, {
     cell: 0.2, ride: RIDE, gripLift: 3 / MM, gripReach: 9 / MM,
-    align: 12, maxTiltRate: (240 * Math.PI) / 180, snap: 14, gravity: 9,
+    align: 12, maxTiltRate: (240 * Math.PI) / 180, snap: 14, deadband: 0.06,
+    gravity: 9,
   }, solid);
 
   const S = new THREE.Vector3();

@@ -19,6 +19,7 @@ const TUNE = {
   align: 12,
   maxTiltRate: (240 * Math.PI) / 180,
   snap: 14,
+  deadband: 0.06,
   gravity: 9,
 };
 
@@ -145,6 +146,62 @@ describe('the surface walker has no world down', () => {
     // Out through the NEAR surface, not hauled up to the north pole.
     expect(frame.at.x).toBeGreaterThan(2.9);
     expect(frame.at.y).toBeLessThan(1);
+  });
+
+  it('is STILL when she stands still — no limit cycle against the seat', () => {
+    /*
+     * The vibration. hold() finds the ground two different ways and picks
+     * between them on whether her centre is in soil or in air; when their
+     * estimates disagree, the two seats straddle that very boundary and she
+     * alternates between them at frame rate — measured on the island at
+     * 0.08 mm each way, every single frame, ~22 Hz. The dead-band plus the
+     * bisected outward search is the fix, and this pins both: after a brief
+     * settle she must simply stop, to the last micron, and stay stopped.
+     */
+    const walker = new SurfaceWalker(slabAndWall, TUNE);
+    const frame = frameAt(
+      /* A hair inside the slab, as the leg-driven ride leaves her. */
+      new THREE.Vector3(0, -0.05, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(1, 0, 0),
+    );
+    for (let i = 0; i < 60; i += 1) walker.settle(frame, 1 / 60, 1 / 60, true);
+    const rest = frame.at.clone();
+    let travelled = 0;
+    for (let i = 0; i < 240; i += 1) {
+      const before = frame.at.clone();
+      walker.settle(frame, 1 / 60, 1 / 60, true);
+      travelled += before.distanceTo(frame.at);
+    }
+    expect(travelled).toBe(0);
+    expect(frame.at.distanceTo(rest)).toBe(0);
+  });
+
+  it('keeps the band out of MOTION — moving callers get every correction', () => {
+    /*
+     * The band applied unconditionally broke cornering: at a wall base the
+     * seat migrates onto the new surface in exactly the sub-band steps the
+     * band eats. So it is opt-in per frame, and the default is off.
+     */
+    const walker = new SurfaceWalker(slabAndWall, TUNE);
+    const frame = frameAt(
+      new THREE.Vector3(0, TUNE.ride + 0.015, 0),
+      new THREE.Vector3(0, 1, 0), new THREE.Vector3(1, 0, 0),
+    );
+    const before = frame.at.y;
+    walker.settle(frame, 1 / 60);
+    expect(frame.at.y).not.toBe(before);
+  });
+
+  it('still corrects a real disturbance, dead-band or no', () => {
+    /* The band must swallow the loop's noise and nothing else: shoved a
+     * full millimetre off her seat, she is drawn straight back onto it. */
+    const walker = new SurfaceWalker(slabAndWall, TUNE);
+    const frame = frameAt(
+      new THREE.Vector3(0, TUNE.ride, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(1, 0, 0),
+    );
+    for (let i = 0; i < 60; i += 1) walker.settle(frame, 1 / 60);
+    frame.at.y += 0.2;
+    for (let i = 0; i < 60; i += 1) walker.settle(frame, 1 / 60, 1 / 60, true);
+    expect(Math.abs(frame.at.y - TUNE.ride)).toBeLessThan(TUNE.deadband + 0.02);
   });
 
   it('falls when there is genuinely nothing to hold, and lands', () => {

@@ -1378,6 +1378,8 @@ export class IslandScene {
         align: 12,
         maxTiltRate: (240 * Math.PI) / 180,
         snap: 14,
+        /* 0.3 mm: the stand-still dead-band — see SurfaceWalkTuning. */
+        deadband: 0.06,
         gravity: 9,
       },
       (x, y, z) => this.soilSolidAt(x, y, z),
@@ -2861,7 +2863,21 @@ export class IslandScene {
      * snapped either side of the call and the difference along her up is kept.
      */
     this.seatFrom.copy(this.at);
-    walker.settle({ at: this.at, up: this.up, forward: this.fwd }, dt, aimDt);
+    /*
+     * STILL means the PLAYER is asking for nothing and no corner is being
+     * worked. Only then may the walker's dead-band refuse the sub-band seat
+     * corrections that, at rest, are pure noise — at 22 Hz and a tenth of a
+     * millimetre, the vibration — but that in motion are the very steps a
+     * corner is made of.
+     */
+    /* 'normal' IS the idle phase — every other value means a corner is in
+     * hand. (The telemetry's 'none' is its own placeholder for "no drive
+     * yet", not a phase the drive ever reports.) */
+    const still = Math.abs(this.input.walk) < 0.01
+      && Math.abs(this.input.strafe) < 0.01
+      && Math.abs(this.input.yaw) < 0.01
+      && (this.driveReport?.corner.phase ?? 'normal') === 'normal';
+    walker.settle({ at: this.at, up: this.up, forward: this.fwd }, dt, aimDt, still);
     this.seatLiftMm = this.seatFrom.sub(this.at).dot(this.up) * -VOXEL_MM;
 
     /*

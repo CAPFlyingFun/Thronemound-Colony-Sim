@@ -93,6 +93,28 @@ describe('the posture the terrain asks for', () => {
     expect(posture(flat, AHEAD, BEHIND).head).toBeCloseTo(0, 9);
   });
 
+  it('lifts the ABDOMEN away from the ground, not into it', () => {
+    /*
+     * The head's escape and the gaster's point in opposite signs: positive
+     * pitch is nose-up, which lifts a face but buries a tail. This bias
+     * shipped added like the head's, so an abdomen touching the ground got
+     * the full emergency nudge pressed the wrong way — seen in play as her
+     * abdomen half-buried on any uphill-behind slope. Tail-up is negative,
+     * exactly as the cresting test above already says.
+     */
+    const tight = posture({ ...flat, gasterClear: CLEARANCE_MM.hard }, AHEAD, BEHIND);
+    expect(tight.gaster).toBeCloseTo(-SPINE_LIMITS.gasterNudge, 6);
+    /* And it must COMBINE with a crest, never fight it: higher ground
+     * behind plus a touching abdomen is more tail-up than either alone. */
+    const crest = posture({ ...flat, behindRise: 0.2 }, AHEAD, BEHIND);
+    const both = posture(
+      { ...flat, behindRise: 0.2, gasterClear: CLEARANCE_MM.hard }, AHEAD, BEHIND,
+    );
+    expect(both.gaster).toBeLessThan(crest.gaster);
+    /* Clear of everything: no bias at all, same as the head. */
+    expect(posture(flat, AHEAD, BEHIND).gaster).toBeCloseTo(0, 9);
+  });
+
   it('never derives clearance from the SIGN of a rise', () => {
     /*
      * The regression this whole rewrite exists for. An uphill rise and a

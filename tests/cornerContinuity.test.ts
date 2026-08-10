@@ -50,6 +50,7 @@ function floorWall() {
     align: 12,
     maxTiltRate: (240 * Math.PI) / 180,
     snap: 14,
+  deadband: 0.06,
     gravity: 9,
   }, solid);
   const S = new THREE.Vector3();

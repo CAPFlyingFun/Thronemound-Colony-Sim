@@ -60,6 +60,26 @@ export interface SurfaceWalkTuning {
   maxTiltRate: number;
   /** How fast she is drawn onto the seat, per second. */
   snap: number;
+  /**
+   * Seat corrections smaller than this are not made at all.
+   *
+   * The seat is derived from field samples of her own position, so at rest
+   * the two form a loop, and a loop with any disagreement in it at all — a
+   * lattice step, a bisection tolerance — oscillates at frame rate instead
+   * of settling. The dead-band breaks the loop: within it she simply does
+   * not move, and a body that does not move samples the same field, gets
+   * the same seat, and stays put.
+   *
+   * THE BAND MUST BEAT THE DISAGREEMENT OR IT HOLDS NOTHING. The walker's
+   * two surface estimates differ at rest by up to 0.24 mm on real lattice
+   * terrain (measured; a tenth-of-a-millimetre band just slowed the creep,
+   * and the residue walked her straight into the anti-embed guard's
+   * three-frame snap — a 14 Hz sawtooth instead of a 22 Hz buzz). Three
+   * tenths clears the worst measured case, and at rest three tenths of a
+   * millimetre of seat error on a nine-millimetre ant whose feet are
+   * IK-planted anyway is invisible.
+   */
+  deadband: number;
   /** World-frame acceleration once she has nothing to hold. */
   gravity: number;
 }
@@ -72,6 +92,7 @@ export const DEFAULT_WALK_TUNING: SurfaceWalkTuning = {
   align: 12,
   maxTiltRate: (240 * Math.PI) / 180,
   snap: 14,
+  deadband: 0.06,
   gravity: 9,
 };
 
@@ -212,10 +233,31 @@ export class SurfaceWalker {
     let best: THREE.Vector3 | null = null;
     let bestDist = Infinity;
     for (const dir of dirs) {
+      let lastSolid = 0;
       for (let d = 0; d <= this.tune.gripReach; d += step) {
         probe.copy(p).addScaledVector(dir, d);
-        if (this.solidAt(probe.x, probe.y, probe.z)) continue;
-        if (d < bestDist) { bestDist = d; best = probe.clone(); }
+        if (this.solidAt(probe.x, probe.y, probe.z)) { lastSolid = d; continue; }
+        /*
+         * BISECTED, BECAUSE `cast` BISECTS. Returning the marched sample
+         * itself put this estimate up to half a step outside the surface
+         * while cast's sat within a sixty-fourth of one — so the walker's
+         * two ways of finding the same ground disagreed by half a
+         * millimetre, and `hold` flip-flopped between them every frame.
+         * The dead-band above absorbs small disagreements; this removes
+         * the large one at its source.
+         */
+        let lo = lastSolid;
+        let hi = d;
+        for (let i = 0; i < 6; i += 1) {
+          const mid = (lo + hi) * 0.5;
+          probe.copy(p).addScaledVector(dir, mid);
+          if (this.solidAt(probe.x, probe.y, probe.z)) lo = mid;
+          else hi = mid;
+        }
+        if (hi < bestDist) {
+          bestDist = hi;
+          best = probe.copy(p).addScaledVector(dir, hi).clone();
+        }
         break;
       }
     }
@@ -261,14 +303,39 @@ export class SurfaceWalker {
    * BELOW her, in her own frame, which is where the far side of an edge is.
    * Only when that is empty too has she genuinely walked off into the air.
    */
-  private hold(frame: WalkFrame, dt: number, aimDt: number): void {
+  /**
+   * Draw her toward a seat — unless she is already as good as on it.
+   *
+   * The band matters more than the pull. Without it, standing still was a
+   * limit cycle: the embedded branch and the cast branch of `hold` disagreed
+   * about the surface by up to half a marching step, their two seats sat on
+   * opposite sides of the very in-soil/in-air boundary that picks between
+   * them, and she alternated 0.08 mm up and down every single frame —
+   * measured at 399 sign flips in 400 steps, about 22 Hz. That was the
+   * vibration. Inside the band she does not move at all, and a body that
+   * does not move gets the same answer next frame and is finally still.
+   */
+  private seatToward(frame: WalkFrame, seat: THREE.Vector3, dt: number, still: boolean): void {
+    /*
+     * ONLY WHEN SHE IS ASKED TO BE STILL. The first cut applied the band
+     * unconditionally, and cornering broke: at the base of a wall her seat
+     * migrates onto the new surface in exactly the sub-band steps the band
+     * eats, so she stood at the wall and never turned. Movement is made of
+     * small corrections; only rest should refuse them.
+     */
+    if (still
+      && frame.at.distanceToSquared(seat) <= this.tune.deadband * this.tune.deadband) return;
+    frame.at.lerp(seat, 1 - Math.exp(-this.tune.snap * dt));
+  }
+
+  private hold(frame: WalkFrame, dt: number, aimDt: number, still: boolean): void {
     if (this.solidAt(frame.at.x, frame.at.y, frame.at.z)) {
       const out = this.nearestSurface(frame, frame.at);
       if (out) {
         const normalOut = this.scratchC;
         this.normalAt(out, normalOut);
         const seat = out.addScaledVector(normalOut, this.tune.ride);
-        frame.at.lerp(seat, 1 - Math.exp(-this.tune.snap * dt));
+        this.seatToward(frame, seat, dt, still);
         this.aimUp(frame, normalOut, aimDt);
         return;
       }
@@ -297,7 +364,7 @@ export class SurfaceWalker {
     const normal = this.scratchC;
     this.normalAt(hit, normal);
     const seat = hit.addScaledVector(normal, this.tune.ride);
-    frame.at.lerp(seat, 1 - Math.exp(-this.tune.snap * dt));
+    this.seatToward(frame, seat, dt, still);
     this.aimUp(frame, normal, aimDt);
   }
 
@@ -347,8 +414,8 @@ export class SurfaceWalker {
    * `aimDt` is the attitude's own timestep, normally `dt`. Zero freezes her
    * attitude while leaving the seating alone — see `aimUp`.
    */
-  settle(frame: WalkFrame, dt: number, aimDt = dt): void {
-    if (this.gripping) this.hold(frame, dt, aimDt);
+  settle(frame: WalkFrame, dt: number, aimDt = dt, still = false): void {
+    if (this.gripping) this.hold(frame, dt, aimDt, still);
     else this.fall(frame, dt);
     this.squareForward(frame);
   }

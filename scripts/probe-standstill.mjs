@@ -74,6 +74,10 @@ const out = await page.evaluate(({ dt, steps, walk }) => {
        * the downward cast, which pulls DOWN. If this flips with the seat, the
        * two are taking turns and that is the whole cycle. */
       inside: s.walker.solidAt(s.at.x, s.at.y, s.at.z) ? 1 : 0,
+      /* TS-private, JS-visible: is the anti-embed guard counting, and where
+       * is the safety anchor it snaps back to? */
+      embed: s.embedFrames ?? -1,
+      safeY: s.lastSafe ? s.lastSafe.y : -1,
     });
   }
   return rows;
@@ -148,10 +152,11 @@ for (let lag = 1; lag <= 8 && !period; lag += 1) {
 }
 console.log(`  height repeats every  : ${period ? `${period} frames` : 'never (no cycle)'}`);
 
-console.log('\nfirst 20 steps    seat    clear         y      up.y  centre');
+console.log('\nfirst 20 steps    seat    clear         y     embed    safeY  centre');
 for (const r of out.slice(0, 20)) {
   console.log(`  ${r.seat.toFixed(3).padStart(16)}  ${r.clear.toFixed(3).padStart(7)}`
-    + `  ${(r.y * 5).toFixed(3).padStart(11)}  ${r.upY.toFixed(6)}`
+    + `  ${(r.y * 5).toFixed(3).padStart(11)}  ${String(r.embed).padStart(5)}`
+    + `  ${(r.safeY * 5).toFixed(3).padStart(9)}`
     + `  ${r.inside ? 'IN SOIL' : 'in air '}`);
 }
 
