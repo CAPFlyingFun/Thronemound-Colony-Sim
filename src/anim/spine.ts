@@ -87,17 +87,21 @@ export const SPINE_LIMITS: SpineLimits = {
   thoraxMax: (30 * Math.PI) / 180,
   gasterMax: (30 * Math.PI) / 180,
   /*
-   * The proximity bias keeps its OLD authority, deliberately. It is an
+   * The proximity bias keeps a MEASURED authority, deliberately. It is an
    * emergency nudge away from something a section is about to touch, not a
-   * posture, and giving it the fold's new headroom would let half a
-   * millimetre of terrain throw her head through sixty degrees. Thirty and
-   * twenty-two are the numbers v0.0.39 settled on by measurement.
+   * posture, and giving it the fold's whole headroom would let half a
+   * millimetre of terrain throw her head through sixty degrees. Thirty is
+   * the head number v0.0.39 settled on. The gaster's grew from twenty-two
+   * to forty for the corner's tail sweep: pitched up a wall, the tail
+   * hangs toward the floor she is leaving and twenty-two degrees of tuck
+   * could not carry it clear — an ant curls her gaster well past that in
+   * life, and the bias only ever spends what the measured clearance asks.
    */
   headNudge: (30 * Math.PI) / 180,
-  gasterNudge: (22 * Math.PI) / 180,
+  gasterNudge: (40 * Math.PI) / 180,
   headRate: 11,
   thoraxRate: 6.5,
-  gasterRate: 3.8,
+  gasterRate: 5.5,
 };
 
 /**

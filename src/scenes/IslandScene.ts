@@ -216,7 +216,20 @@ const S_LEAN = new THREE.Vector3();
  * was sitting down into; released the frame the corner completes, and the
  * gaster's own slow follow rate turns that release into a settle.
  */
-const TAIL_HOLD_RAD = 1.2;
+const TAIL_HOLD_RAD = 1.5;
+
+/**
+ * The first-person lens's own flinch: how much camera-only up-tilt the view
+ * gains as her head's measured clearance closes from `SOFT` to `HARD`
+ * millimetres, and how fast the tilt eases in and out. Five degrees was the
+ * player's own estimate from the device, and it reads right: enough to lift
+ * the terrain off the bottom third of the frame, small enough that the
+ * horizon never visibly tips. See its use where the view pitch is built.
+ */
+const FPV_LIFT_RAD = (5 * Math.PI) / 180;
+const FPV_LIFT_SOFT_MM = 2.5;
+const FPV_LIFT_HARD_MM = 0.5;
+const FPV_LIFT_RATE = 6;
 
 /** The orbit arm's own, so it can be asked to write into any of the others
  *  without quietly aliasing its working vector. */
@@ -1075,6 +1088,12 @@ export class IslandScene {
   private lookPitch = 0;
   /** Seconds since the last look drag. Reset while a finger is down. */
   private lookIdle = 0;
+
+  /** Last measured head-shell clearance, in mm — reused by the FPV lift. */
+  private headClearMm = Infinity;
+
+  /** The eased camera-only up-tilt, in radians. See `FPV_LIFT_RAD`. */
+  private fpvLift = 0;
   /**
    * The direction the first-person lens actually looks, in world space.
    *
@@ -2774,7 +2793,7 @@ export class IslandScene {
     const reading: SpineReading = {
       aheadRise: wantAhead,
       behindRise: wantBehind,
-      headClear: this.shellClearance('head'),
+      headClear: (this.headClearMm = this.shellClearance('head')),
       gasterClear: this.shellClearance('gaster'),
       /*
        * The one thing a rise cannot say. Rounding onto a trunk her probes
@@ -3920,9 +3939,32 @@ export class IslandScene {
        * so she still visibly looks where the player is looking.
        */
       const right = S_RIGHT.crossVectors(baseFwd, baseUp).normalize();
-      const dir = S_RAD.copy(baseFwd).applyAxisAngle(right, this.lookPitch).normalize();
+      /*
+       * THE LENS FLINCHES BEFORE THE GROUND DOES — a few degrees of
+       * camera-only up-tilt as her head's measured clearance closes.
+       *
+       * Rounding a corner in first person, the head rides within a
+       * millimetre of the surface while the body rotates, and a lens that
+       * close with a level view puts the terrain across the bottom third
+       * of the frame — reported as the view being thirty percent
+       * underground. Her HEAD is not tilted for it (the pose is the
+       * animation's business and it is already flinching); only the
+       * picture lifts, the way a person walking at a wall raises their
+       * eyes before their chin. Keyed to the same measured clearance the
+       * spine's flinch uses, so it fires at any speed and either corner
+       * direction, and EASED because the clearance probe reads in
+       * half-millimetre steps that would otherwise pop the horizon.
+       */
+      const closeness = Number.isFinite(this.headClearMm)
+        ? THREE.MathUtils.clamp((FPV_LIFT_SOFT_MM - this.headClearMm)
+          / (FPV_LIFT_SOFT_MM - FPV_LIFT_HARD_MM), 0, 1)
+        : 0;
+      this.fpvLift += (closeness * FPV_LIFT_RAD - this.fpvLift)
+        * (1 - Math.exp(-FPV_LIFT_RATE * dt));
+      const viewPitch = this.lookPitch + this.fpvLift;
+      const dir = S_RAD.copy(baseFwd).applyAxisAngle(right, viewPitch).normalize();
       const steadyFwd = S_NOSE.copy(dir);
-      const steadyUp = S_ROLL.copy(baseUp).applyAxisAngle(right, this.lookPitch).normalize();
+      const steadyUp = S_ROLL.copy(baseUp).applyAxisAngle(right, viewPitch).normalize();
       /* The dig reads this: the crosshair is the centre of the frame, so
        * the cut has to run down the line the frame was built on. */
       this.lookDir.copy(dir);
