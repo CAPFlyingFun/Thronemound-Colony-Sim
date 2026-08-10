@@ -81,11 +81,12 @@ describe('the tree', () => {
   it('offers only barks that actually ship, with no duplicates', () => {
     expect(BARKS.length).toBeGreaterThan(0);
     expect(new Set(BARKS).size).toBe(BARKS.length);
-    /* The two withdrawn for carrying a seller's watermark must not creep
-     * back by being re-listed — the files are gone, so a name without a
-     * file is a tree with no bark at all. */
-    expect(BARKS).not.toContain('bark-pale');
-    expect(BARKS).not.toContain('bark-oak');
+    /* Two barks were once banned here by name for carrying a seller's
+     * watermark. The files went with them, and what that ban was really
+     * guarding — a name listed with no image behind it — is caught in
+     * general below. The names are ordinary again and free to be reused
+     * by art we own. What is NOT reusable is the watermarked image, and
+     * no test can see that; it is checked by eye, at full size. */
   });
 
   /*

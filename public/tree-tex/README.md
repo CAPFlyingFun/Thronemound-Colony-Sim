@@ -47,8 +47,11 @@ this one is, and at this scale the normal map is doing that work already.
 
 ## What to avoid
 
-Two barks were removed from this folder for carrying a stock seller's
-watermark — tiled across the image at low opacity, invisible in a thumbnail
-and perfectly legible on a trunk an ant is standing on. Check any candidate
-at full size before adding it, including the corners, where the marks
-usually sit.
+Two barks — `bark-oak` and `bark-pale` — were removed from this folder for
+carrying a stock seller's watermark: tiled across the image at low opacity,
+invisible in a thumbnail and perfectly legible on a trunk an ant is standing
+on. Check any candidate at full size before adding it, including the corners,
+where the marks usually sit.
+
+The *names* are free. It was the images that were the problem, and they are
+gone; new art of our own may take either name without ceremony.
