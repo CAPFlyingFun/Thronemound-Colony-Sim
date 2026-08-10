@@ -21,7 +21,7 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import {
-  HANDOFF_GRACE, LegDrive, type DriveInput, type Ground, type LegSetup,
+  LegDrive, type DriveInput, type Ground, type LegSetup,
 } from '../src/anim/legDrive';
 import { CORNER_DEG, rowsFromHomes } from '../src/anim/cornerTurn';
 import { SurfaceWalker } from '../src/world/surfaceWalk';
@@ -69,10 +69,17 @@ const setup = (): LegSetup[] => HOMES.map(([slot, x, y, z, reach]) => ({
  */
 function corner(wallMm: number, opts: {
   up?: THREE.Vector3; ahead?: THREE.Vector3; wall?: boolean;
+  /** The wall's pitch from the floor: 90 is vertical, 60 is a steep ramp. */
+  slopeDeg?: number;
 } = {}) {
   const up = (opts.up ?? new THREE.Vector3(0, 1, 0)).clone().normalize();
   const ahead = (opts.ahead ?? new THREE.Vector3(0, 0, 1)).clone().normalize();
-  const wallN = ahead.clone().negate();
+  const slope = ((opts.slopeDeg ?? 90) * Math.PI) / 180;
+  /* The wall's outward normal: straight back at 90, tilted up as it lays
+   * down toward a ramp. The half-space pivots where it meets the floor. */
+  const wallN = up.clone().multiplyScalar(Math.cos(slope))
+    .addScaledVector(ahead, -Math.sin(slope))
+    .normalize();
   const wallAt = wallMm / MM;
   /** Mutable, so a target can be taken away mid-run without a new walker. */
   const state = { wall: opts.wall ?? true };
@@ -83,7 +90,8 @@ function corner(wallMm: number, opts: {
   const density = (x: number, y: number, z: number): number => {
     P.set(x, y, z);
     const floor = -P.dot(up);
-    return state.wall ? Math.max(floor, P.dot(ahead) - wallAt) : floor;
+    const wall = -P.dot(wallN) - wallAt * Math.sin(slope);
+    return state.wall ? Math.max(floor, wall) : floor;
   };
   const solid = (x: number, y: number, z: number): boolean => density(x, y, z) > 0;
 
@@ -132,6 +140,8 @@ interface Snap {
   released: string[];
   owner: Record<string, string>;
   state: Record<string, string>;
+  /** Planted anchors, world frame, straight off the drive. */
+  anchors: Record<string, [number, number, number]>;
   at: THREE.Vector3;
   up: THREE.Vector3;
 }
@@ -191,10 +201,15 @@ function walkAt(o: RunOpts = {}) {
     const owner: Record<string, string> = {};
     const state: Record<string, string> = {};
     const released: string[] = [];
+    const anchors: Record<string, [number, number, number]> = {};
     for (const foot of c.feet) {
       owner[foot.slot] = foot.owner;
       state[foot.slot] = foot.state;
       if (was[foot.slot] === 'PLANT' && foot.state !== 'PLANT') released.push(foot.slot);
+      if (foot.state === 'PLANT') {
+        const a = r.drive.anchorFor(foot.slot);
+        if (a) anchors[foot.slot] = [a[0], a[1], a[2]];
+      }
     }
     was = state;
     track.push({
@@ -208,6 +223,7 @@ function walkAt(o: RunOpts = {}) {
       released,
       owner,
       state,
+      anchors,
       at: r.body.at.clone(),
       up: r.body.up.clone(),
     });
@@ -289,133 +305,172 @@ describe('arming: no grip, no climb', () => {
   });
 });
 
-describe('the queue', () => {
-  it('lifts one foot at a time, never a tripod', () => {
-    const { track } = walkAt({ frames: 600 });
-    for (const s of track) {
-      if (s.phase === 'normal') continue;
-      expect(s.released.length, `${s.released.join(',')} let go together at ${s.frame}`)
-        .toBeLessThanOrEqual(1);
-    }
-  });
+const TRIPOD_A = ['frontLeft', 'midRight', 'rearLeft'];
+const groupOf = (slot: string) => (TRIPOD_A.includes(slot) ? 'A' : 'B');
 
+describe('the tripods, through the corner', () => {
   /*
-   * The queue's discipline is judged from its FIRST RELEASE, not from the
-   * arming frame. Arming no longer waits for a standing start — the fold is
-   * reachable for barely a gait cycle on the way down, and the old all-six
-   * gate meant the tripod could carry her straight past it into the floor —
-   * so the first armed frames may inherit up to three ordinary swings
-   * mid-flight. The queue releases nothing until every one of them is down;
-   * from that release onward the old contract holds untouched.
+   * THE CONTRACT CHANGED, and these tests are the new one. The corner used
+   * to run a queue of its own — one foot at a time, front row first, four
+   * planted always — and the stop-start motion at every fold was that
+   * second cadence showing. Now the ordinary alternating tripod runs
+   * straight through: whole groups lift, whichever surface answers a foot's
+   * ordinary step is the surface it lands on, and the corner only keeps the
+   * ledger and holds the body off the face. So: three planted, not four;
+   * three released together, not one; and the order feet cross in is
+   * geometry, not a schedule.
    */
-  const afterFirstRelease = (track: ReturnType<typeof walkAt>['track']) => {
-    const first = track.findIndex((s) => s.phase !== 'normal' && s.released.length > 0);
-    expect(first, 'the queue never released a foot').toBeGreaterThanOrEqual(0);
-    return track.slice(first);
-  };
-
-  it('flies at most the crossing and one companion — and crosses the front alone', () => {
-    /*
-     * The overlap contract. A crossing may carry ONE ordinary step under it
-     * — that is what buys back the corner's speed — but never two, and
-     * never while the front row is still being acquired: hurrying
-     * `acquireFront` is the one thing every attempt has shown jams her on
-     * the descent.
-     */
-    const { track } = walkAt({ frames: 600 });
-    for (const s of afterFirstRelease(track)) {
-      if (s.phase === 'normal') continue;
-      const up = Object.values(s.state).filter((v) => v !== 'PLANT').length;
-      const cap = s.phase === 'acquireFront' || s.phase === 'recover' ? 1 : 2;
-      expect(up, `${up} feet in the air in ${s.phase} at frame ${s.frame}`)
-        .toBeLessThanOrEqual(cap);
+  it('never mixes tripods in a single release', () => {
+    const { track } = walkAt({ frames: 900 });
+    for (const s of track) {
+      if (s.released.length < 2) continue;
+      const groups = new Set(s.released.map(groupOf));
+      expect(groups.size, `${s.released.join(',')} let go together at ${s.frame}`)
+        .toBe(1);
     }
   });
 
-  it('keeps at least four feet on a surface, always', () => {
-    const { track } = walkAt({ frames: 600 });
-    for (const s of afterFirstRelease(track)) {
+
+
+  it('alternates A and B straight through the transition', () => {
+    const { track } = walkAt({ frames: 900 });
+    expect(finished(track), 'the corner never finished').toBeGreaterThan(0);
+    /*
+     * Gait turns are the releases of two or more feet at once. Mid-fold a
+     * turn can SHRINK to a single foot — a tripod whose crossed feet keep
+     * their grips (a grip is never traded for a maybe) and whose old feet
+     * are groping at the crease has only one foot free to move, and moving
+     * it IS that tripod's turn. So the law is stated the only way the
+     * trace can still tell truth from double-dipping: the same group may
+     * not lead two multi-foot turns in a row unless the OTHER group
+     * released something — anything — in between. On the flat every
+     * release is three feet and the check is as strict as it reads.
+     */
+    const turns = track.filter((s) => s.released.length > 0)
+      .map((s) => ({
+        frame: s.frame,
+        group: groupOf(s.released[0]!),
+        full: s.released.length >= 2,
+      }));
+    expect(turns.filter((t) => t.full).length, 'too few gait turns to judge alternation')
+      .toBeGreaterThan(4);
+    let lastFull: string | null = null;
+    let otherSince = false;
+    for (const turn of turns) {
+      if (!turn.full) {
+        if (turn.group !== lastFull) otherSince = true;
+        continue;
+      }
+      if (turn.group === lastFull) {
+        expect(otherSince, `${turn.group} led twice in a row at frame ${turn.frame}`)
+          .toBe(true);
+      }
+      lastFull = turn.group;
+      otherSince = false;
+    }
+  });
+
+  it('keeps a full stance planted through every armed frame', () => {
+    const { track } = walkAt({ frames: 900 });
+    for (const s of track) {
       if (s.phase === 'normal') continue;
       expect(s.planted, `only ${s.planted} down at frame ${s.frame}`)
-        .toBeGreaterThanOrEqual(4);
+        .toBeGreaterThanOrEqual(3);
     }
   });
 
-  it('inherits mid-flight feet at arming but releases nothing until they land', () => {
-    /* The relaxation itself, held: any armed frame with more than TWO feet
-     * in the air (the crossing plus its one companion) is carrying
-     * INHERITED swings — the queue must not have let go of anything yet. */
-    const { track } = walkAt({ frames: 600 });
-    let released = 0;
-    for (const s of track) {
-      if (s.phase === 'normal') continue;
-      released += s.released.length;
-      const up = Object.values(s.state).filter((v) => v !== 'PLANT').length;
-      if (up > 2) expect(released, `released under ${up} airborne at ${s.frame}`).toBe(0);
-    }
-  });
-
-  it('reaches two new and four old before it touches a middle leg', () => {
-    const { track } = walkAt({ frames: 600 });
-    const twoUp = reached(track, 2);
-    expect(twoUp, 'never got two feet across').toBeTruthy();
-    /* Both of them are the leading row, and everything else is still OLD. */
-    const rows = rowsFromHomes(setup().map((l) => ({ slot: l.slot, home: l.home })));
-    for (const slot of rows[0]!) expect(twoUp!.owner[slot]).toBe('new');
-    for (const row of rows.slice(1)) {
-      for (const slot of row) expect(twoUp!.owner[slot]).toBe('old');
-    }
-    /*
-     * Two new and four old is a claim about SURFACE OWNERSHIP, not about how
-     * many feet happen to be down on the frame it is read — one of the four
-     * may be mid-step on the old floor. So: two across, four still belonging
-     * to the surface she came from, and the counts add up to what is planted.
-     */
-    expect(twoUp!.onNew).toBe(2);
-    expect(twoUp!.onNew + twoUp!.onOld).toBe(twoUp!.planted);
-    expect(Object.values(twoUp!.owner).filter((o) => o === 'old')).toHaveLength(4);
-  });
-
-  it('takes the middles one at a time, then the rears', () => {
+  it('crosses front first, and the rows in anatomical order — by reach, not schedule', () => {
     const { track } = walkAt({ frames: 900 });
+    const firstNew: Record<string, number> = {};
+    for (const s of track) {
+      for (const [slot, o] of Object.entries(s.owner)) {
+        if (o === 'new' && !(slot in firstNew)) firstNew[slot] = s.frame;
+      }
+    }
     const rows = rowsFromHomes(setup().map((l) => ({ slot: l.slot, home: l.home })));
-    const four = reached(track, 4);
-    expect(four, 'never got four feet across').toBeTruthy();
-    for (const slot of rows[1]!) expect(four!.owner[slot]).toBe('new');
-    for (const slot of rows[2]!) expect(four!.owner[slot]).toBe('old');
-    /* And the rear row goes last, and it does go. */
-    const end = finished(track);
-    expect(end, 'the corner never finished').toBeGreaterThan(0);
-    expect(track[end]!.onOld, 'still standing on the old surface').toBe(0);
-    /* Strictly after the middles: the row indices are a queue, not a hint. */
-    expect(end).toBeGreaterThan(track.indexOf(four!));
-    /* Every rear foot got there by being SCHEDULED, never by arriving. */
-    for (const slot of rows[2]!) {
-      expect(track.some((s) => s.swinging === slot), `${slot} never reached`).toBe(true);
+    const rowAt = rows.map((row) => Math.min(...row.map((s) => firstNew[s] ?? Infinity)));
+    expect(rowAt[0], 'the front row never crossed').toBeLessThan(Infinity);
+    expect(rowAt[0]!).toBeLessThan(rowAt[1]!);
+    expect(rowAt[1]!, 'the middle row never crossed').toBeLessThan(rowAt[2]!);
+    expect(rowAt[2]!, 'the rear row never crossed').toBeLessThan(Infinity);
+  });
+
+  it('leads with whichever tripod is due, not a hardcoded foot', () => {
+    /*
+     * Different approach distances put the gait at a different point in its
+     * cycle when the wall comes into reach, so across a spread of starts
+     * BOTH fronts must get to lead. A scheduler with a favourite foot fails
+     * this however well it climbs.
+     */
+    const leaders = new Set<string>();
+    for (const startMm of [6, 8, 10, 12, 14]) {
+      const { track } = walkAt({ frames: 900, startMm });
+      const first = track.find((s) => Object.values(s.owner).includes('new'));
+      if (!first) continue;
+      for (const [slot, o] of Object.entries(first.owner)) {
+        if (o === 'new') leaders.add(slot);
+      }
+    }
+    expect(leaders.has('frontLeft'), `frontLeft never led (${[...leaders].join(',')})`)
+      .toBe(true);
+    expect(leaders.has('frontRight'), `frontRight never led (${[...leaders].join(',')})`)
+      .toBe(true);
+  });
+
+  it('never drags a planted foot', () => {
+    const { track } = walkAt({ frames: 900 });
+    for (let i = 1; i < track.length; i += 1) {
+      const a = track[i - 1]!.anchors;
+      const b = track[i]!.anchors;
+      for (const slot of Object.keys(b)) {
+        if (!(slot in a)) continue;
+        const d = Math.hypot(
+          b[slot]![0] - a[slot]![0], b[slot]![1] - a[slot]![1], b[slot]![2] - a[slot]![2],
+        ) * MM;
+        expect(d, `${slot} slid ${d.toFixed(4)} mm while planted at frame ${i}`)
+          .toBeLessThan(0.001);
+      }
     }
   });
 
-  it('chooses the front foot by reach, not by a fixed order', () => {
+  it('makes no sustained backward progress', () => {
     /*
-     * The wall is skewed so one shoulder meets it first. Whichever foot has
-     * the margin must go first, and turning the skew round must turn the
-     * answer round — a scheduler that always reads the left slot first
-     * passes one of these and fails the other.
+     * Progress measured along the BLENDED path — approach along the floor
+     * plus climb up the wall — never in her own rotating frame, where the
+     * fold itself reads as motion. The seat may breathe a fraction of a
+     * millimetre; a slide is a different order of thing.
      */
-    const leadOf = (skew: number) => {
-      /* The WALL stays put and SHE comes in at an angle, which is the only
-       * way one shoulder meets it first: both front feet are exactly
-       * equidistant from a plane she is square to, whatever the plane. */
-      const { track } = walkAt({
-        frames: 600, startMm: 9, facing: new THREE.Vector3(skew, 0, 1),
-      });
-      return track.find((s) => s.swinging)?.swinging ?? null;
-    };
-    const left = leadOf(0.35);
-    const right = leadOf(-0.35);
-    expect(left, 'never scheduled a foot with the wall skewed left').toBeTruthy();
-    expect(right, 'never scheduled a foot with the wall skewed right').toBeTruthy();
-    expect(left).not.toBe(right);
+    const { track, world } = walkAt({ frames: 900 });
+    expect(finished(track), 'the corner never finished').toBeGreaterThan(0);
+    let worst = 0;
+    let total = 0;
+    for (let i = 1; i < track.length; i += 1) {
+      const s = (t: Snap) => t.at.dot(world.ahead) + t.at.dot(world.up);
+      const d = (s(track[i]!) - s(track[i - 1]!)) * MM;
+      if (d < 0) { total -= d; worst = Math.max(worst, -d); }
+    }
+    expect(worst, `a ${worst.toFixed(3)} mm single-frame reverse`).toBeLessThan(0.5);
+    expect(total, `${total.toFixed(3)} mm of accumulated reverse`).toBeLessThan(3);
+  });
+
+  const climbs = (slopeDeg: number, speedMm: number) => {
+    const world = corner(0, { slopeDeg });
+    const { track } = walkAt({ world, frames: 1200, speedMm });
+    const done = finished(track);
+    expect(done, `never finished the ${slopeDeg}-degree wall`).toBeGreaterThan(0);
+    for (const s of track) {
+      if (s.released.length < 2) continue;
+      expect(new Set(s.released.map(groupOf)).size, `mixed release at ${s.frame}`)
+        .toBe(1);
+      expect(s.planted).toBeGreaterThanOrEqual(3);
+    }
+  };
+
+  it('climbs a 60-degree wall with the same gait', () => climbs(60, 7.5));
+  it('climbs a 75-degree wall with the same gait', () => climbs(75, 7.5));
+  it('takes the vertical wall at a walk and at a sprint', () => {
+    climbs(90, 7.5);
+    climbs(90, 22);
   });
 });
 
@@ -427,15 +482,16 @@ describe('the player, and giving up', () => {
     for (let i = 0; i < 600 && report.corner.onNew < 1; i += 1) report = tick(r);
     expect(report.corner.onNew, 'never got a foot across').toBeGreaterThan(0);
 
-    /* Thumb off. Nothing further is released, the feet that crossed stay
-     * across, and support does not fall. */
+    /* Thumb off. The tripod in flight (if one is) lands, nothing further
+     * is released, and the feet that crossed stay across. Three is the
+     * tripod gait's own support floor while that landing finishes. */
     r.input.walk = 0;
-    const before = report.corner.onNew;
     for (let i = 0; i < 240; i += 1) {
       report = tick(r);
-      expect(report.corner.planted).toBeGreaterThanOrEqual(4);
+      expect(report.corner.planted).toBeGreaterThanOrEqual(3);
     }
-    expect(report.corner.onNew).toBe(before);
+    expect(report.corner.planted).toBe(6);
+    expect(report.corner.onNew).toBeGreaterThan(0);
     expect(report.corner.swinging).toBeNull();
   });
 
@@ -467,30 +523,28 @@ describe('the player, and giving up', () => {
     expect(freed / 60).toBeLessThan(3.5);
   });
 
-  it('does not let a hands-off jam outlive the stall guard', () => {
+  it('does not let a hands-off loss of the wall jam her', () => {
     /*
-     * The startled-player script: a reach is in flight, the wall vanishes
-     * (nothing for it to land on, ever), and the thumb comes OFF. The old
-     * guard reset its clock on !forward, so the jam lived exactly as long
-     * as the player waited it out. A foot in the corner's hands keeps the
-     * clock honest now, input or no input.
+     * The startled-player script: feet are crossing, the wall vanishes, and
+     * the thumb comes OFF. There is no scheduled reach to call off any more
+     * — a swing that loses its new-surface answer simply lands through the
+     * ordinary probe on what is left — so the whole claim is that every
+     * foot comes home to the floor, hands-free, and the first push at the
+     * vanished wall benches the corner within its own stall horizon.
      */
     const r = rig();
     let report = tick(r);
-    for (let i = 0; i < 600 && !report.corner.swinging; i += 1) report = tick(r);
-    expect(report.corner.swinging, 'never scheduled a foot').toBeTruthy();
+    for (let i = 0; i < 900 && report.corner.onNew < 1; i += 1) report = tick(r);
+    expect(report.corner.onNew, 'never got a foot across').toBeGreaterThan(0);
 
     r.world.state.wall = false;
     r.input.walk = 0;
-    /* Hands off, the reach must still be called off and brought home — the
-     * clock runs while a foot is in the corner's hands. A motionless corner
-     * with every foot planted may then pause as long as it likes. */
     let home = -1;
     for (let i = 0; i < 420; i += 1) {
       report = tick(r);
-      if (!report.corner.swinging && report.corner.planted === 6) { home = i; break; }
+      if (report.corner.planted === 6) { home = i; break; }
     }
-    expect(home, 'the reach was never called off hands-free').toBeGreaterThanOrEqual(0);
+    expect(home, 'her feet never all came home hands-free').toBeGreaterThanOrEqual(0);
     expect(home / 60).toBeLessThan(4);
 
     /* And the first push at the vanished wall benches it in seconds. */
@@ -558,56 +612,53 @@ describe('the player, and giving up', () => {
 
   it('does not teleport a foot when the target goes away', () => {
     /*
-     * The wall is pulled out from under a scheduled reach. The foot must end
-     * up somewhere the world actually answers for — never at the remembered
-     * contact, which is now thin air.
+     * The wall is pulled out from under feet that have already crossed. The
+     * feet must end up somewhere the world actually answers for — never at
+     * the remembered contact, which is now thin air.
      */
     const r = rig();
     let report = tick(r);
-    for (let i = 0; i < 600 && !report.corner.swinging; i += 1) report = tick(r);
-    const lost = report.corner.swinging;
-    expect(lost, 'nothing was ever scheduled').toBeTruthy();
+    for (let i = 0; i < 900 && report.corner.onNew < 1; i += 1) report = tick(r);
+    expect(report.corner.onNew, 'never got a foot across').toBeGreaterThan(0);
+    const across = report.corner.feet
+      .filter((f) => f.owner === 'new')
+      .map((f) => f.slot);
+    expect(across.length).toBeGreaterThan(0);
 
-    /* The wall vanishes out from under the reach. Only a floor is left, and
-     * the SAME walker answers for it — so this is the target disappearing,
-     * not the world being swapped for a different one. */
+    /* The wall vanishes out from under them. Only a floor is left, and the
+     * SAME walker answers for it — so this is the target disappearing, not
+     * the world being swapped for a different one. */
     r.world.state.wall = false;
-    for (let i = 0; i < 240; i += 1) report = tick(r);
+    for (let i = 0; i < 300; i += 1) report = tick(r);
 
-    /* Whatever that foot is doing, it is not standing on the wall that is no
-     * longer there, and she has not fallen apart. */
-    const foot = r.drive.anchorFor(lost!)!;
-    const p = new THREE.Vector3(foot[0], foot[1], foot[2]);
-    expect(p.dot(r.world.up)).toBeGreaterThan(-1 / MM);
+    /* Whatever those feet are doing, they are standing on the floor that
+     * still exists — not hovering where the wall used to be — and she has
+     * not fallen apart. */
+    for (const slot of across) {
+      const foot = r.drive.anchorFor(slot)!;
+      const p = new THREE.Vector3(foot[0], foot[1], foot[2]);
+      expect(p.dot(r.world.up) * MM, `${slot} ended above the floor`).toBeLessThan(3);
+      expect(p.dot(r.world.up) * MM, `${slot} ended inside the floor`).toBeGreaterThan(-1);
+    }
     expect(report.corner.planted).toBeGreaterThanOrEqual(3);
     expect(report.corner.phase, 'still armed at a wall that is gone').toBe('normal');
   });
 });
 
 describe('the handoff, and what it must not disturb', () => {
-  it('does not fire a whole tripod on the first frame back', () => {
+  it('keeps her feet under her through the handoff', () => {
+    /*
+     * The old guard here — no whole tripod on the first frames back —
+     * guarded a seam that no longer exists: the gait was never paused, so
+     * there is no first frame back, and a tripod firing on it is just the
+     * gait. What must still hold is that the strain the first post-corner
+     * frames inherit — homes computed in a body frame that has swung ninety
+     * degrees — is survivable: the support floor holds, and she keeps
+     * walking rather than standing on the wall having arrived.
+     */
     const { track } = walkAt({ frames: 900 });
     const done = finished(track);
     expect(done, 'the corner never finished').toBeGreaterThan(0);
-    /*
-     * The settle frame and the first ordinary frame after it. That is the
-     * whole of what the guard has to cover — a body frame that has just
-     * swung ninety degrees makes every excursion large AT ONCE, and the risk
-     * is one frame reading a spent tripod and lifting three feet together.
-     * Beyond that the ordinary tripod is SUPPOSED to lift three, so a wider
-     * window would fail on the gait working.
-     *
-     * Not sized from `HANDOFF_GRACE` any more. It used to be, and when the
-     * constant was narrowed to a single frame the window came with it and
-     * this test quietly stopped inspecting anything.
-     */
-    expect(Math.round(HANDOFF_GRACE * 60)).toBeGreaterThanOrEqual(1);
-    for (const s of track.slice(done, done + 2)) {
-      expect(s.released.length, `${s.released.length} let go at frame ${s.frame}`)
-        .toBeLessThanOrEqual(1);
-    }
-    /* And she is still standing on it a good while later — the strain the
-     * first normal frames inherit is survivable, however it is spent. */
     for (const s of track.slice(done, done + 60)) {
       expect(s.planted, `only ${s.planted} down at frame ${s.frame}`)
         .toBeGreaterThanOrEqual(3);
@@ -676,14 +727,14 @@ describe('the frame', () => {
     const armed = track.find((s) => s.phase !== 'normal');
     expect(armed, 'never armed off the world floor').toBeTruthy();
     expect(reached(track, 2), 'never got the leading row across').toBeTruthy();
-    /* From the queue's first release — the armed frames before it may still
-     * carry the ordinary gait's inherited swings; see "the queue" above. */
-    const first = track.findIndex((s) => s.phase !== 'normal' && s.released.length > 0);
-    expect(first, 'the queue never released a foot').toBeGreaterThanOrEqual(0);
-    for (const s of track.slice(first)) {
+    /* Same gait, same counts: whole tripods, never mixed, three down. */
+    for (const s of track) {
       if (s.phase === 'normal') continue;
-      expect(s.released.length).toBeLessThanOrEqual(1);
-      expect(s.planted).toBeGreaterThanOrEqual(4);
+      if (s.released.length >= 2) {
+        expect(new Set(s.released.map(groupOf)).size, `mixed release at ${s.frame}`)
+          .toBe(1);
+      }
+      expect(s.planted).toBeGreaterThanOrEqual(3);
     }
   });
 });

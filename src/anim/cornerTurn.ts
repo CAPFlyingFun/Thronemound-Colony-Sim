@@ -123,14 +123,12 @@ export type CornerPhase =
   | 'normal'
   /** Getting the leading row onto the new surface. */
   | 'acquireFront'
-  /** Every row between the first and the last, one foot at a time. */
+  /** Every row between the first and the last, on their tripods' turns. */
   | 'transferMiddle'
   /** The trailing row. */
   | 'transferRear'
-  /** All across; rebasing the gait's bookkeeping before it resumes. */
-  | 'settle'
-  /** Support fell too far, or the target was lost. No new releases. */
-  | 'recover';
+  /** All across; the observable finish frame. */
+  | 'settle';
 
 export interface CornerTuning {
   /** Disagreement between the support normal and a candidate to ENTER. */
@@ -175,8 +173,6 @@ export interface CornerTuning {
   lookAhead: number;
   /** Feet on a surface below which nothing may be released. */
   minPlanted: number;
-  /** How long a scheduled foot may reach before the release is called off. */
-  gropeSeconds: number;
   /**
    * How long a transition may make no progress at all before it gives up.
    *
@@ -237,7 +233,6 @@ export const CORNER_TUNING: CornerTuning = {
    * wrong — a foot dragged past its own reach by the body coming round.
    */
   minPlanted: 4,
-  gropeSeconds: 0.6,
   stallSeconds: 2,
   retrySeconds: 2.5,
   aimRate: 4,
@@ -247,15 +242,19 @@ export const CORNER_TUNING: CornerTuning = {
 
 /** What the drive is told to do this frame. */
 export interface CornerCommand {
-  /** Is the ordinary tripod scheduler paused? */
+  /**
+   * Is a transition being tracked? ACTIVE DOES NOT PAUSE THE GAIT.
+   *
+   * The corner used to own a cadence of its own — one foot at a time, in
+   * rows, with the tripod trigger muzzled behind it — and that second
+   * cadence is what this interface no longer carries. The ordinary
+   * alternating tripod runs straight through the corner now; while active,
+   * the corner only answers WHERE a swinging foot may land on the new
+   * surface (`stepAim`), keeps the ownership ledger (`landed`), and holds
+   * the body off the face (`hold`).
+   */
   active: boolean;
-  /** The one slot authorised to leave its surface this frame. */
-  release: string | null;
-  /** Where the scheduled swing must land. Null when nothing is scheduled. */
-  aim: SurfaceContact | null;
-  /** The slot `aim` belongs to. */
-  aimSlot: string | null;
-  /** Set on the frame the transition hands back — see `LegDrive` grace. */
+  /** Set on the frame the transition observes itself finished. */
   handedOff: boolean;
   /**
    * SHE MAY NOT OUT-WALK HER OWN FRONT FEET.
@@ -372,29 +371,6 @@ export class CornerTurn {
    */
   private readonly crossed = new Set<string>();
 
-  /** Which row is being transferred. */
-  private row = 0;
-
-  private swinging: string | null = null;
-
-  /**
-   * Is the foot in the air being brought BACK rather than taken across?
-   *
-   * A reach that found nothing is called off, and the foot then has to get
-   * home somehow. Putting it there — planting it on its old anchor the frame
-   * the timeout fires — is a teleport of a couple of millimetres, which is
-   * visible and is the thing this whole file refuses to do. So the aim is
-   * simply swapped for the anchor it never stopped carrying, and the
-   * ordinary swing interpolation walks it back over its ordinary swing.
-   */
-  private returning = false;
-
-  private readonly aimPoint = new THREE.Vector3();
-
-  private readonly aimNormal = new THREE.Vector3();
-
-  private gropeClock = 0;
-
   /**
    * How long she has been armed with nothing to do and nowhere to go.
    *
@@ -456,62 +432,50 @@ export class CornerTurn {
 
   get phase(): CornerPhase { return this.state; }
 
-  /**
-   * The slot the scheduler still OWNS mid-swing, aim or no aim.
-   *
-   * `CornerCommand.aimSlot` goes null on a frame the foothold re-probe
-   * fails, but the foot is still a cross-surface crossing in progress —
-   * anyone timing swings off the command alone would misread that frame as
-   * an ordinary step. See the swing clock in `LegDrive`.
-   */
-  get swingingSlot(): string | null { return this.swinging; }
-
-  /**
-   * The slot mid-CROSS — a scheduled foot genuinely going to the new
-   * surface, as opposed to one being walked back home after a failed reach.
-   *
-   * The drive's overlap rule wants exactly this distinction: a crossing in
-   * flight is the steady state a stance leg may keep stepping under, while
-   * a returning foot means the corner is already recovering and piling a
-   * second foot into the air on top of that is how a recovery becomes a
-   * fall.
-   */
-  get crossingSlot(): string | null {
-    return this.returning ? null : this.swinging;
-  }
-
-  /**
-   * Which surface a foot belongs to, as the ledger has it.
-   *
-   * The drive's overlap creep needs this: a creep step lands through the
-   * ordinary `nearest`, which measures along an up that still belongs to
-   * the OLD surface — so a foot already across must never be handed to it.
-   * Worse than the wrong landing, a second airborne foot cannot be adopted
-   * while a crossing is in flight, so the label comes off and the corner
-   * can never again observe itself finished. Measured: armed for the whole
-   * of a 700-frame descent, one ground foot forever flapping back to 'old'.
-   */
+  /** Which surface a foot belongs to, as the ledger has it. */
   ownerOf(slot: string): Owner { return this.owner.get(slot) ?? 'old'; }
 
   /**
-   * A landing for a foot ALREADY ACROSS that the drive is re-stepping —
-   * the corner's own foothold question, asked on the new surface, so an
-   * ordinary swing can renew a crossed foot without going through the
-   * queue.
+   * THE ONE QUESTION THE CORNER ANSWERS FOR THE GAIT: where would this
+   * leg's ordinary step land on the NEW surface, if it can land there at
+   * all?
    *
-   * This is what makes transfers overlap: re-steps used to be scheduled
-   * one at a time between crossings (each a full careful swing with the
-   * body parked at the clip), and taking them off the queue lets the
-   * stance renew itself while a genuine crossing is in the air. The
-   * scheduler still owns every OLD→NEW transfer; this only answers where
-   * a NEW foot's next ordinary step lands, in the frame `nearest` cannot
-   * measure in.
+   * Asked by the drive for every swing while a transition is tracked, and
+   * re-asked every frame of the swing because the body moves under it. A
+   * `true` answer means the new surface is inside this leg's own measured
+   * workspace — which is the whole of the transfer rule: front feet reach
+   * it first because they are in front, middles and rears follow on their
+   * own later tripod turns as the fold brings the face into their reach.
+   * Nothing sequences that; geometry does.
    */
-  restepAim(
+  stepAim(
     leg: CornerLeg, body: CornerBody, ground: CornerGround, into: SurfaceContact,
   ): boolean {
     if (!this.active) return false;
     return this.footholdFor(leg, body, ground, into);
+  }
+
+  /**
+   * A LANDING WRITES THE LEDGER — the only place ownership changes hands.
+   *
+   * The drive calls this the frame a swing plants. A foot that landed
+   * through `stepAim` went to the new surface: label it, ledger it, and let
+   * the target lean toward the normal it actually found — a trunk is
+   * curved, and the normal that armed the corner is not the normal three
+   * feet further round it. A foot that landed through the ordinary
+   * `nearest` is standing on the old surface, whatever it used to be.
+   */
+  landed(slot: string, onNew: boolean, normal: THREE.Vector3 | null, dt: number): void {
+    if (!this.active || this.state === 'settle') return;
+    if (onNew) {
+      this.owner.set(slot, 'new');
+      this.crossed.add(slot);
+      if (normal) {
+        this.newUp.lerp(normal, 1 - Math.exp(-this.tune.aimRate * dt)).normalize();
+      }
+    } else {
+      this.owner.set(slot, 'old');
+    }
   }
 
   get active(): boolean { return this.state !== 'normal'; }
@@ -655,87 +619,12 @@ export class CornerTurn {
    * re-stepped onto the ground, and the corner never got past one foot.
    * Every step on the new surface has to be found in the new frame, which is
    * what this file is for.
-   *
-   * Transfers come first — the queue is the queue — and a re-step is what
-   * she does when the queue is waiting for her body to bring the next row
-   * within reach.
    */
-  private pick(
-    body: CornerBody, ground: CornerGround, legs: readonly CornerLeg[],
-    into: SurfaceContact,
-  ): string | null {
-    const found: SurfaceContact = {
-      point: new THREE.Vector3(), normal: new THREE.Vector3(),
-    };
-    let best: string | null = null;
-    let bestScore = -Infinity;
-    for (const slot of this.rows[this.row] ?? []) {
-      if (this.owner.get(slot) === 'new') continue;
-      const leg = legs.find((l) => l.slot === slot);
-      if (!leg || !leg.planted) continue;
-      if (!this.footholdFor(leg, body, ground, found)) continue;
-      /*
-       * MARGIN first, agreement second. How much of its own workspace the
-       * foot would have left over is what decides whether a grip is real;
-       * how squarely the contact faces the target breaks the tie. Reading
-       * the pair off in a fixed order instead is how a scheduler ends up
-       * always leading with the left foot on a slope that suits the right.
-       */
-      const home = this.homeWorld(leg, body, this.sB);
-      const margin = leg.spread - home.distanceTo(found.point);
-      const square = found.normal.dot(this.newUp);
-      const score = margin + square * 0.1;
-      if (score > bestScore) {
-        bestScore = score;
-        best = slot;
-        into.point.copy(found.point);
-        into.normal.copy(found.normal);
-      }
-    }
-    if (best) return best;
-
-    /* Nothing to transfer. Is a foot already across out of room? */
-    let worst = -Infinity;
-    for (const leg of legs) {
-      if (this.owner.get(leg.slot) !== 'new' || !leg.planted) continue;
-      const home = this.homeWorld(leg, body, this.sB);
-      const over = home.distanceTo(leg.anchor) - this.budgetFor(leg);
-      if (over <= 0 || over <= worst) continue;
-      if (!this.footholdFor(leg, body, ground, found)) continue;
-      /* And only if the new place is better than the one it is leaving. */
-      if (this.homeWorld(leg, body, this.sB).distanceTo(found.point)
-        >= home.distanceTo(leg.anchor)) continue;
-      worst = over;
-      best = leg.slot;
-      into.point.copy(found.point);
-      into.normal.copy(found.normal);
-    }
-    return best;
-  }
-
-  /**
-   * How far from home a foot may sit before it is worth re-stepping.
-   *
-   * Its measured spread LESS a stride: past that, a foot has less than one
-   * ordinary step of room left, which is the point at which the gait would
-   * move it anyway. Only the re-step in `pick` asks this — a foothold is
-   * accepted against the full spread, because a scheduled step now carries
-   * its own stride. Floored at a quarter of the spread so a caller that
-   * never reports a stride still gets something usable.
-   */
-  private budgetFor(leg: CornerLeg): number {
-    return Math.max(leg.spread * 0.25, leg.spread - this.stroke);
-  }
-
   /** Give up the corner and hand every foot back to the ordinary gait. */
   private stand(): void {
     this.state = 'normal';
-    this.swinging = null;
-    this.returning = false;
     this.owner.clear();
     this.crossed.clear();
-    this.gropeClock = 0;
-    this.row = 0;
     this.hasCandidate = false;
     this.candidateRange = -1;
     this.stallClock = 0;
@@ -780,10 +669,7 @@ export class CornerTurn {
     dt: number, body: CornerBody, input: CornerInput,
     ground: CornerGround | null, legs: readonly CornerLeg[],
   ): CornerCommand {
-    const idle: CornerCommand = {
-      active: false, release: null, aim: null, aimSlot: null,
-      handedOff: false, hold: null,
-    };
+    const idle: CornerCommand = { active: false, handedOff: false, hold: null };
     /* No ground, no sample: the next measured frame must not read the whole
      * airborne interval as one frame of velocity. */
     if (!ground) { this.haveWasAt = false; if (this.active) this.stand(); return idle; }
@@ -857,8 +743,8 @@ export class CornerTurn {
        * exactly those frames, and she walked straight into the floor and
        * let the walker's embedded-rescue fold her (a 58 mm/s body spike
        * and 0.6 mm of penetration). Arming with feet in flight is safe
-       * because arming RELEASES nothing: the queue's own support gate
-       * refuses a first release until every foot is down, so the only
+       * because arming RELEASES nothing: the gait's own corner gate
+       * refuses a release until the rest of her is down, so the only
        * thing that starts sooner is the hold plane — which is precisely
        * the thing that stops her outwalking the corner. (Even a support
        * floor here was too strict: the ordinary tripod holds three feet in
@@ -893,21 +779,34 @@ export class CornerTurn {
        * establish that, and nothing may relabel it later. */
       for (const leg of legs) this.owner.set(leg.slot, 'old');
       this.state = this.labelFor(0);
-      this.row = 0;
-      this.swinging = null;
-      this.gropeClock = 0;
       return { ...idle, active: true };
     }
 
     /* ------------------------------------------------------- in one */
-    const cmd: CornerCommand = {
-      active: true, release: null, aim: null, aimSlot: null,
-      handedOff: false, hold: null,
-    };
+    const cmd: CornerCommand = { active: true, handedOff: false, hold: null };
 
-    /* The frame after everything crossed: hand back. The tripod trigger is
-     * muzzled a little longer than this by the drive's own grace. */
+    /* The frame after everything crossed: hand back. The gait was never
+     * paused, so there is nothing to un-pause — the settle frame exists so
+     * a finished corner is observable at all. The drive builds its report
+     * at the END of a step, and a transition that cleared itself the
+     * instant it finished would finish invisibly. */
     if (this.state === 'settle') { this.stand(); return idle; }
+
+    /*
+     * A FOOT THAT LOST THE SURFACE LOSES ITS LABEL — and only that foot.
+     *
+     * Labels change at LANDINGS now (see `landed`); the one exception is a
+     * groping foot, which by definition has asked for the new surface and
+     * been refused. Leaving its label on would keep the pre-tilt leaning on
+     * a grip that is not there — the lean's proof is the grip. It gropes,
+     * the ordinary swing finds it something (either surface), and the
+     * landing writes the truth back.
+     */
+    for (const leg of legs) {
+      if (!leg.planted && leg.groping && this.owner.get(leg.slot) === 'new') {
+        this.owner.set(leg.slot, 'old');
+      }
+    }
 
     /*
      * Hold the leading row clear of the face until it is across. One cell of
@@ -932,111 +831,32 @@ export class CornerTurn {
     }
 
     /*
-     * A FOOT THAT LOST ITS GRIP LOSES ITS LABEL — and only then.
-     *
-     * Labels are frozen against the two frames the corner is between, so a
-     * curved trunk cannot make one flip mid-turn. But a foot the scheduler
-     * put on the new surface can be taken off it again by something that is
-     * not the scheduler: the body comes round, that leg runs out of reach,
-     * and the spread rule lets go. It is then in the air with no idea where
-     * it is going, and the ordinary swing will put it wherever the world
-     * answers — possibly straight back onto the old floor. Keeping the NEW
-     * label through that is how a row gets called finished with a foot that
-     * is not on it.
-     *
-     * So the label goes back, and the queue below re-acquires it properly.
-     * The leg the scheduler is currently flying is exempt: it is still OLD
-     * until it lands, by construction.
-     */
-    if (!this.swinging) {
-      for (const leg of legs) {
-        if (leg.planted || this.owner.get(leg.slot) !== 'new') continue;
-        /*
-         * A new foot in the air that is NOT groping is the drive re-stepping
-         * it through `restepAim` — an ordinary swing to a found spot on the
-         * new surface, off the queue by design. Adopting it would put it
-         * back ON the queue, which is the serialisation this exists to end.
-         * Only a foot that has genuinely lost the surface — groping — needs
-         * the scheduler to take it over.
-         *
-         * The exemption holds only in the phases where the drive is allowed
-         * to re-step at all — past the front row. In `acquireFront` a
-         * dragged-off front grip must come back through the queue's careful
-         * clock, exactly as it always did.
-         */
-        if (!leg.groping
-          && this.state !== 'acquireFront' && this.state !== 'recover') continue;
-        /*
-         * ADOPT IT, do not disown it. A foot the spread rule lifted off the
-         * new surface is still a foot that belongs on the new surface, and
-         * the ordinary swing would put it wherever `nearest` says — which is
-         * measured along an up that may still belong to the floor. Taking it
-         * over costs one aim and keeps the label, which keeps the queue where
-         * it was. Disowning it rewound the queue to the leading row and the
-         * phase flapped between acquiring and transferring four times in a
-         * single corner: an ant that visibly cannot decide what it is doing.
-         */
-        this.swinging = leg.slot;
-        this.returning = false;
-        this.gropeClock = 0;
-        break;
-      }
-    }
-    /* Anything still in the air with a NEW label that is not the one we are
-     * flying has genuinely lost the surface, and the queue must go back for
-     * it properly. */
-    for (const leg of legs) {
-      if (leg.planted || leg.slot === this.swinging) continue;
-      /* Same exemption, same phase bounds: a drive re-step in flight still
-       * belongs to the new surface. Only a groping foot has lost it. */
-      if (!leg.groping
-        && this.state !== 'acquireFront' && this.state !== 'recover') continue;
-      if (this.owner.get(leg.slot) === 'new') this.owner.set(leg.slot, 'old');
-    }
-    /*
-     * And the queue's position is DERIVED from those labels rather than
-     * remembered alongside them. A remembered index and a label map are two
-     * accounts of the same fact, and the moment a grip is lost they disagree
-     * — the index says the front row is finished while the labels say a
-     * front foot is back on the floor. One account, read fresh.
+     * The PHASE is derived from the labels rather than remembered — a
+     * remembered index and a label map are two accounts of the same fact,
+     * and the moment a grip is lost they disagree. One account, read fresh.
+     * It is anatomy for the report and the HUD now, not a queue position:
+     * the rows cross whenever their ordinary tripod turns come round.
      */
     const pending = this.rows.findIndex(
       (r) => r.some((s) => this.owner.get(s) !== 'new'),
     );
-    this.row = pending < 0 ? this.rows.length - 1 : pending;
-    if (this.state !== 'recover') this.state = this.labelFor(this.row);
+    this.state = this.labelFor(pending < 0 ? this.rows.length - 1 : pending);
 
     /*
-     * THE STALL GUARD. Armed, asking for forward, and neither scheduling a
-     * foot nor going anywhere — give it up and let the ordinary gait have
-     * her back. Paused counts as fine: letting go of forward is a pause by
-     * design, and a pause must not time out.
-     */
-    /*
-     * A foot IN FLIGHT no longer counts as progress. It used to reset the
-     * clock, and a scheduler that perpetually flies a front foot at a wall
-     * it can never hold is swinging on almost every frame — so the guard
-     * built to end exactly that stall never fired. Only a pause by choice
-     * (letting go of forward) or measured gain resets it now.
-     */
-    /*
-     * AND A PAUSE ONLY COUNTS AS A PAUSE WHEN HER HANDS ARE EMPTY. Letting
-     * go of forward while every foot is planted is the pause by design and
-     * must not time out — but letting go while the queue is still flying a
-     * foot is what a startled player does when a corner goes wrong, and it
-     * used to FREEZE the guard: the jammed reach lived as long as the
-     * player waited it out (telemetry: ten seconds pinned in transferRear,
-     * drifting backwards, before a shove broke it loose). A foot in the
-     * corner's hands keeps the clock honest whether forward is asked for
-     * or not.
-     */
-    /*
-     * ...AND ONLY WHEN SHE IS ACTUALLY STANDING STILL. A pause that is
-     * measurably going somewhere is the seat treadmilling her, not the
-     * player waiting, and it must time out like any other stall.
+     * THE STALL GUARD. Armed, asking for forward, and not measurably getting
+     * anywhere — give it up and bench. Progress is the ledger, not a
+     * flicker: a new foot in `crossed`, or the body's best angle toward the
+     * target beaten by a full degree.
+     *
+     * A pause only counts as a pause when she is ACTUALLY STANDING STILL.
+     * Letting go of forward with every foot planted is the pause by design
+     * and must not time out — but a "pause" that is measurably going
+     * somewhere is the seat treadmilling her, not the player waiting
+     * (telemetry: ten seconds of steady backward drift at an armed corner,
+     * hands off), and it must time out like any other stall.
      */
     const still = this.slipMms < 0.5;
-    if ((!forward && !this.swinging && still) || !allowed || gaining) this.stallClock = 0;
+    if ((!forward && still) || !allowed || gaining) this.stallClock = 0;
     else this.stallClock += dt;
     if (this.stallClock >= this.tune.stallSeconds) {
       /* Benched, not just stopped — see `retrySeconds`. */
@@ -1049,17 +869,13 @@ export class CornerTurn {
      * AND THE CORNER IS OVER WHEN NOTHING IS STANDING ON THE OLD SURFACE.
      *
      * Not "when all six carry the new label". That reads as the same thing
-     * and is not: one foot is nearly always in the air, and a foot in the
-     * air has just had its label taken away by the rule above — so the
-     * all-six condition is only ever true on the rare frame when every foot
-     * happens to be down at once. Measured against the wall, it was never
-     * true at all: she climbed six millimetres up it with the scheduler
-     * still armed, releasing a foot at a time forever, because the corner
-     * she had finished could not be observed to have finished.
-     *
-     * Nothing planted on the surface she left IS the finish, it is what
-     * "six new, none old" was always trying to say, and it cannot be undone
-     * by a foot being mid-step.
+     * and is not: one foot is nearly always in the air, and the all-six
+     * condition is only ever true on the rare frame when every foot happens
+     * to be down at once. Measured against the wall, it was never true at
+     * all: she climbed six millimetres up it with the corner still armed,
+     * because the finish could not be observed. Nothing planted on the
+     * surface she left IS the finish, and it cannot be undone by a foot
+     * being mid-step.
      */
     let onOld = 0;
     for (const leg of legs) {
@@ -1073,7 +889,7 @@ export class CornerTurn {
     /* Reversing before anything has been committed is a change of mind, and
      * she is still standing on the surface she started on. */
     const anyNew = [...this.owner.values()].some((o) => o === 'new');
-    if (input.walk < 0 && !anyNew && !this.swinging) { this.stand(); return idle; }
+    if (input.walk < 0 && !anyNew) { this.stand(); return idle; }
 
     /* The corner turned out not to be one — hysteresis, so a curved trunk
      * does not chatter across the threshold. */
@@ -1082,163 +898,6 @@ export class CornerTurn {
       return idle;
     }
 
-    /* --------------------------------------- a scheduled foot in the air */
-    if (this.swinging) {
-      const leg = legs.find((l) => l.slot === this.swinging);
-      if (!leg) { this.swinging = null; return cmd; }
-      if (leg.planted && this.returning) {
-        /* Back where it started. Nothing crossed, nothing is relabelled, and
-         * the queue tries again from wherever she now is. */
-        this.swinging = null;
-        this.returning = false;
-        this.gropeClock = 0;
-        this.state = this.labelFor(this.row);
-        return cmd;
-      }
-      if (leg.planted) {
-        /* It landed. Label it, and let the target lean toward what it
-         * actually found — a trunk is curved, and the normal that armed
-         * the corner is not the normal three feet further round it. */
-        this.owner.set(leg.slot, 'new');
-        this.crossed.add(leg.slot);
-        this.newUp.lerp(this.aimNormal, 1 - Math.exp(-this.tune.aimRate * dt)).normalize();
-        this.swinging = null;
-        this.gropeClock = 0;
-        /*
-         * Whether that finished a row is not decided here. The block above
-         * re-reads the labels every frame and moves the queue on when a row
-         * is genuinely complete — including the finish, which therefore gets
-         * a SETTLE frame of its own. That frame matters: the drive builds its
-         * report at the END of a step, so a transition that cleared itself
-         * the instant it finished would finish invisibly, and nothing — a
-         * test, a debug line — could ever observe a corner completing.
-         */
-        this.state = this.labelFor(this.row);
-        return cmd;
-      }
-      /*
-       * Still reaching. Re-aim it every frame, because the body moves under
-       * it — but do NOT let it hunt forever. On timeout the release is
-       * called off and the foot goes back where it was; groping, never
-       * teleporting.
-       */
-      if (this.returning) {
-        /* Coming home. The anchor is still there — a release stops HONOURING
-         * an anchor, it does not forget one — so it is a swing target like
-         * any other. If she has moved so far that it is no longer a leg, the
-         * aim is dropped and the ordinary swing gropes for something on the
-         * old surface, which is the right answer and not this file's job. */
-        const home = this.homeWorld(leg, body, this.sB);
-        if (home.distanceTo(leg.anchor) <= leg.spread) {
-          this.aimPoint.copy(leg.anchor);
-          /*
-           * The anchor's OWN surface, not the old one by habit. A returning
-           * foot that had already crossed is going home to the NEW face,
-           * and aiming a wall point with the floor's normal is a foothold
-           * that can never be honoured — measured as a front foot groping
-           * at its own anchor indefinitely while the corner cycled
-           * recover/transfer around it.
-           */
-          this.aimNormal.copy(
-            this.owner.get(leg.slot) === 'new' ? this.newUp : this.oldUp,
-          );
-          cmd.aim = { point: this.aimPoint, normal: this.aimNormal };
-          cmd.aimSlot = leg.slot;
-          return cmd;
-        }
-        /* She has moved too far for that to be a leg any more. Let go of it
-         * ENTIRELY rather than keep steering a foot with nowhere to go —
-         * holding on left the scheduler owning a leg it could not place, and
-         * owning a leg is what keeps the whole transition alive. Measured: a
-         * reach whose target was removed left her armed indefinitely. */
-        this.swinging = null;
-        this.returning = false;
-        return cmd;
-      }
-      this.gropeClock += dt;
-      if (this.footholdFor(leg, body, ground, { point: this.aimPoint, normal: this.aimNormal })) {
-        cmd.aim = { point: this.aimPoint, normal: this.aimNormal };
-        cmd.aimSlot = leg.slot;
-        return cmd;
-      }
-      if (this.gropeClock >= this.tune.gropeSeconds) {
-        this.returning = true;
-        this.gropeClock = 0;
-        this.state = 'recover';
-      }
-      return cmd;
-    }
-
-    /* ------------------------------------------- nothing in the air yet */
-
-    /*
-     * SUPPORT SAFETY, and it is a gate rather than an alarm. One foot at a
-     * time out of six means five planted through an untroubled transfer; a
-     * count below that says something else has already let go — the body
-     * coming round can drag an old foot past its own reach — so no new
-     * release is authorised until the gait has put it back.
-     */
-    if (planted < legs.length) {
-      if (planted < this.tune.minPlanted) { this.state = 'recover'; return cmd; }
-      /*
-       * OVERLAP, HALF ONE: a release may go out over ONE ordinary creep.
-       *
-       * Waiting for an empty sky between grips is what made the corner
-       * strictly sequential — grip, wait, creep, wait, grip — and the wait
-       * is most of the lost speed. One creep step in the air is the gait's
-       * own steady state (a swing is in the air most of every cycle), so a
-       * crossing released across it leaves four planted, which is the same
-       * support the tuning already accepts as its floor. Anything else in
-       * the air — two feet, a groping foot, a foot the scheduler put on the
-       * new surface and lost — is not that steady state, and the queue
-       * waits exactly as it always did.
-       */
-      const airborne = legs.filter((l) => !l.planted);
-      /*
-       * The one airborne foot may be either kind of ordinary step: an OLD
-       * foot creeping (only while the middle row is going — creeping a rear
-       * foot that should be transferring stalled the rear row for forty
-       * frames at a stretch), or a NEW foot the drive is re-stepping through
-       * `restepAim` (fine under any transfer, it renews the stance the body
-       * is folding over). A groping foot is neither — that is a foot in
-       * trouble, and the queue waits.
-       */
-      const flier = airborne.length === 1 ? airborne[0] : undefined;
-      const creepOnly = flier !== undefined
-        && !flier.groping
-        && (this.owner.get(flier.slot) === 'new'
-          || this.labelFor(this.row) === 'transferMiddle');
-      /*
-       * NEVER while the leading row is still going on. The front grips are
-       * the fragile part of the whole manoeuvre — the body has to fold onto
-       * the new face before a front foot's hold is real, and every attempt
-       * to hurry that phase has jammed it (measured three separate ways: a
-       * fast clock, a near-home gate, and this very overlap ungated — all
-       * ended with the grip dragged back off and the corner re-acquiring
-       * for hundreds of frames). Past the front row her attitude is
-       * committed and a grip is just a grip.
-       */
-      if (this.row === 0 || !creepOnly
-        || planted - 1 < this.tune.minPlanted) return cmd;
-    }
-    if (this.state === 'recover') this.state = this.labelFor(this.row);
-
-    /* Letting go of forward PAUSES. It does not abandon: the feet that have
-     * crossed stay across, and the queue picks up when she asks again. */
-    if (!forward || !allowed) return cmd;
-
-    const found: SurfaceContact = {
-      point: new THREE.Vector3(), normal: new THREE.Vector3(),
-    };
-    const next = this.pick(body, ground, legs, found);
-    if (!next) return cmd;
-    this.swinging = next;
-    this.gropeClock = 0;
-    this.aimPoint.copy(found.point);
-    this.aimNormal.copy(found.normal);
-    cmd.release = next;
-    cmd.aim = { point: this.aimPoint, normal: this.aimNormal };
-    cmd.aimSlot = next;
     return cmd;
   }
 
@@ -1288,7 +947,7 @@ export class CornerTurn {
       onNew,
       onOld,
       planted,
-      swinging: this.swinging,
+      swinging: null,
       turnDeg: this.active
         ? +((angleBetween(this.oldUp, this.newUp) * 180) / Math.PI).toFixed(1)
         : 0,
