@@ -407,6 +407,22 @@ export class CornerTurn {
   /** Seconds the scheduler stays benched after abandoning a corner. */
   private cooloff = 0;
 
+  /**
+   * Where the body was last frame, so a "pause" can be checked against the
+   * one thing that defines a pause: NOT MOVING. Parked at an armed corner
+   * with every foot planted, the seat's two attractors can treadmill her
+   * backwards at a millimetre a second indefinitely — hands off, nothing
+   * swinging, and the old guard reading it as a pause by design. Measured:
+   * ten seconds of steady backward drift that stopped the instant the
+   * corner disarmed.
+   */
+  private readonly wasAt = new THREE.Vector3();
+
+  private haveWasAt = false;
+
+  /** Millimetres per second, low-passed over ~a third of a second. */
+  private slipMms = 0;
+
   /** Last frame's progress marks — see the stall guard in `update`. */
   private wasAcross = 0;
 
@@ -760,6 +776,15 @@ export class CornerTurn {
 
     const planted = legs.reduce((n, l) => n + (l.planted ? 1 : 0), 0);
     const forward = input.walk > 0;
+    /* The body's own speed, low-passed so a single reseated frame does not
+     * read as motion. Only the stall guard consumes it — see `wasAt`. */
+    if (dt > 0) {
+      const mms = (body.at.distanceTo(this.wasAt) * MM) / dt;
+      const blend = 1 - Math.exp(-3 * dt);
+      this.slipMms += ((this.haveWasAt ? mms : 0) - this.slipMms) * blend;
+    }
+    this.wasAt.copy(body.at);
+    this.haveWasAt = true;
     const allowed = input.mayTransition ?? true;
     this.stroke = input.radius ?? 0;
     /*
@@ -980,7 +1005,24 @@ export class CornerTurn {
      * built to end exactly that stall never fired. Only a pause by choice
      * (letting go of forward) or measured gain resets it now.
      */
-    if (!forward || !allowed || gaining) this.stallClock = 0;
+    /*
+     * AND A PAUSE ONLY COUNTS AS A PAUSE WHEN HER HANDS ARE EMPTY. Letting
+     * go of forward while every foot is planted is the pause by design and
+     * must not time out — but letting go while the queue is still flying a
+     * foot is what a startled player does when a corner goes wrong, and it
+     * used to FREEZE the guard: the jammed reach lived as long as the
+     * player waited it out (telemetry: ten seconds pinned in transferRear,
+     * drifting backwards, before a shove broke it loose). A foot in the
+     * corner's hands keeps the clock honest whether forward is asked for
+     * or not.
+     */
+    /*
+     * ...AND ONLY WHEN SHE IS ACTUALLY STANDING STILL. A pause that is
+     * measurably going somewhere is the seat treadmilling her, not the
+     * player waiting, and it must time out like any other stall.
+     */
+    const still = this.slipMms < 0.5;
+    if ((!forward && !this.swinging && still) || !allowed || gaining) this.stallClock = 0;
     else this.stallClock += dt;
     if (this.stallClock >= this.tune.stallSeconds) {
       /* Benched, not just stopped — see `retrySeconds`. */
@@ -1075,7 +1117,17 @@ export class CornerTurn {
         const home = this.homeWorld(leg, body, this.sB);
         if (home.distanceTo(leg.anchor) <= leg.spread) {
           this.aimPoint.copy(leg.anchor);
-          this.aimNormal.copy(this.oldUp);
+          /*
+           * The anchor's OWN surface, not the old one by habit. A returning
+           * foot that had already crossed is going home to the NEW face,
+           * and aiming a wall point with the floor's normal is a foothold
+           * that can never be honoured — measured as a front foot groping
+           * at its own anchor indefinitely while the corner cycled
+           * recover/transfer around it.
+           */
+          this.aimNormal.copy(
+            this.owner.get(leg.slot) === 'new' ? this.newUp : this.oldUp,
+          );
           cmd.aim = { point: this.aimPoint, normal: this.aimNormal };
           cmd.aimSlot = leg.slot;
           return cmd;

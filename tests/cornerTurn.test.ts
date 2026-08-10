@@ -439,6 +439,72 @@ describe('the player, and giving up', () => {
     expect(report.corner.swinging).toBeNull();
   });
 
+  it('times out a hands-off pause that is measurably going somewhere', () => {
+    /*
+     * The telemetry that forced this: parked at an armed corner with every
+     * foot planted and the thumb off, the seat treadmilled her backwards at
+     * about a millimetre a second for ten seconds, and the guard read the
+     * whole thing as a pause by design. A pause is NOT MOVING; a "pause"
+     * with measured drift must bench like any other stall.
+     */
+    const r = rig();
+    let report = tick(r);
+    for (let i = 0; i < 600 && report.corner.onNew < 1; i += 1) report = tick(r);
+    expect(report.corner.onNew, 'never got a foot across').toBeGreaterThan(0);
+
+    r.input.walk = 0;
+    /* Drift her backwards at 1.2 mm/s — hands off, nothing swinging. */
+    const drift = r.world.ahead.clone().multiplyScalar(-(1.2 / MM) / 60);
+    let freed = -1;
+    for (let i = 0; i < 300; i += 1) {
+      r.body.at.add(drift);
+      report = tick(r);
+      if (report.corner.phase === 'normal') { freed = i; break; }
+    }
+    expect(freed, 'drifting "pause" never benched the corner')
+      .toBeGreaterThanOrEqual(0);
+    /* Within the stall guard's own horizon, not eventually. */
+    expect(freed / 60).toBeLessThan(3.5);
+  });
+
+  it('does not let a hands-off jam outlive the stall guard', () => {
+    /*
+     * The startled-player script: a reach is in flight, the wall vanishes
+     * (nothing for it to land on, ever), and the thumb comes OFF. The old
+     * guard reset its clock on !forward, so the jam lived exactly as long
+     * as the player waited it out. A foot in the corner's hands keeps the
+     * clock honest now, input or no input.
+     */
+    const r = rig();
+    let report = tick(r);
+    for (let i = 0; i < 600 && !report.corner.swinging; i += 1) report = tick(r);
+    expect(report.corner.swinging, 'never scheduled a foot').toBeTruthy();
+
+    r.world.state.wall = false;
+    r.input.walk = 0;
+    /* Hands off, the reach must still be called off and brought home — the
+     * clock runs while a foot is in the corner's hands. A motionless corner
+     * with every foot planted may then pause as long as it likes. */
+    let home = -1;
+    for (let i = 0; i < 420; i += 1) {
+      report = tick(r);
+      if (!report.corner.swinging && report.corner.planted === 6) { home = i; break; }
+    }
+    expect(home, 'the reach was never called off hands-free').toBeGreaterThanOrEqual(0);
+    expect(home / 60).toBeLessThan(4);
+
+    /* And the first push at the vanished wall benches it in seconds. */
+    r.input.walk = 1;
+    let freed = -1;
+    for (let i = 0; i < 300; i += 1) {
+      report = tick(r);
+      if (report.corner.phase === 'normal') { freed = i; break; }
+    }
+    expect(freed, 'push at a vanished corner never benched it')
+      .toBeGreaterThanOrEqual(0);
+    expect(freed / 60).toBeLessThan(3.5);
+  });
+
   it('recovers to the old surface when she reverses before committing', () => {
     const r = rig();
     let report = tick(r);
