@@ -30,12 +30,20 @@ Bark is a different sum and keeps its own note in
 `public/tree-tex/README.md` — a trunk tile covers far more surface per
 texel, so 1024 genuinely is plenty there.
 
-The other half of sharpness is anisotropy, and it is free: everything the
-ant stands on is seen at a grazing angle, so the biome textures now take
-the renderer's own ceiling (16) rather than the 4 they were pinned at.
+The other half of sharpness is anisotropy, and it is NOT free on ground.
+Everything the ant stands on is seen at a grazing angle, so the biome
+textures were raised from the 4 they were pinned at — but only to 8, not to
+the 16 the bark takes. Bark is one texture on a trunk; the ground is a
+six-way splat sampled twice per band for anti-repeat and three times for
+triplanar rock, so anisotropy multiplies a dozen samples rather than one.
+Measured, as time for the queen's model to load under a software rasteriser
+— a fair proxy for how much of the frame the shading eats: 46 s at 4, 57 s
+at 8, 106 s at 16.
+
 Anisotropy rescues the DISTANCE; resolution rescues the near field. They
 fix different halves of the same picture and neither substitutes for the
-other.
+other — which is why the answer was more texels AND more taps, but not the
+maximum of either.
 
 ## rocky-ground-1
 

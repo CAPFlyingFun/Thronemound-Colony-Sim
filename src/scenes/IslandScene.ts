@@ -1309,9 +1309,24 @@ export class IslandScene {
     const url = `${import.meta.env.BASE_URL}kauai-1025.bin`;
     const [raw, textures] = await Promise.all([
       (await fetch(url)).arrayBuffer(),
+      /*
+       * EIGHT, NOT SIXTEEN, and the difference is measured rather than
+       * taste. The bark asks for sixteen because bark is ONE texture on a
+       * trunk. The ground is the heaviest shader in the game — a six-way
+       * elevation/slope splat where every band is sampled twice for
+       * anti-repeat and the rock bands three times for triplanar, so a
+       * pixel of ground can cost a dozen samples before anisotropy
+       * multiplies any of them.
+       *
+       * Time for the queen's model to finish loading, which under a
+       * software rasteriser is a fair proxy for how much of the frame the
+       * shading is eating: 46 s at 4, 57 s at 8, 106 s at 16. Eight buys
+       * most of the grazing-angle win for a quarter of sixteen's cost, and
+       * a phone is bandwidth-bound in exactly the way that measurement is.
+       */
       loadBiomeTextures(
         import.meta.env.BASE_URL,
-        Math.min(16, this.renderer.capabilities.getMaxAnisotropy()),
+        Math.min(8, this.renderer.capabilities.getMaxAnisotropy()),
       ),
     ]);
     this.loading.setStatus('Raising the island…');

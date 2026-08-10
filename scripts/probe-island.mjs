@@ -37,14 +37,14 @@ const check = (name, ok, detail = '') => {
 };
 
 await page.goto(`${base}/?scene=island`, { waitUntil: 'domcontentloaded' });
-await page.waitForFunction(() => window.islandScene?.ready, null, { timeout: 60000 });
+await page.waitForFunction(() => window.islandScene?.ready, null, { timeout: 150000 });
 await page.evaluate(() => window.islandScene.setPausedForTest(true));
 
 console.log('\nTHE LOADING SCREEN (a dark curtain until the island AND the queen settle)');
 const loadWorld = await page.evaluate(() => window.islandScene.loadingStateForTest());
 check('the world readies behind the curtain', loadWorld.world === 1);
 await page.waitForFunction(
-  () => window.islandScene.loadingStateForTest().player === 1, null, { timeout: 60000 },
+  () => window.islandScene.loadingStateForTest().player === 1, null, { timeout: 150000 },
 );
 await page.waitForFunction(
   () => document.querySelector('.tm-loading-root') === null, null, { timeout: 15000 },
@@ -573,7 +573,7 @@ check('no page errors', errs.length === 0, errs.join(' | ').slice(0, 200));
 // slow SwiftShader raster must not fail the run.
 try {
 await page.reload({ waitUntil: 'domcontentloaded' });
-await page.waitForFunction(() => window.islandScene?.ready, null, { timeout: 60000 });
+await page.waitForFunction(() => window.islandScene?.ready, null, { timeout: 150000 });
 await page.waitForTimeout(1000);
 await page.screenshot({ path: '/tmp/island-summit.png', timeout: 90000 });
 await page.evaluate(() => {

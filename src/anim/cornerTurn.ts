@@ -186,6 +186,17 @@ export interface CornerTuning {
    * within reach IS progress and she may be creeping.
    */
   stallSeconds: number;
+  /**
+   * How long an ABANDONED corner keeps the scheduler benched.
+   *
+   * Giving up is only real if it lasts: `stand()` returns to 'normal', and
+   * on the very next frame the same wall answers the same probe and the
+   * same corner re-arms — a livelock that runs straight through the stall
+   * guard, measured at 898 of 900 frames spent in acquireFront against the
+   * wall of a dug pit. The bench gives the ordinary gait — whose walker can
+   * wrap onto a wall by itself — a real turn at the problem.
+   */
+  retrySeconds: number;
   /** How fast the target normal may be re-aimed by new contacts, per second. */
   aimRate: number;
 }
@@ -215,6 +226,7 @@ export const CORNER_TUNING: CornerTuning = {
   minPlanted: 4,
   gropeSeconds: 0.6,
   stallSeconds: 2,
+  retrySeconds: 2.5,
   aimRate: 4,
 };
 
@@ -377,6 +389,8 @@ export class CornerTurn {
    * foothold in reach and no exit condition that could fire.
    */
   private stallClock = 0;
+  /** Seconds the scheduler stays benched after abandoning a corner. */
+  private cooloff = 0;
 
   /** Last frame's progress marks — see the stall guard in `update`. */
   private wasAcross = 0;
@@ -748,13 +762,35 @@ export class CornerTurn {
       if (leg.planted && this.owner.get(leg.slot) === 'new') across += 1;
     }
     const turn = angleBetween(body.up, this.newUp);
-    const gaining = across > this.wasAcross || turn < this.wasTurn - 1e-4;
-    this.wasAcross = across;
-    this.wasTurn = turn;
+    /*
+     * PROGRESS IS A LEDGER, NOT A FLICKER — on both axes.
+     *
+     * Feet: the live on-new count flickers 0-1-0 forever against the wall
+     * of a dug pit — a front foot lands, is dragged off, lands again — and
+     * every flicker read as "gaining". `crossed` only ever grows, so it
+     * resets the clock once per genuine new grip.
+     *
+     * Turn: any frame where the angle merely wobbled downward by a
+     * hundredth of a degree also read as "gaining", and a stuck body
+     * wobbles both ways every frame — the clock was being fed by jitter.
+     * So the turn ledger is the BEST angle ever reached, and only beating
+     * it by a full degree counts. Jitter around a stuck angle runs out of
+     * new bests almost immediately; a real turn produces them constantly.
+     */
+    const TURN_GAIN = (1 * Math.PI) / 180;
+    const gaining = this.crossed.size > this.wasAcross || turn < this.wasTurn - TURN_GAIN;
+    this.wasAcross = this.crossed.size;
+    this.wasTurn = Math.min(this.wasTurn, turn);
+
+    if (this.cooloff > 0) this.cooloff = Math.max(0, this.cooloff - dt);
 
     /* ------------------------------------------------- not in one yet */
     if (this.state === 'normal') {
       if (!allowed || !forward) { this.hasCandidate = false; return idle; }
+      /* Benched after a stall: the same wall would re-arm the same corner
+       * on the very next frame otherwise, and the give-up would be a
+       * one-frame blink inside the same livelock. */
+      if (this.cooloff > 0) { this.hasCandidate = false; return idle; }
       /*
        * ENTER FROM A STANDING START, not from mid-stride.
        *
@@ -922,9 +958,21 @@ export class CornerTurn {
      * her back. Paused counts as fine: letting go of forward is a pause by
      * design, and a pause must not time out.
      */
-    if (!forward || !allowed || this.swinging || gaining) this.stallClock = 0;
+    /*
+     * A foot IN FLIGHT no longer counts as progress. It used to reset the
+     * clock, and a scheduler that perpetually flies a front foot at a wall
+     * it can never hold is swinging on almost every frame — so the guard
+     * built to end exactly that stall never fired. Only a pause by choice
+     * (letting go of forward) or measured gain resets it now.
+     */
+    if (!forward || !allowed || gaining) this.stallClock = 0;
     else this.stallClock += dt;
-    if (this.stallClock >= this.tune.stallSeconds) { this.stand(); return idle; }
+    if (this.stallClock >= this.tune.stallSeconds) {
+      /* Benched, not just stopped — see `retrySeconds`. */
+      this.cooloff = this.tune.retrySeconds;
+      this.stand();
+      return idle;
+    }
 
     /*
      * AND THE CORNER IS OVER WHEN NOTHING IS STANDING ON THE OLD SURFACE.
