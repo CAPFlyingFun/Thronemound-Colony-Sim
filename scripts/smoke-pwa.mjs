@@ -172,6 +172,17 @@ if (!registered.controlled) {
    * a live dig is how you lose a tunnel — and the page must offer the reload
    * instead of performing it.
    */
+  /*
+   * The page has to be BEING PLAYED for the prompt to be the right answer.
+   * An update that arrives while nobody has touched anything is taken
+   * automatically and on purpose — that is the whole of `pwaPolicy.ts` — so
+   * without a touch first this would be measuring the other branch and
+   * reporting it under the wrong name. A synthetic pointerdown on window is
+   * enough: the flag is set by a capture listener there, and dispatching at
+   * window reaches no control in the scene.
+   */
+  await page.evaluate(() => window.dispatchEvent(new Event('pointerdown')));
+
   const shown = await page.evaluate(async (base) => {
     await navigator.serviceWorker.register(`${base}sw.js?v=smoke-next`, { scope: base });
     for (let i = 0; i < 60; i += 1) {
@@ -187,6 +198,60 @@ if (!registered.controlled) {
     else ok('a newer build waits and offers a reload rather than taking over');
   }
   await page.screenshot({ path: process.env.PWA_SHOT ?? '/tmp/pwa-update.png' });
+}
+
+/* ------------------------------------------ and never in the middle of a load */
+{
+  /*
+   * THE ONE THIS WAS BUILT FOR. Reported as: open the app, turn the phone to
+   * landscape, and sometimes — after an update — it shows nothing and has to
+   * be opened again. Part of the reason was that a new build found by the
+   * eight-second check counted as "at launch" against a twenty-second window,
+   * so it reloaded the document unattended with the height field, the biome
+   * textures and the ant model all still in flight.
+   *
+   * A fresh context, because the point is the FIRST load of a build: the one
+   * with nothing in the cache, which is the one an update produces.
+   */
+  const fresh = await browser.newContext({
+    viewport: { width: 932, height: 430 }, deviceScaleFactor: 2,
+  });
+  const slow = await fresh.newPage();
+  await slow.goto(`${URL_BASE}?scene=island`, { waitUntil: 'domcontentloaded' });
+  /* Nothing can be offered before there is a worker in charge to replace. */
+  await slow.waitForFunction(() => navigator.serviceWorker.controller != null,
+    null, { timeout: 60000 });
+  await slow.evaluate(
+    (base) => navigator.serviceWorker.register(`${base}sw.js?v=smoke-hold`, { scope: base }),
+    URL_BASE,
+  );
+
+  /* Watch the two facts together for a minute: is the island still loading,
+   * and is there a banner? A banner in the left-hand column is the bug. */
+  let sawLoading = false;
+  let offeredMidLoad = false;
+  let offeredAfter = false;
+  for (let i = 0; i < 600; i += 1) {
+    const seen = await slow.evaluate(() => ({
+      loading: !window.islandScene?.playerReady,
+      banner: document.querySelector('.tm-update') != null,
+    }));
+    if (seen.loading) {
+      sawLoading = true;
+      if (seen.banner) { offeredMidLoad = true; break; }
+    } else if (seen.banner) { offeredAfter = true; break; }
+    else if (sawLoading) {
+      /* Loaded, no banner yet — give the held update its moment to land. */
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+
+  if (offeredMidLoad) fail('an update was taken mid-load — the thing that blanks the app');
+  else if (!sawLoading) console.log('  --  the island loaded too fast here to exercise the hold');
+  else if (!offeredAfter) fail('the update was held and then never offered at all');
+  else ok('an update that lands mid-load waits for the curtain, then offers itself');
+  await fresh.close();
 }
 
 await browser.close();

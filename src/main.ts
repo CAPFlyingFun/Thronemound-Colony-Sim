@@ -1,5 +1,5 @@
 import './style.css';
-import { registerServiceWorker } from './pwa';
+import { markLoaded, registerServiceWorker } from './pwa';
 
 /*
  * Offline play and the update prompt. First, so a scene that throws while
@@ -29,6 +29,25 @@ const colonySim = scene === 'density'
   || params.has('densityterrainlab');
 
 const host = document.getElementById('app');
+
+/*
+ * WHO SAYS THE APP HAS FINISHED LOADING.
+ *
+ * A waiting update is not allowed to reload the app out from under a load in
+ * progress — see `pwaPolicy.ts` for the bug that rule exists for — so
+ * something has to say when the load is over. The island says it itself, from
+ * the far side of a height field, a set of biome textures and a megabyte of
+ * ant. Every other route here is a development rig: a small deterministic
+ * room that is up as soon as its module is, with no curtain to lift and
+ * nothing worth protecting from a reload. They are marked loaded at once, so
+ * a rig can still take an update immediately and none of them can strand one.
+ */
+const island = !colonySim && ![
+  'queen', 'block', 'terrainbug', 'world', 'hex', 'dig',
+  'ant-sandbox', 'rail', 'pipes', 'sandbox', 'carry',
+].includes(scene ?? '');
+if (!island) markLoaded();
+
 if (host) {
   host.classList.add('dig-host');
   if (colonySim) {

@@ -72,6 +72,8 @@ import {
   CAP_PLANES, CELLS_Y, CELL_SIZE, MM, SAMPLES_Y, TILE_CELLS, WINDOW_CELLS,
   WINDOW_MM, WINDOW_BYTES,
 } from '../world/worldScape';
+import { guardContext } from '../render/contextGuard';
+import { markLoaded } from '../pwa';
 
 /** The island: 56 km of Kauai at 1:1000. Real metres ARE in-world mm. */
 const SPAN_MM = 56000;
@@ -1107,6 +1109,11 @@ export class IslandScene {
   private previous = performance.now();
 
   private frame = 0;
+  /** True while the GPU context is gone and the loop is stopped. */
+  private contextLost = false;
+  /** The "device dropped the 3D display" bar, once it has been raised. */
+  private gpuNotice: HTMLElement | null = null;
+  private stopContextGuard: (() => void) | null = null;
 
   private lastScrollAt = 0;
 
@@ -1209,6 +1216,7 @@ export class IslandScene {
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     host.appendChild(this.renderer.domElement);
+    this.watchContext();
 
     this.scene.background = new THREE.Color(0x9cc4e0);
     this.skyColour.copy(this.scene.background as THREE.Color);
@@ -1262,6 +1270,19 @@ export class IslandScene {
     this.load().catch((err: unknown) => {
       const why = err instanceof Error ? err.message : String(err);
       this.loading.fail(`The island failed to load — ${why}. Refresh to try again.`);
+      /*
+       * ONLY ON THE FAILING PATH. `load()` resolving is NOT the app being
+       * loaded: it resolves the moment the world is standing, and leaves the
+       * queen's model — a megabyte, and the longest fetch of the boot — still
+       * in flight behind it. Marking loaded here on success would hand a
+       * waiting update the app precisely during the download that is worst to
+       * interrupt. The success signal is where the curtain actually lifts,
+       * after the queen has settled. Failure has no such moment and needs
+       * one: an update held behind a load that has already given up is an
+       * update that never arrives, and a fresh build is exactly what a failed
+       * load most wants.
+       */
+      markLoaded();
     });
 
     (window as unknown as { islandScene?: unknown }).islandScene = this;
@@ -1387,6 +1408,9 @@ export class IslandScene {
       this.queenSettled = true;
       this.playerReady = true;
       void this.loading.finish();
+      /* The curtain is up: a waiting update may now take the app, because
+       * from here a reload costs nothing but the load it already finished. */
+      markLoaded();
     });
   }
 
@@ -4362,6 +4386,10 @@ export class IslandScene {
   /* --------------------------------------------------------------- loop */
 
   private animate = (): void => {
+    /* Nothing to draw into. `watchContext` cancels the pending frame, so
+     * this is the belt to that pair of braces — and it is what stops a
+     * restore from ever running two loops at once. */
+    if (this.contextLost) return;
     const now = performance.now();
     const dt = Math.min(0.05, (now - this.previous) / 1000);
     this.previous = now;
@@ -4403,6 +4431,69 @@ export class IslandScene {
     this.renderer.setSize(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+  }
+
+  /* --------------------------------------------------- the lost context */
+
+  /**
+   * What to do when the device takes the GPU away.
+   *
+   * It happens most on a rotate: turning the phone reallocates the drawing
+   * buffer, and a first launch after an update is doing that with an emptied
+   * cache, a megabyte of ant still arriving and terrain being built. three.js
+   * rebuilds its own state if the context returns, but says nothing either
+   * way and quietly makes `render` a no-op — so the sim keeps stepping, the
+   * HUD keeps ticking, and the screen stays black with nothing to press.
+   *
+   * A loss that heals leaves no trace but a dropped frame: no banner, because
+   * one that flashes up and away is worse than the hitch it describes. Only
+   * a loss that does not heal gets a message, and the message has the one
+   * button that can actually help.
+   */
+  private watchContext(): void {
+    this.stopContextGuard = guardContext(this.renderer.domElement, {
+      onLost: () => {
+        this.contextLost = true;
+        /* Stop the loop. Every draw from here is discarded, and simulating
+         * an invisible island is just battery. */
+        cancelAnimationFrame(this.frame);
+        this.frame = 0;
+      },
+      onRestored: () => {
+        this.contextLost = false;
+        this.clearGpuNotice();
+        /* The buffer is new and may be a different size — a rotate is the
+         * usual reason the context went in the first place. */
+        this.resize();
+        /* Without this the first frame back carries the whole outage as its
+         * dt; the clamp in `animate` would cap it at 50 ms, but she would
+         * still take a step nobody asked for. */
+        this.previous = performance.now();
+        this.animate();
+      },
+      onAbandoned: () => this.showGpuNotice(),
+    });
+  }
+
+  private showGpuNotice(): void {
+    if (this.gpuNotice) return;
+    const bar = document.createElement('div');
+    bar.className = 'tm-update tm-update--alert';
+    bar.setAttribute('role', 'alert');
+    bar.innerHTML = `
+      <span class="tm-update__text">The device dropped the 3D display.</span>
+      <button class="tm-update__go" type="button">RELOAD</button>
+    `;
+    bar.querySelector('.tm-update__go')?.addEventListener('click', () => {
+      window.location.reload();
+    });
+    document.body.appendChild(bar);
+    this.gpuNotice = bar;
+  }
+
+  private clearGpuNotice(): void {
+    this.gpuNotice?.remove();
+    this.gpuNotice = null;
   }
 
   /* -------------------------------------------------------------- probes */
@@ -4767,6 +4858,9 @@ export class IslandScene {
 
   dispose(): void {
     cancelAnimationFrame(this.frame);
+    this.stopContextGuard?.();
+    this.stopContextGuard = null;
+    this.clearGpuNotice();
     for (const name of ['gesturestart', 'gesturechange', 'gestureend']) {
       this.host.removeEventListener(name, this.refuseGesture);
     }

@@ -474,6 +474,17 @@ canvas {
   color: #16220e;
 }
 
+/*
+ * The same bar, in the colour of something being wrong: raised when the
+ * device has taken the GPU context away and not given it back. It is the
+ * only thing on a black screen, so it says what happened rather than just
+ * offering the button.
+ */
+.tm-update--alert {
+  background: rgba(58, 24, 20, 0.94);
+  color: #ffd9cf;
+}
+
 .tm-update__later {
   width: 26px;
   height: 26px;

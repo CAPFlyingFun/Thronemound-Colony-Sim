@@ -13,12 +13,16 @@
  * file would be identical on every deploy and no update would ever be found.
  */
 
+import { decideUpdate } from './pwaPolicy';
+
 declare const __BUILD_TIME__: string;
 
 /** How long after boot the update check runs, so it never fights the load. */
 const FIRST_CHECK_MS = 8_000;
 /** And how often after that, for a session left open on a phone all day. */
 const RECHECK_MS = 30 * 60_000;
+/** When to stop waiting for a scene that never reports itself loaded. */
+const LOAD_BACKSTOP_MS = 90_000;
 
 function prompt(onAccept: () => void): void {
   if (document.querySelector('.tm-update')) return;
@@ -43,17 +47,47 @@ function prompt(onAccept: () => void): void {
 let accepted = false;
 
 /**
- * At LAUNCH, updates are taken automatically — a banner says so and the
- * page reloads itself once the new worker is in charge. Nothing has been
- * played yet, so there is no tunnel to eat; making the player load the
- * game twice to get today's build was the real cost. Mid-session updates
- * keep the ask. The window is measured from registration, and a session
- * flag stops a broken update from reload-looping: the second attempt in
- * one tab falls back to the prompt.
+ * At LAUNCH, updates are taken automatically — a banner says so and the page
+ * reloads itself once the new worker is in charge. Nothing has been played
+ * yet, so there is no tunnel to eat; making the player load the game twice to
+ * get today's build was the real cost.
+ *
+ * WHAT "AT LAUNCH" MEANS IS NOT A CLOCK. It used to be, and the clock was
+ * broken: a twenty-second window from boot, against a first update check at
+ * eight seconds, meant every update the check found reloaded the app
+ * unattended — during the load, with the height field, the biome textures and
+ * the ant model all in flight. See `pwaPolicy.ts`. The question is now
+ * whether there is anything to lose, which the app answers itself through
+ * {@link markLoaded} and a first touch.
+ *
+ * A session flag still stops a broken update from reload-looping: the second
+ * automatic attempt in one tab falls back to the prompt.
  */
-const AUTO_UPDATE_WINDOW_MS = 20_000;
 const AUTO_FLAG = 'tm-auto-updated';
-let bootAt = 0;
+
+/**
+ * The app has not said it finished loading yet. It starts true and is only
+ * ever cleared, so a scene that never reports in cannot leave an update held
+ * for ever — see the backstop in {@link registerServiceWorker}.
+ */
+let loading = true;
+/** A pointer or a key has reached the page: something is being played. */
+let interacted = false;
+/** An update that installed mid-load, kept until the curtain lifts. */
+let held: ServiceWorkerRegistration | null = null;
+
+/**
+ * The app is up and drawing. Called by the scene when its load settles —
+ * whether it settled in success or in failure, because an update held behind
+ * a load that has failed is an update that never arrives.
+ */
+export function markLoaded(): void {
+  if (!loading) return;
+  loading = false;
+  const waiting = held;
+  held = null;
+  if (waiting) offer(waiting);
+}
 
 function autoBanner(): void {
   if (document.querySelector('.tm-update')) return;
@@ -73,8 +107,23 @@ export function registerServiceWorker(): void {
    */
   if (import.meta.env.DEV) return;
 
+  /*
+   * One touch is enough to mean "being played". Capture, so a scene that
+   * stops the event on its own controls does not hide it from here.
+   */
+  const touched = (): void => { interacted = true; };
+  window.addEventListener('pointerdown', touched, { once: true, capture: true });
+  window.addEventListener('keydown', touched, { once: true, capture: true });
+
   window.addEventListener('load', () => {
-    bootAt = performance.now();
+    /*
+     * The backstop. Every route is supposed to call `markLoaded`, but a scene
+     * that throws before it gets there, or one added later that never learns
+     * to, must not be able to strand an update in `held` for the life of the
+     * session. Generous, because a cold first load of the island on a phone
+     * is genuinely slow, and it only ever fires when something else is wrong.
+     */
+    window.setTimeout(markLoaded, LOAD_BACKSTOP_MS);
     const url = `${import.meta.env.BASE_URL}sw.js?v=${encodeURIComponent(__BUILD_TIME__)}`;
     void navigator.serviceWorker.register(url, { scope: import.meta.env.BASE_URL })
       .then((registration) => {
@@ -128,22 +177,31 @@ export function registerServiceWorker(): void {
 }
 
 function offer(registration: ServiceWorkerRegistration): void {
-  const atLaunch = performance.now() - bootAt < AUTO_UPDATE_WINDOW_MS;
   let looped = false;
   try {
     looped = sessionStorage.getItem(AUTO_FLAG) === '1';
   } catch { /* storage refused: treat as first time */ }
-  if (atLaunch && !looped) {
-    try {
-      sessionStorage.setItem(AUTO_FLAG, '1');
-    } catch { /* refused storage only costs the loop guard */ }
-    autoBanner();
+
+  const take = (): void => {
     accepted = true;
     registration.waiting?.postMessage('SKIP_WAITING');
-    return;
+  };
+
+  switch (decideUpdate({ loading, interacted, looped })) {
+    case 'hold':
+      /* Keep the newest one. An older held registration is the same
+       * registration object anyway, but the intent is: whatever is waiting
+       * when the curtain lifts is what gets offered. */
+      held = registration;
+      return;
+    case 'auto':
+      try {
+        sessionStorage.setItem(AUTO_FLAG, '1');
+      } catch { /* refused storage only costs the loop guard */ }
+      autoBanner();
+      take();
+      return;
+    default:
+      prompt(take);
   }
-  prompt(() => {
-    accepted = true;
-    registration.waiting?.postMessage('SKIP_WAITING');
-  });
 }
