@@ -378,6 +378,11 @@ export const HANDOFF_GRACE = 2 / 60;
 /** Where a scheduled swing is aiming, this frame. Copied out immediately. */
 const SCRATCH_AIM = new THREE.Vector3();
 
+/* Probe pose for the lean's hold-plane cap — see `step`. */
+const LEAN_PROBE: BodyPose = {
+  at: new THREE.Vector3(), up: new THREE.Vector3(), forward: new THREE.Vector3(),
+};
+
 /** A re-step's foothold on the new surface. Copied out immediately. */
 const SCRATCH_CONTACT: SurfaceContact = {
   point: new THREE.Vector3(), normal: new THREE.Vector3(),
@@ -434,13 +439,21 @@ export class LegDrive {
     this.corner = new CornerTurn(rowsFromHomes(this.legs));
   }
 
+  /** The lean the last step SETTLED ON — see the hold-plane cap in `step`. */
+  private leanShare = 0;
+
+  private readonly leanUp = new THREE.Vector3();
+
   /**
    * The corner's pre-tilt, passed through for whoever seats the body —
-   * fills `out` with the new face and returns the share. See
-   * `CornerTurn.leanToward`.
+   * fills `out` with the new face and returns the share. This is the share
+   * as CAPPED against the hold plane during `step`, not the corner's raw
+   * ask; a rotation moves homes just as surely as a translation does, and
+   * both answer to the same plane. See the cap in `step`.
    */
   cornerLean(out: THREE.Vector3): number {
-    return this.corner.leanToward(out);
+    if (this.leanShare > 0) out.copy(this.leanUp);
+    return this.leanShare;
   }
 
   /** Where each foot should be drawn this frame, for the IK. */
@@ -731,6 +744,39 @@ export class LegDrive {
         if (fits(mid)) lo = mid; else hi = mid;
       }
       allowed = lo;
+    }
+
+    /*
+     * THE LEAN OBEYS THE HOLD PLANE TOO, and this is where it learns to.
+     *
+     * The clip above keeps un-crossed leading homes on the air side of the
+     * target face — but it only ever examines TRANSLATIONS. The corner's
+     * pre-tilt turns her up in the walker afterwards, and a rotation moves
+     * those same homes without ever passing through `fits`: the exact hole
+     * through which the second front foot's home once ended up inside the
+     * wall with no foothold ever found again. So the share the scene will
+     * hand the walker is capped HERE, against the same plane, with the same
+     * homes, at the lean's own CONVERGED attitude — halved until the homes
+     * keep their brow-lift standoff, zero if even a sliver does not fit.
+     * One grip on the wall usually passes untouched; it is the pinned
+     * frames right at the plane where this bites, which is exactly when it
+     * must.
+     */
+    this.leanShare = this.corner.leanToward(this.leanUp);
+    if (this.leanShare > 0 && hold && holdLegs.length > 0) {
+      const leanFits = (share: number): boolean => {
+        LEAN_PROBE.at.copy(from);
+        LEAN_PROBE.up.copy(body.up).lerp(this.leanUp, share).normalize();
+        LEAN_PROBE.forward.copy(forward0)
+          .addScaledVector(LEAN_PROBE.up, -forward0.dot(LEAN_PROBE.up)).normalize();
+        for (const leg of holdLegs) {
+          this.homeWorld(leg, LEAN_PROBE, home);
+          if (home.sub(hold.point).dot(hold.normal) < CORNER_TUNING.browLift) return false;
+        }
+        return true;
+      };
+      while (this.leanShare > 0.02 && !leanFits(this.leanShare)) this.leanShare *= 0.5;
+      if (this.leanShare <= 0.02 && !leanFits(this.leanShare)) this.leanShare = 0;
     }
 
     body.at.copy(from).addScaledVector(shove, allowed);
