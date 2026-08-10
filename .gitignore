@@ -3,3 +3,9 @@ dist/
 *.tsbuildinfo
 .DS_Store
 *.local
+
+# Throwaway one-off probes. Real probes live in scripts/probe-*.mjs and are
+# committed; these are written, run once against the dev server, and deleted
+# in the same breath while chasing a specific bug. Ignoring them keeps a
+# half-finished investigation from ever landing in a commit.
+scratch-*.mjs
