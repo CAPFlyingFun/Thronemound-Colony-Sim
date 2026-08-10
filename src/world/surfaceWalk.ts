@@ -340,7 +340,15 @@ export class SurfaceWalker {
      * low-pass then only has residue to clean up, so it can stay light.
      * A frozen frame (dt = 0) neither moves the filter nor reads around it.
      */
-    if (dt > 0) {
+    if (dt <= 0) {
+      /*
+       * A freeze is an epoch boundary, not a long frame. The samples either
+       * side of it are NOT adjacent — contacts change while the attitude is
+       * held (digging does exactly this) — so resuming must reseed the pair
+       * rather than average today's wall with the one from before the pause.
+       */
+      this.goalLive = false;
+    } else {
       if (!this.goalLive) {
         this.goalSmooth.copy(goal);
         this.goalPrev.copy(goal);
@@ -443,7 +451,9 @@ export class SurfaceWalker {
    * where she used to be.
    */
   private pairSeat(seat: THREE.Vector3): THREE.Vector3 {
-    const far = Math.abs(this.tune.ride) * 4;
+    /* Floored at a lattice cell: `ride` may be tuned to zero, and a zero
+     * guard would call every honest step a teleport. */
+    const far = Math.max(Math.abs(this.tune.ride) * 4, this.tune.cell);
     if (this.seatHist > 0 && seat.distanceToSquared(this.seatPrev) > far * far) {
       this.seatHist = 0;
     }
@@ -508,6 +518,15 @@ export class SurfaceWalker {
     if (!hit) {
       this.gripping = false;
       this.fallSpeed = 0;
+      /*
+       * Losing the surface ends the epoch the filters were averaging over.
+       * Wherever she lands next is a NEW contact, and pairing its normal or
+       * seat with the ledge she just fell off manufactures a target that
+       * belongs to neither — the exact false-midpoint lurch the filters
+       * exist to remove.
+       */
+      this.goalLive = false;
+      this.seatHist = 0;
       return;
     }
     const normal = this.scratchC;
