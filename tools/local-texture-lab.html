@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<meta name="theme-color" content="#161411" />
+<title>Local Texture Lab</title>
+<style>
+:root{
+  --bg:#12110f;--panel:#1c1a17;--panel2:#24211d;--line:#3a342d;
+  --text:#f3eee6;--muted:#b6ab9f;--accent:#d6a96e;--good:#8ec08c;
+  --danger:#d47c6d;--radius:16px;--shadow:0 10px 30px rgba(0,0,0,.28);
+}
+*{box-sizing:border-box}
+body{
+  margin:0;background:linear-gradient(180deg,#11100e,#171410 45%,#11100e);
+  color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  min-height:100vh;
+}
+button,input,select{font:inherit}
+button{
+  border:1px solid var(--line);background:#2a251f;color:var(--text);
+  border-radius:11px;padding:10px 13px;cursor:pointer;
+}
+button.primary{background:#7a5834;border-color:#9a7248}
+button.good{background:#36553a;border-color:#547558}
+button.danger{background:#5a302b;border-color:#7e443d}
+button:active{transform:translateY(1px)}
+.app{max-width:1380px;margin:auto;padding:12px 12px 28px}
+.topbar{
+  display:flex;gap:10px;align-items:center;justify-content:space-between;
+  position:sticky;top:0;z-index:20;padding:10px 0;background:rgba(18,17,15,.92);
+  backdrop-filter:blur(12px);
+}
+.brand h1{font-size:20px;margin:0}.brand small{color:var(--muted)}
+.tabs{display:flex;gap:7px}
+.tab.active{background:#7a5834;border-color:#a67a4c}
+.workspace{
+  display:grid;grid-template-columns:minmax(0,1.35fr) minmax(330px,.65fr);
+  gap:14px;align-items:start;
+}
+.panel{
+  background:rgba(28,26,23,.96);border:1px solid var(--line);
+  border-radius:var(--radius);box-shadow:var(--shadow);
+}
+.previewPanel{padding:12px;position:sticky;top:72px}
+.canvasWrap{
+  background:#0d0c0b;border:1px solid #312c26;border-radius:13px;overflow:hidden;
+  aspect-ratio:1/1;display:grid;place-items:center;
+}
+#preview{width:100%;height:100%;display:block;image-rendering:auto}
+.previewTabs{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}
+.previewTabs button{padding:8px 10px;font-size:13px}
+.previewTabs button.active{background:#6b4f31}
+.status{color:var(--muted);font-size:12px;margin-top:8px;min-height:18px}
+.controls{display:flex;flex-direction:column;gap:12px}
+.section{overflow:hidden}
+.section summary{
+  list-style:none;padding:14px 15px;cursor:pointer;font-weight:700;
+  background:#201d19;border-bottom:1px solid transparent;
+}
+.section[open] summary{border-bottom-color:var(--line)}
+.section summary::-webkit-details-marker{display:none}
+.section summary:before{content:"▸";display:inline-block;margin-right:8px;transition:.2s}
+.section[open] summary:before{transform:rotate(90deg)}
+.body{padding:14px 15px}
+.row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin:10px 0}
+.row label{font-size:14px}
+.row .sub{display:block;color:var(--muted);font-size:11px;margin-top:2px}
+.rangeRow{display:grid;grid-template-columns:1fr 72px;gap:10px;align-items:center}
+input[type=range]{width:100%;accent-color:#c7975d}
+input[type=number],select,input[type=text]{
+  width:100%;background:#151310;border:1px solid var(--line);color:var(--text);
+  border-radius:9px;padding:9px;
+}
+input[type=color]{width:48px;height:36px;padding:2px;background:#151310;border:1px solid var(--line);border-radius:9px}
+.check{display:flex;align-items:center;gap:9px}
+.hr{height:1px;background:var(--line);margin:13px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px}
+.layer{
+  border:1px solid var(--line);border-radius:12px;padding:10px;margin:9px 0;background:#191713
+}
+.layerHead{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.layerHead strong{font-size:14px}
+.help{
+  background:#171511;border:1px dashed #4b443b;border-radius:11px;
+  padding:10px;color:var(--muted);font-size:12px;line-height:1.45
+}
+.fileBox{
+  border:1px dashed #5a5146;border-radius:12px;padding:14px;text-align:center;background:#171511
+}
+.hidden{display:none!important}
+.pill{font-size:11px;color:#dac4aa;background:#352b21;border:1px solid #554534;border-radius:999px;padding:4px 8px}
+footer{color:#8f857a;text-align:center;font-size:11px;padding:18px}
+@media(max-width:900px){
+  .workspace{grid-template-columns:1fr}
+  .previewPanel{position:relative;top:auto}
+}
+@media(max-width:520px){
+  .app{padding:8px 8px 24px}.topbar{align-items:flex-start}
+  .brand small{display:none}.tabs button{padding:8px 10px}
+  .grid3{grid-template-columns:1fr}.grid2{grid-template-columns:1fr 1fr}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="brand">
+      <h1>🪨 Local Texture Lab</h1>
+      <small>Offline PBR + procedural texture maker</small>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-mode="convert">Convert Image</button>
+      <button class="tab" data-mode="create">Create Texture</button>
+    </div>
+  </div>
+
+  <div class="workspace">
+    <div class="panel previewPanel">
+      <div class="canvasWrap"><canvas id="preview" width="768" height="768"></canvas></div>
+      <div class="previewTabs" id="previewTabs">
+        <button class="active" data-view="base">Base</button>
+        <button data-view="height">Height</button>
+        <button data-view="normal">Normal</button>
+        <button data-view="rough">Roughness</button>
+        <button data-view="ao">AO</button>
+        <button data-view="tiles">3×3 Tiles</button>
+        <button data-view="relief">Relief Preview</button>
+      </div>
+      <div class="status" id="status">Ready. Import an image or switch to Create Texture.</div>
+    </div>
+
+    <div class="controls">
+      <details class="panel section" open>
+        <summary>Source / Preset</summary>
+        <div class="body">
+          <div id="convertSource">
+            <div class="fileBox">
+              <div style="font-size:28px">🖼️</div>
+              <div style="margin:5px 0 10px">Choose a texture image</div>
+              <input id="imageInput" type="file" accept="image/*">
+            </div>
+            <div class="row">
+              <label>Make edges tile smoothly<span class="sub">Cross-fades opposite edges before map generation.</span></label>
+              <input id="seamless" type="checkbox" checked>
+            </div>
+            <div class="row">
+              <label>Tile blend width<span class="sub">Higher values soften a wider border.</span></label>
+              <div class="rangeRow"><input id="tileBlend" type="range" min="0" max="30" value="10"><input id="tileBlendN" type="number" min="0" max="30" value="10"></div>
+            </div>
+          </div>
+
+          <div id="createSource" class="hidden">
+            <div class="grid2">
+              <button class="preset primary" data-preset="rocky">🪨 Rocky Dirt</button>
+              <button class="preset" data-preset="sand">🏖️ Sand</button>
+              <button class="preset" data-preset="mud">🌧️ Mud</button>
+              <button class="preset" data-preset="cliff">⛰️ Cliff Rock</button>
+            </div>
+            <div class="row">
+              <label>Random Seed<span class="sub">Same seed = same texture.</span></label>
+              <div class="rangeRow"><input id="seed" type="range" min="1" max="9999" value="3187"><input id="seedN" type="number" min="1" max="9999" value="3187"></div>
+            </div>
+            <button id="randomSeed">🎲 New Seed</button>
+          </div>
+
+          <div class="hr"></div>
+          <div class="row">
+            <label>Working Resolution<span class="sub">512 is fast on iPhone. 1024 has more detail.</span></label>
+            <select id="resolution">
+              <option value="512" selected>512 × 512</option>
+              <option value="768">768 × 768</option>
+              <option value="1024">1024 × 1024</option>
+              <option value="1536">1536 × 1536</option>
+            </select>
+          </div>
+        </div>
+      </details>
+
+      <details class="panel section" id="proceduralSection">
+        <summary>Procedural Layers</summary>
+        <div class="body">
+          <div class="help">These are the friendly “nodes.” Each layer contributes shapes to the final height field. All procedural layers wrap perfectly, so generated textures are seamless by design.</div>
+
+          <div class="layer">
+            <div class="layerHead"><strong>Layer 1 · Base Terrain</strong><span class="pill">FBM</span></div>
+            <div class="row"><label>Large Shape Size<span class="sub">Lower = broader land forms.</span></label>
+              <div class="rangeRow"><input id="baseScale" type="range" min="2" max="20" step=".5" value="5"><input id="baseScaleN" type="number" min="2" max="20" step=".5" value="5"></div>
+            </div>
+            <div class="row"><label>Strength</label>
+              <div class="rangeRow"><input id="baseStrength" type="range" min="0" max="100" value="65"><input id="baseStrengthN" type="number" min="0" max="100" value="65"></div>
+            </div>
+          </div>
+
+          <div class="layer">
+            <div class="layerHead"><strong>Layer 2 · Rocks / Ridges</strong><span class="pill">Ridged</span></div>
+            <div class="row"><label>Rock Size</label>
+              <div class="rangeRow"><input id="rockScale" type="range" min="3" max="40" step=".5" value="11"><input id="rockScaleN" type="number" min="3" max="40" step=".5" value="11"></div>
+            </div>
+            <div class="row"><label>Rock Amount</label>
+              <div class="rangeRow"><input id="rockStrength" type="range" min="0" max="100" value="48"><input id="rockStrengthN" type="number" min="0" max="100" value="48"></div>
+            </div>
+          </div>
+
+          <div class="layer">
+            <div class="layerHead"><strong>Layer 3 · Fine Detail</strong><span class="pill">Noise</span></div>
+            <div class="row"><label>Tiny Surface Detail</label>
+              <div class="rangeRow"><input id="detailScale" type="range" min="10" max="100" value="42"><input id="detailScaleN" type="number" min="10" max="100" value="42"></div>
+            </div>
+            <div class="row"><label>Detail Strength</label>
+              <div class="rangeRow"><input id="detailStrength" type="range" min="0" max="100" value="24"><input id="detailStrengthN" type="number" min="0" max="100" value="24"></div>
+            </div>
+          </div>
+
+          <div class="row"><label>Low Color</label><input id="lowColor" type="color" value="#5b4634"></div>
+          <div class="row"><label>Mid Color</label><input id="midColor" type="color" value="#89705a"></div>
+          <div class="row"><label>High / Rock Color</label><input id="highColor" type="color" value="#a69b8d"></div>
+        </div>
+      </details>
+
+      <details class="panel section" open>
+        <summary>Height / Shape</summary>
+        <div class="body">
+          <div id="imageHeightControls">
+            <div class="row"><label>Height Contrast<span class="sub">Separates raised and low areas.</span></label>
+              <div class="rangeRow"><input id="heightContrast" type="range" min="20" max="250" value="125"><input id="heightContrastN" type="number" min="20" max="250" value="125"></div>
+            </div>
+            <div class="row"><label>Large Form Weight<span class="sub">Emphasizes broad shapes instead of pixel-level brightness.</span></label>
+              <div class="rangeRow"><input id="largeForm" type="range" min="0" max="100" value="62"><input id="largeFormN" type="number" min="0" max="100" value="62"></div>
+            </div>
+            <div class="row"><label>Fine Detail</label>
+              <div class="rangeRow"><input id="imageDetail" type="range" min="0" max="100" value="35"><input id="imageDetailN" type="number" min="0" max="100" value="35"></div>
+            </div>
+            <div class="row"><label>Invert Height<span class="sub">Useful when dark objects should be raised.</span></label><input id="invertHeight" type="checkbox"></div>
+          </div>
+          <div class="row"><label>Height Levels · Low</label>
+            <div class="rangeRow"><input id="heightLow" type="range" min="0" max="100" value="4"><input id="heightLowN" type="number" min="0" max="100" value="4"></div>
+          </div>
+          <div class="row"><label>Height Levels · High</label>
+            <div class="rangeRow"><input id="heightHigh" type="range" min="1" max="100" value="96"><input id="heightHighN" type="number" min="1" max="100" value="96"></div>
+          </div>
+        </div>
+      </details>
+
+      <details class="panel section">
+        <summary>PBR Maps</summary>
+        <div class="body">
+          <div class="row"><label>Ground Bumpiness<span class="sub">Normal map strength.</span></label>
+            <div class="rangeRow"><input id="normalStrength" type="range" min="10" max="400" value="125"><input id="normalStrengthN" type="number" min="10" max="400" value="125"></div>
+          </div>
+          <div class="row"><label>Godot / OpenGL Normal (+Y)</label><input id="normalY" type="checkbox" checked></div>
+          <div class="row"><label>Surface Roughness</label>
+            <div class="rangeRow"><input id="roughness" type="range" min="0" max="100" value="78"><input id="roughnessN" type="number" min="0" max="100" value="78"></div>
+          </div>
+          <div class="row"><label>Roughness Variation</label>
+            <div class="rangeRow"><input id="roughVariation" type="range" min="0" max="100" value="22"><input id="roughVariationN" type="number" min="0" max="100" value="22"></div>
+          </div>
+          <div class="row"><label>Crevice Darkness<span class="sub">Ambient occlusion strength.</span></label>
+            <div class="rangeRow"><input id="aoStrength" type="range" min="0" max="100" value="55"><input id="aoStrengthN" type="number" min="0" max="100" value="55"></div>
+          </div>
+          <div class="row"><label>AO Radius</label>
+            <div class="rangeRow"><input id="aoRadius" type="range" min="1" max="12" value="4"><input id="aoRadiusN" type="number" min="1" max="12" value="4"></div>
+          </div>
+        </div>
+      </details>
+
+      <details class="panel section">
+        <summary>Export / Project</summary>
+        <div class="body">
+          <div class="grid2">
+            <button class="good export" data-map="base">Base PNG</button>
+            <button class="export" data-map="height">Height PNG</button>
+            <button class="export" data-map="normal">Normal PNG</button>
+            <button class="export" data-map="rough">Roughness PNG</button>
+            <button class="export" data-map="ao">AO PNG</button>
+            <button id="exportAll" class="primary">Export All</button>
+          </div>
+          <div class="hr"></div>
+          <div class="grid2">
+            <button id="saveProject">💾 Save Project</button>
+            <button id="loadProjectBtn">📂 Load Project</button>
+          </div>
+          <input id="loadProject" class="hidden" type="file" accept=".json,application/json">
+          <div class="help" style="margin-top:10px">Everything runs locally in your browser. No image or project data is uploaded anywhere.</div>
+        </div>
+      </details>
+    </div>
+  </div>
+  <footer>Local Texture Lab v0.1 · single-file offline prototype</footer>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+const $ = id => document.getElementById(id);
+const clamp=(v,a=0,b=1)=>Math.max(a,Math.min(b,v));
+const lerp=(a,b,t)=>a+(b-a)*t;
+const smooth=t=>t*t*(3-2*t);
+
+const state = {
+  mode:'convert', view:'base', sourceImage:null, sourceName:'texture',
+  maps:{base:null,height:null,normal:null,rough:null,ao:null},
+  busy:false, renderToken:0
+};
+
+const ids=[
+'seed','baseScale','baseStrength','rockScale','rockStrength','detailScale','detailStrength',
+'tileBlend','heightContrast','largeForm','imageDetail','heightLow','heightHigh',
+'normalStrength','roughness','roughVariation','aoStrength','aoRadius'
+];
+for(const id of ids){
+  const r=$(id), n=$(id+'N');
+  if(!r||!n) continue;
+  r.addEventListener('input',()=>{n.value=r.value;scheduleRender()});
+  n.addEventListener('input',()=>{r.value=n.value;scheduleRender()});
+}
+['seamless','invertHeight','normalY','resolution','lowColor','midColor','highColor'].forEach(id=>{
+  $(id)?.addEventListener('input',scheduleRender);
+});
+
+function setStatus(msg){$('status').textContent=msg}
+
+function hash2(x,y,seed){
+  let n=(x*374761393 + y*668265263 + seed*69069)>>>0;
+  n=(n^(n>>13))*1274126177>>>0;
+  return ((n^(n>>16))>>>0)/4294967295;
+}
+function periodicValueNoise(x,y,period,seed){
+  const p=Math.max(2,Math.floor(period));
+  const x0=Math.floor(x), y0=Math.floor(y);
+  const fx=x-x0, fy=y-y0, sx=smooth(fx), sy=smooth(fy);
+  const wrap=v=>((v%p)+p)%p;
+  const a=hash2(wrap(x0),wrap(y0),seed);
+  const b=hash2(wrap(x0+1),wrap(y0),seed);
+  const c=hash2(wrap(x0),wrap(y0+1),seed);
+  const d=hash2(wrap(x0+1),wrap(y0+1),seed);
+  return lerp(lerp(a,b,sx),lerp(c,d,sx),sy);
+}
+function fbm(u,v,scale,seed,octaves=5){
+  let value=0, amp=.55, sum=0;
+  for(let o=0;o<octaves;o++){
+    const period=Math.max(2,Math.round(scale*Math.pow(2,o)));
+    value += periodicValueNoise(u*period,v*period,period,seed+o*131)*amp;
+    sum+=amp;amp*=.5;
+  }
+  return value/sum;
+}
+function ridged(u,v,scale,seed){
+  const n=fbm(u,v,scale,seed,4);
+  return 1-Math.abs(n*2-1);
+}
+function hexToRgb(hex){
+  const n=parseInt(hex.slice(1),16);
+  return [(n>>16)&255,(n>>8)&255,n&255];
+}
+function mixColor(a,b,t){return [lerp(a[0],b[0],t),lerp(a[1],b[1],t),lerp(a[2],b[2],t)]}
+
+function canvasOf(size){
+  const c=document.createElement('canvas'); c.width=c.height=size; return c;
+}
+function imageDataToCanvas(imgData){
+  const c=canvasOf(imgData.width); c.getContext('2d').putImageData(imgData,0,0); return c;
+}
+function copyCanvas(src){
+  const c=canvasOf(src.width); c.getContext('2d').drawImage(src,0,0); return c;
+}
+function makeSeamless(src,percent){
+  if(percent<=0) return copyCanvas(src);
+  const w=src.width,h=src.height, ctx=src.getContext('2d',{willReadFrequently:true});
+  const data=ctx.getImageData(0,0,w,h), out=new ImageData(new Uint8ClampedArray(data.data),w,h);
+  const p=data.data, q=out.data;
+  const bx=Math.max(1,Math.floor(w*percent/100)), by=Math.max(1,Math.floor(h*percent/100));
+  function idx(x,y){return (y*w+x)*4}
+  // Symmetric edge averaging guarantees matching edge neighborhoods.
+  for(let y=0;y<h;y++){
+    for(let x=0;x<bx;x++){
+      const t=(bx-x)/bx*.5;
+      const xr=w-1-x, i=idx(x,y), j=idx(xr,y);
+      for(let k=0;k<3;k++){
+        const avg=(p[i+k]+p[j+k])*.5;
+        q[i+k]=lerp(p[i+k],avg,t*2); q[j+k]=lerp(p[j+k],avg,t*2);
+      }
+    }
+  }
+  const temp=new Uint8ClampedArray(q);
+  for(let y=0;y<by;y++){
+    const t=(by-y)/by*.5, yr=h-1-y;
+    for(let x=0;x<w;x++){
+      const i=idx(x,y),j=idx(x,yr);
+      for(let k=0;k<3;k++){
+        const avg=(temp[i+k]+temp[j+k])*.5;
+        q[i+k]=lerp(temp[i+k],avg,t*2); q[j+k]=lerp(temp[j+k],avg,t*2);
+      }
+    }
+  }
+  for(let i=3;i<q.length;i+=4)q[i]=255;
+  return imageDataToCanvas(out);
+}
+function resampleImage(img,size){
+  const c=canvasOf(size),ctx=c.getContext('2d');
+  ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
+  const sw=img.naturalWidth||img.width, sh=img.naturalHeight||img.height;
+  const s=Math.max(size/sw,size/sh), dw=sw*s, dh=sh*s;
+  ctx.drawImage(img,(size-dw)/2,(size-dh)/2,dw,dh);
+  return c;
+}
+function boxBlurGray(gray,w,h,radius){
+  if(radius<=0)return new Float32Array(gray);
+  const tmp=new Float32Array(w*h), out=new Float32Array(w*h), r=Math.max(1,Math.floor(radius));
+  for(let y=0;y<h;y++){
+    let sum=0;
+    for(let k=-r;k<=r;k++)sum+=gray[y*w+((k+w)%w)];
+    for(let x=0;x<w;x++){
+      tmp[y*w+x]=sum/(r*2+1);
+      sum-=gray[y*w+((x-r+w)%w)];
+      sum+=gray[y*w+((x+r+1)%w)];
+    }
+  }
+  for(let x=0;x<w;x++){
+    let sum=0;
+    for(let k=-r;k<=r;k++)sum+=tmp[((k+h)%h)*w+x];
+    for(let y=0;y<h;y++){
+      out[y*w+x]=sum/(r*2+1);
+      sum-=tmp[((y-r+h)%h)*w+x];
+      sum+=tmp[((y+r+1)%h)*w+x];
+    }
+  }
+  return out;
+}
+function normalizeLevels(arr,lowPct,highPct){
+  const low=lowPct/100, high=Math.max(low+.001,highPct/100);
+  const out=new Float32Array(arr.length);
+  for(let i=0;i<arr.length;i++) out[i]=clamp((arr[i]-low)/(high-low));
+  return out;
+}
+function generateFromImage(base){
+  const w=base.width,h=base.height,ctx=base.getContext('2d',{willReadFrequently:true});
+  const d=ctx.getImageData(0,0,w,h).data, lum=new Float32Array(w*h);
+  for(let i=0,j=0;i<d.length;i+=4,j++) lum[j]=(d[i]*.2126+d[i+1]*.7152+d[i+2]*.0722)/255;
+  const blurRadius=Math.max(2,Math.round(w/128));
+  const broad=boxBlurGray(lum,w,h,blurRadius);
+  const lf=+$('largeForm').value/100, det=+$('imageDetail').value/100;
+  const contrast=+$('heightContrast').value/100;
+  let out=new Float32Array(w*h);
+  for(let i=0;i<out.length;i++){
+    const high=lum[i]-broad[i];
+    let v=lerp(lum[i],broad[i],lf*.72)+high*det*1.3;
+    v=(v-.5)*contrast+.5;
+    if($('invertHeight').checked)v=1-v;
+    out[i]=clamp(v);
+  }
+  return normalizeLevels(out,+$('heightLow').value,+$('heightHigh').value);
+}
+function generateProcedural(size){
+  const seed=+$('seed').value, bs=+$('baseScale').value, bstr=+$('baseStrength').value/100;
+  const rs=+$('rockScale').value,rstr=+$('rockStrength').value/100;
+  const ds=+$('detailScale').value,dstr=+$('detailStrength').value/100;
+  const height=new Float32Array(size*size);
+  for(let y=0;y<size;y++){
+    const v=y/size;
+    for(let x=0;x<size;x++){
+      const u=x/size;
+      const base=fbm(u,v,bs,seed,5);
+      const rock=Math.pow(ridged(u,v,rs,seed+500),2.15);
+      const detail=fbm(u,v,ds,seed+1200,3);
+      let h=.5 + (base-.5)*bstr*.95 + (rock-.5)*rstr*.55 + (detail-.5)*dstr*.28;
+      height[y*size+x]=clamp(h);
+    }
+  }
+  const leveled=normalizeLevels(height,+$('heightLow').value,+$('heightHigh').value);
+  const low=hexToRgb($('lowColor').value),mid=hexToRgb($('midColor').value),high=hexToRgb($('highColor').value);
+  const baseCanvas=canvasOf(size), id=baseCanvas.getContext('2d').createImageData(size,size);
+  for(let i=0;i<leveled.length;i++){
+    const h=leveled[i];let c;
+    if(h<.55)c=mixColor(low,mid,h/.55); else c=mixColor(mid,high,(h-.55)/.45);
+    const micro=(height[i]-.5)*18;
+    const j=i*4; id.data[j]=clamp(c[0]+micro,0,255);id.data[j+1]=clamp(c[1]+micro,0,255);id.data[j+2]=clamp(c[2]+micro,0,255);id.data[j+3]=255;
+  }
+  baseCanvas.getContext('2d').putImageData(id,0,0);
+  return {height:leveled,base:baseCanvas};
+}
+function grayCanvas(arr,size){
+  const c=canvasOf(size),ctx=c.getContext('2d'),id=ctx.createImageData(size,size);
+  for(let i=0;i<arr.length;i++){const v=Math.round(clamp(arr[i])*255),j=i*4;id.data[j]=id.data[j+1]=id.data[j+2]=v;id.data[j+3]=255}
+  ctx.putImageData(id,0,0);return c;
+}
+function normalCanvas(height,size){
+  const c=canvasOf(size),ctx=c.getContext('2d'),id=ctx.createImageData(size,size);
+  const strength=+$('normalStrength').value/100;
+  const openGL=$('normalY').checked;
+  const at=(x,y)=>height[((y+size)%size)*size+((x+size)%size)];
+  for(let y=0;y<size;y++)for(let x=0;x<size;x++){
+    const dx=(at(x+1,y)-at(x-1,y))*strength*2.2;
+    const dy=(at(x,y+1)-at(x,y-1))*strength*2.2;
+    let nx=-dx, ny=openGL?-dy:dy, nz=1;
+    const len=Math.hypot(nx,ny,nz)||1; nx/=len;ny/=len;nz/=len;
+    const j=(y*size+x)*4;
+    id.data[j]=(nx*.5+.5)*255;id.data[j+1]=(ny*.5+.5)*255;id.data[j+2]=(nz*.5+.5)*255;id.data[j+3]=255;
+  }
+  ctx.putImageData(id,0,0);return c;
+}
+function roughCanvas(height,size){
+  const avg=+$('roughness').value/100, variation=+$('roughVariation').value/100;
+  const c=canvasOf(size),ctx=c.getContext('2d'),id=ctx.createImageData(size,size);
+  for(let i=0;i<height.length;i++){
+    const v=clamp(avg+(height[i]-.5)*variation*.55);
+    const b=Math.round(v*255),j=i*4;id.data[j]=id.data[j+1]=id.data[j+2]=b;id.data[j+3]=255;
+  }
+  ctx.putImageData(id,0,0);return c;
+}
+function aoCanvas(height,size){
+  const radius=+$('aoRadius').value, strength=+$('aoStrength').value/100;
+  const blur=boxBlurGray(height,size,size,radius);
+  const c=canvasOf(size),ctx=c.getContext('2d'),id=ctx.createImageData(size,size);
+  for(let i=0;i<height.length;i++){
+    const cavity=Math.max(0,blur[i]-height[i]);
+    const ao=clamp(1-cavity*strength*5.5);
+    const b=Math.round(ao*255),j=i*4;id.data[j]=id.data[j+1]=id.data[j+2]=b;id.data[j+3]=255;
+  }
+  ctx.putImageData(id,0,0);return c;
+}
+function reliefCanvas(base,height,size){
+  const c=canvasOf(size),ctx=c.getContext('2d'),id=ctx.createImageData(size,size);
+  const bd=base.getContext('2d',{willReadFrequently:true}).getImageData(0,0,size,size).data;
+  const at=(x,y)=>height[((y+size)%size)*size+((x+size)%size)];
+  const lx=-.45,ly=-.55,lz=.7;
+  for(let y=0;y<size;y++)for(let x=0;x<size;x++){
+    const dx=(at(x+1,y)-at(x-1,y))*3,dy=(at(x,y+1)-at(x,y-1))*3;
+    let nx=-dx,ny=-dy,nz=1,l=Math.hypot(nx,ny,nz);nx/=l;ny/=l;nz/=l;
+    const light=clamp((nx*lx+ny*ly+nz*lz)*.72+.42,.18,1.2);
+    const j=(y*size+x)*4;
+    id.data[j]=clamp(bd[j]*light,0,255);id.data[j+1]=clamp(bd[j+1]*light,0,255);id.data[j+2]=clamp(bd[j+2]*light,0,255);id.data[j+3]=255;
+  }
+  ctx.putImageData(id,0,0);return c;
+}
+function tileCanvas(src){
+  const c=canvasOf(src.width),ctx=c.getContext('2d');
+  const s=src.width/3;
+  for(let y=0;y<3;y++)for(let x=0;x<3;x++)ctx.drawImage(src,x*s,y*s,s,s);
+  return c;
+}
+async function render(){
+  if(state.busy)return;
+  const token=++state.renderToken;state.busy=true;
+  try{
+    const size=+$('resolution').value;
+    setStatus('Rendering…');
+    await new Promise(r=>setTimeout(r,0));
+    let base,height;
+    if(state.mode==='convert'){
+      if(!state.sourceImage){
+        drawPlaceholder();setStatus('Choose an image to begin.');return;
+      }
+      base=resampleImage(state.sourceImage,size);
+      if($('seamless').checked)base=makeSeamless(base,+$('tileBlend').value);
+      height=generateFromImage(base);
+    }else{
+      const g=generateProcedural(size);base=g.base;height=g.height;
+    }
+    if(token!==state.renderToken)return;
+    const h=grayCanvas(height,size),n=normalCanvas(height,size),r=roughCanvas(height,size),ao=aoCanvas(height,size);
+    state.maps={base,height:h,normal:n,rough:r,ao};
+    state.heightArray=height;state.relief=reliefCanvas(base,height,size);
+    updatePreview();
+    setStatus(`${size}×${size} rendered · ${state.mode==='create'?'procedural texture is seamless':'check 3×3 Tiles for seams'}`);
+  }catch(err){
+    console.error(err);setStatus('Render error: '+err.message);
+  }finally{state.busy=false}
+}
+let timer=null;
+function scheduleRender(){clearTimeout(timer);timer=setTimeout(render,120)}
+function drawPlaceholder(){
+  const c=$('preview'),ctx=c.getContext('2d');ctx.clearRect(0,0,c.width,c.height);
+  const g=ctx.createLinearGradient(0,0,c.width,c.height);g.addColorStop(0,'#24211d');g.addColorStop(1,'#12110f');ctx.fillStyle=g;ctx.fillRect(0,0,c.width,c.height);
+  ctx.fillStyle='#c5b8aa';ctx.textAlign='center';ctx.font='600 24px -apple-system';ctx.fillText('Texture preview',c.width/2,c.height/2-8);
+  ctx.fillStyle='#8d8378';ctx.font='15px -apple-system';ctx.fillText('Import an image or create one procedurally',c.width/2,c.height/2+24);
+}
+function updatePreview(){
+  const src= state.view==='tiles' ? (state.maps.base&&tileCanvas(state.maps.base))
+    : state.view==='relief' ? state.relief : state.maps[state.view];
+  if(!src){drawPlaceholder();return}
+  const c=$('preview'),ctx=c.getContext('2d');ctx.clearRect(0,0,c.width,c.height);
+  ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
+  ctx.drawImage(src,0,0,c.width,c.height);
+}
+document.querySelectorAll('#previewTabs button').forEach(b=>b.addEventListener('click',()=>{
+  document.querySelectorAll('#previewTabs button').forEach(x=>x.classList.remove('active'));b.classList.add('active');
+  state.view=b.dataset.view;updatePreview();
+}));
+document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');
+  state.mode=b.dataset.mode;
+  $('convertSource').classList.toggle('hidden',state.mode!=='convert');
+  $('createSource').classList.toggle('hidden',state.mode!=='create');
+  $('proceduralSection').classList.toggle('hidden',state.mode!=='create');
+  $('imageHeightControls').classList.toggle('hidden',state.mode!=='convert');
+  scheduleRender();
+}));
+$('proceduralSection').classList.add('hidden');
+
+$('imageInput').addEventListener('change',e=>{
+  const f=e.target.files?.[0];if(!f)return;
+  state.sourceName=f.name.replace(/\.[^.]+$/,'')||'texture';
+  const url=URL.createObjectURL(f), img=new Image();
+  img.onload=()=>{state.sourceImage=img;URL.revokeObjectURL(url);render()};
+  img.onerror=()=>setStatus('Could not read that image.');
+  img.src=url;
+});
+
+const presets={
+ rocky:{baseScale:5,baseStrength:65,rockScale:11,rockStrength:48,detailScale:42,detailStrength:24,lowColor:'#5b4634',midColor:'#89705a',highColor:'#a69b8d',roughness:78,aoStrength:55},
+ sand:{baseScale:4,baseStrength:38,rockScale:24,rockStrength:10,detailScale:58,detailStrength:26,lowColor:'#8c6c45',midColor:'#c5a16d',highColor:'#e2c99b',roughness:72,aoStrength:30},
+ mud:{baseScale:6,baseStrength:52,rockScale:15,rockStrength:20,detailScale:35,detailStrength:15,lowColor:'#342a22',midColor:'#5f4c3a',highColor:'#88715a',roughness:60,aoStrength:62},
+ cliff:{baseScale:3.5,baseStrength:78,rockScale:7,rockStrength:72,detailScale:48,detailStrength:30,lowColor:'#3e3b37',midColor:'#77736c',highColor:'#b2aea6',roughness:86,aoStrength:70}
+};
+document.querySelectorAll('.preset').forEach(b=>b.addEventListener('click',()=>{
+  const p=presets[b.dataset.preset];
+  for(const [k,v] of Object.entries(p)){
+    const el=$(k);if(!el)continue;el.value=v;if($(k+'N'))$(k+'N').value=v;
+  }
+  render();
+}));
+$('randomSeed').addEventListener('click',()=>{$('seed').value=$('seedN').value=1+Math.floor(Math.random()*9999);render()});
+
+function downloadCanvas(canvas,name){
+  canvas.toBlob(blob=>{
+    if(!blob)return;
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1500);
+  },'image/png');
+}
+document.querySelectorAll('.export').forEach(b=>b.addEventListener('click',()=>{
+  const map=b.dataset.map,c=state.maps[map];if(!c)return setStatus('Nothing to export yet.');
+  downloadCanvas(c,`${state.sourceName}_${map}.png`);
+}));
+function crc32(bytes){
+  let table=crc32._table;
+  if(!table){
+    table=new Uint32Array(256);
+    for(let n=0;n<256;n++){
+      let c=n;
+      for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);
+      table[n]=c>>>0;
+    }
+    crc32._table=table;
+  }
+  let crc=0xFFFFFFFF;
+  for(let i=0;i<bytes.length;i++) crc=table[(crc^bytes[i])&0xFF]^(crc>>>8);
+  return (crc^0xFFFFFFFF)>>>0;
+}
+function u16(v){return new Uint8Array([v&255,(v>>>8)&255])}
+function u32(v){return new Uint8Array([v&255,(v>>>8)&255,(v>>>16)&255,(v>>>24)&255])}
+function concatBytes(parts){
+  const len=parts.reduce((n,p)=>n+p.length,0), out=new Uint8Array(len);
+  let off=0; for(const p of parts){out.set(p,off);off+=p.length}
+  return out;
+}
+function dosDateTime(date=new Date()){
+  const year=Math.max(1980,date.getFullYear());
+  const time=((date.getHours()&31)<<11)|((date.getMinutes()&63)<<5)|((Math.floor(date.getSeconds()/2))&31);
+  const day=((year-1980)<<9)|((date.getMonth()+1)<<5)|date.getDate();
+  return {time,day};
+}
+async function canvasBytes(canvas){
+  const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));
+  if(!blob)throw new Error('Could not encode PNG.');
+  return new Uint8Array(await blob.arrayBuffer());
+}
+function buildStoredZip(files){
+  const enc=new TextEncoder(), localParts=[], centralParts=[];
+  let offset=0;
+  const dt=dosDateTime();
+  for(const file of files){
+    const name=enc.encode(file.name), data=file.data, crc=crc32(data);
+    const local=concatBytes([
+      u32(0x04034b50),u16(20),u16(0),u16(0),u16(dt.time),u16(dt.day),
+      u32(crc),u32(data.length),u32(data.length),u16(name.length),u16(0),name,data
+    ]);
+    localParts.push(local);
+    const central=concatBytes([
+      u32(0x02014b50),u16(20),u16(20),u16(0),u16(0),u16(dt.time),u16(dt.day),
+      u32(crc),u32(data.length),u32(data.length),u16(name.length),u16(0),u16(0),
+      u16(0),u16(0),u32(0),u32(offset),name
+    ]);
+    centralParts.push(central);
+    offset+=local.length;
+  }
+  const central=concatBytes(centralParts), locals=concatBytes(localParts);
+  const end=concatBytes([
+    u32(0x06054b50),u16(0),u16(0),u16(files.length),u16(files.length),
+    u32(central.length),u32(locals.length),u16(0)
+  ]);
+  return new Blob([locals,central,end],{type:'application/zip'});
+}
+$('exportAll').textContent='📦 Export All as ZIP';
+$('exportAll').addEventListener('click',async()=>{
+  if(!state.maps.base)return setStatus('Nothing to export yet.');
+  const names={
+    base:'BaseColor',
+    height:'Height',
+    normal:$('normalY').checked?'Normal_OpenGL':'Normal_DirectX',
+    rough:'Roughness',
+    ao:'AO'
+  };
+  const order=['base','height','normal','rough','ao'];
+  try{
+    setStatus('Building ZIP…');
+    const files=[];
+    for(const map of order){
+      files.push({name:`${state.sourceName}_${names[map]}.png`,data:await canvasBytes(state.maps[map])});
+    }
+    const zip=buildStoredZip(files);
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(zip);
+    a.download=`${state.sourceName}_PBR.zip`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+    setStatus('ZIP ready: Base Color, Height, Normal, Roughness, and AO.');
+  }catch(err){
+    console.error(err);
+    setStatus('ZIP export error: '+err.message);
+  }
+});
+function projectData(){
+  const values={};
+  document.querySelectorAll('input,select').forEach(el=>{
+    if(!el.id||['imageInput','loadProject'].includes(el.id))return;
+    values[el.id]=el.type==='checkbox'?el.checked:el.value;
+  });
+  return {app:'Local Texture Lab',version:1,mode:state.mode,sourceName:state.sourceName,values};
+}
+$('saveProject').addEventListener('click',()=>{
+  const blob=new Blob([JSON.stringify(projectData(),null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`${state.sourceName}_texture_project.json`;a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1500);
+});
+$('loadProjectBtn').addEventListener('click',()=>$('loadProject').click());
+$('loadProject').addEventListener('change',async e=>{
+  const f=e.target.files?.[0];if(!f)return;
+  try{
+    const p=JSON.parse(await f.text());
+    for(const [id,v] of Object.entries(p.values||{})){
+      const el=$(id);if(!el)continue;
+      if(el.type==='checkbox')el.checked=!!v; else el.value=v;
+      if($(id+'N'))$(id+'N').value=v;
+    }
+    if(p.mode){
+      document.querySelector(`.tab[data-mode="${p.mode}"]`)?.click();
+    }else render();
+    state.sourceName=p.sourceName||state.sourceName;
+    setStatus('Project settings loaded. Image files are not embedded in project JSON.');
+  }catch(err){setStatus('Could not load project: '+err.message)}
+});
+
+drawPlaceholder();
+})();
+</script>
+</body>
+</html>
