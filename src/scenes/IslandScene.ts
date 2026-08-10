@@ -1473,6 +1473,11 @@ export class IslandScene {
          * accel keeps the corner inside its measured timing while taking
          * the slam off both ends of the turn. */
         tiltAccel: (2400 * Math.PI) / 180,
+        /* And the goal it chases is low-passed — see `SurfaceWalkTuning.
+         * goalGain`. At an inside crease the raw contact normal alternates
+         * faces on alternate frames; the filter turns that into its
+         * average, and it is what took the lurch out of the fold. */
+        goalGain: 1000,
         snap: 14,
         /* 0.3 mm: the stand-still dead-band — see SurfaceWalkTuning. */
         deadband: 0.06,

@@ -19,6 +19,7 @@ const TUNE = {
   align: 12,
   maxTiltRate: (240 * Math.PI) / 180,
   tiltAccel: (2400 * Math.PI) / 180,
+  goalGain: 1000,
   snap: 14,
   deadband: 0.06,
   gravity: 9,

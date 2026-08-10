@@ -72,6 +72,27 @@ export interface SurfaceWalkTuning {
    * braking-curve rate in a frame.
    */
   tiltAccel: number;
+  /**
+   * How fast the attitude GOAL itself follows the pair-averaged contact
+   * normal, per second — a low-pass behind the two-sample mean in `aimUp`.
+   *
+   * The trapezoid made the RESPONSE a motion, but the goal it chases is
+   * still a per-frame sample, and at the crease of a fold that sample
+   * alternates faces: embedded at an inside corner, the nearest surface is
+   * genuinely a different wall on alternate frames — measured 26° of goal
+   * flip per frame through a descent, with the body lurching forward and
+   * back as the seat followed it (act +10/−4 mm/s on alternate frames on
+   * the phone). The two-sample mean nulls exactly that alternation for half
+   * a frame of lag, so this gain only has to mop up what is left — and it
+   * must stay LIGHT, because lag here is not free: at a tenth-of-a-second
+   * time constant she under-rotated around a ball and let a wall into her
+   * body before folding (both measured as test regressions). At 1000/s the
+   * filter converges within a frame and is effectively the pair average
+   * alone; it is kept as a knob because the pair mean only cancels
+   * period-two flapping, and a slower surface may one day need a touch of
+   * genuine smoothing behind it.
+   */
+  goalGain: number;
   /** How fast she is drawn onto the seat, per second. */
   snap: number;
   /**
@@ -106,6 +127,7 @@ export const DEFAULT_WALK_TUNING: SurfaceWalkTuning = {
   align: 12,
   maxTiltRate: (240 * Math.PI) / 180,
   tiltAccel: (2400 * Math.PI) / 180,
+  goalGain: 1000,
   snap: 14,
   deadband: 0.06,
   gravity: 9,
@@ -295,7 +317,45 @@ export class SurfaceWalker {
   /** The tilt's own speed, slewed — the state a motion profile needs. */
   private tiltRate = 0;
 
+  /** The smoothed attitude goal — see `SurfaceWalkTuning.goalGain`. */
+  private readonly goalSmooth = new THREE.Vector3();
+
+  /** Last frame's RAW goal — one half of the pair average. */
+  private readonly goalPrev = new THREE.Vector3();
+
+  private goalLive = false;
+
+  /* Scratch for the pair average; distinct from A/B/C, which are live here. */
+  private readonly goalPair = new THREE.Vector3();
+
   aimUp(frame: WalkFrame, goal: THREE.Vector3, dt: number): void {
+    /*
+     * The raw sample is averaged with LAST frame's, then fed to a low-pass,
+     * and everything downstream — the easing, the braking curve, the axis —
+     * reads the filtered goal. The pair average is aimed at exactly the
+     * measured failure: a goal that alternates faces on alternate frames
+     * nulls out completely in a two-sample mean, at the price of half a
+     * frame of lag, where a low-pass strong enough to flatten it dragged
+     * whole tenths of a second behind a genuinely turning surface. The
+     * low-pass then only has residue to clean up, so it can stay light.
+     * A frozen frame (dt = 0) neither moves the filter nor reads around it.
+     */
+    if (dt > 0) {
+      if (!this.goalLive) {
+        this.goalSmooth.copy(goal);
+        this.goalPrev.copy(goal);
+        this.goalLive = true;
+      } else {
+        const pair = this.goalPair.addVectors(goal, this.goalPrev);
+        if (pair.lengthSq() < 1e-8) pair.copy(goal);
+        pair.normalize();
+        this.goalPrev.copy(goal);
+        this.goalSmooth.lerp(pair, 1 - Math.exp(-this.tune.goalGain * dt));
+        if (this.goalSmooth.lengthSq() < 1e-8) this.goalSmooth.copy(pair);
+        this.goalSmooth.normalize();
+      }
+      goal = this.goalSmooth;
+    }
     const eased = this.scratchA.copy(frame.up)
       .lerp(goal, 1 - Math.exp(-this.tune.align * dt)).normalize();
     const swing = Math.acos(THREE.MathUtils.clamp(frame.up.dot(eased), -1, 1));
@@ -353,6 +413,57 @@ export class SurfaceWalker {
    * vibration. Inside the band she does not move at all, and a body that
    * does not move gets the same answer next frame and is finally still.
    */
+  /** The last two RAW seats — enough history to recognise a flap. */
+  private readonly seatPrev = new THREE.Vector3();
+
+  private readonly seatPrev2 = new THREE.Vector3();
+
+  private seatHist = 0;
+
+  private readonly seatPair = new THREE.Vector3();
+
+  /**
+   * A FLAPPING seat is averaged; a TRAVELLING seat is passed through.
+   *
+   * Embedded at an inside crease, the nearest face — and with it the seat —
+   * alternates on alternate frames, and the body lurched forward and back
+   * chasing the two attractors (seat +0.13/−0.04 mm on alternate frames on
+   * the phone, travel swinging +10/−4 mm/s). The mean of the two attractors
+   * is their midpoint, which is where a body at a crease belongs.
+   *
+   * But the mean must not touch an honest migration: folding onto a wall IS
+   * the seat walking from one face to the other, frame by frame in one
+   * direction, and averaging that halves its first step every frame — the
+   * fold's onset is a positive feedback, and taxing its takeoff delayed it
+   * by eight frames straight into a measured regression. So the filter asks
+   * the history which case it is in: a seat closer to where it was TWO
+   * frames ago than to where it was one frame ago is bouncing between two
+   * points, and only then is it averaged. A seat that jumped outright — a
+   * teleport, a landing — resets the history instead of being compared to
+   * where she used to be.
+   */
+  private pairSeat(seat: THREE.Vector3): THREE.Vector3 {
+    const far = Math.abs(this.tune.ride) * 4;
+    if (this.seatHist > 0 && seat.distanceToSquared(this.seatPrev) > far * far) {
+      this.seatHist = 0;
+    }
+    if (this.seatHist < 2) {
+      if (this.seatHist === 1) this.seatPrev2.copy(this.seatPrev);
+      this.seatPrev.copy(seat);
+      this.seatHist += 1;
+      return seat;
+    }
+    const toPrev = seat.distanceToSquared(this.seatPrev);
+    const toPrev2 = seat.distanceToSquared(this.seatPrev2);
+    const flapping = toPrev2 * 4 < toPrev;
+    const out = flapping
+      ? this.seatPair.addVectors(seat, this.seatPrev).multiplyScalar(0.5)
+      : seat;
+    this.seatPrev2.copy(this.seatPrev);
+    this.seatPrev.copy(seat);
+    return out;
+  }
+
   private seatToward(frame: WalkFrame, seat: THREE.Vector3, dt: number, still: boolean): void {
     /*
      * ONLY WHEN SHE IS ASKED TO BE STILL. The first cut applied the band
@@ -372,7 +483,7 @@ export class SurfaceWalker {
       if (out) {
         const normalOut = this.scratchC;
         this.normalAt(out, normalOut);
-        const seat = out.addScaledVector(normalOut, this.tune.ride);
+        const seat = this.pairSeat(out.addScaledVector(normalOut, this.tune.ride));
         this.seatToward(frame, seat, dt, still);
         this.aimUp(frame, normalOut, aimDt);
         return;
@@ -401,7 +512,7 @@ export class SurfaceWalker {
     }
     const normal = this.scratchC;
     this.normalAt(hit, normal);
-    const seat = hit.addScaledVector(normal, this.tune.ride);
+    const seat = this.pairSeat(hit.addScaledVector(normal, this.tune.ride));
     this.seatToward(frame, seat, dt, still);
     this.aimUp(frame, normal, aimDt);
   }
