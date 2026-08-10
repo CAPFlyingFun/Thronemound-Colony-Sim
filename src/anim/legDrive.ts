@@ -434,6 +434,15 @@ export class LegDrive {
     this.corner = new CornerTurn(rowsFromHomes(this.legs));
   }
 
+  /**
+   * The corner's pre-tilt, passed through for whoever seats the body —
+   * fills `out` with the new face and returns the share. See
+   * `CornerTurn.leanToward`.
+   */
+  cornerLean(out: THREE.Vector3): number {
+    return this.corner.leanToward(out);
+  }
+
   /** Where each foot should be drawn this frame, for the IK. */
   anchorFor(slot: string): readonly [number, number, number] | null {
     const leg = this.legs.find((l) => l.slot === slot);

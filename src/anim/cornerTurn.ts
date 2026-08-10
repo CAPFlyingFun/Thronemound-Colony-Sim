@@ -199,6 +199,19 @@ export interface CornerTuning {
   retrySeconds: number;
   /** How fast the target normal may be re-aimed by new contacts, per second. */
   aimRate: number;
+  /**
+   * HOW FAR SHE MAY REAR toward the new face while the front grips take it,
+   * as fractions of the way from her measured attitude to the face's own —
+   * one front foot across, then both. A real ant does not stand flat with
+   * her nose at the bark until some signal fires: the moment a front leg
+   * holds the wall her shoulders start to rise, which is what lifts the
+   * head clear of the wood (measured: the head shell sat half a millimetre
+   * INSIDE the trunk through the last two millimetres of a flat approach,
+   * with the neck already at its limit) and spends the waiting on visible
+   * motion instead of a freeze. Optional so older tuning literals stand.
+   */
+  leanOne?: number;
+  leanBoth?: number;
 }
 
 /**
@@ -228,6 +241,8 @@ export const CORNER_TUNING: CornerTuning = {
   stallSeconds: 2,
   retrySeconds: 2.5,
   aimRate: 4,
+  leanOne: 0.15,
+  leanBoth: 0.35,
 };
 
 /** What the drive is told to do this frame. */
@@ -1162,6 +1177,33 @@ export class CornerTurn {
   }
 
   /** Everything a debug line wants, computed from state alone. */
+  /**
+   * The corner's PRE-TILT: how far of the way toward the new face her
+   * attitude goal may lean this frame, with the face itself written into
+   * `out`. Nought until a front grip is actually holding the new surface —
+   * the grip is the proof the lean stands on — then a small share for one
+   * and a larger one for both. See `CornerTuning.leanOne`.
+   *
+   * A SHARE of the measured goal rather than an absolute angle, so it needs
+   * no braking of its own: the walker's easing and rate cap already own how
+   * fast an attitude may move, and once the crease flips the measured goal
+   * onto the new face the blend collapses to nothing by construction.
+   */
+  leanToward(out: THREE.Vector3): number {
+    if (!this.active) return 0;
+    const front = this.rows[0];
+    if (!front || front.length === 0) return 0;
+    let across = 0;
+    for (const slot of front) {
+      if (this.owner.get(slot) === 'new') across += 1;
+    }
+    if (across === 0) return 0;
+    out.copy(this.newUp);
+    return across >= front.length
+      ? this.tune.leanBoth ?? 0
+      : this.tune.leanOne ?? 0;
+  }
+
   report(legs: readonly CornerLeg[], up?: THREE.Vector3): CornerReport {
     let onNew = 0;
     let onOld = 0;

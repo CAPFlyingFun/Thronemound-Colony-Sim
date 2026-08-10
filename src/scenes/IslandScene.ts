@@ -207,6 +207,16 @@ const S_TARGET = new THREE.Vector3();
 /** The ghost's own, so it cannot be trampled by whatever the cameras are
  *  doing with the shared scratch in the same frame. */
 const S_SPOT = new THREE.Vector3();
+const S_LEAN = new THREE.Vector3();
+
+/**
+ * The LEAST fold the tail believes while the rear feet are still crossing a
+ * corner — about 23 degrees of lift at the sting once staggered through
+ * `posture`. Enough, measured, to carry the gaster over the crease sweep it
+ * was sitting down into; released the frame the corner completes, and the
+ * gaster's own slow follow rate turns that release into a settle.
+ */
+const TAIL_HOLD_RAD = 1.2;
 
 /** The orbit arm's own, so it can be asked to write into any of the others
  *  without quietly aliasing its working vector. */
@@ -2774,6 +2784,20 @@ export class IslandScene {
        * knows the angle; it just had nowhere to send it.
        */
       fold: this.driveReport?.corner.fold ?? 0,
+      /*
+       * The tail does not relax on the neck's schedule. While the rear feet
+       * have yet to cross — the transfer phases — the gaster is still
+       * sweeping the surface she is leaving, so its lift holds at the
+       * corner's full character even as the attitude angle spends itself.
+       * See `SpineReading.tailFold`.
+       */
+      tailFold: (() => {
+        const c = this.driveReport?.corner;
+        if (!c) return undefined;
+        return c.phase === 'transferMiddle' || c.phase === 'transferRear'
+          ? Math.max(c.fold, TAIL_HOLD_RAD)
+          : c.fold;
+      })(),
     };
     /* Millimetres converted ONCE, here at the boundary — everything inside
      * `posture` is then in the same units as the reading it was handed. */
@@ -2825,12 +2849,36 @@ export class IslandScene {
     const up = this.up;
     const reach = SHELL_REACH;
     const step = CELL_SIZE * 0.5;
+    let clear = Infinity;
     for (let d = 0; d <= reach; d += step) {
       if (this.soilSolidAt(
         S_SPOT.x - up.x * d, S_SPOT.y - up.y * d, S_SPOT.z - up.z * d,
-      )) return d - shell;
+      )) { clear = d - shell; break; }
     }
-    return Infinity;
+    /*
+     * THE HEAD ALSO LOOKS WHERE SHE IS GOING.
+     *
+     * `CLEARANCE_MM`'s own words are "what is in front of it", and along
+     * her down that is true of the ground but never of a wall: marching
+     * down from the head spot, a vertical face ahead reads clear on one
+     * frame and half a millimetre INSIDE on the next — a cliff, not a
+     * ramp — and no follow rate can answer a warning that arrives after
+     * the touch. Measured at the trunk corner: 4.01 mm to 0.01 mm in one
+     * frame at walking pace. So the head takes the nearer of two
+     * questions, below and AHEAD, and the wall becomes the same gentle
+     * ramp the ground always was — the bias starts easing her face up
+     * while it is still a millimetre out. The gaster keeps the single
+     * probe: what it drags over is always beneath it.
+     */
+    if (which === 'head') {
+      const fwd = this.fwd;
+      for (let d = 0; d <= reach; d += step) {
+        if (this.soilSolidAt(
+          S_SPOT.x + fwd.x * d, S_SPOT.y + fwd.y * d, S_SPOT.z + fwd.z * d,
+        )) { clear = Math.min(clear, d - shell); break; }
+      }
+    }
+    return clear;
   }
 
   /**
@@ -2980,7 +3028,19 @@ export class IslandScene {
       && Math.abs(this.input.strafe) < 0.01
       && Math.abs(this.input.yaw) < 0.01
       && (this.driveReport?.corner.phase ?? 'normal') === 'normal';
-    walker.settle({ at: this.at, up: this.up, forward: this.fwd }, dt, aimDt, still);
+    /*
+     * THE CORNER'S PRE-TILT. The moment a front grip holds the new face the
+     * drive reports a lean, and the walker bends her attitude goal toward
+     * the wall by that share — shoulders rising while the front feet take
+     * hold, the way an ant actually enters a climb. This is what lifts the
+     * head clear of the bark during the flat approach; see
+     * `CornerTurn.leanToward`.
+     */
+    const leanShare = this.drive ? this.drive.cornerLean(S_LEAN) : 0;
+    walker.settle(
+      { at: this.at, up: this.up, forward: this.fwd }, dt, aimDt, still,
+      leanShare > 0 ? { toward: S_LEAN, share: leanShare } : undefined,
+    );
     this.seatLiftMm = this.seatFrom.sub(this.at).dot(this.up) * -VOXEL_MM;
 
     /*

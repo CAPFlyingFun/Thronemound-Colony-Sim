@@ -156,6 +156,20 @@ export interface SpineReading {
    * of corners omits it and gets exactly the posture it got before.
    */
   fold?: number;
+  /**
+   * The GASTER'S OWN FOLD, when the tail must not trust the neck's.
+   *
+   * `fold` is the attitude still to turn, and the head is right to relax
+   * as the body comes round — the nose is across by then. The tail is NOT:
+   * it is still sweeping over the surface she is leaving, and keying its
+   * lift to the shrinking attitude angle sat it down in exactly that sweep
+   * — measured with the corner pre-tilt, the gaster shell went from five
+   * frames inside the old floor to forty-two, all of them after the crest
+   * with `fold` nearly spent. A caller who knows the rear feet have not
+   * crossed yet passes the fold the TAIL should still believe. Optional;
+   * omitted, the tail believes the neck as it always did.
+   */
+  tailFold?: number;
 }
 
 /** Pitches in her own frame: positive is nose-up. */
@@ -226,20 +240,37 @@ export function posture(
    */
   const fold = read.fold ?? 0;
 
+  /*
+   * THE EMERGENCY OUTRANKS THE POSTURE, which means it clamps SECOND.
+   *
+   * These used to be one sum inside one clamp, and at a full corner that
+   * silenced the bias entirely: fold 1.5 asks the neck for 57 of its 60
+   * degrees, the head hits the anatomical limit, and the proximity nudge —
+   * the one term whose whole job is "you are about to touch that" — had
+   * nothing left to spend. Measured on the trunk corner: head shell half a
+   * millimetre INSIDE the wood for the last two millimetres of approach,
+   * bias at full, contributing nought. So the POSTURE (terrain plus fold)
+   * takes the anatomical clamp, and the bias adds on top with its own
+   * headroom — a neck at ninety degrees for a few frames is a flinch, and
+   * a flinch is what this term is. `Spine.follow` grants the same room.
+   */
+  const headPose = clamp(ahead + (fold * 2) / 3, limits.headMax);
+  /*
+   * SUBTRACTED, unlike the head's, because the two escape in opposite
+   * signs. Positive pitch is nose-up: on the head that lifts the face
+   * AWAY from ground beneath it, on the gaster it presses the tip INTO
+   * it — tail-up is negative, as the cresting behaviour above and its
+   * test both say. This bias shipped ADDED, so the abdomen's emergency
+   * lift spent its whole authority pitching the abdomen into the hill it
+   * was already touching. Seen from the outside as: her abdomen buries
+   * itself on any uphill-behind slope, and nothing seems to care.
+   */
+  const gasterPose = clamp(behind - (read.tailFold ?? fold) / 3, limits.gasterMax);
+
   return {
-    head: clamp(ahead + headBias + (fold * 2) / 3, limits.headMax),
+    head: clamp(headPose + headBias, limits.headMax + limits.headNudge),
     thorax: clamp(through + fold / 3, limits.thoraxMax),
-    /*
-     * SUBTRACTED, unlike the head's, because the two escape in opposite
-     * signs. Positive pitch is nose-up: on the head that lifts the face
-     * AWAY from ground beneath it, on the gaster it presses the tip INTO
-     * it — tail-up is negative, as the cresting behaviour above and its
-     * test both say. This bias shipped ADDED, so the abdomen's emergency
-     * lift spent its whole authority pitching the abdomen into the hill it
-     * was already touching. Seen from the outside as: her abdomen buries
-     * itself on any uphill-behind slope, and nothing seems to care.
-     */
-    gaster: clamp(behind - gasterBias - fold / 3, limits.gasterMax),
+    gaster: clamp(gasterPose - gasterBias, limits.gasterMax + limits.gasterNudge),
   };
 }
 
@@ -278,9 +309,16 @@ export class Spine {
     const l = this.limits;
     const ease = (from: number, to: number, rate: number): number =>
       from + (to - from) * (1 - Math.exp(-rate * Math.max(0, dt)));
-    this.now.head = ease(this.now.head, clamp(want.head, l.headMax), l.headRate);
+    /*
+     * Head and gaster keep the nudge's headroom here too — `posture` only
+     * exceeds the anatomical limit when the proximity bias is spending its
+     * own allowance, and re-clamping at the limit here would take it back.
+     */
+    this.now.head = ease(this.now.head, clamp(want.head, l.headMax + l.headNudge), l.headRate);
     this.now.thorax = ease(this.now.thorax, clamp(want.thorax, l.thoraxMax), l.thoraxRate);
-    this.now.gaster = ease(this.now.gaster, clamp(want.gaster, l.gasterMax), l.gasterRate);
+    this.now.gaster = ease(
+      this.now.gaster, clamp(want.gaster, l.gasterMax + l.gasterNudge), l.gasterRate,
+    );
     return this.now;
   }
 }

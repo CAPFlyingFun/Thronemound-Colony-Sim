@@ -253,10 +253,17 @@ describe('the train', () => {
   });
 
   it('clamps whatever it is handed, not just what posture() produced', () => {
+    /* Head and gaster keep the proximity nudge's headroom — posture() only
+     * exceeds the anatomical limit when the emergency bias is spending its
+     * own allowance, and re-clamping at the bare limit here silenced that
+     * bias exactly when a corner had the fold saturating the neck. The
+     * thorax has no nudge and keeps the bare limit. */
     const spine = new Spine();
     spine.follow({ head: 99, thorax: 99, gaster: 99 }, 10);
-    expect(spine.pose.head).toBeLessThanOrEqual(SPINE_LIMITS.headMax + 1e-9);
+    expect(spine.pose.head)
+      .toBeLessThanOrEqual(SPINE_LIMITS.headMax + SPINE_LIMITS.headNudge + 1e-9);
     expect(spine.pose.thorax).toBeLessThanOrEqual(SPINE_LIMITS.thoraxMax + 1e-9);
-    expect(spine.pose.gaster).toBeLessThanOrEqual(SPINE_LIMITS.gasterMax + 1e-9);
+    expect(spine.pose.gaster)
+      .toBeLessThanOrEqual(SPINE_LIMITS.gasterMax + SPINE_LIMITS.gasterNudge + 1e-9);
   });
 });

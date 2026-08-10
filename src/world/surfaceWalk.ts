@@ -140,6 +140,17 @@ export interface WalkFrame {
   forward: THREE.Vector3;
 }
 
+/**
+ * A caller-supplied pre-tilt: lean the ATTITUDE GOAL `share` of the way
+ * toward `toward` before the filters see it. The seat is untouched — she
+ * rears without leaving the surface she stands on. See `CornerTurn.leanToward`
+ * for the one caller and the reasoning.
+ */
+export interface WalkLean {
+  toward: THREE.Vector3;
+  share: number;
+}
+
 export class SurfaceWalker {
   /** Is she holding on to something, or in the air? */
   gripping = true;
@@ -487,7 +498,9 @@ export class SurfaceWalker {
     frame.at.lerp(seat, 1 - Math.exp(-this.tune.snap * dt));
   }
 
-  private hold(frame: WalkFrame, dt: number, aimDt: number, still: boolean): void {
+  private hold(
+    frame: WalkFrame, dt: number, aimDt: number, still: boolean, lean?: WalkLean,
+  ): void {
     if (this.solidAt(frame.at.x, frame.at.y, frame.at.z)) {
       const out = this.nearestSurface(frame, frame.at);
       if (out) {
@@ -495,6 +508,17 @@ export class SurfaceWalker {
         this.normalAt(out, normalOut);
         const seat = this.pairSeat(out.addScaledVector(normalOut, this.tune.ride));
         this.seatToward(frame, seat, dt, still);
+        /*
+         * The lean bends the AIM and only the aim — the seat above is
+         * already taken off the raw normal, so she rears without her body
+         * being pushed off the surface she is actually standing on. Blended
+         * BEFORE the pair filter, which is safe because a lean share moves
+         * monotonically — it is not the alternating sample the filter
+         * exists to null.
+         */
+        if (lean && lean.share > 0) {
+          normalOut.lerp(lean.toward, lean.share).normalize();
+        }
         this.aimUp(frame, normalOut, aimDt);
         return;
       }
@@ -533,6 +557,10 @@ export class SurfaceWalker {
     this.normalAt(hit, normal);
     const seat = this.pairSeat(hit.addScaledVector(normal, this.tune.ride));
     this.seatToward(frame, seat, dt, still);
+    /* Same as above: the aim leans, the seat does not. */
+    if (lean && lean.share > 0) {
+      normal.lerp(lean.toward, lean.share).normalize();
+    }
     this.aimUp(frame, normal, aimDt);
   }
 
@@ -582,8 +610,8 @@ export class SurfaceWalker {
    * `aimDt` is the attitude's own timestep, normally `dt`. Zero freezes her
    * attitude while leaving the seating alone — see `aimUp`.
    */
-  settle(frame: WalkFrame, dt: number, aimDt = dt, still = false): void {
-    if (this.gripping) this.hold(frame, dt, aimDt, still);
+  settle(frame: WalkFrame, dt: number, aimDt = dt, still = false, lean?: WalkLean): void {
+    if (this.gripping) this.hold(frame, dt, aimDt, still, lean);
     else this.fall(frame, dt);
     this.squareForward(frame);
   }
