@@ -3861,6 +3861,14 @@ export class IslandScene {
     const wantPitch = Math.min(CHASE_PITCH_MAX,
       Math.max(CHASE_PITCH_MIN, CHASE_PITCH - this.lookPitch));
     this.camPitch += (wantPitch - this.camPitch) * Math.min(1, dt * 6);
+    /*
+     * The lens's flinch is FIRST-PERSON STATE, and a view change is a hard
+     * cut everywhere in this rig — so the lift is dropped the frame the view
+     * leaves her head, rather than surviving in a corner to greet the next
+     * first-person frame with a five-degree tilt the clearance no longer
+     * asks for. (Code review's catch, not a report.)
+     */
+    if (!this.firstPerson) this.fpvLift = 0;
     if (this.firstPerson) {
       /* Her own eyes: at the head, looking where she faces; the mouse (or
        * right-half drag) turns HER, and pitch is a look, not an orbit. On
