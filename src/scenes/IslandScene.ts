@@ -192,6 +192,30 @@ const RIDE = 1.3 / MM;
 const S_PERP = new THREE.Vector3();
 const S_RAD = new THREE.Vector3();
 const S_CENTER = new THREE.Vector3();
+/** The aim debug's own scratches. It runs at the very end of the frame,
+ *  after every other consumer of the S_ pool has finished. */
+const S_DBG_CENTRE = new THREE.Vector3();
+const S_DBG_DIR = new THREE.Vector3();
+const S_DBG_END = new THREE.Vector3();
+const S_DBG_JAW = new THREE.Vector3();
+const S_DBG_HEAD = new THREE.Vector3();
+const S_DBG_UP = new THREE.Vector3();
+const S_DBG_RIGHT = new THREE.Vector3();
+const S_DBG_REL = new THREE.Vector3();
+
+/** How many frames of camera look the aim debug keeps, to measure how far
+ *  the head's own facing trails the view. Twelve is a fifth of a second at
+ *  60 Hz — longer than any easing here should ever lag. */
+const AIM_DBG_LAG = 12;
+
+/** The lens guard's own scratches: it runs inside the camera pass, after
+ *  the pose has finished with the S_ pool but while `S_TARGET` is live. */
+const S_LENS_FWD = new THREE.Vector3();
+const S_LENS_UP = new THREE.Vector3();
+const S_LENS_RIGHT = new THREE.Vector3();
+const S_LENS_CORNER = new THREE.Vector3();
+const S_LENS_STEP = new THREE.Vector3();
+
 /** Head-clearance and bone-follow scratches — theirs alone, read across
  *  frames of the pose and never shared with the S_ pool. */
 const HEAD_PROBE_AT = new THREE.Vector3();
@@ -948,6 +972,40 @@ export class IslandScene {
 
   /** Where the next press will act, drawn before it acts: the cut, and
    *  the halo the same stroke shaves around it. */
+  /* ------------------------------------------------- the aim debug rig */
+
+  /**
+   * `?aimdebug=1` — draws where the SHOVEL thinks it is aiming against
+   * where the CROSSHAIR is looking, because those are two different
+   * calculations and only one of them is visible in normal play.
+   *
+   * Off unless asked for, and armed only while DIG is: these are
+   * diagnostic overlays, not gameplay, and nothing here changes what the
+   * stroke does. See `updateAimDebug`.
+   */
+  private aimDebug = false;
+
+  private aimDbgDig: THREE.Line | null = null;
+
+  private aimDbgCam: THREE.Line | null = null;
+
+  private aimDbgSpot: THREE.Mesh | null = null;
+
+  private aimDbgJaw: THREE.Mesh | null = null;
+
+  private aimDbgHead: THREE.Line | null = null;
+
+  /** A ring of recent camera look directions — see `AIM_DBG_LAG`. */
+  private readonly aimDbgLook: THREE.Vector3[] = [];
+
+  private aimDbgLookAt = 0;
+
+  private aimDbgText: HTMLElement | null = null;
+
+  private aimChip: HTMLButtonElement | null = null;
+
+  private aimDbgAt = 0;
+
   private toolGhost: THREE.Mesh | null = null;
 
   private smoothGhost: THREE.Mesh | null = null;
@@ -1146,6 +1204,14 @@ export class IslandScene {
   private spineRead: SpineReading | null = null;
 
   private spineWant: SpinePose | null = null;
+
+  /**
+   * How far into soil the WORST near-plane corner sits, in mm, after the
+   * guard has had its say. Positive is dirt in the picture. Reported by
+   * `lensReportForTest` so a probe can separate a query fault from an
+   * escape fault instead of counting one blurred total.
+   */
+  private lensWorstMm = 0;
 
   /** The terrain rises, low-passed — see `readSpine`. */
   private riseAhead = 0;
@@ -1396,6 +1462,15 @@ export class IslandScene {
     if (new URLSearchParams(
       typeof location === 'undefined' ? '' : location.search,
     ).get('ik') === 'off') this.setIK(false);
+    /*
+     * `?aimdebug=1` — the aim overlay's only switch, read once at startup
+     * for the same reason `?ik=off` is: a phone has no console. It stays
+     * off in every ordinary session, and even when armed it draws nothing
+     * until DIG is.
+     */
+    if (new URLSearchParams(
+      typeof location === 'undefined' ? '' : location.search,
+    ).get('aimdebug') === '1') this.setAimDebug(true);
     new ResizeObserver(() => this.resize()).observe(host);
     this.resize();
     this.animate();
@@ -2682,6 +2757,9 @@ export class IslandScene {
     this.recordTelemetry(dt);
     // While the designer is up the camera is ITS fly rig, not the follow cam.
     if (!this.designer?.isOpen) this.aimCamera(dt);
+    /* Last, so the crosshair ray is drawn from where the lens ACTUALLY
+     * ended up this frame rather than where it was asked to go. */
+    this.updateAimDebug();
   }
 
   /* ------------------------------------------------ chambers and the modes */
@@ -3419,6 +3497,212 @@ export class IslandScene {
   }
 
   /**
+   * THE AIM, DRAWN — diagnostic only, and it computes nothing of its own.
+   *
+   * GREEN is the line the stroke actually works along: the same
+   * `boreAim()` vector `bite()` calls, from the same origin (her centre),
+   * ending at the same `biteCentre` the cut is seated on. It is not a
+   * reconstruction — if the shovel is aiming somewhere strange, this line
+   * is strange in exactly the same way, which is the whole point.
+   *
+   * RED is where the crosshair is looking: the camera's own position and
+   * world direction. When the two disagree, both stay on screen and the
+   * angle between them is printed, so "it digs where I am not pointing"
+   * stops being a feeling and becomes a number.
+   *
+   * The yellow bead is the exact centre of the next terrain removal.
+   *
+   * Nothing is allocated per frame: three objects are made once on first
+   * use and their vertices rewritten in place.
+   */
+  private updateAimDebug(): void {
+    const show = this.aimDebug && this.digMode && this.ready;
+    if (!show) {
+      if (this.aimDbgDig) this.aimDbgDig.visible = false;
+      if (this.aimDbgCam) this.aimDbgCam.visible = false;
+      if (this.aimDbgHead) this.aimDbgHead.visible = false;
+      if (this.aimDbgSpot) this.aimDbgSpot.visible = false;
+      if (this.aimDbgJaw) this.aimDbgJaw.visible = false;
+      if (this.aimDbgText) this.aimDbgText.style.display = 'none';
+      return;
+    }
+    if (!this.aimDbgDig) {
+      const line = (colour: number): THREE.Line => {
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+        const obj = new THREE.Line(geo, new THREE.LineBasicMaterial({
+          color: colour, depthTest: false, transparent: true, opacity: 0.95,
+        }));
+        obj.renderOrder = 12;
+        obj.frustumCulled = false;
+        this.scene.add(obj);
+        return obj;
+      };
+      /*
+       * Unit spheres, SCALED BY RANGE each frame. Drawn at a fixed world
+       * size and with depth testing off, a bead a millimetre from the
+       * lens — which is exactly where her jaws are in first person —
+       * becomes a wall of colour across the whole screen. Reported as
+       * "weird stuff", and it was: the yellow shape swallowing the frame
+       * was her mandible marker seen from the inside.
+       */
+      const bead = (colour: number): THREE.Mesh => {
+        const m = new THREE.Mesh(
+          new THREE.SphereGeometry(1, 10, 8),
+          new THREE.MeshBasicMaterial({ color: colour, depthTest: false }),
+        );
+        m.renderOrder = 13;
+        this.scene.add(m);
+        return m;
+      };
+      this.aimDbgDig = line(0x2fe36a);   // GREEN  the dig ray, as bite() has it
+      this.aimDbgCam = line(0xe0553f);   // RED    the crosshair's own ray
+      this.aimDbgHead = line(0x35d6e8);  // CYAN   the head bone's forward axis
+      this.aimDbgSpot = bead(0xffffff); // WHITE  the carve centre
+      this.aimDbgJaw = bead(0xffd23f);  // YELLOW the mandible tip
+      this.aimDbgText = document.createElement('div');
+      this.aimDbgText.className = 'density-lab-status rail-status';
+      this.aimDbgText.style.top = '58px';
+      this.aimDbgText.style.whiteSpace = 'pre';
+      this.aimDbgText.style.fontSize = '11px';
+      this.hud.appendChild(this.aimDbgText);
+    }
+
+    /*
+     * THE SAME ARITHMETIC `bite()` DOES, in the same order — including the
+     * jaw bone's say over how far along the aim the hull reaches, and
+     * `biteCentre`'s own fallback to a scrape when the aim meets nothing.
+     * Anything less faithful would draw a line the cut does not follow,
+     * which is the bug this exists to catch.
+     */
+    const aim = this.boreAim();
+    const centre = S_DBG_CENTRE;
+    let hull = NOSE_REACH + JAW_PAST_NOSE;
+    const haveJaw = this.queenReady && this.queen.jawPosition(S_DBG_JAW);
+    if (haveJaw) {
+      centre.copy(S_DBG_JAW);
+      hull = Math.max(hull, centre.sub(this.at).dot(aim));
+    }
+    const willBite = this.biteCentre(aim, hull, centre);
+
+    const put = (obj: THREE.Line, a: THREE.Vector3, b: THREE.Vector3): void => {
+      const pos = obj.geometry.getAttribute('position') as THREE.BufferAttribute;
+      pos.setXYZ(0, a.x, a.y, a.z);
+      pos.setXYZ(1, b.x, b.y, b.z);
+      pos.needsUpdate = true;
+      obj.visible = true;
+    };
+
+    /* GREEN — her centre to the exact seat of the next scoop. This is the
+     * origin under audit: `bite()` works from `this.at`, not the jaws. */
+    put(this.aimDbgDig!, this.at, centre);
+    /* About a degree across, whatever the range — see `bead`. */
+    const sizeAt = (at: THREE.Vector3): number =>
+      Math.max(0.02, this.camera.position.distanceTo(at) * 0.012);
+    this.aimDbgSpot!.position.copy(centre);
+    this.aimDbgSpot!.scale.setScalar(sizeAt(centre));
+    this.aimDbgSpot!.visible = true;
+    (this.aimDbgSpot!.material as THREE.MeshBasicMaterial).color.setHex(
+      willBite ? 0xffffff : 0xff5c5c,
+    );
+
+    /* YELLOW — where her mandibles actually are, and CYAN — where the head
+     * bone is actually pointed. The gap between the yellow bead and the
+     * green line's origin IS the anatomical error being measured. */
+    const haveHead = this.queenReady && this.queen.eyeForwardWorld(S_DBG_HEAD);
+    this.aimDbgJaw!.visible = haveJaw;
+    if (haveJaw) {
+      this.aimDbgJaw!.position.copy(S_DBG_JAW);
+      this.aimDbgJaw!.scale.setScalar(sizeAt(S_DBG_JAW));
+    }
+    if (haveJaw && haveHead) {
+      S_DBG_END.copy(S_DBG_JAW).addScaledVector(S_DBG_HEAD, NOSE_REACH * 2);
+      put(this.aimDbgHead!, S_DBG_JAW, S_DBG_END);
+    } else if (this.aimDbgHead) this.aimDbgHead.visible = false;
+
+    /* RED — the crosshair's own ray, stopped where it first meets soil so
+     * both lines end on the same face and the gap between their ends is
+     * the error at the range that matters. */
+    this.camera.updateMatrixWorld();
+    const camAt = this.camera.position;
+    const camDir = this.camera.getWorldDirection(S_DBG_DIR);
+    const reach = Math.max(this.at.distanceTo(centre), NOSE_REACH * 3);
+    S_DBG_END.copy(camAt).addScaledVector(camDir, reach);
+    for (let d = CELL_SIZE * 0.5; d <= reach; d += CELL_SIZE * 0.5) {
+      const x = camAt.x + camDir.x * d;
+      const y = camAt.y + camDir.y * d;
+      const z = camAt.z + camDir.z * d;
+      if (this.soilSolidAt(x, y, z)) { S_DBG_END.set(x, y, z); break; }
+    }
+    put(this.aimDbgCam!, camAt, S_DBG_END);
+
+    /*
+     * HOW FAR THE HEAD TRAILS THE VIEW, measured rather than assumed.
+     *
+     * The whole reason the dig was taken off the jaw bone in v0.0.1 was
+     * that the bone "lags her by a frame of easing". This keeps a ring of
+     * recent camera looks and reports WHICH one the head's current facing
+     * matches best: 0 means the head is on this frame's view, 5 means it
+     * is showing what the camera was looking at five frames ago.
+     */
+    if (this.aimDbgLook.length < AIM_DBG_LAG) {
+      this.aimDbgLook.push(camDir.clone());
+    } else {
+      this.aimDbgLook[this.aimDbgLookAt % AIM_DBG_LAG]!.copy(camDir);
+    }
+    this.aimDbgLookAt += 1;
+    let bestLag = -1;
+    let bestOff = Infinity;
+    if (haveHead && this.aimDbgLook.length === AIM_DBG_LAG) {
+      for (let k = 0; k < AIM_DBG_LAG; k += 1) {
+        const idx = (this.aimDbgLookAt - 1 - k + AIM_DBG_LAG * 2) % AIM_DBG_LAG;
+        const off = Math.acos(Math.max(-1, Math.min(1,
+          this.aimDbgLook[idx]!.dot(S_DBG_HEAD))));
+        if (off < bestOff) { bestOff = off; bestLag = k; }
+      }
+    }
+
+    const now = performance.now();
+    if (now - this.aimDbgAt < 100) return;
+    this.aimDbgAt = now;
+    const mm = (v: THREE.Vector3): string =>
+      `${(v.x * MM).toFixed(1)}, ${(v.y * MM).toFixed(1)}, ${(v.z * MM).toFixed(1)}`;
+    const deg = (a: THREE.Vector3, b: THREE.Vector3): number =>
+      (Math.acos(Math.max(-1, Math.min(1, a.dot(b)))) * 180) / Math.PI;
+    /*
+     * WHERE THE CARVE LANDS RELATIVE TO HER JAWS, split in the HEAD's own
+     * frame — forward is reach, and the other two are the offsets the
+     * report is about: how far above her mandibles the hole opens, and how
+     * far to one side.
+     */
+    let lift = 0;
+    let side = 0;
+    let ahead = 0;
+    if (haveJaw && haveHead) {
+      this.queen.eyeUpWorld(S_DBG_UP);
+      S_DBG_RIGHT.crossVectors(S_DBG_HEAD, S_DBG_UP).normalize();
+      S_DBG_REL.copy(centre).sub(S_DBG_JAW);
+      ahead = S_DBG_REL.dot(S_DBG_HEAD) * MM;
+      lift = S_DBG_REL.dot(S_DBG_UP) * MM;
+      side = S_DBG_REL.dot(S_DBG_RIGHT) * MM;
+    }
+    this.aimDbgText!.style.display = '';
+    this.aimDbgText!.textContent = [
+      `AIM DEBUG  ${willBite ? 'bite WILL touch soil' : 'bite touches NOTHING'}`,
+      `RED   cam ray ${mm(camAt)}`,
+      `GREEN dig ray ${mm(this.at)}`,
+      `YELLOW jaw    ${haveJaw ? mm(S_DBG_JAW) : 'no rig'}`,
+      `WHITE carve   ${mm(centre)}`,
+      `cam vs bore   ${deg(camDir, aim).toFixed(1)}\u00b0`,
+      `cam vs head   ${haveHead ? `${deg(camDir, S_DBG_HEAD).toFixed(1)}\u00b0` : '-'}`,
+      `jaw off axis  ${haveJaw ? `${(S_DBG_JAW.distanceTo(this.at) * MM).toFixed(2)} mm from centre` : '-'}`,
+      `jaw to carve  ${haveJaw ? `${(S_DBG_JAW.distanceTo(centre) * MM).toFixed(2)} mm` : '-'}`,
+      `carve vs jaw  fwd ${ahead.toFixed(2)}  up ${lift.toFixed(2)}  side ${side.toFixed(2)} mm`,
+      `head lag      ${bestLag < 0 ? '-' : `${bestLag} frame(s), ${((bestOff * 180) / Math.PI).toFixed(1)}\u00b0`}`,
+    ].join('\n');
+  }
+
+  /**
    * THE GHOST: where the next press will act, shown before it acts.
    *
    * Both tools work at arm's length down a line you cannot see, which is
@@ -3842,13 +4126,123 @@ export class IslandScene {
     return Math.hypot(cam.near, halfH, halfW) + CAMERA_SKIN;
   }
 
-  private liftCameraClear(): void {
-    const p = this.camera.position;
+  /**
+   * THE WORST OF THE FOUR CORNERS the picture actually starts at, tested as
+   * POINTS rather than inferred from a radius.
+   *
+   * v0.0.78 defended a sphere of `lensClearance` around the lens, on the
+   * assumption that the soil field's magnitude is a distance. It is not.
+   * Measured at a failing frame: the lens sat clear by the full margin
+   * while a corner 1.51 mm away read +1.18 mm INSIDE — density had swung
+   * 2.84 mm over 1.51 mm of travel, a gradient of 1.9, because this field
+   * is a blend of a heightfield, a carved window and the tree's own solid
+   * and none of them promise unit slope. A radius argued in density units
+   * is therefore not the millimetres it claims to be, and the only honest
+   * test of "is soil in frame" is to ask at the corners themselves.
+   *
+   * Four probes, and they replace the guesswork rather than adding to it.
+   */
+  private frustumWorstAt(
+    at: THREE.Vector3, fwd: THREE.Vector3, up: THREE.Vector3,
+  ): number {
+    let worst = this.soilDensityAt(at.x, at.y, at.z);
+    for (let i = 0; i < 4; i += 1) {
+      const c = this.lensCorner(at, fwd, up, i);
+      const d = this.soilDensityAt(c.x, c.y, c.z);
+      if (d > worst) worst = d;
+    }
+    return worst;
+  }
+
+  /** One near-plane corner, i in 0..3. */
+  private lensCorner(
+    at: THREE.Vector3, fwd: THREE.Vector3, up: THREE.Vector3, i: number,
+  ): THREE.Vector3 {
+    const cam = this.camera;
+    const halfH = cam.near * Math.tan((cam.fov * Math.PI) / 360);
+    const halfW = halfH * cam.aspect;
+    const right = S_LENS_RIGHT.crossVectors(fwd, up).normalize();
+    return S_LENS_CORNER.copy(at)
+      .addScaledVector(fwd, cam.near)
+      .addScaledVector(right, halfW * (i < 2 ? -1 : 1))
+      .addScaledVector(up, halfH * (i % 2 === 0 ? -1 : 1));
+  }
+
+  /*
+   * TRIED AND REJECTED, recorded so it is not tried twice: running this
+   * guard on `soilSolidAt` instead: a rounded lattice read is three times
+   * cheaper than the interpolated one, and five reads per probe is the
+   * guard's whole cost. It measured no faster than the noise — the
+   * expense is the tree and scrub unions inside either query, not the
+   * interpolation — and it broke the thing the guard is for: rounding
+   * disagrees with the surface the mesher actually draws, so the boolean
+   * came back clear while the picture still had dirt in it. Escapes in
+   * the dig scenario went from 9 frames of 300 to 78. The guard reads the
+   * same field the geometry is built from, or it guards nothing.
+   */
+
+  /**
+   * The lens's own basis for the guard, which cannot read the camera's
+   * matrix: the guard runs BEFORE `lookAt`, so `matrixWorld` still holds
+   * last frame's orientation. First person hands in the ray it is about to
+   * look down; the chase hands in the line to her.
+   */
+  private lensBasis(
+    fwdOut: THREE.Vector3, upOut: THREE.Vector3, look?: THREE.Vector3,
+  ): void {
+    if (look) fwdOut.copy(look).normalize();
+    else fwdOut.copy(this.at).sub(this.camera.position);
+    if (fwdOut.lengthSq() < 1e-12) fwdOut.set(0, 0, 1);
+    fwdOut.normalize();
+    upOut.copy(this.camera.up);
+    upOut.addScaledVector(fwdOut, -upOut.dot(fwdOut));
+    if (upOut.lengthSq() < 1e-12) upOut.set(0, 1, 0).addScaledVector(fwdOut, -fwdOut.y);
+    upOut.normalize();
+  }
+
+  /**
+   * GUARD THE TARGET, SMOOTH THE LENS — and the order is the whole fix.
+   *
+   * This used to run on `camera.position` AFTER the two-pole smoothing
+   * had already placed it, so every frame the guard answered a different
+   * intermediate position with a different instantaneous shove. Panning
+   * down to line up a dig is the case that exposes it: the drag drives
+   * `lookPitch`, the chase arm's elevation is `CHASE_PITCH - lookPitch`
+   * so the arm FALLS, the falling arm brings the lens toward the ground,
+   * and the guard pushes it back — pan, shove, pan, shove, at frame rate.
+   * Reported from the phone as the camera fighting itself, and correctly
+   * blamed on panning down rather than on digging.
+   *
+   * Neither half was wrong. The arm is right to fall and the guard is
+   * right to push; what was missing is that the push was never smoothed
+   * by anything. Cleared on the TARGET, the correction goes through the
+   * same filters the arm already has and arrives as part of the camera's
+   * motion instead of on top of it.
+   */
+  private liftCameraClear(look?: THREE.Vector3, point?: THREE.Vector3): void {
+    const p = point ?? this.camera.position;
     const walker = this.walker;
     if (!walker) return;
-    /* Clear by the FRUSTUM's radius, not by a point's. */
-    const margin = this.lensClearance();
-    if (this.soilDensityAt(p.x, p.y, p.z) <= -margin) return;
+    /*
+     * THE CHEAP QUESTION FIRST. The corner test costs five field reads
+     * and the march can cost fifty; the lens spends most of the game
+     * nowhere near soil, and ONE read settles those frames. The bound is
+     * deliberately generous because this field's magnitude is not a
+     * distance (see `frustumWorstAt`) — the steepest gradient measured
+     * was 1.9, so three times the clearance has margin to spare.
+     *
+     * It buys nothing while she digs, where the lens is at the working
+     * face by definition. It buys everything in the other 95% of play.
+     */
+    const clear = this.lensClearance();
+    const middle = this.soilDensityAt(p.x, p.y, p.z);
+    if (middle < -clear * 3) { this.lensWorstMm = middle * MM; return; }
+    /* The four corners the picture starts at — see `frustumWorstAt`. */
+    const fwd = S_LENS_FWD;
+    const up = S_LENS_UP;
+    this.lensBasis(fwd, up, look);
+    this.lensWorstMm = this.frustumWorstAt(p, fwd, up) * MM;
+    if (this.lensWorstMm <= 0) return;
     /*
      * OUT ALONG THE SOIL'S OWN NORMAL — the shortest way to air, and the
      * only direction that works on every surface.
@@ -3862,16 +4256,53 @@ export class IslandScene {
      */
     const out = S_TARGET.set(0, 1, 0);
     walker.normalAt(p, out);
-    for (let d = CAMERA_SKIN; d <= RIDE * 4 + margin; d += CAMERA_SKIN) {
-      if (this.soilDensityAt(
-        p.x + out.x * d, p.y + out.y * d, p.z + out.z * d,
-      ) <= -margin) {
-        /* One skin PAST the boundary: landing exactly on it leaves the near
-         * plane straddling the surface, which is the dirt still showing. */
-        p.addScaledVector(out, d + CAMERA_SKIN);
+    /*
+     * A COARSE WALK, THEN A BISECTION — not forty-five fine steps.
+     *
+     * The old march advanced one CAMERA_SKIN at a time and paid five
+     * field reads at every one of them, which is most of what the guard
+     * cost. Eight strides find the boundary and four halvings put it back
+     * within a skin, for a twelfth of the reads and the same answer.
+     */
+    const span = RIDE * 4 + clear;
+    const step = span / 8;
+    const probe = S_LENS_STEP;
+    /*
+     * BEST EFFORT, NOT ALL OR NOTHING. A bore barely wider than the
+     * frustum has no spot where all four corners come clear, and the old
+     * rule — walk the whole march, then jump to her centre — threw away
+     * every partial improvement it had already found and put the lens
+     * inside her instead. Remembering the least-bad offset means a tunnel
+     * too tight to satisfy still gets the emptiest picture available, and
+     * the fallback to her position only wins when it is genuinely better.
+     */
+    for (let i = 1; i <= 8; i += 1) {
+      const d = step * i;
+      probe.copy(p).addScaledVector(out, d);
+      /* The whole frustum has to come clear, not just the lens: stopping
+       * when the POINT escapes is what left a corner in the soil. */
+      if (this.frustumWorstAt(probe, fwd, up) <= 0) {
+        /* Somewhere between the last stride and this one it came clear.
+         * Four halvings land within a skin of the true boundary, so the
+         * lens still sits as close to her as the soil allows. */
+        let lo = d - step;
+        let hi = d;
+        for (let k = 0; k < 4; k += 1) {
+          const mid = (lo + hi) / 2;
+          probe.copy(p).addScaledVector(out, mid);
+          if (this.frustumWorstAt(probe, fwd, up) > 0) lo = mid; else hi = mid;
+        }
+        p.addScaledVector(out, hi + CAMERA_SKIN);
+        this.lensWorstMm = this.frustumWorstAt(p, fwd, up) * MM;
         return;
       }
     }
+    /* Nothing clear anywhere along the normal — a bore no wider than the
+     * picture. Her own position is provably open, because she is standing
+     * in it, so the lens goes there rather than staying in the wall. */
+    p.copy(this.at);
+    this.lensWorstMm = this.frustumWorstAt(p, fwd, up) * MM;
+
     /* Buried deeper than the search — the only place certainly in air is
      * where she is, so fall back on her and let the next frame ease out. */
     p.copy(this.at);
@@ -4131,6 +4562,10 @@ export class IslandScene {
        * which is player input, so turning stays instant. That split is the
        * whole design — filter the body, never the intent.
        */
+      /* Cleared BEFORE the filter, for the reason spelled out on
+       * `liftCameraClear`: a correction applied after the smoothing is a
+       * correction nothing smooths. */
+      this.liftCameraClear(dir, eye);
       this.settleEye(eye, dt);
       /*
        * THE EYE'S OWN UP, TURNED WITH THE PITCH — not the world's.
@@ -4160,7 +4595,11 @@ export class IslandScene {
        * a trunk read as her leaning rather than the world tipping.
        */
       this.camera.up.copy(steadyUp);
-      this.liftCameraClear();
+      /* The same backstop the chase keeps: the target was clear, so this
+       * only ever catches the lens crossing a lip on its way there. */
+      if (this.soilDensityAt(
+        this.camera.position.x, this.camera.position.y, this.camera.position.z,
+      ) > 0) this.liftCameraClear(dir);
       /* Aim from where the lens ACTUALLY ended up. The guard above may have
        * nudged it out of a roof, and looking at a target measured from the
        * old spot tilts the whole view by however far it moved — a pitch
@@ -4365,10 +4804,23 @@ export class IslandScene {
     const jump = this.camWant.distanceTo(want);
     this.camWant.lerp(want, 1 - Math.exp(-(jump > this.camDist ? 12 : 5) * dt));
 
+    /* The clearance is applied HERE, to the smoothed target, so it is
+     * carried by the filter below rather than added after it. */
+    this.liftCameraClear(undefined, this.camWant);
+
     const gap = this.camera.position.distanceTo(this.camWant);
     const rate = gap > this.camDist ? 14 : 7;
     this.camera.position.lerp(this.camWant, 1 - Math.exp(-rate * dt));
-    this.liftCameraClear();
+    /*
+     * A BACKSTOP, not a second guard: the lens is somewhere between its
+     * old spot and a target already known to be clear, so it can only be
+     * inside soil while crossing a thin lip. That is worth correcting and
+     * is not worth another full search — and because the target is clear,
+     * this fires on a handful of frames instead of every one.
+     */
+    if (this.soilDensityAt(
+      this.camera.position.x, this.camera.position.y, this.camera.position.z,
+    ) > 0) this.liftCameraClear();
 
     const look = S_UP.copy(this.at).addScaledVector(this.up, 0.3);
     if (!this.camLook) this.camLook = look.clone();
@@ -4470,6 +4922,10 @@ export class IslandScene {
        * spot she was lining up. */
       if (this.digMode) this.dodge.cancel();
       dig.classList.toggle('is-grip', this.digMode);
+      /* The overlay's switch belongs to the shovel, and leaves with it —
+       * along with the overlay itself, which `updateAimDebug` hides on
+       * the same condition. */
+      if (this.aimChip) this.aimChip.style.display = this.digMode ? '' : 'none';
       this.scoopBtn!.style.display = this.digMode ? '' : 'none';
       this.headingReadout!.style.display = this.digMode ? '' : 'none';
       this.depthReadout!.style.display = this.digMode ? '' : 'none';
@@ -4564,6 +5020,28 @@ export class IslandScene {
       if (this.nestView) this.nestView.root.visible = this.showPlan;
     });
     actions.appendChild(plan);
+
+    /*
+     * AIM — the dig overlay's switch, and it lives with the dig controls
+     * because that is the only mode it draws in.
+     *
+     * It was shipped as `?aimdebug=1` alone, which is a fine switch for a
+     * probe and a poor one for the person actually holding the phone: it
+     * cannot be turned off without retyping the address, and it cannot be
+     * turned ON at the moment something looks wrong, which is the only
+     * moment anyone wants it. The chip appears with the shovel and goes
+     * away with it, so an ordinary session never sees it — and the URL
+     * still works, for probes and for arriving with it already on.
+     */
+    this.aimChip = document.createElement('button');
+    this.aimChip.className = 'density-lab-button density-lab-mode';
+    this.aimChip.textContent = 'AIM';
+    this.aimChip.style.display = 'none';
+    this.aimChip.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      this.setAimDebug(!this.aimDebug);
+    });
+    actions.appendChild(this.aimChip);
 
     const view = document.createElement('button');
     view.className = 'density-lab-button density-lab-mode';
@@ -5150,6 +5628,144 @@ export class IslandScene {
         this.groundForLegs,
       );
     }
+  }
+
+  /**
+   * THE CAMERA'S TERRAIN QUESTION, ANSWERED IN THE OPEN.
+   *
+   * Every stage of the chain for one world point, so a probe can say WHICH
+   * subsystem owns a bad frame rather than counting one blurred total:
+   * whether the fine window had an answer at all, what it said, what the
+   * coarse island would have said instead, what the tree contributes, and
+   * whether the chunk covering the point is built, queued or missing.
+   *
+   * The distinction that matters is `fine`: 'solid' and 'air' are both
+   * ANSWERS and both authoritative — carved air must never be overruled by
+   * the coarse heightfield merely because the point lies under the original
+   * surface — while 'unavailable' is the only state the fallback may serve.
+   */
+  lensQueryForTest(x: number, y: number, z: number): {
+    fine: 'solid' | 'air' | 'unavailable';
+    fineMm: number | null;
+    coarseMm: number;
+    treeMm: number | null;
+    scrubMm: number | null;
+    finalMm: number;
+    localCell: [number, number, number] | null;
+    chunk: string;
+    chunkState: 'built' | 'queued' | 'missing' | 'out-of-window';
+  } {
+    const stream = this.stream;
+    const raw = stream?.densityAtWu(x, y, z);
+    const available = raw !== null && raw !== undefined;
+    const tree = this.tree?.solid?.densityAt(x, y, z);
+    const scrub = this.stand?.densityAt(x, y, z);
+    let localCell: [number, number, number] | null = null;
+    let chunk = 'out-of-window';
+    let chunkState: 'built' | 'queued' | 'missing' | 'out-of-window' = 'out-of-window';
+    if (stream) {
+      const lx = (x - stream.originWorldX) / CELL_SIZE;
+      const ly = (y - stream.bandFloorWu) / CELL_SIZE;
+      const lz = (z - stream.originWorldZ) / CELL_SIZE;
+      localCell = [lx, ly, lz];
+      if (available) {
+        const key = this.key(
+          Math.floor(lx / CH), Math.floor(ly / CH), Math.floor(lz / CH),
+        );
+        chunk = key;
+        chunkState = this.chunkMeshes.has(key) || this.builtChunks.has(key)
+          ? 'built' : this.queued.has(key) ? 'queued' : 'missing';
+      }
+    }
+    return {
+      fine: available ? (raw > 0 ? 'solid' : 'air') : 'unavailable',
+      fineMm: available ? raw * MM : null,
+      coarseMm: (this.walkGroundAt(x, z) - y) * MM,
+      treeMm: tree === undefined ? null : tree * MM,
+      scrubMm: scrub === undefined ? null : scrub * MM,
+      finalMm: this.soilDensityAt(x, y, z) * MM,
+      localCell,
+      chunk,
+      chunkState,
+    };
+  }
+
+  /** What the guard left in frame, and what it was defending. */
+  lensReportForTest(): {
+    worstMm: number; clearanceMm: number; fovDeg: number; nearMm: number;
+    camMm: [number, number, number]; queuedChunks: number;
+  } {
+    const p = this.camera.position;
+    return {
+      worstMm: this.lensWorstMm,
+      clearanceMm: this.lensClearance() * MM,
+      fovDeg: this.camera.fov,
+      nearMm: this.camera.near * MM,
+      camMm: [p.x * MM, p.y * MM, p.z * MM],
+      queuedChunks: this.queue.length,
+    };
+  }
+
+  /** The overlay's one switch, so the chip, the URL and a probe cannot
+   *  disagree about whether it is on. */
+  private setAimDebug(on: boolean): void {
+    this.aimDebug = on;
+    this.aimChip?.classList.toggle('is-grip', on);
+  }
+
+  /** The aim overlay, for a probe that wants it without a URL. */
+  setAimDebugForTest(on: boolean): void { this.setAimDebug(on); }
+
+  /** What the overlay is drawing, as numbers — the same values, so a probe
+   *  can assert the discrepancy the picture shows. */
+  aimDebugForTest(): {
+    camAtMm: [number, number, number]; digAtMm: [number, number, number];
+    jawMm: [number, number, number] | null; biteMm: [number, number, number];
+    camVsBoreDeg: number; camVsHeadDeg: number | null;
+    jawOffAxisMm: number | null; jawToCarveMm: number | null;
+    carveAheadMm: number; carveUpMm: number; carveSideMm: number;
+    reachMm: number; willBite: boolean;
+  } {
+    const aim = this.boreAim();
+    const centre = new THREE.Vector3();
+    const jaw = new THREE.Vector3();
+    let hull = NOSE_REACH + JAW_PAST_NOSE;
+    const haveJaw = this.queenReady && this.queen.jawPosition(jaw);
+    if (haveJaw) {
+      centre.copy(jaw);
+      hull = Math.max(hull, centre.sub(this.at).dot(aim));
+    }
+    const willBite = this.biteCentre(aim, hull, centre);
+    this.camera.updateMatrixWorld();
+    const camDir = this.camera.getWorldDirection(new THREE.Vector3());
+    const head = new THREE.Vector3();
+    const haveHead = this.queenReady && this.queen.eyeForwardWorld(head);
+    const p = this.camera.position;
+    const ang = (a: THREE.Vector3, b: THREE.Vector3): number =>
+      (Math.acos(Math.max(-1, Math.min(1, a.dot(b)))) * 180) / Math.PI;
+    let ahead = 0; let lift = 0; let side = 0;
+    if (haveJaw && haveHead) {
+      const up = new THREE.Vector3();
+      this.queen.eyeUpWorld(up);
+      const right = new THREE.Vector3().crossVectors(head, up).normalize();
+      const rel = centre.clone().sub(jaw);
+      ahead = rel.dot(head) * MM;
+      lift = rel.dot(up) * MM;
+      side = rel.dot(right) * MM;
+    }
+    return {
+      camAtMm: [p.x * MM, p.y * MM, p.z * MM],
+      digAtMm: [this.at.x * MM, this.at.y * MM, this.at.z * MM],
+      jawMm: haveJaw ? [jaw.x * MM, jaw.y * MM, jaw.z * MM] : null,
+      biteMm: [centre.x * MM, centre.y * MM, centre.z * MM],
+      camVsBoreDeg: ang(camDir, aim),
+      camVsHeadDeg: haveHead ? ang(camDir, head) : null,
+      jawOffAxisMm: haveJaw ? jaw.distanceTo(this.at) * MM : null,
+      jawToCarveMm: haveJaw ? jaw.distanceTo(centre) * MM : null,
+      carveAheadMm: ahead, carveUpMm: lift, carveSideMm: side,
+      reachMm: this.at.distanceTo(centre) * MM,
+      willBite,
+    };
   }
 
   setPausedForTest(on: boolean): void { this.paused = on; }
