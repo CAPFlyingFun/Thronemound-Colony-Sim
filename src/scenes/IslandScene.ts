@@ -192,6 +192,14 @@ const RIDE = 1.3 / MM;
 const S_PERP = new THREE.Vector3();
 const S_RAD = new THREE.Vector3();
 const S_CENTER = new THREE.Vector3();
+/** The lens guard's own scratches: it runs inside the camera pass, after
+ *  the pose has finished with the S_ pool but while `S_TARGET` is live. */
+const S_LENS_FWD = new THREE.Vector3();
+const S_LENS_UP = new THREE.Vector3();
+const S_LENS_RIGHT = new THREE.Vector3();
+const S_LENS_CORNER = new THREE.Vector3();
+const S_LENS_STEP = new THREE.Vector3();
+
 /** Head-clearance and bone-follow scratches — theirs alone, read across
  *  frames of the pose and never shared with the S_ pool. */
 const HEAD_PROBE_AT = new THREE.Vector3();
@@ -1146,6 +1154,14 @@ export class IslandScene {
   private spineRead: SpineReading | null = null;
 
   private spineWant: SpinePose | null = null;
+
+  /**
+   * How far into soil the WORST near-plane corner sits, in mm, after the
+   * guard has had its say. Positive is dirt in the picture. Reported by
+   * `lensReportForTest` so a probe can separate a query fault from an
+   * escape fault instead of counting one blurred total.
+   */
+  private lensWorstMm = 0;
 
   /** The terrain rises, low-passed — see `readSpine`. */
   private riseAhead = 0;
@@ -3842,13 +3858,72 @@ export class IslandScene {
     return Math.hypot(cam.near, halfH, halfW) + CAMERA_SKIN;
   }
 
-  private liftCameraClear(): void {
+  /**
+   * THE WORST OF THE FOUR CORNERS the picture actually starts at, tested as
+   * POINTS rather than inferred from a radius.
+   *
+   * v0.0.78 defended a sphere of `lensClearance` around the lens, on the
+   * assumption that the soil field's magnitude is a distance. It is not.
+   * Measured at a failing frame: the lens sat clear by the full margin
+   * while a corner 1.51 mm away read +1.18 mm INSIDE — density had swung
+   * 2.84 mm over 1.51 mm of travel, a gradient of 1.9, because this field
+   * is a blend of a heightfield, a carved window and the tree's own solid
+   * and none of them promise unit slope. A radius argued in density units
+   * is therefore not the millimetres it claims to be, and the only honest
+   * test of "is soil in frame" is to ask at the corners themselves.
+   *
+   * Four probes, and they replace the guesswork rather than adding to it.
+   */
+  private frustumWorstAt(
+    at: THREE.Vector3, fwd: THREE.Vector3, up: THREE.Vector3,
+  ): number {
+    const cam = this.camera;
+    const halfH = cam.near * Math.tan((cam.fov * Math.PI) / 360);
+    const halfW = halfH * cam.aspect;
+    const right = S_LENS_RIGHT.crossVectors(fwd, up).normalize();
+    let worst = this.soilDensityAt(at.x, at.y, at.z);
+    for (let i = 0; i < 4; i += 1) {
+      const sx = i < 2 ? -1 : 1;
+      const sy = i % 2 === 0 ? -1 : 1;
+      const c = S_LENS_CORNER.copy(at)
+        .addScaledVector(fwd, cam.near)
+        .addScaledVector(right, halfW * sx)
+        .addScaledVector(up, halfH * sy);
+      const d = this.soilDensityAt(c.x, c.y, c.z);
+      if (d > worst) worst = d;
+    }
+    return worst;
+  }
+
+  /**
+   * The lens's own basis for the guard, which cannot read the camera's
+   * matrix: the guard runs BEFORE `lookAt`, so `matrixWorld` still holds
+   * last frame's orientation. First person hands in the ray it is about to
+   * look down; the chase hands in the line to her.
+   */
+  private lensBasis(
+    fwdOut: THREE.Vector3, upOut: THREE.Vector3, look?: THREE.Vector3,
+  ): void {
+    if (look) fwdOut.copy(look).normalize();
+    else fwdOut.copy(this.at).sub(this.camera.position);
+    if (fwdOut.lengthSq() < 1e-12) fwdOut.set(0, 0, 1);
+    fwdOut.normalize();
+    upOut.copy(this.camera.up);
+    upOut.addScaledVector(fwdOut, -upOut.dot(fwdOut));
+    if (upOut.lengthSq() < 1e-12) upOut.set(0, 1, 0).addScaledVector(fwdOut, -fwdOut.y);
+    upOut.normalize();
+  }
+
+  private liftCameraClear(look?: THREE.Vector3): void {
     const p = this.camera.position;
     const walker = this.walker;
     if (!walker) return;
-    /* Clear by the FRUSTUM's radius, not by a point's. */
-    const margin = this.lensClearance();
-    if (this.soilDensityAt(p.x, p.y, p.z) <= -margin) return;
+    /* The four corners the picture starts at — see `frustumWorstAt`. */
+    const fwd = S_LENS_FWD;
+    const up = S_LENS_UP;
+    this.lensBasis(fwd, up, look);
+    this.lensWorstMm = this.frustumWorstAt(p, fwd, up) * MM;
+    if (this.lensWorstMm <= 0) return;
     /*
      * OUT ALONG THE SOIL'S OWN NORMAL — the shortest way to air, and the
      * only direction that works on every surface.
@@ -3862,15 +3937,44 @@ export class IslandScene {
      */
     const out = S_TARGET.set(0, 1, 0);
     walker.normalAt(p, out);
-    for (let d = CAMERA_SKIN; d <= RIDE * 4 + margin; d += CAMERA_SKIN) {
-      if (this.soilDensityAt(
-        p.x + out.x * d, p.y + out.y * d, p.z + out.z * d,
-      ) <= -margin) {
-        /* One skin PAST the boundary: landing exactly on it leaves the near
-         * plane straddling the surface, which is the dirt still showing. */
-        p.addScaledVector(out, d + CAMERA_SKIN);
+    const step = CAMERA_SKIN;
+    const probe = S_LENS_STEP;
+    /*
+     * BEST EFFORT, NOT ALL OR NOTHING. A bore barely wider than the
+     * frustum has no spot where all four corners come clear, and the old
+     * rule — walk the whole march, then jump to her centre — threw away
+     * every partial improvement it had already found and put the lens
+     * inside her instead. Remembering the least-bad offset means a tunnel
+     * too tight to satisfy still gets the emptiest picture available, and
+     * the fallback to her position only wins when it is genuinely better.
+     */
+    let bestD = 0;
+    let bestWorst = this.lensWorstMm / MM;
+    for (let d = step; d <= RIDE * 4 + this.lensClearance(); d += step) {
+      probe.copy(p).addScaledVector(out, d);
+      /* The whole frustum has to come clear, not just the lens: stopping
+       * when the POINT escapes is what left a corner in the soil. */
+      const worst = this.frustumWorstAt(probe, fwd, up);
+      if (worst <= 0) {
+        p.copy(probe).addScaledVector(out, step);
+        this.lensWorstMm = this.frustumWorstAt(p, fwd, up) * MM;
         return;
       }
+      if (worst < bestWorst) { bestWorst = worst; bestD = d; }
+    }
+    /* Nothing clear anywhere along the normal. Her own position is
+     * provably open — she is standing in it — so take whichever of the two
+     * leaves less dirt in frame. */
+    const atHer = this.frustumWorstAt(this.at, fwd, up);
+    if (atHer < bestWorst) {
+      p.copy(this.at);
+      this.lensWorstMm = atHer * MM;
+      return;
+    }
+    if (bestD > 0) {
+      p.addScaledVector(out, bestD);
+      this.lensWorstMm = bestWorst * MM;
+      return;
     }
     /* Buried deeper than the search — the only place certainly in air is
      * where she is, so fall back on her and let the next frame ease out. */
@@ -4160,7 +4264,7 @@ export class IslandScene {
        * a trunk read as her leaning rather than the world tipping.
        */
       this.camera.up.copy(steadyUp);
-      this.liftCameraClear();
+      this.liftCameraClear(dir);
       /* Aim from where the lens ACTUALLY ended up. The guard above may have
        * nudged it out of a roof, and looking at a target measured from the
        * old spot tilts the whole view by however far it moved — a pitch
@@ -5150,6 +5254,82 @@ export class IslandScene {
         this.groundForLegs,
       );
     }
+  }
+
+  /**
+   * THE CAMERA'S TERRAIN QUESTION, ANSWERED IN THE OPEN.
+   *
+   * Every stage of the chain for one world point, so a probe can say WHICH
+   * subsystem owns a bad frame rather than counting one blurred total:
+   * whether the fine window had an answer at all, what it said, what the
+   * coarse island would have said instead, what the tree contributes, and
+   * whether the chunk covering the point is built, queued or missing.
+   *
+   * The distinction that matters is `fine`: 'solid' and 'air' are both
+   * ANSWERS and both authoritative — carved air must never be overruled by
+   * the coarse heightfield merely because the point lies under the original
+   * surface — while 'unavailable' is the only state the fallback may serve.
+   */
+  lensQueryForTest(x: number, y: number, z: number): {
+    fine: 'solid' | 'air' | 'unavailable';
+    fineMm: number | null;
+    coarseMm: number;
+    treeMm: number | null;
+    scrubMm: number | null;
+    finalMm: number;
+    localCell: [number, number, number] | null;
+    chunk: string;
+    chunkState: 'built' | 'queued' | 'missing' | 'out-of-window';
+  } {
+    const stream = this.stream;
+    const raw = stream?.densityAtWu(x, y, z);
+    const available = raw !== null && raw !== undefined;
+    const tree = this.tree?.solid?.densityAt(x, y, z);
+    const scrub = this.stand?.densityAt(x, y, z);
+    let localCell: [number, number, number] | null = null;
+    let chunk = 'out-of-window';
+    let chunkState: 'built' | 'queued' | 'missing' | 'out-of-window' = 'out-of-window';
+    if (stream) {
+      const lx = (x - stream.originWorldX) / CELL_SIZE;
+      const ly = (y - stream.bandFloorWu) / CELL_SIZE;
+      const lz = (z - stream.originWorldZ) / CELL_SIZE;
+      localCell = [lx, ly, lz];
+      if (available) {
+        const key = this.key(
+          Math.floor(lx / CH), Math.floor(ly / CH), Math.floor(lz / CH),
+        );
+        chunk = key;
+        chunkState = this.chunkMeshes.has(key) || this.builtChunks.has(key)
+          ? 'built' : this.queued.has(key) ? 'queued' : 'missing';
+      }
+    }
+    return {
+      fine: available ? (raw > 0 ? 'solid' : 'air') : 'unavailable',
+      fineMm: available ? raw * MM : null,
+      coarseMm: (this.walkGroundAt(x, z) - y) * MM,
+      treeMm: tree === undefined ? null : tree * MM,
+      scrubMm: scrub === undefined ? null : scrub * MM,
+      finalMm: this.soilDensityAt(x, y, z) * MM,
+      localCell,
+      chunk,
+      chunkState,
+    };
+  }
+
+  /** What the guard left in frame, and what it was defending. */
+  lensReportForTest(): {
+    worstMm: number; clearanceMm: number; fovDeg: number; nearMm: number;
+    camMm: [number, number, number]; queuedChunks: number;
+  } {
+    const p = this.camera.position;
+    return {
+      worstMm: this.lensWorstMm,
+      clearanceMm: this.lensClearance() * MM,
+      fovDeg: this.camera.fov,
+      nearMm: this.camera.near * MM,
+      camMm: [p.x * MM, p.y * MM, p.z * MM],
+      queuedChunks: this.queue.length,
+    };
   }
 
   setPausedForTest(on: boolean): void { this.paused = on; }
