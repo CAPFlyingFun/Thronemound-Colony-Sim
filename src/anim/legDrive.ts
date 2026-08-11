@@ -179,10 +179,12 @@ const LOCK_AT = 0.9;
  * Expressed as fractions of WALK pace rather than absolute speeds, so a
  * major and a minim each get the transition at their own pace.
  *
- * OFF BY DEFAULT. Fewer feet leaving the ground changes the input the corner
+ * THE CORNER IS EXEMPT BY CONSTRUCTION, and that is what makes this safe to
+ * run by default. Fewer feet leaving the ground changes the input the corner
  * scheduler's release rule is tuned against — `minPlanted`, the acquire and
- * transfer phases, the stall guard — so this is opt-in until its numbers
- * have been looked at: `?gait=adaptive`, or `drive.adaptiveGait = true`.
+ * transfer phases, the stall guard — so a transition in progress keeps the
+ * tripod whatever the speed says. The scene ships it on for the CRAWL pace;
+ * `?gait=tripod`, or `drive.adaptiveGait = false`, puts the one gait back.
  */
 export const GAIT_WAVE_BELOW = 0.35;
 
@@ -442,9 +444,9 @@ export class LegDrive {
   /**
    * Let the gait choose how many feet leave the ground, by speed.
    *
-   * Off by default — see `feetAllowedUp`. Fewer feet lifting changes the
-   * input the corner scheduler's release rule is tuned against, so this is
-   * opt-in until its numbers have been looked at: `?gait=adaptive`.
+   * On in the island scene — see `feetAllowedUp`. Left false HERE so a bare
+   * drive built by a test gets the one gait it was written against, and the
+   * scene says out loud that it wants the other; `?gait=tripod` turns it off.
    */
   adaptiveGait = false;
   /** The pace the gait's speed fractions are measured against, in wu/s. */

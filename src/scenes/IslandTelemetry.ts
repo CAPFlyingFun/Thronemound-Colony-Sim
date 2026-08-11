@@ -39,6 +39,9 @@ export interface TelemetrySample {
   yaw: number;
   strafe: number;
   sprint: boolean;
+  /** The other end of the pace latch — logged so a slow row is not read as
+   *  a stuck one. The two are never both true. */
+  crawl: boolean;
   /** What the stick asked for, in millimetres per second. */
   reqMmS: number;
   /**
@@ -237,7 +240,7 @@ export class TelemetryRecorder {
       for (let i = from; i <= to; i += 1) {
         const s = this.samples[i]!;
         lines.push(`${i === ev.at ? '>' : ' '}${n(s.t, 6, 2)} `
-          + `${n(s.walk, 5, 2)}${s.sprint ? '*' : ' '}`
+          + `${n(s.walk, 5, 2)}${s.sprint ? '*' : (s.crawl ? '.' : ' ')}`
           + `${n(s.reqMmS, 5)} ${n(s.actMmS, 5)} ${n(s.heldBackMm, 5, 2)} `
           + `${n(s.planted, 5, 0)} ${n(s.groping, 5, 0)} ${n(s.upRateDeg, 7, 0)} `
           + `${n(s.turnDeg, 5, 0)} ${n(s.candidateMm, 5, 1)} `

@@ -9,7 +9,7 @@ import {
 const still = (over: Partial<Omit<TelemetrySample, 't' | 'upRateDeg'>> = {}) => ({
   x: 0, y: 0, z: 0,
   upX: 0, upY: 1, upZ: 0,
-  walk: 0, yaw: 0, strafe: 0, sprint: false,
+  walk: 0, yaw: 0, strafe: 0, sprint: false, crawl: false,
   reqMmS: 0, actMmS: 0, heldBackMm: 0,
   planted: 6, groping: 0, strain: 0, allowed: 1, clearanceMm: 1, seatMm: 0,
   phase: 'none', turnDeg: 0, candidateMm: 0, onNew: 0, onOld: 6,

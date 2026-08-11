@@ -102,6 +102,17 @@ const SEC_VERTS = (MESH_N - 1) / SECTIONS + 1;
  */
 const WALK_SPEED = 1.5;
 const SPRINT = 3;
+/*
+ * CRAWL — the third pace, and the one the wave gait was written for.
+ *
+ * Three tenths rather than a third, because the gait switches below
+ * `GAIT_WAVE_BELOW` (0.35) and a pace sitting exactly on the threshold
+ * would flicker between one foot up and three as the speed filter breathed.
+ * Two and a quarter millimetres a second: she picks her way rather than
+ * travels, which is the whole point of having the pace at all.
+ */
+const CRAWL = 0.3;
+const PACE_NAMES = ['CRAWL', 'WALK', 'RUN'] as const;
 
 /*
  * SHE LEANS INTO IT — the body pitching on planted feet, which is the one
@@ -996,7 +1007,22 @@ export class IslandScene {
 
   private readonly velocity = new THREE.Vector3();
 
-  readonly input = { walk: 0, yaw: 0, strafe: 0, dig: false, sprint: false };
+  readonly input = {
+    walk: 0, yaw: 0, strafe: 0, dig: false, sprint: false, crawl: false,
+  };
+
+  /**
+   * What the pace latch multiplies her walk by: crawl, walk or run.
+   *
+   * `applyPace` writes both flags from ONE index, so they cannot disagree —
+   * but the order here is still a run first, because `input` is public and
+   * a probe or a script setting the flags by hand should get the same
+   * answer the chip would have given it.
+   */
+  private paceMul(): number {
+    if (this.input.sprint) return SPRINT;
+    return this.input.crawl ? CRAWL : 1;
+  }
 
   /*
    * There is no TURN/STEER latch any more. It existed to choose which of
@@ -1004,8 +1030,31 @@ export class IslandScene {
    * view always side-steps, so there is nothing left to choose.
    */
 
-  /** The WALK/RUN latch, which is the only sprint a thumb has. */
-  private running = false;
+  /**
+   * The CRAWL / WALK / RUN latch — 0, 1, 2 — and the only pace a thumb has.
+   *
+   * Shift has always doubled her pace for the PC hand and there was never a
+   * way down from a walk at all; the chip now cycles all three, so a thumb
+   * gets the crawl the wave gait was written for as well as the run.
+   */
+  private pace: 0 | 1 | 2 = 1;
+
+  /** Push the latch out to the two input flags and the chip's face. */
+  private applyPace(): void {
+    /* A HELD KEY OUTRANKS THE LATCH, and Shift outranks C — pressing both is
+     * a fumble, not a request, and a run is the safer thing to give it. */
+    const held = this.shiftHeld ? 2 : this.crawlHeld ? 0 : null;
+    const now = held ?? this.pace;
+    this.input.sprint = now === 2;
+    this.input.crawl = now === 0;
+    if (this.paceChip) this.paceChip.textContent = PACE_NAMES[this.pace];
+  }
+
+  /** Shift runs and C crawls, both held; the chip latches. The keys match
+   *  the density lab's, which has had all three paces for far longer. */
+  private shiftHeld = false;
+
+  private crawlHeld = false;
 
   private paceChip: HTMLButtonElement | null = null;
 
@@ -1543,13 +1592,16 @@ export class IslandScene {
       typeof location === 'undefined' ? '' : location.search,
     ).get('lean') === '0') this.leaning = false;
     /*
-     * `?gait=adaptive` — let the gait choose how many feet leave the ground
-     * by speed: a wave when she creeps, a tetrapod between, the tripod she
-     * has always run at pace. Opt-in; see `feetAllowedUp` in `legDrive.ts`.
+     * `?gait=tripod` — put the one gait back, for looking at the two side
+     * by side. The speed-chosen gait is ON now: the CRAWL chip exists to
+     * reach it, and a pace that named itself a crawl and then ran the same
+     * tripod as a run would be a label rather than a gait. Walking and
+     * running are untouched — `feetAllowedUp` only parts company with the
+     * tripod below `GAIT_WAVE_BELOW`, which no walk reaches.
      */
     if (new URLSearchParams(
       typeof location === 'undefined' ? '' : location.search,
-    ).get('gait') === 'adaptive') this.adaptiveGait = true;
+    ).get('gait') === 'tripod') this.adaptiveGait = false;
     new ResizeObserver(() => this.resize()).observe(host);
     this.resize();
     this.animate();
@@ -2680,7 +2732,7 @@ export class IslandScene {
      */
     const flat = Math.hypot(this.fwd.x, this.fwd.z);
     if (flat > 0.15) this.facing = Math.atan2(this.fwd.x, this.fwd.z);
-    const speed = this.input.walk * WALK_SPEED * (this.input.sprint ? SPRINT : 1);
+    const speed = this.input.walk * WALK_SPEED * this.paceMul();
     this.velocity.copy(this.fwd).multiplyScalar(speed);
 
     /*
@@ -3137,7 +3189,7 @@ export class IslandScene {
      * than snapping back to it.
      */
     const burst = this.dodge.sample(dt);
-    const stickSpeed = WALK_SPEED * (this.input.sprint ? SPRINT : 1);
+    const stickSpeed = WALK_SPEED * this.paceMul();
     const w = burst.authority;
     const walk = this.input.walk + (burst.forward - this.input.walk) * w;
     const strafe = this.input.strafe + (burst.side - this.input.strafe) * w;
@@ -4065,8 +4117,8 @@ export class IslandScene {
   private bankHasPrev = false;
   /** `?lean=0` turns it off, for looking at the two side by side. */
   private leaning = true;
-  /** `?gait=adaptive` — the slow gaits. Applied to the drive as it is built. */
-  private adaptiveGait = false;
+  /** `?gait=tripod` turns it off. Applied to the drive as it is built. */
+  private adaptiveGait = true;
 
   private pose(dt: number): void {
     if (!this.queenReady) return;
@@ -5194,26 +5246,31 @@ export class IslandScene {
     actions.appendChild(view);
 
     /*
-     * WALK / RUN — and on a touch screen it is the ONLY sprint there is.
+     * CRAWL / WALK / RUN — and on a touch screen it is the ONLY pace there is.
      *
      * Shift has always doubled her pace for the PC hand; a thumb had no
      * equivalent, so a phone was locked to 7.5 mm/s whatever it did. The
      * chip is a latch rather than a held button because there is nowhere
      * left on a phone to hold a second finger down: the left half of the
      * screen is the stick and the right half is the look-drag.
+     *
+     * It cycles three ways rather than two because there is now a second
+     * GAIT down there to reach: below `GAIT_WAVE_BELOW` she picks her way
+     * one foot at a time, and without a crawl on the chip that gait was
+     * only reachable by feathering a thumbstick, which nobody does
+     * deliberately.
      */
     this.paceChip = document.createElement('button');
     this.paceChip.className = 'density-lab-button density-lab-mode';
-    this.paceChip.textContent = 'WALK';
     this.paceChip.addEventListener('pointerdown', (e) => {
       e.preventDefault();
-      this.running = !this.running;
-      this.paceChip!.textContent = this.running ? 'RUN' : 'WALK';
+      this.pace = ((this.pace + 1) % 3) as 0 | 1 | 2;
       /* Written HERE as well as in `applyKeys`, because that only runs on a
        * key event — on a phone there are none, so the latch would have sat
        * there doing nothing until someone plugged a keyboard in. */
-      this.input.sprint = this.running;
+      this.applyPace();
     });
+    this.applyPace();
     actions.appendChild(this.paceChip);
 
     /*
@@ -5288,7 +5345,7 @@ export class IslandScene {
 
     /*
      * WASD for the PC hand (playtest: "I was having trouble moving"):
-     * W/S walk, A/D turn, Shift sprint, Space DIGS (hold), B opens the nest
+     * W/S walk, A/D turn, Shift runs, C crawls, Space DIGS (hold), B opens the nest
      * tools, V swaps the view. There is no aim key: she digs where the view
      * looks.
      * Arrows mirror WASD. Keys and stick write the same inputs.
@@ -5310,9 +5367,13 @@ export class IslandScene {
         this.input.walk = forward;
         this.input.yaw = turn;
       }
-      /* Shift OR the latch — the key is a hold and the chip is a toggle,
-       * and either one asking for a run is a run. */
-      this.input.sprint = k.has('shift') || this.running;
+      /* The keys are holds and the chip is a latch, so a hold wins for as
+       * long as it is held and the latch is still there afterwards — the
+       * chip's face keeps reading the latch throughout, because that is
+       * what it will go back to. */
+      this.shiftHeld = k.has('shift');
+      this.crawlHeld = k.has('c');
+      this.applyPace();
       /* Space is the shovel, and it is HELD — but only once DIG is armed. */
       const space = k.has(' ');
       if (space !== this.spaceWasDown) {
@@ -5987,6 +6048,7 @@ export class IslandScene {
       yaw: this.input.yaw,
       strafe: this.input.strafe,
       sprint: this.input.sprint,
+      crawl: this.input.crawl,
       reqMmS: this.velocity.length() * VOXEL_MM,
       /*
        * MEASURED, NOT CLAIMED. r.movedMm is what the drive believes it did,
