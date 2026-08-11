@@ -3538,9 +3538,17 @@ export class IslandScene {
         this.scene.add(obj);
         return obj;
       };
-      const bead = (colour: number, r: number): THREE.Mesh => {
+      /*
+       * Unit spheres, SCALED BY RANGE each frame. Drawn at a fixed world
+       * size and with depth testing off, a bead a millimetre from the
+       * lens — which is exactly where her jaws are in first person —
+       * becomes a wall of colour across the whole screen. Reported as
+       * "weird stuff", and it was: the yellow shape swallowing the frame
+       * was her mandible marker seen from the inside.
+       */
+      const bead = (colour: number): THREE.Mesh => {
         const m = new THREE.Mesh(
-          new THREE.SphereGeometry(r, 10, 8),
+          new THREE.SphereGeometry(1, 10, 8),
           new THREE.MeshBasicMaterial({ color: colour, depthTest: false }),
         );
         m.renderOrder = 13;
@@ -3550,8 +3558,8 @@ export class IslandScene {
       this.aimDbgDig = line(0x2fe36a);   // GREEN  the dig ray, as bite() has it
       this.aimDbgCam = line(0xe0553f);   // RED    the crosshair's own ray
       this.aimDbgHead = line(0x35d6e8);  // CYAN   the head bone's forward axis
-      this.aimDbgSpot = bead(0xffffff, 0.16); // WHITE the carve centre
-      this.aimDbgJaw = bead(0xffd23f, 0.12);  // YELLOW the mandible tip
+      this.aimDbgSpot = bead(0xffffff); // WHITE  the carve centre
+      this.aimDbgJaw = bead(0xffd23f);  // YELLOW the mandible tip
       this.aimDbgText = document.createElement('div');
       this.aimDbgText.className = 'density-lab-status rail-status';
       this.aimDbgText.style.top = '58px';
@@ -3588,7 +3596,11 @@ export class IslandScene {
     /* GREEN — her centre to the exact seat of the next scoop. This is the
      * origin under audit: `bite()` works from `this.at`, not the jaws. */
     put(this.aimDbgDig!, this.at, centre);
+    /* About a degree across, whatever the range — see `bead`. */
+    const sizeAt = (at: THREE.Vector3): number =>
+      Math.max(0.02, this.camera.position.distanceTo(at) * 0.012);
     this.aimDbgSpot!.position.copy(centre);
+    this.aimDbgSpot!.scale.setScalar(sizeAt(centre));
     this.aimDbgSpot!.visible = true;
     (this.aimDbgSpot!.material as THREE.MeshBasicMaterial).color.setHex(
       willBite ? 0xffffff : 0xff5c5c,
@@ -3599,7 +3611,10 @@ export class IslandScene {
      * green line's origin IS the anatomical error being measured. */
     const haveHead = this.queenReady && this.queen.eyeForwardWorld(S_DBG_HEAD);
     this.aimDbgJaw!.visible = haveJaw;
-    if (haveJaw) this.aimDbgJaw!.position.copy(S_DBG_JAW);
+    if (haveJaw) {
+      this.aimDbgJaw!.position.copy(S_DBG_JAW);
+      this.aimDbgJaw!.scale.setScalar(sizeAt(S_DBG_JAW));
+    }
     if (haveJaw && haveHead) {
       S_DBG_END.copy(S_DBG_JAW).addScaledVector(S_DBG_HEAD, NOSE_REACH * 2);
       put(this.aimDbgHead!, S_DBG_JAW, S_DBG_END);
@@ -4130,23 +4145,41 @@ export class IslandScene {
   private frustumWorstAt(
     at: THREE.Vector3, fwd: THREE.Vector3, up: THREE.Vector3,
   ): number {
-    const cam = this.camera;
-    const halfH = cam.near * Math.tan((cam.fov * Math.PI) / 360);
-    const halfW = halfH * cam.aspect;
-    const right = S_LENS_RIGHT.crossVectors(fwd, up).normalize();
     let worst = this.soilDensityAt(at.x, at.y, at.z);
     for (let i = 0; i < 4; i += 1) {
-      const sx = i < 2 ? -1 : 1;
-      const sy = i % 2 === 0 ? -1 : 1;
-      const c = S_LENS_CORNER.copy(at)
-        .addScaledVector(fwd, cam.near)
-        .addScaledVector(right, halfW * sx)
-        .addScaledVector(up, halfH * sy);
+      const c = this.lensCorner(at, fwd, up, i);
       const d = this.soilDensityAt(c.x, c.y, c.z);
       if (d > worst) worst = d;
     }
     return worst;
   }
+
+  /** One near-plane corner, i in 0..3. */
+  private lensCorner(
+    at: THREE.Vector3, fwd: THREE.Vector3, up: THREE.Vector3, i: number,
+  ): THREE.Vector3 {
+    const cam = this.camera;
+    const halfH = cam.near * Math.tan((cam.fov * Math.PI) / 360);
+    const halfW = halfH * cam.aspect;
+    const right = S_LENS_RIGHT.crossVectors(fwd, up).normalize();
+    return S_LENS_CORNER.copy(at)
+      .addScaledVector(fwd, cam.near)
+      .addScaledVector(right, halfW * (i < 2 ? -1 : 1))
+      .addScaledVector(up, halfH * (i % 2 === 0 ? -1 : 1));
+  }
+
+  /*
+   * TRIED AND REJECTED, recorded so it is not tried twice: running this
+   * guard on `soilSolidAt` instead: a rounded lattice read is three times
+   * cheaper than the interpolated one, and five reads per probe is the
+   * guard's whole cost. It measured no faster than the noise — the
+   * expense is the tree and scrub unions inside either query, not the
+   * interpolation — and it broke the thing the guard is for: rounding
+   * disagrees with the surface the mesher actually draws, so the boolean
+   * came back clear while the picture still had dirt in it. Escapes in
+   * the dig scenario went from 9 frames of 300 to 78. The guard reads the
+   * same field the geometry is built from, or it guards nothing.
+   */
 
   /**
    * The lens's own basis for the guard, which cannot read the camera's
@@ -4171,6 +4204,20 @@ export class IslandScene {
     const p = this.camera.position;
     const walker = this.walker;
     if (!walker) return;
+    /*
+     * THE CHEAP QUESTION FIRST. The corner test costs five field reads
+     * and the march can cost fifty; the lens spends most of the game
+     * nowhere near soil, and ONE read settles those frames. The bound is
+     * deliberately generous because this field's magnitude is not a
+     * distance (see `frustumWorstAt`) — the steepest gradient measured
+     * was 1.9, so three times the clearance has margin to spare.
+     *
+     * It buys nothing while she digs, where the lens is at the working
+     * face by definition. It buys everything in the other 95% of play.
+     */
+    const clear = this.lensClearance();
+    const middle = this.soilDensityAt(p.x, p.y, p.z);
+    if (middle < -clear * 3) { this.lensWorstMm = middle * MM; return; }
     /* The four corners the picture starts at — see `frustumWorstAt`. */
     const fwd = S_LENS_FWD;
     const up = S_LENS_UP;
@@ -4190,7 +4237,16 @@ export class IslandScene {
      */
     const out = S_TARGET.set(0, 1, 0);
     walker.normalAt(p, out);
-    const step = CAMERA_SKIN;
+    /*
+     * A COARSE WALK, THEN A BISECTION — not forty-five fine steps.
+     *
+     * The old march advanced one CAMERA_SKIN at a time and paid five
+     * field reads at every one of them, which is most of what the guard
+     * cost. Eight strides find the boundary and four halvings put it back
+     * within a skin, for a twelfth of the reads and the same answer.
+     */
+    const span = RIDE * 4 + clear;
+    const step = span / 8;
     const probe = S_LENS_STEP;
     /*
      * BEST EFFORT, NOT ALL OR NOTHING. A bore barely wider than the
@@ -4201,34 +4257,32 @@ export class IslandScene {
      * too tight to satisfy still gets the emptiest picture available, and
      * the fallback to her position only wins when it is genuinely better.
      */
-    let bestD = 0;
-    let bestWorst = this.lensWorstMm / MM;
-    for (let d = step; d <= RIDE * 4 + this.lensClearance(); d += step) {
+    for (let i = 1; i <= 8; i += 1) {
+      const d = step * i;
       probe.copy(p).addScaledVector(out, d);
       /* The whole frustum has to come clear, not just the lens: stopping
        * when the POINT escapes is what left a corner in the soil. */
-      const worst = this.frustumWorstAt(probe, fwd, up);
-      if (worst <= 0) {
-        p.copy(probe).addScaledVector(out, step);
+      if (this.frustumWorstAt(probe, fwd, up) <= 0) {
+        /* Somewhere between the last stride and this one it came clear.
+         * Four halvings land within a skin of the true boundary, so the
+         * lens still sits as close to her as the soil allows. */
+        let lo = d - step;
+        let hi = d;
+        for (let k = 0; k < 4; k += 1) {
+          const mid = (lo + hi) / 2;
+          probe.copy(p).addScaledVector(out, mid);
+          if (this.frustumWorstAt(probe, fwd, up) > 0) lo = mid; else hi = mid;
+        }
+        p.addScaledVector(out, hi + CAMERA_SKIN);
         this.lensWorstMm = this.frustumWorstAt(p, fwd, up) * MM;
         return;
       }
-      if (worst < bestWorst) { bestWorst = worst; bestD = d; }
     }
-    /* Nothing clear anywhere along the normal. Her own position is
-     * provably open — she is standing in it — so take whichever of the two
-     * leaves less dirt in frame. */
-    const atHer = this.frustumWorstAt(this.at, fwd, up);
-    if (atHer < bestWorst) {
-      p.copy(this.at);
-      this.lensWorstMm = atHer * MM;
-      return;
-    }
-    if (bestD > 0) {
-      p.addScaledVector(out, bestD);
-      this.lensWorstMm = bestWorst * MM;
-      return;
-    }
+    /* Nothing clear anywhere along the normal — a bore no wider than the
+     * picture. Her own position is provably open, because she is standing
+     * in it, so the lens goes there rather than staying in the wall. */
+    p.copy(this.at);
+    this.lensWorstMm = this.frustumWorstAt(p, fwd, up) * MM;
     /* Buried deeper than the search — the only place certainly in air is
      * where she is, so fall back on her and let the next frame ease out. */
     p.copy(this.at);
