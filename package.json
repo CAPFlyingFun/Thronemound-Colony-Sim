@@ -1,7 +1,7 @@
 {
   "name": "thronemound-colony-sim",
   "private": true,
-  "version": "0.0.84",
+  "version": "0.0.85",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -33,6 +33,7 @@
     "probe:camera": "node scripts/probe-camera.mjs",
     "probe:lean": "node scripts/probe-lean.mjs",
     "probe:gait": "node scripts/probe-gait.mjs",
+    "probe:support": "node scripts/probe-support.mjs",
     "probe:eyeshake": "node scripts/probe-eyeshake.mjs",
     "icons": "node scripts/make-icons.mjs",
     "probe:lens": "node scripts/probe-lens.mjs"

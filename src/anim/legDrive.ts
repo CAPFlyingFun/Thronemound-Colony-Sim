@@ -109,6 +109,18 @@ export const TRIPOD_A = ['frontLeft', 'midRight', 'rearLeft'];
 export const TRIPOD_B = ['frontRight', 'midLeft', 'rearRight'];
 
 /**
+ * The six feet in RING ORDER — down one side and back up the other.
+ *
+ * Not a tripod and not a cosmetic ordering: `supportNormal` walks this as a
+ * polygon, and a polygon's normal is only meaningful if its vertices go
+ * round rather than zig-zag across. Listed here beside the tripods so the
+ * two orderings are read together and neither is mistaken for the other.
+ */
+export const SUPPORT_RING = [
+  'frontLeft', 'midLeft', 'rearLeft', 'rearRight', 'midRight', 'frontRight',
+];
+
+/**
  * How far a foot travels fore and aft of its home, per gait — the diameter
  * of the circle a step goes on, so half of each number is its radius.
  *
@@ -515,6 +527,58 @@ export class LegDrive {
   cornerLean(out: THREE.Vector3): number {
     if (this.leanShare > 0) out.copy(this.leanUp);
     return this.leanShare;
+  }
+
+  /**
+   * THE PLANE HER FEET ARE ACTUALLY STANDING ON, and how much to believe it.
+   *
+   * Her attitude has always come from the density gradient sampled at her
+   * own centre — the ground under her BELLY. That is one point, and it is
+   * the wrong one: a hexapod's support is the polygon its planted feet make,
+   * and those six contacts know about a crest, a dip or a freshly dug hole
+   * that the single sample beneath her does not. Reading the feet is what
+   * the robot literature means by a support plane, and it is the difference
+   * between an animal that stands on terrain and one that hovers over a
+   * height sample.
+   *
+   * Newell's method rather than an eigen-solve, because the feet already
+   * come in a ring — front, middle and rear down one side and back up the
+   * other — so they ARE a polygon and its area-weighted normal is the
+   * least-squares answer for free, robust when a foot or two is in the air.
+   *
+   * The return is a CONFIDENCE, not a flag, and it is the ring's own area
+   * against its span squared. That is exactly the quantity that collapses
+   * in the cases where a plane through three points means nothing: three
+   * feet nearly in a line, or a stance so shrunk by swinging legs that the
+   * remaining contacts are a sliver. A caller blends by it rather than
+   * switching on it, so a degenerate stance fades out instead of snapping.
+   */
+  supportNormal(out: THREE.Vector3, up: THREE.Vector3): number {
+    const pts = SUPPORT_RING
+      .map((slot) => this.legs.find((l) => l.slot === slot))
+      .filter((leg): leg is Leg => !!leg && leg.planted && !leg.groping)
+      .map((leg) => leg.anchor);
+    if (pts.length < 3) return 0;
+    out.set(0, 0, 0);
+    let span = 0;
+    for (let i = 0; i < pts.length; i += 1) {
+      const a = pts[i]!;
+      const b = pts[(i + 1) % pts.length]!;
+      out.x += (a.y - b.y) * (a.z + b.z);
+      out.y += (a.z - b.z) * (a.x + b.x);
+      out.z += (a.x - b.x) * (a.y + b.y);
+      for (let j = i + 1; j < pts.length; j += 1) {
+        span = Math.max(span, a.distanceTo(pts[j]!));
+      }
+    }
+    const twiceArea = out.length();
+    if (twiceArea < 1e-9 || span < 1e-6) return 0;
+    out.multiplyScalar(1 / twiceArea);
+    /* A normal has no sign of its own; hers is the one that agrees with the
+     * body she is already using. Flipping it here rather than at the caller
+     * keeps every consumer from having to know. */
+    if (out.dot(up) < 0) out.negate();
+    return Math.min(1, twiceArea / (span * span));
   }
 
   /** Where each foot should be drawn this frame, for the IK. */

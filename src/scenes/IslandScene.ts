@@ -114,6 +114,12 @@ const SPRINT = 3;
 const CRAWL = 0.3;
 const PACE_NAMES = ['CRAWL', 'WALK', 'RUN'] as const;
 
+/**
+ * How much of her attitude comes from her FEET rather than from the ground
+ * under her belly. See the blend at the `settle` call for the measurements.
+ */
+const SUPPORT_SHARE = 0.5;
+
 /*
  * SHE LEANS INTO IT — the body pitching on planted feet, which is the one
  * thing the robot rigs do that this does not.
@@ -301,6 +307,7 @@ const S_TARGET = new THREE.Vector3();
  *  doing with the shared scratch in the same frame. */
 const S_SPOT = new THREE.Vector3();
 const S_LEAN = new THREE.Vector3();
+const S_SUPPORT = new THREE.Vector3();
 
 /**
  * The LEAST fold the tail believes while the rear feet are still crossing a
@@ -1602,6 +1609,15 @@ export class IslandScene {
     if (new URLSearchParams(
       typeof location === 'undefined' ? '' : location.search,
     ).get('gait') === 'tripod') this.adaptiveGait = false;
+    /*
+     * `?support=0` — take her feet out of her attitude and leave it to the
+     * density gradient under her belly, as it was. The control for
+     * `probe-support`, and the only way to compare a climb with and without
+     * the support plane on the same build.
+     */
+    if (new URLSearchParams(
+      typeof location === 'undefined' ? '' : location.search,
+    ).get('support') === '0') this.footAttitude = false;
     new ResizeObserver(() => this.resize()).observe(host);
     this.resize();
     this.animate();
@@ -3305,9 +3321,47 @@ export class IslandScene {
      * `CornerTurn.leanToward`.
      */
     const leanShare = this.drive ? this.drive.cornerLean(S_LEAN) : 0;
+    let attitude = leanShare > 0 ? { toward: S_LEAN, share: leanShare } : undefined;
+    /*
+     * AND WHEN THERE IS NO CORNER, HER FEET GET A SAY.
+     *
+     * The walker's attitude goal is the density gradient sampled at her own
+     * centre — the ground under her BELLY, one point. Her six planted feet
+     * are a support polygon spanning most of her length, and they know
+     * things that point does not. Measured with `probe-support`, degrees
+     * between the two answers:
+     *
+     *   standing   6.7    walking   5.4 (peak 15)
+     *   AFTER A DIG   44 mean, 53 peak
+     *
+     * That last line is the whole reason this exists. She digs the ground
+     * out from under her own middle, so the belly sample is reading the
+     * HOLE while her feet stand on its rim — and the fifty-three degrees of
+     * disagreement is the same fifty degrees she was then measured slowly
+     * rotating through, over seven seconds of standing still, to match the
+     * pit instead of the ground. Blending toward the feet is what makes her
+     * attitude a thing she stands on rather than a thing she hovers over.
+     *
+     * HALF, and not all of it. The two are both real: the gradient is the
+     * true local surface and the polygon is the average across her span, so
+     * a crest reads differently to each and neither is a lie. Half moves the
+     * dig case tens of degrees while leaving the six or seven degrees of
+     * ordinary standing difference at three, which is invisible. Scaled by
+     * the fit's own confidence so a stance shrunk to a sliver by swinging
+     * legs fades out rather than shouting.
+     *
+     * THE CORNER KEEPS ITS SLOT UNCONDITIONALLY. Mid-fold her feet straddle
+     * floor and wall and the plane through both dissents by 17 to 22
+     * degrees — real, and precisely the thing that must not be allowed to
+     * argue with the scheduler that is deliberately turning her.
+     */
+    if (!attitude && this.drive && this.footAttitude) {
+      const fit = this.drive.supportNormal(S_SUPPORT, this.up);
+      if (fit > 0) attitude = { toward: S_SUPPORT, share: SUPPORT_SHARE * fit };
+    }
     walker.settle(
       { at: this.at, up: this.up, forward: this.fwd }, dt, aimDt, still,
-      leanShare > 0 ? { toward: S_LEAN, share: leanShare } : undefined,
+      attitude,
     );
     this.seatLiftMm = this.seatFrom.sub(this.at).dot(this.up) * -VOXEL_MM;
 
@@ -4119,6 +4173,10 @@ export class IslandScene {
   private leaning = true;
   /** `?gait=tripod` turns it off. Applied to the drive as it is built. */
   private adaptiveGait = true;
+
+  /** `?support=0` — her attitude back to the belly sample alone, for
+   *  measuring the two side by side. See `SUPPORT_SHARE`. */
+  private footAttitude = true;
 
   private pose(dt: number): void {
     if (!this.queenReady) return;

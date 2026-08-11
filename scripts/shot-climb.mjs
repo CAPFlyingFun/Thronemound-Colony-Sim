@@ -18,7 +18,9 @@ const browser = await chromium.launch({
 const errs = [];
 const page = await browser.newPage({ viewport: { width: 932, height: 430 } });
 page.on('pageerror', (e) => errs.push(e.message));
-await page.goto(`${base}/?scene=island`, { waitUntil: 'domcontentloaded' });
+/* `Q='&support=0' node scripts/shot-climb.mjs` — extra query, so the same
+ * climb runs against a switch and its control on one build. */
+await page.goto(`${base}/?scene=island${process.env.Q ?? ''}`, { waitUntil: 'domcontentloaded' });
 await page.waitForFunction(() => window.islandScene?.ready, null, { timeout: 90000 });
 await page.waitForFunction(() => window.islandScene.loadingStateForTest().player === 1, null, { timeout: 90000 });
 await page.waitForFunction(() => window.islandScene.tree?.solid != null, null, { timeout: 60000 });
