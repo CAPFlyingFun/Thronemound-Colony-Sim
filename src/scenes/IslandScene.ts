@@ -102,6 +102,64 @@ const SEC_VERTS = (MESH_N - 1) / SECTIONS + 1;
  */
 const WALK_SPEED = 1.5;
 const SPRINT = 3;
+
+/*
+ * SHE LEANS INTO IT — the body pitching on planted feet, which is the one
+ * thing the robot rigs do that this does not.
+ *
+ * A hexapod's body is not welded to its legs: it can pitch over feet that
+ * stay exactly where they are, and the legs absorb it. The robot literature
+ * calls it body orientation control, and it is why those machines read as
+ * animals leaning rather than tables sliding.
+ *
+ * It costs nothing here because it is PURELY THE DRAWN POSE. `at` — the
+ * physics root the walker seats, the corner scheduler reasons about and the
+ * chase camera follows — is untouched; only the model's own quaternion is
+ * turned, and her feet are IK'd to WORLD anchors, so tilting the body moves
+ * her hips and the legs take up the difference exactly as the real machine's
+ * do. Nothing else has to be told about it at all.
+ *
+ * Two terms, because they read differently. ACCELERATION is the one an eye
+ * notices: nose down as she takes off, nose up as she pulls up. SPEED adds a
+ * small steady set forward, the attitude of an animal actually travelling.
+ */
+const LEAN_PER_ACCEL = 0.035;
+const LEAN_AT_SPRINT = (4.5 * Math.PI) / 180;
+const LEAN_MAX = (9 * Math.PI) / 180;
+/** Fast enough to read as a lean, slow enough to still be a body. */
+const LEAN_RATE = 6;
+/*
+ * THE SPEED IS SMOOTHED BEFORE IT IS DIFFERENTIATED, and that is what makes
+ * the braking lean exist at all.
+ *
+ * Her drive stops her in a frame or two, so a raw per-frame acceleration is
+ * a single enormous negative spike — and a lean with a 170 ms constant moves
+ * about a tenth of the way toward a target held for 40 ms. Measured: nose
+ * down 3.9 degrees taking off, and 0.0 pulling up, because the spike was
+ * over before the body could answer it.
+ *
+ * Smoothing the SPEED first spreads that same change over the window, so the
+ * deceleration is a signal the body has time to lean against. It also takes
+ * the frame-pacing noise out of a number that is a difference of differences.
+ */
+const LEAN_SPEED_RATE = 14;
+
+/*
+ * AND SHE BANKS INTO THE TURN — the same trick on the other axis.
+ *
+ * The rig's own diagram is a full roll-pitch-yaw on the body: R(-γ) roll,
+ * R(-ψ) pitch, R(-α) yaw, applied to every foot's start position. It is
+ * written negated there because they rotate the FOOT TARGETS into the
+ * rotated body frame; rotating the body and leaving the feet in the world
+ * is the same rotation the other way round, and it is the cheaper half
+ * here because her feet are already anchored in the world.
+ *
+ * Pitch was the half that shows when she sets off. Roll is the half that
+ * shows when she turns: the inside of the turn drops, which is what any
+ * legged animal does with a body it can move over its feet.
+ */
+const BANK_PER_TURN = 0.16;
+const BANK_MAX = (7 * Math.PI) / 180;
 /*
  * HOW FAST SHE TURNS, ALL IN — and until now there was no such number.
  *
@@ -317,6 +375,11 @@ const S_FWD = new THREE.Vector3();
 const S_UP = new THREE.Vector3();
 const S_RIGHT = new THREE.Vector3();
 const S_MAT = new THREE.Matrix4();
+/* The lean is about her OWN right, so the axis is local +x, always. */
+const S_QLEAN = new THREE.Quaternion();
+const S_LEAN_AXIS = new THREE.Vector3(1, 0, 0);
+const S_BANK_AXIS = new THREE.Vector3(0, 0, 1);
+const S_BANK = new THREE.Vector3();
 
 /*
  * A ledge she may step up, and the rate she scaled a wall at, both gone.
@@ -1471,6 +1534,22 @@ export class IslandScene {
     if (new URLSearchParams(
       typeof location === 'undefined' ? '' : location.search,
     ).get('aimdebug') === '1') this.setAimDebug(true);
+    /*
+     * `?lean=0` — the body lean's off switch, same reasoning: it is a change
+     * you judge by eye, so it has to be switchable on the device you are
+     * looking at it on. See `LEAN_PER_ACCEL`.
+     */
+    if (new URLSearchParams(
+      typeof location === 'undefined' ? '' : location.search,
+    ).get('lean') === '0') this.leaning = false;
+    /*
+     * `?gait=adaptive` — let the gait choose how many feet leave the ground
+     * by speed: a wave when she creeps, a tetrapod between, the tripod she
+     * has always run at pace. Opt-in; see `feetAllowedUp` in `legDrive.ts`.
+     */
+    if (new URLSearchParams(
+      typeof location === 'undefined' ? '' : location.search,
+    ).get('gait') === 'adaptive') this.adaptiveGait = true;
     new ResizeObserver(() => this.resize()).observe(host);
     this.resize();
     this.animate();
@@ -1838,6 +1917,9 @@ export class IslandScene {
       (this.walker.tune as { ride: number }).ride = this.legRide;
     }
     this.drive = new LegDrive(setup);
+    /* The slow gaits, if they were asked for — see `feetAllowedUp`. */
+    this.drive.adaptiveGait = this.adaptiveGait;
+    this.drive.walkSpeed = WALK_SPEED;
     this.drive.plantAll(
       { at: this.at, up: this.up, forward: this.fwd }, this.groundForLegs,
     );
@@ -3972,6 +4054,20 @@ export class IslandScene {
     this.scene.add(this.nestView.root);
   }
 
+  /** Her drawn body's pitch on her planted feet, radians, nose-down positive. */
+  private bodyLean = 0;
+  private leanSpeedWas = 0;
+  /** Her speed, smoothed — see `LEAN_SPEED_RATE`. */
+  private leanSpeed = 0;
+  /** Her drawn body's roll into a turn, radians, inside-of-the-turn down. */
+  private bodyBank = 0;
+  private readonly bankFwdWas = new THREE.Vector3();
+  private bankHasPrev = false;
+  /** `?lean=0` turns it off, for looking at the two side by side. */
+  private leaning = true;
+  /** `?gait=adaptive` — the slow gaits. Applied to the drive as it is built. */
+  private adaptiveGait = false;
+
   private pose(dt: number): void {
     if (!this.queenReady) return;
     /*
@@ -3991,6 +4087,51 @@ export class IslandScene {
     const right = S_RIGHT.crossVectors(up, forward).normalize();
     this.queen.root.position.copy(this.at);
     this.queen.root.quaternion.setFromRotationMatrix(S_MAT.makeBasis(right, up, forward));
+    /*
+     * AND THEN SHE LEANS — see `LEAN_PER_ACCEL`. Post-multiplied, so the
+     * axis is her OWN right and a positive angle carries her nose toward
+     * her feet; that makes it mean the same thing on a wall or upside down
+     * as it does on the flat. Her feet do not hear about it: they are
+     * anchored in the world, so the legs simply take up the difference.
+     */
+    const rawSpeed = dt > 1e-6
+      ? (this.driveReport?.movedMm ?? 0) / MM / dt : this.leanSpeed;
+    this.leanSpeed += (rawSpeed - this.leanSpeed) * (1 - Math.exp(-LEAN_SPEED_RATE * dt));
+    const speedNow = this.leanSpeed;
+    const accel = dt > 1e-6 ? (speedNow - this.leanSpeedWas) / dt : 0;
+    this.leanSpeedWas = speedNow;
+    const wantLean = this.leaning
+      ? Math.max(-LEAN_MAX, Math.min(LEAN_MAX,
+        accel * LEAN_PER_ACCEL + (speedNow / (WALK_SPEED * SPRINT)) * LEAN_AT_SPRINT))
+      : 0;
+    this.bodyLean += (wantLean - this.bodyLean) * (1 - Math.exp(-LEAN_RATE * dt));
+    /*
+     * The turn rate, measured off her nose rather than off the stick — a
+     * stick held against a wall she cannot turn on would bank her into
+     * nothing. Signed about her own up, so it means the same inverted.
+     */
+    let turnRate = 0;
+    if (this.bankHasPrev && dt > 1e-6) {
+      const swept = S_BANK.crossVectors(this.bankFwdWas, forward).dot(up);
+      turnRate = Math.asin(Math.max(-1, Math.min(1, swept))) / dt;
+    }
+    this.bankFwdWas.copy(forward);
+    this.bankHasPrev = true;
+    const wantBank = this.leaning
+      ? Math.max(-BANK_MAX, Math.min(BANK_MAX, turnRate * BANK_PER_TURN))
+      : 0;
+    this.bodyBank += (wantBank - this.bodyBank) * (1 - Math.exp(-LEAN_RATE * dt));
+    if (Math.abs(this.bodyLean) > 1e-5) {
+      this.queen.root.quaternion.multiply(
+        S_QLEAN.setFromAxisAngle(S_LEAN_AXIS, this.bodyLean),
+      );
+    }
+    if (Math.abs(this.bodyBank) > 1e-5) {
+      /* About her own FORWARD: rolling, not steering. */
+      this.queen.root.quaternion.multiply(
+        S_QLEAN.setFromAxisAngle(S_BANK_AXIS, this.bodyBank),
+      );
+    }
     this.queen.update(dt, {
       /*
        * WHAT SHE ACTUALLY TRAVELLED, not what the stick asked for.

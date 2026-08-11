@@ -165,6 +165,48 @@ export const FOOT_CLEARANCE_MM = 0.005;
 
 /** Fraction of a swing after which the foot is down and locked. */
 const LOCK_AT = 0.9;
+/**
+ * HOW MANY FEET MAY LEAVE THE GROUND AT ONCE, BY SPEED — the prototype.
+ *
+ * The gait here has exactly one shape: a tripod, three feet up together, at
+ * every speed from a creep to a sprint. Real hexapods do not — and neither
+ * do ants. Duty factor rises as speed falls: fast is a tripod (three up),
+ * slower is a tetrapod (two up, four down), slower still is a wave (one up,
+ * five down). It is why a careful animal looks careful rather than looking
+ * like a fast one played at half rate, and it is the one thing the robot
+ * repositories do that this does not.
+ *
+ * Expressed as fractions of WALK pace rather than absolute speeds, so a
+ * major and a minim each get the transition at their own pace.
+ *
+ * OFF BY DEFAULT. Fewer feet leaving the ground changes the input the corner
+ * scheduler's release rule is tuned against — `minPlanted`, the acquire and
+ * transfer phases, the stall guard — so this is opt-in until its numbers
+ * have been looked at: `?gait=adaptive`, or `drive.adaptiveGait = true`.
+ */
+export const GAIT_WAVE_BELOW = 0.35;
+
+/**
+ * How many of the due tripod's feet may swing together.
+ *
+ * TWO GAITS, NOT THREE. A crawl gets the WAVE — one foot up, five down,
+ * which is what the robot charts draw as a single leg cycling while the rest
+ * hold — and walking and running keep the tripod they have always had. A
+ * middle tetrapod was tried and is not wanted: the interesting difference is
+ * between picking your way and travelling, and two gaits say that clearly
+ * where three blur it.
+ *
+ * `speed` is her ACTUAL commanded ground speed, not the pace ceiling. The
+ * first cut passed `DriveInput.speed`, which is the maximum the stick could
+ * ask for — 1.5, or 4.5 sprinting — and never varies with how far the stick
+ * is actually pushed, so every pace read as a full walk and nothing ever
+ * changed. The stick's magnitude lives in `walk`.
+ */
+export function feetAllowedUp(speed: number, walkSpeed: number): 1 | 3 {
+  if (walkSpeed <= 1e-9) return 3;
+  return Math.abs(speed) / walkSpeed < GAIT_WAVE_BELOW ? 1 : 3;
+}
+
 /** Peak lift of a swinging foot, as a fraction of the stride. */
 const SWING_LIFT = 0.35;
 /** Seconds a swing takes when she is moving at all. */
@@ -377,6 +419,10 @@ const SCRATCH_AIM = new THREE.Vector3();
 const DEST_HOME = new THREE.Vector3();
 const DEST_DIR = new THREE.Vector3();
 const DEST_AHEAD = new THREE.Vector3();
+/* Scratch for ranking a group by how spent each foot is. */
+const SPENT_HOME = new THREE.Vector3();
+const SPENT_DIR = new THREE.Vector3();
+
 const DEST_CONTACT: SurfaceContact = {
   point: new THREE.Vector3(), normal: new THREE.Vector3(),
 };
@@ -393,6 +439,16 @@ const SCRATCH_CONTACT: SurfaceContact = {
 
 export class LegDrive {
   private readonly legs: Leg[] = [];
+  /**
+   * Let the gait choose how many feet leave the ground, by speed.
+   *
+   * Off by default — see `feetAllowedUp`. Fewer feet lifting changes the
+   * input the corner scheduler's release rule is tuned against, so this is
+   * opt-in until its numbers have been looked at: `?gait=adaptive`.
+   */
+  adaptiveGait = false;
+  /** The pace the gait's speed fractions are measured against, in wu/s. */
+  walkSpeed = 1.5;
   /** Mean distance of a foot from her turn axis. See `radius`. */
   private stanceRadius = 1;
 
@@ -617,6 +673,20 @@ export class LegDrive {
    * that eats the gait circle. The vertical part is a leg reaching down a
    * ledge, which is bounded separately and at plant time.
    */
+  /**
+   * How far through its stroke this foot is: -1 just planted ahead of home,
+   * +1 fully spent behind it. The same measure the trigger picks the
+   * most-spent foot by, exposed so the slow gaits can rank a group by it.
+   */
+  private spentOf(leg: Leg, body: BodyPose, input: DriveInput): number {
+    const home = SPENT_HOME;
+    const dir = SPENT_DIR;
+    this.homeWorld(leg, body, home);
+    const speed = this.travel(leg, body, input, dir);
+    if (speed <= 1e-9) dir.copy(leg.dir);
+    return this.excursion(leg, home, body.up).dot(dir) / this.radius(body, input);
+  }
+
   private excursion(leg: Leg, home: THREE.Vector3, up: THREE.Vector3): THREE.Vector3 {
     const d = home.clone().sub(leg.anchor);
     return d.addScaledVector(up, -d.dot(up));
@@ -989,8 +1059,35 @@ export class LegDrive {
           }
         }
         if (go) {
-          for (const leg of this.legs) {
-            if (!group.includes(leg.slot) || !leg.planted) continue;
+          /*
+           * HOW MANY OF THE GROUP ACTUALLY GO — the slow gaits.
+           *
+           * A tripod releases all three; a WAVE releases one, which is the
+           * pattern the robot charts draw as a single leg cycling while
+           * five stay down. Which one goes is not arbitrary: the most-spent
+           * foot is the one that needs it, and the group still alternates
+           * because a group that has just stepped is fresh by definition.
+           *
+           * The CORNER is exempt and takes the whole group as before. Its
+           * release rule is written around three feet leaving together —
+           * `minPlanted`, the acquire and transfer phases, the stall guard
+           * — and quietly handing it one at a time would be changing the
+           * input that machinery is tuned against, from the outside.
+           */
+          let allowed = 3;
+          if (this.adaptiveGait && !this.corner.active) {
+            /* Her real ground speed: the stick's magnitude times the pace
+             * ceiling it is asking against. See `feetAllowedUp`. */
+            allowed = feetAllowedUp(Math.abs(input.walk) * input.speed, this.walkSpeed);
+          }
+          const going = this.legs.filter(
+            (leg) => group.includes(leg.slot) && leg.planted,
+          );
+          if (allowed < going.length) {
+            going.sort((a, b) => this.spentOf(b, body, input) - this.spentOf(a, body, input));
+            going.length = allowed;
+          }
+          for (const leg of going) {
             /*
              * A crossed foot renews with its group ONLY when the face
              * answers its foothold question right now — a grip is never
