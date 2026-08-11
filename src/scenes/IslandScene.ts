@@ -1659,28 +1659,26 @@ export class IslandScene {
      * height lookups and puts the tree on the flattest thing within reach.
      */
     /*
-     * SEVEN HUNDRED MILLIMETRES OF CLEAR GROUND, not seven hundred to the
-     * pin — the term that was missing is the tree's own foot.
+     * SEVEN HUNDRED TO THE PIN, which leaves about fifty millimetres of
+     * clear ground — and that is DELIBERATE, not an oversight in the
+     * arithmetic.
      *
-     * This measured to the trunk's ORIGIN while the bole's flared base is
-     * 640 mm of radius (girth/2 x 1.28, tree.ts), whose axis then wanders a
-     * further 0.35 of the base radius off that origin. Measured on the
-     * shipped seed: her spawn stood 49.6 mm from BARK — five body lengths —
-     * so holding the stick forward walked her into a 1.26 m wall of wood
-     * 5.7 seconds after her first step, every single time.
+     * v0.0.77 "fixed" this by adding a girth, on the reasoning that the
+     * trunk's flared foot is 640 mm of radius so the stated 700 mm was
+     * never clear ground. The arithmetic was right and the change was
+     * wrong: a five-second walk to an eighty-foot tree is the opening of
+     * this game, it has been that way since the first version, and moving
+     * the tree to arm's length turned the landmark into scenery at the
+     * edge of the frame. Reverted on the player's word.
      *
-     * That is what a whole field telemetry session turned out to be. Every
-     * corner-phase row in it sits 1.4-1.7 mm from the bark: the four climbs
-     * and returns, the 240 deg/s body rotations, the backward lurch — all
-     * of it was her wrapping on and off this trunk, and none of it was the
-     * walking-on-open-ground it was read as. The scheduler was never at
-     * fault: over 4,669 frames of ordinary terrain the corner's look-ahead
-     * found no candidate face at all, while the bark reads 82-87 degrees.
-     *
-     * Adding one girth covers both terms at any seed and restores what the
-     * comment above always claimed: a landmark you walk TO.
+     * What that investigation DID establish stands, and is worth keeping
+     * here: because the bark is fifty millimetres away, a telemetry session
+     * recorded by holding the stick forward is a recording of her climbing
+     * this tree — every corner-phase row of one such log sat 1.4-1.7 mm
+     * from bark. Read a walking log with that in mind, or start it facing
+     * away from here.
      */
-    const away = (TREE_FROM_HER_MM + TREE_GIRTH_MM) / MM;
+    const away = TREE_FROM_HER_MM / MM;
     const here = this.walkGroundAt(this.at.x, this.at.z);
     let tx = this.at.x + away;
     let tz = this.at.z;
@@ -3819,11 +3817,38 @@ export class IslandScene {
    * depth, then, if the point is still INSIDE something (a roof, a wall
    * it swung into), climb until it is not.
    */
+  /**
+   * HOW FAR THE PICTURE REACHES PAST THE LENS — the radius the guards
+   * actually have to keep clear, and the reason they were not keeping it.
+   *
+   * Every clearance test here asked whether the camera's own POINT was in
+   * air. A camera is not a point: it draws everything past its near plane,
+   * whose four corners stand off to the side of that point. At the dig
+   * view's 100-degree field on a phone's aspect that corner is 1.5 mm from
+   * the lens, while the margins being defended were EYE_SKIN 0.5 mm and
+   * CAMERA_SKIN 0.15 mm — so a lens sitting a legal half-millimetre off the
+   * bark still had a millimetre of wood inside its own frustum, and drew
+   * it. That is the terrain coming through the picture while every guard
+   * reports itself satisfied.
+   *
+   * Derived from the live camera rather than typed as a constant, because
+   * arming DIG swaps the field of view to 100 and a rotation changes the
+   * aspect: the number this has to beat moves while she plays.
+   */
+  private lensClearance(): number {
+    const cam = this.camera;
+    const halfH = cam.near * Math.tan((cam.fov * Math.PI) / 360);
+    const halfW = halfH * cam.aspect;
+    return Math.hypot(cam.near, halfH, halfW) + CAMERA_SKIN;
+  }
+
   private liftCameraClear(): void {
     const p = this.camera.position;
     const walker = this.walker;
     if (!walker) return;
-    if (this.soilDensityAt(p.x, p.y, p.z) <= 0) return;
+    /* Clear by the FRUSTUM's radius, not by a point's. */
+    const margin = this.lensClearance();
+    if (this.soilDensityAt(p.x, p.y, p.z) <= -margin) return;
     /*
      * OUT ALONG THE SOIL'S OWN NORMAL — the shortest way to air, and the
      * only direction that works on every surface.
@@ -3837,10 +3862,10 @@ export class IslandScene {
      */
     const out = S_TARGET.set(0, 1, 0);
     walker.normalAt(p, out);
-    for (let d = CAMERA_SKIN; d <= RIDE * 4; d += CAMERA_SKIN) {
+    for (let d = CAMERA_SKIN; d <= RIDE * 4 + margin; d += CAMERA_SKIN) {
       if (this.soilDensityAt(
         p.x + out.x * d, p.y + out.y * d, p.z + out.z * d,
-      ) <= 0) {
+      ) <= -margin) {
         /* One skin PAST the boundary: landing exactly on it leaves the near
          * plane straddling the surface, which is the dirt still showing. */
         p.addScaledVector(out, d + CAMERA_SKIN);
@@ -4053,13 +4078,17 @@ export class IslandScene {
        * different only when the world is actually different.
        */
       const eye = S_TARGET.copy(base);
+      /* The eye's own retreat clears the FRUSTUM too — see `lensClearance`.
+       * EYE_SKIN alone let the lens stop half a millimetre off a wall the
+       * near plane was already a millimetre inside of. */
+      const skin = Math.max(EYE_SKIN, this.lensClearance());
       const clearAt = (t: number): boolean => {
         const px = base.x + dir.x * EYE_FORWARD * t;
         const py = base.y + dir.y * EYE_FORWARD * t;
         const pz = base.z + dir.z * EYE_FORWARD * t;
-        return this.soilDensityAt(px, py, pz) <= 0
-          && this.soilDensityAt(px + dir.x * EYE_SKIN, py + dir.y * EYE_SKIN,
-            pz + dir.z * EYE_SKIN) <= 0;
+        return this.soilDensityAt(px, py, pz) <= -skin
+          && this.soilDensityAt(px + dir.x * skin, py + dir.y * skin,
+            pz + dir.z * skin) <= 0;
       };
       /*
        * MARCHED, NOT JUST TESTED AT THE END — the lens must stay in HER air.
