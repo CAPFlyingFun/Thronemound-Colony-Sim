@@ -1002,6 +1002,8 @@ export class IslandScene {
 
   private aimDbgText: HTMLElement | null = null;
 
+  private aimChip: HTMLButtonElement | null = null;
+
   private aimDbgAt = 0;
 
   private toolGhost: THREE.Mesh | null = null;
@@ -1468,7 +1470,7 @@ export class IslandScene {
      */
     if (new URLSearchParams(
       typeof location === 'undefined' ? '' : location.search,
-    ).get('aimdebug') === '1') this.aimDebug = true;
+    ).get('aimdebug') === '1') this.setAimDebug(true);
     new ResizeObserver(() => this.resize()).observe(host);
     this.resize();
     this.animate();
@@ -4825,6 +4827,10 @@ export class IslandScene {
        * spot she was lining up. */
       if (this.digMode) this.dodge.cancel();
       dig.classList.toggle('is-grip', this.digMode);
+      /* The overlay's switch belongs to the shovel, and leaves with it —
+       * along with the overlay itself, which `updateAimDebug` hides on
+       * the same condition. */
+      if (this.aimChip) this.aimChip.style.display = this.digMode ? '' : 'none';
       this.scoopBtn!.style.display = this.digMode ? '' : 'none';
       this.headingReadout!.style.display = this.digMode ? '' : 'none';
       this.depthReadout!.style.display = this.digMode ? '' : 'none';
@@ -4919,6 +4925,28 @@ export class IslandScene {
       if (this.nestView) this.nestView.root.visible = this.showPlan;
     });
     actions.appendChild(plan);
+
+    /*
+     * AIM — the dig overlay's switch, and it lives with the dig controls
+     * because that is the only mode it draws in.
+     *
+     * It was shipped as `?aimdebug=1` alone, which is a fine switch for a
+     * probe and a poor one for the person actually holding the phone: it
+     * cannot be turned off without retyping the address, and it cannot be
+     * turned ON at the moment something looks wrong, which is the only
+     * moment anyone wants it. The chip appears with the shovel and goes
+     * away with it, so an ordinary session never sees it — and the URL
+     * still works, for probes and for arriving with it already on.
+     */
+    this.aimChip = document.createElement('button');
+    this.aimChip.className = 'density-lab-button density-lab-mode';
+    this.aimChip.textContent = 'AIM';
+    this.aimChip.style.display = 'none';
+    this.aimChip.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      this.setAimDebug(!this.aimDebug);
+    });
+    actions.appendChild(this.aimChip);
 
     const view = document.createElement('button');
     view.className = 'density-lab-button density-lab-mode';
@@ -5583,8 +5611,15 @@ export class IslandScene {
     };
   }
 
+  /** The overlay's one switch, so the chip, the URL and a probe cannot
+   *  disagree about whether it is on. */
+  private setAimDebug(on: boolean): void {
+    this.aimDebug = on;
+    this.aimChip?.classList.toggle('is-grip', on);
+  }
+
   /** The aim overlay, for a probe that wants it without a URL. */
-  setAimDebugForTest(on: boolean): void { this.aimDebug = on; }
+  setAimDebugForTest(on: boolean): void { this.setAimDebug(on); }
 
   /** What the overlay is drawing, as numbers — the same values, so a probe
    *  can assert the discrepancy the picture shows. */
