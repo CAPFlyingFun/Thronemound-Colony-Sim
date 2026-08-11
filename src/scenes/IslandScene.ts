@@ -192,6 +192,22 @@ const RIDE = 1.3 / MM;
 const S_PERP = new THREE.Vector3();
 const S_RAD = new THREE.Vector3();
 const S_CENTER = new THREE.Vector3();
+/** The aim debug's own scratches. It runs at the very end of the frame,
+ *  after every other consumer of the S_ pool has finished. */
+const S_DBG_CENTRE = new THREE.Vector3();
+const S_DBG_DIR = new THREE.Vector3();
+const S_DBG_END = new THREE.Vector3();
+const S_DBG_JAW = new THREE.Vector3();
+const S_DBG_HEAD = new THREE.Vector3();
+const S_DBG_UP = new THREE.Vector3();
+const S_DBG_RIGHT = new THREE.Vector3();
+const S_DBG_REL = new THREE.Vector3();
+
+/** How many frames of camera look the aim debug keeps, to measure how far
+ *  the head's own facing trails the view. Twelve is a fifth of a second at
+ *  60 Hz — longer than any easing here should ever lag. */
+const AIM_DBG_LAG = 12;
+
 /** The lens guard's own scratches: it runs inside the camera pass, after
  *  the pose has finished with the S_ pool but while `S_TARGET` is live. */
 const S_LENS_FWD = new THREE.Vector3();
@@ -956,6 +972,38 @@ export class IslandScene {
 
   /** Where the next press will act, drawn before it acts: the cut, and
    *  the halo the same stroke shaves around it. */
+  /* ------------------------------------------------- the aim debug rig */
+
+  /**
+   * `?aimdebug=1` — draws where the SHOVEL thinks it is aiming against
+   * where the CROSSHAIR is looking, because those are two different
+   * calculations and only one of them is visible in normal play.
+   *
+   * Off unless asked for, and armed only while DIG is: these are
+   * diagnostic overlays, not gameplay, and nothing here changes what the
+   * stroke does. See `updateAimDebug`.
+   */
+  private aimDebug = false;
+
+  private aimDbgDig: THREE.Line | null = null;
+
+  private aimDbgCam: THREE.Line | null = null;
+
+  private aimDbgSpot: THREE.Mesh | null = null;
+
+  private aimDbgJaw: THREE.Mesh | null = null;
+
+  private aimDbgHead: THREE.Line | null = null;
+
+  /** A ring of recent camera look directions — see `AIM_DBG_LAG`. */
+  private readonly aimDbgLook: THREE.Vector3[] = [];
+
+  private aimDbgLookAt = 0;
+
+  private aimDbgText: HTMLElement | null = null;
+
+  private aimDbgAt = 0;
+
   private toolGhost: THREE.Mesh | null = null;
 
   private smoothGhost: THREE.Mesh | null = null;
@@ -1412,6 +1460,15 @@ export class IslandScene {
     if (new URLSearchParams(
       typeof location === 'undefined' ? '' : location.search,
     ).get('ik') === 'off') this.setIK(false);
+    /*
+     * `?aimdebug=1` — the aim overlay's only switch, read once at startup
+     * for the same reason `?ik=off` is: a phone has no console. It stays
+     * off in every ordinary session, and even when armed it draws nothing
+     * until DIG is.
+     */
+    if (new URLSearchParams(
+      typeof location === 'undefined' ? '' : location.search,
+    ).get('aimdebug') === '1') this.aimDebug = true;
     new ResizeObserver(() => this.resize()).observe(host);
     this.resize();
     this.animate();
@@ -2698,6 +2755,9 @@ export class IslandScene {
     this.recordTelemetry(dt);
     // While the designer is up the camera is ITS fly rig, not the follow cam.
     if (!this.designer?.isOpen) this.aimCamera(dt);
+    /* Last, so the crosshair ray is drawn from where the lens ACTUALLY
+     * ended up this frame rather than where it was asked to go. */
+    this.updateAimDebug();
   }
 
   /* ------------------------------------------------ chambers and the modes */
@@ -3432,6 +3492,197 @@ export class IslandScene {
       touched = done;
     }
     return touched;
+  }
+
+  /**
+   * THE AIM, DRAWN — diagnostic only, and it computes nothing of its own.
+   *
+   * GREEN is the line the stroke actually works along: the same
+   * `boreAim()` vector `bite()` calls, from the same origin (her centre),
+   * ending at the same `biteCentre` the cut is seated on. It is not a
+   * reconstruction — if the shovel is aiming somewhere strange, this line
+   * is strange in exactly the same way, which is the whole point.
+   *
+   * RED is where the crosshair is looking: the camera's own position and
+   * world direction. When the two disagree, both stay on screen and the
+   * angle between them is printed, so "it digs where I am not pointing"
+   * stops being a feeling and becomes a number.
+   *
+   * The yellow bead is the exact centre of the next terrain removal.
+   *
+   * Nothing is allocated per frame: three objects are made once on first
+   * use and their vertices rewritten in place.
+   */
+  private updateAimDebug(): void {
+    const show = this.aimDebug && this.digMode && this.ready;
+    if (!show) {
+      if (this.aimDbgDig) this.aimDbgDig.visible = false;
+      if (this.aimDbgCam) this.aimDbgCam.visible = false;
+      if (this.aimDbgHead) this.aimDbgHead.visible = false;
+      if (this.aimDbgSpot) this.aimDbgSpot.visible = false;
+      if (this.aimDbgJaw) this.aimDbgJaw.visible = false;
+      if (this.aimDbgText) this.aimDbgText.style.display = 'none';
+      return;
+    }
+    if (!this.aimDbgDig) {
+      const line = (colour: number): THREE.Line => {
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+        const obj = new THREE.Line(geo, new THREE.LineBasicMaterial({
+          color: colour, depthTest: false, transparent: true, opacity: 0.95,
+        }));
+        obj.renderOrder = 12;
+        obj.frustumCulled = false;
+        this.scene.add(obj);
+        return obj;
+      };
+      const bead = (colour: number, r: number): THREE.Mesh => {
+        const m = new THREE.Mesh(
+          new THREE.SphereGeometry(r, 10, 8),
+          new THREE.MeshBasicMaterial({ color: colour, depthTest: false }),
+        );
+        m.renderOrder = 13;
+        this.scene.add(m);
+        return m;
+      };
+      this.aimDbgDig = line(0x2fe36a);   // GREEN  the dig ray, as bite() has it
+      this.aimDbgCam = line(0xe0553f);   // RED    the crosshair's own ray
+      this.aimDbgHead = line(0x35d6e8);  // CYAN   the head bone's forward axis
+      this.aimDbgSpot = bead(0xffffff, 0.16); // WHITE the carve centre
+      this.aimDbgJaw = bead(0xffd23f, 0.12);  // YELLOW the mandible tip
+      this.aimDbgText = document.createElement('div');
+      this.aimDbgText.className = 'density-lab-status rail-status';
+      this.aimDbgText.style.top = '58px';
+      this.aimDbgText.style.whiteSpace = 'pre';
+      this.aimDbgText.style.fontSize = '11px';
+      this.hud.appendChild(this.aimDbgText);
+    }
+
+    /*
+     * THE SAME ARITHMETIC `bite()` DOES, in the same order — including the
+     * jaw bone's say over how far along the aim the hull reaches, and
+     * `biteCentre`'s own fallback to a scrape when the aim meets nothing.
+     * Anything less faithful would draw a line the cut does not follow,
+     * which is the bug this exists to catch.
+     */
+    const aim = this.boreAim();
+    const centre = S_DBG_CENTRE;
+    let hull = NOSE_REACH + JAW_PAST_NOSE;
+    const haveJaw = this.queenReady && this.queen.jawPosition(S_DBG_JAW);
+    if (haveJaw) {
+      centre.copy(S_DBG_JAW);
+      hull = Math.max(hull, centre.sub(this.at).dot(aim));
+    }
+    const willBite = this.biteCentre(aim, hull, centre);
+
+    const put = (obj: THREE.Line, a: THREE.Vector3, b: THREE.Vector3): void => {
+      const pos = obj.geometry.getAttribute('position') as THREE.BufferAttribute;
+      pos.setXYZ(0, a.x, a.y, a.z);
+      pos.setXYZ(1, b.x, b.y, b.z);
+      pos.needsUpdate = true;
+      obj.visible = true;
+    };
+
+    /* GREEN — her centre to the exact seat of the next scoop. This is the
+     * origin under audit: `bite()` works from `this.at`, not the jaws. */
+    put(this.aimDbgDig!, this.at, centre);
+    this.aimDbgSpot!.position.copy(centre);
+    this.aimDbgSpot!.visible = true;
+    (this.aimDbgSpot!.material as THREE.MeshBasicMaterial).color.setHex(
+      willBite ? 0xffffff : 0xff5c5c,
+    );
+
+    /* YELLOW — where her mandibles actually are, and CYAN — where the head
+     * bone is actually pointed. The gap between the yellow bead and the
+     * green line's origin IS the anatomical error being measured. */
+    const haveHead = this.queenReady && this.queen.eyeForwardWorld(S_DBG_HEAD);
+    this.aimDbgJaw!.visible = haveJaw;
+    if (haveJaw) this.aimDbgJaw!.position.copy(S_DBG_JAW);
+    if (haveJaw && haveHead) {
+      S_DBG_END.copy(S_DBG_JAW).addScaledVector(S_DBG_HEAD, NOSE_REACH * 2);
+      put(this.aimDbgHead!, S_DBG_JAW, S_DBG_END);
+    } else if (this.aimDbgHead) this.aimDbgHead.visible = false;
+
+    /* RED — the crosshair's own ray, stopped where it first meets soil so
+     * both lines end on the same face and the gap between their ends is
+     * the error at the range that matters. */
+    this.camera.updateMatrixWorld();
+    const camAt = this.camera.position;
+    const camDir = this.camera.getWorldDirection(S_DBG_DIR);
+    const reach = Math.max(this.at.distanceTo(centre), NOSE_REACH * 3);
+    S_DBG_END.copy(camAt).addScaledVector(camDir, reach);
+    for (let d = CELL_SIZE * 0.5; d <= reach; d += CELL_SIZE * 0.5) {
+      const x = camAt.x + camDir.x * d;
+      const y = camAt.y + camDir.y * d;
+      const z = camAt.z + camDir.z * d;
+      if (this.soilSolidAt(x, y, z)) { S_DBG_END.set(x, y, z); break; }
+    }
+    put(this.aimDbgCam!, camAt, S_DBG_END);
+
+    /*
+     * HOW FAR THE HEAD TRAILS THE VIEW, measured rather than assumed.
+     *
+     * The whole reason the dig was taken off the jaw bone in v0.0.1 was
+     * that the bone "lags her by a frame of easing". This keeps a ring of
+     * recent camera looks and reports WHICH one the head's current facing
+     * matches best: 0 means the head is on this frame's view, 5 means it
+     * is showing what the camera was looking at five frames ago.
+     */
+    if (this.aimDbgLook.length < AIM_DBG_LAG) {
+      this.aimDbgLook.push(camDir.clone());
+    } else {
+      this.aimDbgLook[this.aimDbgLookAt % AIM_DBG_LAG]!.copy(camDir);
+    }
+    this.aimDbgLookAt += 1;
+    let bestLag = -1;
+    let bestOff = Infinity;
+    if (haveHead && this.aimDbgLook.length === AIM_DBG_LAG) {
+      for (let k = 0; k < AIM_DBG_LAG; k += 1) {
+        const idx = (this.aimDbgLookAt - 1 - k + AIM_DBG_LAG * 2) % AIM_DBG_LAG;
+        const off = Math.acos(Math.max(-1, Math.min(1,
+          this.aimDbgLook[idx]!.dot(S_DBG_HEAD))));
+        if (off < bestOff) { bestOff = off; bestLag = k; }
+      }
+    }
+
+    const now = performance.now();
+    if (now - this.aimDbgAt < 100) return;
+    this.aimDbgAt = now;
+    const mm = (v: THREE.Vector3): string =>
+      `${(v.x * MM).toFixed(1)}, ${(v.y * MM).toFixed(1)}, ${(v.z * MM).toFixed(1)}`;
+    const deg = (a: THREE.Vector3, b: THREE.Vector3): number =>
+      (Math.acos(Math.max(-1, Math.min(1, a.dot(b)))) * 180) / Math.PI;
+    /*
+     * WHERE THE CARVE LANDS RELATIVE TO HER JAWS, split in the HEAD's own
+     * frame — forward is reach, and the other two are the offsets the
+     * report is about: how far above her mandibles the hole opens, and how
+     * far to one side.
+     */
+    let lift = 0;
+    let side = 0;
+    let ahead = 0;
+    if (haveJaw && haveHead) {
+      this.queen.eyeUpWorld(S_DBG_UP);
+      S_DBG_RIGHT.crossVectors(S_DBG_HEAD, S_DBG_UP).normalize();
+      S_DBG_REL.copy(centre).sub(S_DBG_JAW);
+      ahead = S_DBG_REL.dot(S_DBG_HEAD) * MM;
+      lift = S_DBG_REL.dot(S_DBG_UP) * MM;
+      side = S_DBG_REL.dot(S_DBG_RIGHT) * MM;
+    }
+    this.aimDbgText!.style.display = '';
+    this.aimDbgText!.textContent = [
+      `AIM DEBUG  ${willBite ? 'bite WILL touch soil' : 'bite touches NOTHING'}`,
+      `RED   cam ray ${mm(camAt)}`,
+      `GREEN dig ray ${mm(this.at)}`,
+      `YELLOW jaw    ${haveJaw ? mm(S_DBG_JAW) : 'no rig'}`,
+      `WHITE carve   ${mm(centre)}`,
+      `cam vs bore   ${deg(camDir, aim).toFixed(1)}\u00b0`,
+      `cam vs head   ${haveHead ? `${deg(camDir, S_DBG_HEAD).toFixed(1)}\u00b0` : '-'}`,
+      `jaw off axis  ${haveJaw ? `${(S_DBG_JAW.distanceTo(this.at) * MM).toFixed(2)} mm from centre` : '-'}`,
+      `jaw to carve  ${haveJaw ? `${(S_DBG_JAW.distanceTo(centre) * MM).toFixed(2)} mm` : '-'}`,
+      `carve vs jaw  fwd ${ahead.toFixed(2)}  up ${lift.toFixed(2)}  side ${side.toFixed(2)} mm`,
+      `head lag      ${bestLag < 0 ? '-' : `${bestLag} frame(s), ${((bestOff * 180) / Math.PI).toFixed(1)}\u00b0`}`,
+    ].join('\n');
   }
 
   /**
@@ -5329,6 +5580,61 @@ export class IslandScene {
       nearMm: this.camera.near * MM,
       camMm: [p.x * MM, p.y * MM, p.z * MM],
       queuedChunks: this.queue.length,
+    };
+  }
+
+  /** The aim overlay, for a probe that wants it without a URL. */
+  setAimDebugForTest(on: boolean): void { this.aimDebug = on; }
+
+  /** What the overlay is drawing, as numbers — the same values, so a probe
+   *  can assert the discrepancy the picture shows. */
+  aimDebugForTest(): {
+    camAtMm: [number, number, number]; digAtMm: [number, number, number];
+    jawMm: [number, number, number] | null; biteMm: [number, number, number];
+    camVsBoreDeg: number; camVsHeadDeg: number | null;
+    jawOffAxisMm: number | null; jawToCarveMm: number | null;
+    carveAheadMm: number; carveUpMm: number; carveSideMm: number;
+    reachMm: number; willBite: boolean;
+  } {
+    const aim = this.boreAim();
+    const centre = new THREE.Vector3();
+    const jaw = new THREE.Vector3();
+    let hull = NOSE_REACH + JAW_PAST_NOSE;
+    const haveJaw = this.queenReady && this.queen.jawPosition(jaw);
+    if (haveJaw) {
+      centre.copy(jaw);
+      hull = Math.max(hull, centre.sub(this.at).dot(aim));
+    }
+    const willBite = this.biteCentre(aim, hull, centre);
+    this.camera.updateMatrixWorld();
+    const camDir = this.camera.getWorldDirection(new THREE.Vector3());
+    const head = new THREE.Vector3();
+    const haveHead = this.queenReady && this.queen.eyeForwardWorld(head);
+    const p = this.camera.position;
+    const ang = (a: THREE.Vector3, b: THREE.Vector3): number =>
+      (Math.acos(Math.max(-1, Math.min(1, a.dot(b)))) * 180) / Math.PI;
+    let ahead = 0; let lift = 0; let side = 0;
+    if (haveJaw && haveHead) {
+      const up = new THREE.Vector3();
+      this.queen.eyeUpWorld(up);
+      const right = new THREE.Vector3().crossVectors(head, up).normalize();
+      const rel = centre.clone().sub(jaw);
+      ahead = rel.dot(head) * MM;
+      lift = rel.dot(up) * MM;
+      side = rel.dot(right) * MM;
+    }
+    return {
+      camAtMm: [p.x * MM, p.y * MM, p.z * MM],
+      digAtMm: [this.at.x * MM, this.at.y * MM, this.at.z * MM],
+      jawMm: haveJaw ? [jaw.x * MM, jaw.y * MM, jaw.z * MM] : null,
+      biteMm: [centre.x * MM, centre.y * MM, centre.z * MM],
+      camVsBoreDeg: ang(camDir, aim),
+      camVsHeadDeg: haveHead ? ang(camDir, head) : null,
+      jawOffAxisMm: haveJaw ? jaw.distanceTo(this.at) * MM : null,
+      jawToCarveMm: haveJaw ? jaw.distanceTo(centre) * MM : null,
+      carveAheadMm: ahead, carveUpMm: lift, carveSideMm: side,
+      reachMm: this.at.distanceTo(centre) * MM,
+      willBite,
     };
   }
 
