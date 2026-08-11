@@ -1658,7 +1658,29 @@ export class IslandScene {
      * taking the one whose ground sits closest to her own costs sixteen
      * height lookups and puts the tree on the flattest thing within reach.
      */
-    const away = TREE_FROM_HER_MM / MM;
+    /*
+     * SEVEN HUNDRED MILLIMETRES OF CLEAR GROUND, not seven hundred to the
+     * pin — the term that was missing is the tree's own foot.
+     *
+     * This measured to the trunk's ORIGIN while the bole's flared base is
+     * 640 mm of radius (girth/2 x 1.28, tree.ts), whose axis then wanders a
+     * further 0.35 of the base radius off that origin. Measured on the
+     * shipped seed: her spawn stood 49.6 mm from BARK — five body lengths —
+     * so holding the stick forward walked her into a 1.26 m wall of wood
+     * 5.7 seconds after her first step, every single time.
+     *
+     * That is what a whole field telemetry session turned out to be. Every
+     * corner-phase row in it sits 1.4-1.7 mm from the bark: the four climbs
+     * and returns, the 240 deg/s body rotations, the backward lurch — all
+     * of it was her wrapping on and off this trunk, and none of it was the
+     * walking-on-open-ground it was read as. The scheduler was never at
+     * fault: over 4,669 frames of ordinary terrain the corner's look-ahead
+     * found no candidate face at all, while the bark reads 82-87 degrees.
+     *
+     * Adding one girth covers both terms at any seed and restores what the
+     * comment above always claimed: a landmark you walk TO.
+     */
+    const away = (TREE_FROM_HER_MM + TREE_GIRTH_MM) / MM;
     const here = this.walkGroundAt(this.at.x, this.at.z);
     let tx = this.at.x + away;
     let tz = this.at.z;
