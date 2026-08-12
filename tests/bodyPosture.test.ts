@@ -8,6 +8,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { BodyPosture, POSTURE_LIMITS } from '../src/scenes/bodyPosture';
+import { REACH_DOWN_MM } from '../src/anim/legDrive';
 
 /** Run the ease to rest, so a target can be compared against a value. */
 const settle = (p: BodyPosture): void => {
@@ -94,6 +95,21 @@ describe('BodyPosture', () => {
     expect(p.rideMm).toBe(0);
     expect(p.mode).toBe('off');
     expect(p.neutral).toBe(true);
+  });
+
+  it('never asks a leg to reach further down than it physically can', () => {
+    /*
+     * The bug this pins: a uniform body rise raises every leg's home by the
+     * same amount, which is the identical demand a downward lip makes on a
+     * walking leg. A rise that used the tightest leg's WHOLE spare left
+     * nothing for a lip on top of it, and the report from play was exactly
+     * that — a foot held its old anchor while the body kept rising. So the
+     * rise must sit strictly under the tightest leg's reach, with something
+     * left over.
+     */
+    const tightest = Math.min(...Object.values(REACH_DOWN_MM));
+    expect(POSTURE_LIMITS.riseMm).toBeLessThan(tightest);
+    expect(tightest - POSTURE_LIMITS.riseMm).toBeGreaterThan(0.2);
   });
 
   it('only one control owns the stick at a time', () => {

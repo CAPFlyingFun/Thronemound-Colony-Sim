@@ -46,27 +46,51 @@
  * side effect of releasing.
  */
 
+import { REACH_DOWN_MM } from '../anim/legDrive';
+
 /** Which of the two controls owns the stick, if either. */
 export type PostureMode = 'off' | 'ride' | 'tilt';
 
+/*
+ * WHY THE RISE IS BOUNDED BY `REACH_DOWN_MM` AND NOT A ROUND NUMBER.
+ *
+ * The first cut used 1.2 mm, picked as "a visible eighth of her body
+ * length". Played, it stuck: raising her whole body raises every leg's HOME
+ * by the same amount, and each leg has to reach further DOWN to keep its
+ * foot on the same ground it was just standing on — the identical demand a
+ * downward lip makes on a walking leg, from `legDrive.ts`'s own measurement:
+ * "a leg asked for reach it does not have does not stretch; the solver
+ * drags the body down instead". Front (1.12 mm) and middle (1.08-1.10 mm)
+ * are the tight ones; 1.2 mm asked them for more than they have, on EVERY
+ * full-stick rise, before any terrain lip was added on top — so on the very
+ * ground this control exists to help with, there was nothing left in the
+ * budget and the foot held its old anchor while the body kept rising.
+ *
+ * So the ceiling is derived from that same table rather than guessed a
+ * second time, with a margin reserved so a rise and a lip can still both be
+ * asked of a leg at once. The rear legs (1.83 mm spare) have far more room
+ * than this uses — which is exactly the asymmetry the corner posture (rear
+ * stretched, front lowered) is built to spend, rather than the uniform rise
+ * this manual control gives every leg alike.
+ */
+const TIGHTEST_DOWN_REACH_MM = Math.min(...Object.values(REACH_DOWN_MM));
+/** Left over for a terrain lip once the manual rise has taken its share. */
+const RISE_TERRAIN_MARGIN = 0.35;
+
 export const POSTURE_LIMITS = {
   /**
-   * How far she may rise, in millimetres along her own up.
-   *
-   * Bounded by her LEGS, not by taste: the rig rests its feet 0.26 units
-   * below her origin and reaches 1.1-1.8 mm downward, so a rise much past a
-   * millimetre lifts the soles off their anchors and every leg starts
-   * groping. 1.2 mm is a visible eighth of her body length and still leaves
-   * the tripod something to stand on.
+   * How far she may rise, in millimetres along her own up. See above.
    */
-  riseMm: 1.2,
+  riseMm: Math.max(0, TIGHTEST_DOWN_REACH_MM - RISE_TERRAIN_MARGIN),
   /**
-   * And how far she may crouch. Less than the rise, because down is where
-   * the ground is: `groundGuard` will bodily lift her out of soil she has
-   * been pushed into, and a crouch deep enough to trip that guard fights it
-   * every frame instead of looking like a crouch.
+   * And how far she may crouch — asked for, by measurement, at 0.6 mm:
+   * enough for the downhill side of a 90° bend without the sink `↕` was
+   * originally letting her ask for. `groundGuard` still backstops this: it
+   * will bodily lift her out of any soil the crouch pushes her into, so the
+   * number only has to be a sensible crouch, not a proof against every
+   * floor.
    */
-  crouchMm: 0.9,
+  crouchMm: 0.6,
   /**
    * Cyclic authority, radians. 22 degrees across a 9 mm body moves each end
    * about 1.7 mm — enough to lift a gaster clear of a wall it is scraping,
