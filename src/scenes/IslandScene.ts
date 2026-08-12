@@ -429,6 +429,50 @@ const S_BANK = new THREE.Vector3();
 /** How far below the drawn island counts as "underground" for the camera. */
 const UNDER_MM = 5;
 
+/*
+ * HOW DEEP SHE MUST BE BEFORE THE SENSE TAKES OVER — a bigger number than
+ * the camera's, and the whole of the fix for "the sky went dark while I was
+ * still at the surface".
+ *
+ * Reported with a screenshot: a shallow scoop turned the sky night-dark and
+ * washed the near soil blue while the quest readout still said 9 mm down.
+ * `underground` was driving the camera's algorithm AND the sense shader off
+ * one 5 mm threshold, and 5 mm is right for the camera and far too eager
+ * for a way of SEEING — an open-topped scrape clears it while her head is
+ * still above the rim in full daylight. The sense was written for being
+ * shut inside a bore ("a first-person camera in a 7 mm bore has no
+ * landmarks" — `undergroundSense.ts`), which a scoop with the sky over it
+ * is not.
+ *
+ * WHY THIS IS A DEPTH AND NOT A CAST, which is the interesting part.
+ *
+ * The honest test is "can she see sky straight up", and two casts were
+ * written and both were thrown away MEASURED rather than reasoned about:
+ *
+ *   1. along her own up — wrong axis. Her up is the surface normal she
+ *      stands on, so in a 22 mm chamber it points across open air, finds no
+ *      roof, and reads as daylight INSIDE the nest.
+ *   2. world-vertical, up to the grade — right answer, wrong cost. The
+ *      chunk mesher's budget breaks on `performance.now()`, so ANY extra
+ *      per-frame terrain probing changes how many chunks land that frame,
+ *      which changes the soil the lens guard is tested against. Measured
+ *      over three runs each: baseline 0/0/0 frames with soil in the
+ *      picture, with the cast 0/25/5. The cast's logic was fine; merely
+ *      asking the questions broke something else.
+ *
+ * So the sense gets a threshold instead, and the threshold is free — one
+ * comparison against a height this frame already sampled for the camera.
+ * It cannot perturb the mesher because it asks nothing new.
+ *
+ * WHAT THIS DELIBERATELY DOES NOT FIX: a roofed tunnel running shallower
+ * than this stays lit rather than sensed. That is a real gap and a much
+ * smaller one than the bug it replaces — you reach it by digging along
+ * just under the surface, where there is still plenty to see by. A true
+ * sky test belongs with the tri-state solid/air/unavailable query work,
+ * where it can be answered without a per-frame march.
+ */
+const ENCLOSED_MM = 16;
+
 /** Soil mesh chunks: the slide tile IS the chunk, the world room's trick. */
 const CH = TILE_CELLS;
 const CHUNKS_XZ = WINDOW_CELLS / CH;
@@ -1423,6 +1467,21 @@ export class IslandScene {
 
   private underground = false;
 
+  /**
+   * SHUT IN — what the SENSE runs on, and not what the camera runs on.
+   *
+   * `underground` answers "is she below grade", which is the right question
+   * for choosing a camera algorithm and the wrong one for choosing a way of
+   * SEEING: a nine-millimetre scoop with the sky open over it is below
+   * grade and still in daylight. Keeping them apart is deliberate and was
+   * learned the expensive way — one attempt redefined `underground` itself
+   * and silently moved the camera with it, which `probe-lens` caught as
+   * soil in the picture. The camera's flag is left exactly as it was; this
+   * one is new, and nothing but the sense and the sky-coloured background
+   * may read it.
+   */
+  private enclosed = false;
+
   /** The room camera's share of the underground view, eased 0..1. */
   private chamberCam = 0;
 
@@ -2408,6 +2467,7 @@ export class IslandScene {
     return this.stand?.solidAt(x, y, z) === true;
   }
 
+
   /**
    * HER FRAME IN A BURROW — which way is up for her, and where the surface
    * under a point is measured ALONG that up.
@@ -2884,8 +2944,12 @@ export class IslandScene {
     const went = moved.length() / Math.max(dt, 1e-6);
     this.groundSpeed += (went - this.groundSpeed) * Math.min(1, dt * 12);
 
-    this.underground = this.at.y + RIDE
-      < this.walkGroundAt(this.at.x, this.at.z) - UNDER_MM / MM;
+    /* ONE height sample, TWO thresholds — the camera's and the sense's.
+     * Sharing the sample is what keeps the second answer free; see
+     * `ENCLOSED_MM` for why the sense may not afford a cast of its own. */
+    const overhead = this.walkGroundAt(this.at.x, this.at.z) - (this.at.y + RIDE);
+    this.underground = overhead > UNDER_MM / MM;
+    this.enclosed = overhead > ENCLOSED_MM / MM;
 
     this.questTick(dt);
     /* The small tiers follow her; the big ones were planted once. */
@@ -2990,7 +3054,7 @@ export class IslandScene {
      * one of the moments this game has, and half a second of contours
      * resolving into daylight is the whole of the effect. */
     if (this.sense) {
-      this.sense.uSense.value += ((this.underground ? 1 : 0) - this.sense.uSense.value)
+      this.sense.uSense.value += ((this.enclosed ? 1 : 0) - this.sense.uSense.value)
         * (1 - Math.exp(-SENSE_EASE * dt));
       /*
        * AND THE VOID BEHIND A MISSING CHUNK IS SOIL, NOT NOTHING.
@@ -6520,6 +6584,7 @@ export class IslandScene {
     this.at.y = this.walkGroundAt(this.at.x, this.at.z) + RIDE;
     this.velocity.set(0, 0, 0);
     this.underground = false;
+    this.enclosed = false;
     this.hasSafe = false;
     /* Set down the right way up wherever she lands, gripping again. Carrying
      * a ceiling's attitude across a teleport would have her arrive upside
@@ -6689,6 +6754,9 @@ export class IslandScene {
       rebases: this.stats.rebases,
       bandFloorMm: this.stream?.bandFloorMm ?? -1,
       underground: this.underground ? 1 : 0,
+      /* The sense's own flag, reported beside the camera's so a probe can
+       * tell the two apart — they are meant to disagree in an open pit. */
+      enclosed: this.enclosed ? 1 : 0,
       firstPerson: this.firstPerson ? 1 : 0,
       aimDeg: (this.aimPitch * 180) / Math.PI,
       scoopWideMm: SCOOP_WIDE_MM,
