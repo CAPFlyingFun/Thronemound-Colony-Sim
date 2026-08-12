@@ -92,6 +92,80 @@ export class IslandStream {
     return total;
   }
 
+  /**
+   * Every dig she has made, as bytes — the whole of a saved island.
+   *
+   * The soil is a pure function of position, so nothing about the island
+   * needs storing except what she has CHANGED about it. That is this sparse
+   * map, and it is why a save is kilobytes rather than megabytes.
+   *
+   *   [uint32 tiles] then per tile:
+   *   [uint32 key] [uint32 count] then count x ([uint32 local] [float32 value])
+   *
+   * THE KEY IS UINT32, and that is not a copy of `TerrainStream`'s format:
+   * that one writes uint16 and its own comment says to check the width
+   * against the arithmetic rather than against the comment. Checked — the
+   * island is 56 m across in 32 mm tiles, so `tx + ISLAND_TILES * tz` reaches
+   * 1749 + 1750 x 1749 = 3,062,499, which is forty-six times what a uint16
+   * can hold. Sixteen bits would wrap modulo 65,536 and fold thousands of
+   * tiles onto each other's keys, which a `Map` collapses silently on load:
+   * a tunnel that heals part of itself on resume, which is the exact bug
+   * that comment was written about.
+   */
+  serializeEdits(): Uint8Array {
+    let bytes = 4;
+    for (const tile of this.edits.values()) bytes += 8 + tile.size * 8;
+    const out = new Uint8Array(bytes);
+    const view = new DataView(out.buffer);
+    let at = 0;
+    view.setUint32(at, this.edits.size, true); at += 4;
+    for (const [key, tile] of this.edits) {
+      view.setUint32(at, key, true); at += 4;
+      view.setUint32(at, tile.size, true); at += 4;
+      for (const [local, value] of tile) {
+        view.setUint32(at, local, true); at += 4;
+        view.setFloat32(at, value, true); at += 4;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Replace every edit with a saved set and rebuild the window.
+   *
+   * Parsed WHOLE before anything is touched, and it throws on a malformed
+   * buffer rather than keeping whatever it managed to read: a half-restored
+   * island — some tunnels back, some not, and no way to tell which — is
+   * worse than one that refuses and says so.
+   */
+  restoreEdits(bytes: Uint8Array): void {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const parsed = new Map<number, Map<number, number>>();
+    let at = 0;
+    const need = (n: number): void => {
+      if (at + n > bytes.byteLength) throw new Error('an island save ended early');
+    };
+    need(4);
+    const tiles = view.getUint32(at, true); at += 4;
+    for (let t = 0; t < tiles; t += 1) {
+      need(8);
+      const key = view.getUint32(at, true); at += 4;
+      const count = view.getUint32(at, true); at += 4;
+      need(count * 8);
+      const tile = new Map<number, number>();
+      for (let i = 0; i < count; i += 1) {
+        const local = view.getUint32(at, true); at += 4;
+        const value = view.getFloat32(at, true); at += 4;
+        tile.set(local, value);
+      }
+      parsed.set(key, tile);
+    }
+    if (at !== bytes.byteLength) throw new Error('trailing bytes in an island save');
+    this.edits.clear();
+    for (const [key, tile] of parsed) this.edits.set(key, tile);
+    this.generate(0, WINDOW_CELLS + 1, 0, SAMPLES_Y, 0, WINDOW_CELLS + 1);
+  }
+
   private tileOf(worldCoord: number): number {
     const cell = Math.floor(worldCoord / CELL_SIZE);
     return Math.min(ISLAND_TILES - 1, Math.max(0, Math.floor(cell / TILE_CELLS)));

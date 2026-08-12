@@ -157,27 +157,73 @@ if (host) {
       import('./scenes/IslandScene'),
       import('./scenes/LoadingOverlay'),
     ]).then(([{ MainMenu }, { IslandScene }, { QuietCurtain }]) => {
-      const menu = new MainMenu(host, {
-        onStart: () => {
-          /* The island is already standing behind this; taking the menu down
-           * IS the transition. Nothing loads, nothing navigates. */
-          menu.dispose();
-        },
-        onDev: () => { window.location.search = '?scene=poseedit'; },
-      });
-      /* Disabled until she is standing — a START that drops you into a
-       * half-built island is worse than one you wait a moment for. */
-      menu.setEnabled('onStart', false);
-      menu.setStatus('Preparing the island…');
-      const island = new IslandScene(host, {
+      /*
+       * THE MENU IS ALSO THE PAUSE MENU, which is what makes SAVE worth
+       * having on it. Escape brings it back over the running island, and
+       * because the island is never torn down, going in and out of it costs
+       * nothing at all.
+       */
+      let menu: InstanceType<typeof MainMenu>;
+      let island: InstanceType<typeof IslandScene> | null = null;
+
+      /*
+       * EVERY ACTION EXISTS FROM THE START and is switched on when it can do
+       * something, rather than being wired in later. The menu decides whether
+       * a button is greyed by whether it was GIVEN an action, so handing it
+       * `undefined` while the island is still building would need a second
+       * menu built over the first — a visible flash, to solve a problem that
+       * `setEnabled` already solves.
+       */
+      const build = (): void => {
+        menu = new MainMenu(host, {
+          onStart: () => menu.dispose(),
+          /* RESUME restores into the island already standing behind the
+           * menu, then goes straight in. */
+          onResume: () => {
+            if (island?.resumeFromStorage()) menu.dispose();
+            else menu.setStatus('That save could not be read');
+          },
+          onSave: () => {
+            menu.setStatus(island?.saveToStorage()
+              ? 'Saved' : 'Could not save — storage is full or blocked');
+          },
+          onDev: () => { window.location.search = '?scene=poseedit'; },
+        });
+        const playable = !!island?.ready;
+        menu.setEnabled('onStart', playable);
+        menu.setEnabled('onSave', playable);
+        /* Only offer a resume there is actually one of. */
+        menu.setEnabled('onResume', playable && IslandScene.hasSave());
+        if (playable) menu.setLoaded();
+        else menu.setStatus('Preparing the island…');
+        (window as unknown as { mainMenu?: unknown }).mainMenu = menu;
+      };
+
+      build();
+      island = new IslandScene(host, {
         curtain: new QuietCurtain(
           (text) => menu.setStatus(text),
           (why) => menu.setFailed(why),
         ),
-        onReady: () => menu.setLoaded(),
+        onReady: () => {
+          menu.setLoaded();
+          menu.setEnabled('onStart', true);
+          menu.setEnabled('onSave', true);
+          menu.setEnabled('onResume', IslandScene.hasSave());
+        },
       });
-      (window as unknown as { mainMenu?: unknown }).mainMenu = menu;
-      void island;
+
+      /*
+       * ESCAPE BRINGS IT BACK, which is what makes SAVE worth having on a
+       * menu at all — otherwise it could only ever save an island nobody had
+       * played yet. The island is never torn down, so pausing and resuming
+       * costs nothing.
+       */
+      window.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        if (document.querySelector('.main-menu') || !island?.ready) return;
+        build();
+      });
     });
   }
 }

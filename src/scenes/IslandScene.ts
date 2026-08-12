@@ -54,6 +54,10 @@ import {
 } from '../anim/spine';
 import { DebugStatsPanel } from './DebugStatsPanel';
 import { type Curtain, LoadingOverlay } from './LoadingOverlay';
+import {
+  fromBase64, ISLAND_SAVE_KEY, ISLAND_SAVE_V, parseIslandSave, toBase64,
+  type IslandSave,
+} from './islandSave';
 
 /**
  * How the island was started, when it was not started on its own.
@@ -6258,6 +6262,104 @@ export class IslandScene {
       const scroll = this.stream.recentreOn(this.at.x, this.at.z);
       if (scroll) this.onScroll(scroll);
     }
+  }
+
+  /* ------------------------------------------------------------ the save */
+
+  /**
+   * Write her nest and her whereabouts to storage. False when it could not.
+   *
+   * False rather than a throw: storage is denied in private browsing and full
+   * on a loaded phone, and neither is worth taking a running game down for.
+   * The caller says so instead.
+   */
+  saveToStorage(): boolean {
+    if (!this.stream) return false;
+    const save: IslandSave = {
+      v: ISLAND_SAVE_V,
+      when: Date.now(),
+      at: [this.at.x, this.at.y, this.at.z],
+      up: [this.up.x, this.up.y, this.up.z],
+      fwd: [this.fwd.x, this.fwd.y, this.fwd.z],
+      facing: this.facing,
+      dug: toBase64(this.stream.serializeEdits()),
+    };
+    try {
+      window.localStorage.setItem(ISLAND_SAVE_KEY, JSON.stringify(save));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Is there a save worth offering a RESUME for? */
+  static hasSave(): boolean {
+    try {
+      return parseIslandSave(window.localStorage.getItem(ISLAND_SAVE_KEY)) !== null;
+    } catch {
+      return false;
+    }
+  }
+
+  /** When it was written, for a menu that wants to say so. */
+  static savedWhen(): number {
+    try {
+      return parseIslandSave(window.localStorage.getItem(ISLAND_SAVE_KEY))?.when ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Put a saved island back: the digs first, then her.
+   *
+   * THAT ORDER IS THE WHOLE THING. Her seat is derived from the soil beneath
+   * her, so placing her before the tunnels exist seats her on ground that is
+   * about to be removed — she would be left standing inside her own nest's
+   * ceiling. Restoring the soil first means the frame that places her reads
+   * the world she actually saved.
+   *
+   * A save that will not parse leaves the fresh island exactly as it was; a
+   * save whose BYTES are bad is dropped, because `restoreEdits` refuses
+   * before touching the store and there is nothing half-applied to undo.
+   */
+  resumeFromStorage(): boolean {
+    if (!this.stream) return false;
+    const save = (() => {
+      try { return parseIslandSave(window.localStorage.getItem(ISLAND_SAVE_KEY)); } catch {
+        return null;
+      }
+    })();
+    if (!save) return false;
+    try {
+      this.stream.restoreEdits(fromBase64(save.dug));
+    } catch {
+      /* A save we cannot read is not a save. Left in storage rather than
+       * deleted: it costs nothing, and a future build may understand it. */
+      return false;
+    }
+    this.at.set(save.at[0], save.at[1], save.at[2]);
+    this.up.set(save.up[0], save.up[1], save.up[2]).normalize();
+    this.fwd.set(save.fwd[0], save.fwd[1], save.fwd[2]).normalize();
+    this.facing = save.facing;
+    this.bore.turn(save.facing - this.bore.heading);
+    this.headingWas = this.bore.heading;
+    this.velocity.set(0, 0, 0);
+    if (this.walker) {
+      this.walker.gripping = true;
+      this.walker.fallSpeed = 0;
+      this.walker.squareForward({ at: this.at, up: this.up, forward: this.fwd });
+    }
+    /* Her feet were anchored to world points on the island she left. */
+    this.drive?.plantAll(
+      { at: this.at, up: this.up, forward: this.fwd }, this.groundForLegs,
+    );
+    /* The window follows her, and every chunk it holds is now wrong: the
+     * soil under it has just changed everywhere she ever dug. */
+    const scroll = this.stream.recentreOn(this.at.x, this.at.z);
+    if (scroll) this.onScroll(scroll);
+    this.remeshEverything();
+    return true;
   }
 
   drainQueueForTest(): void {

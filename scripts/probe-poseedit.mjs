@@ -83,7 +83,10 @@ if (!booting.status) fail.push('the menu showed no loading status while the isla
 if (!booting.devLive) fail.push('DEV was locked out while the island loaded');
 
 await page.waitForFunction(
-  () => !document.querySelector('.main-menu__button[data-key="onStart"]')?.disabled,
+  () => {
+    const b = document.querySelector('.main-menu__button[data-key="onStart"]');
+    return !!b && !b.disabled;
+  },
   null, { timeout: 200000 },
 ).catch(() => fail.push('START never opened — the island never reported ready'));
 
@@ -110,6 +113,152 @@ console.log(`start  : menu gone ${started.menuGone}, island alive ${started.stil
 if (!started.menuGone) fail.push('START left the menu on screen');
 if (!started.stillIsland) fail.push('START lost the island it had already built');
 if (started.navigated) fail.push(`START navigated to "${started.navigated}" — it should not reload`);
+
+/*
+ * SAVE AND RESUME, which is the thing that made digging feel provisional:
+ * a tunnel was an hour's work and it evaporated with the tab.
+ *
+ * Measured on the SOIL, not on the button. She digs, the edit count goes up,
+ * a save is written; then the page is RELOADED — a real one, not a re-render
+ * — and RESUME has to bring the same count back. Anything less and the save
+ * is a button that lights up.
+ */
+const dug = await page.evaluate(async () => {
+  const s = window.islandScene;
+  s.setPausedForTest(true);
+  s.aimPitchForTest(-1.0);
+  s.input.dig = true;
+  s.stepForTest(0.023, 90);
+  s.input.dig = false;
+  /* How big the save actually is, because localStorage is about five
+   * megabytes and a nest is eight bytes a sample — the number matters. */
+  const bytes = s.stream?.serializeEdits().length ?? 0;
+  return {
+    edits: s.stream?.editedSamples ?? 0,
+    bytes,
+    saved: s.saveToStorage(),
+    stored: (window.localStorage.getItem('thronemound.island.v1') ?? '').length,
+    at: [s.at.x, s.at.y, s.at.z],
+  };
+});
+console.log(`save   : dug ${dug.edits} samples = ${(dug.bytes / 1024).toFixed(0)} KiB raw, `
+  + `${(dug.stored / 1024).toFixed(0)} KiB stored, saved ${dug.saved}`);
+if (!dug.edits) fail.push('the probe dug nothing, so the save proves nothing');
+if (!dug.saved) fail.push('saving the island failed');
+
+await page.reload({ waitUntil: 'domcontentloaded' });
+/*
+ * EXISTENCE FIRST, THEN ENABLED — and the order is not pedantry.
+ *
+ * The check here was `!document.querySelector(sel)?.disabled`, which for a
+ * MISSING element is `!undefined`, which is true. So straight after a reload,
+ * before the menu's module had even imported, the wait passed instantly and
+ * every measurement after it was taken against a page with no menu on it:
+ * the click hit nothing, the restore never ran from the button, and three
+ * runs were spent reading that as a broken feature.
+ */
+/*
+ * The key is passed as an ARGUMENT, not closed over. Playwright serialises
+ * this function into the page, where the surrounding scope does not exist —
+ * a closed-over `key` throws "key is not defined" inside the browser, the
+ * wait rejects, and the `.catch` below turns a broken predicate into a
+ * confident report that the button never lit up.
+ */
+const waitEnabled = (key) => page.waitForFunction(
+  (k) => {
+    const el = document.querySelector(`.main-menu__button[data-key="${k}"]`);
+    return !!el && !el.disabled;
+  },
+  key,
+  { timeout: 200000 },
+);
+await waitEnabled('onResume')
+  .catch(() => fail.push('RESUME never lit up after a save'));
+
+const beforeResume = await page.evaluate(() => window.islandScene?.stream?.editedSamples ?? 0);
+/*
+ * Dispatched rather than `page.click`ed. RESUME rebuilds every chunk in the
+ * window synchronously, so the main thread is blocked for the whole restore
+ * and Playwright's post-click stability wait times out on a page that is
+ * merely busy. The button is real and enabled — the log above proves it —
+ * so what is being tested is the restore, not the actuality of the click.
+ */
+/* One place, one report: how many menus are on the page, whether the button
+ * is really enabled, and what changed the instant it is clicked. Three runs
+ * were spent inferring this from the outside. */
+const clicked = await page.evaluate(() => {
+  const all = [...document.querySelectorAll('.main-menu__button[data-key="onResume"]')];
+  const btn = all[0];
+  const before = {
+    menus: document.querySelectorAll('.main-menu').length,
+    buttons: all.length,
+    disabled: all.map((b) => b.disabled),
+  };
+  btn?.click();
+  return {
+    ...before,
+    status: document.querySelector('.main-menu__status')?.textContent ?? '',
+    menusNow: document.querySelectorAll('.main-menu').length,
+  };
+});
+console.log(`click  : ${clicked.menus} menu(s), ${clicked.buttons} RESUME button(s) `
+  + `disabled=${JSON.stringify(clicked.disabled)} -> ${clicked.menusNow} menu(s), `
+  + `status "${clicked.status}"`);
+/*
+ * WAITED FOR, not slept through. Restoring rebuilds every chunk in the
+ * window synchronously — seventy thousand edits is seconds of work on a
+ * software renderer — so a fixed pause measures the machine rather than the
+ * feature. Twice this probe reported a working restore as broken because it
+ * looked before the main thread came back.
+ */
+await page.waitForFunction(
+  () => !document.querySelector('.main-menu'), null, { timeout: 120000 },
+).catch(() => { /* reported below, with the reason */ });
+const resumed = await page.evaluate(() => {
+  const s = window.islandScene;
+  /* If the button's restore did not take, call it directly and report what
+   * it says — a probe that only knows "it did not work" cannot be acted on. */
+  let why = document.querySelector('.main-menu__status')?.textContent ?? '';
+  /*
+   * DIAGNOSTIC ONLY, and only when the BUTTON failed to restore.
+   *
+   * It used to run unconditionally, which quietly made the probe unable to
+   * fail: a button that did nothing would still end with the right number of
+   * edits, because this call put them back. A check that repairs the thing
+   * it is checking is not a check. So it runs only when there is already a
+   * failure to explain, and says so.
+   */
+  if ((s?.stream?.editedSamples ?? 0) === 0) {
+    why += ' | the BUTTON restored nothing;';
+    try {
+      why += ` a direct call returned ${s.resumeFromStorage()}`;
+    } catch (e) {
+      why += ` a direct call THREW: ${e && e.message ? e.message : String(e)}`;
+    }
+  }
+  return {
+    edits: s?.stream?.editedSamples ?? 0,
+    at: [s.at.x, s.at.y, s.at.z],
+    menuGone: !document.querySelector('.main-menu'),
+    why,
+  };
+});
+const moved = Math.hypot(
+  resumed.at[0] - dug.at[0], resumed.at[1] - dug.at[1], resumed.at[2] - dug.at[2],
+) * 5;
+console.log(`resume : fresh island had ${beforeResume} edits, after RESUME ${resumed.edits}`
+  + ` (saved ${dug.edits}); she came back within ${moved.toFixed(2)} mm`);
+console.log(`         menu gone ${resumed.menuGone} — ${resumed.why}`);
+if (beforeResume >= dug.edits) {
+  fail.push('the reloaded island already had the digs — nothing was proved');
+}
+if (resumed.edits !== dug.edits) {
+  fail.push(`RESUME restored ${resumed.edits} of ${dug.edits} dug samples`
+    + ` (it said: "${resumed.why}")`);
+}
+if (!resumed.menuGone) fail.push('RESUME left the menu up');
+/* Where she stood is part of the save; centimetres out means it was ignored. */
+if (moved > 5) fail.push(`RESUME put her ${moved.toFixed(1)} mm from where she saved`);
 
 /* And the old direct route is untouched, because forty probes use it. */
 await page.goto(`${base}/?scene=island`, { waitUntil: 'domcontentloaded' });

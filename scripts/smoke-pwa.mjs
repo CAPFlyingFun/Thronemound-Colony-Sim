@@ -12,7 +12,24 @@
 import { chromium } from 'playwright';
 import { existsSync, rmSync, writeFileSync } from 'node:fs';
 
-const URL_BASE = process.env.SMOKE_URL ?? 'http://localhost:4300/Thronemound-Colony-Sim/';
+import { startDistServer } from './serveDist.mjs';
+
+/*
+ * IT BRINGS ITS OWN SERVER, because the one it used to ask for cannot do the
+ * job. `vite preview` picks its base off `command`, and preview runs as
+ * `serve`, so a production build whose HTML points at `/Thronemound-Colony-Sim/`
+ * is served from `/` — every asset misses and the SPA fallback answers each
+ * one with index.html at status 200. The manifest came back as text/html and
+ * this smoke died on `JSON.parse`, which reads like a broken manifest and is
+ * really a broken server.
+ *
+ * `SMOKE_URL` still overrides, for pointing it at a real deploy. Otherwise it
+ * starts a static server on an OS-chosen port and stops it at the end — no
+ * fixed port to be squatted by a forgotten server from an earlier session,
+ * which has already cost this project a session's worth of measurements.
+ */
+const own = process.env.SMOKE_URL ? null : await startDistServer(0);
+const URL_BASE = process.env.SMOKE_URL ?? own.url;
 
 let failed = false;
 const fail = (msg) => { console.error(`FAIL: ${msg}`); failed = true; };
@@ -255,6 +272,7 @@ if (!registered.controlled) {
 }
 
 await browser.close();
+await own?.stop();
 if (failed) {
   console.error('\nPWA SMOKE FAILED');
   process.exit(1);
