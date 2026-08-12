@@ -298,6 +298,68 @@ describe('the train', () => {
     expect(SPINE_LIMITS.thoraxRate).toBeGreaterThan(SPINE_LIMITS.gasterRate);
   });
 
+  it('splits the flinch out of the pose, and the halves add back up', () => {
+    /* The decomposition is what lets the two travel at different rates, so
+     * it has to be exact rather than approximately right: whatever the
+     * clamp let through is the flinch, and posture plus flinch is the pose
+     * `QueenModel` gets. */
+    const tight = posture(
+      { ...flat, gasterClear: CLEARANCE_MM.hard, headClear: CLEARANCE_MM.hard },
+      AHEAD, BEHIND,
+    );
+    expect(tight.gasterFlinch).toBeLessThan(0);
+    expect(tight.headFlinch).toBeGreaterThan(0);
+    /* Clear of everything, there is no flinch at all — the same claim the
+     * proximity tests make, now about the half rather than the whole. */
+    const open = posture(flat, AHEAD, BEHIND);
+    expect(open.gasterFlinch).toBeCloseTo(0, 9);
+    expect(open.headFlinch).toBeCloseTo(0, 9);
+  });
+
+  it('gets the tail out of the ground far faster than it lets it back down', () => {
+    /*
+     * THE WHOLE POINT OF THE SPLIT, and the thing the device reported.
+     *
+     * Measured on the island, every frame her abdomen was inside the ground
+     * the target was already pinned at the clamp and the pose was 7.6
+     * degrees short of it — the gaster's own 5.5/s rate is a 180 ms time
+     * constant and the ground moves faster than that. The flinch now
+     * attacks at four times that and still RELEASES on the postural rate,
+     * because a fast release is how a ride term becomes a twitch.
+     */
+    const tight = posture({ ...flat, gasterClear: CLEARANCE_MM.hard }, AHEAD, BEHIND);
+    const dt = 1 / 60;
+    const lift = new Spine();
+    for (let i = 0; i < 6; i += 1) lift.follow(tight, dt);
+    const after = lift.pose.gaster;
+    /* A tenth of a second in, it must be most of the way there. On the old
+     * single rate this was under half. */
+    expect(after / tight.gaster).toBeGreaterThan(0.85);
+
+    /* And now let it go: the same six frames back toward level must NOT
+     * undo it, or the asymmetry is not there. */
+    const level = posture(flat, AHEAD, BEHIND);
+    for (let i = 0; i < 6; i += 1) lift.follow(level, dt);
+    expect(Math.abs(lift.pose.gaster)).toBeGreaterThan(Math.abs(after) * 0.5);
+  });
+
+  it('leaves the train alone — the postural half still runs at its own rate', () => {
+    /* The flinch is fast; the terrain-following must not have become fast
+     * with it, or the trailing tail that reads as an ant is gone. */
+    expect(SPINE_LIMITS.gasterFlinchRate).toBeGreaterThan(SPINE_LIMITS.gasterRate);
+    expect(SPINE_LIMITS.headFlinchRate).toBeGreaterThan(SPINE_LIMITS.headRate);
+    const spine = new Spine();
+    const uphill = posture({ ...flat, aheadRise: 0.3, behindRise: -0.3 }, AHEAD, BEHIND);
+    /* No clearance anywhere, so this target is pure posture. */
+    expect(uphill.gasterFlinch).toBeCloseTo(0, 9);
+    const track = run(spine, uphill, 0.6);
+    const halfway = (pick: (r: typeof track[number]) => number, end: number) =>
+      track.find((r) => Math.abs(pick(r)) >= Math.abs(end) * 0.5)?.t ?? Infinity;
+    const last = track[track.length - 1]!;
+    expect(halfway((r) => r.head, last.head))
+      .toBeLessThan(halfway((r) => r.gaster, last.gaster));
+  });
+
   it('clamps whatever it is handed, not just what posture() produced', () => {
     /* Head and gaster keep the proximity nudge's headroom — posture() only
      * exceeds the anatomical limit when the emergency bias is spending its

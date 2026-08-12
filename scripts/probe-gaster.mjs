@@ -125,25 +125,43 @@ if (out.standing.empty || out.standing.none > out.standing.frames * 0.2) {
 /*
  * A RATCHET, NOT A PASS MARK — and the difference is worth being plain about.
  *
- * The abdomen still clips while WALKING: 2% of frames, worst 0.53 mm in, with
- * the ride band in place (it was 0.70 mm without). The band did what it was
- * asked to — she holds her height and floats rather than sitting rigid, and
- * standing, turning and post-dig never go under at all — but it did not clear
- * the walking case, and a threshold set loose enough to call that a pass
- * would be a probe congratulating itself.
+ * THE RATE WAS THE CAUSE, and it was measured rather than guessed. Every
+ * frame her abdomen read as inside the ground, the target was already pinned
+ * at the full 70-degree clamp and the pose was 7.6 degrees short of it: the
+ * gaster chases at 5.5/s, a 180 ms time constant, and the ground under her
+ * tail moves faster than that. Sweeping the tail against the measured
+ * clearance puts the gain at about 0.05 mm per degree, so that lag was 0.38
+ * mm of tail in the soil — which is the whole of what was reported. Splitting
+ * the flinch onto its own fast-attack rate (`spine.ts`) took the worst
+ * walking depth from 0.53 mm to 0.27, and the clipping frames in a 500-frame
+ * walk at the device's own 32.6 ms from 9 to 3.
  *
- * So this is set just above where it stands. It cannot say "fixed"; it can
- * say "no worse", which is the honest job for it until the remaining cause is
- * dealt with. That cause is most likely RATE rather than authority — the
- * gaster chases at 5.5/s, a 180 ms time constant, and at walking pace the
- * ground under her tail changes faster than that.
+ * WHAT IS LEFT IS NOT THE SAME FAULT. Splitting the gaster's two probes
+ * apart, the AFT one — the tail swinging into the face she is leaving — is
+ * the nearer on every remaining frame, all of them in `transferRear`, and all
+ * of them at exactly 0.27 mm. That number is a standoff from a plane she is
+ * sliding along: swept from -40 to -130 degrees the reading does not move at
+ * all, so it is not something the tail can bend its way out of, and the
+ * 0.27 is the conservative half-radius shell allowance rather than measured
+ * mesh in soil.
+ *
+ * So the frequency budget stays where it was — it is dominated by that
+ * standoff and shortening it would be a probe congratulating itself — and a
+ * DEPTH ratchet is added underneath it, which is the axis that actually moved.
  */
 const CLIP_BUDGET = 0.03;
+/* Just under where the aft standoff sits, so any return of the rate fault —
+ * which showed as depth, not frequency — fails this rather than hiding. */
+const DEEPEST_MM = -0.3;
 for (const [what, r] of Object.entries(out)) {
   if (r.empty) continue;
   if (r.underFrac > CLIP_BUDGET) {
     fail.push(`${what}: her abdomen is inside the ground on ${pc(r.underFrac)} of frames `
       + `(worst ${n(r.min).trim()} mm) — past the ${pc(CLIP_BUDGET)} this stands at`);
+  }
+  if (r.min < DEEPEST_MM) {
+    fail.push(`${what}: her abdomen reached ${n(r.min).trim()} mm inside the ground — `
+      + `deeper than the ${DEEPEST_MM} mm this stands at`);
   }
 }
 
@@ -153,4 +171,5 @@ if (fail.length) {
   console.log(`\nFAILED: ${fail.join('; ')}`);
   process.exit(1);
 }
-console.log('\nno worse than it stands — see the note on CLIP_BUDGET; walking still clips');
+console.log('\nno worse than it stands — see the note on CLIP_BUDGET; the residue is the'
+  + '\naft standoff at a corner, which no amount of tail bend moves');

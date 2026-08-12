@@ -62,6 +62,17 @@ export interface SpineLimits {
   headRate: number;
   thoraxRate: number;
   gasterRate: number;
+  /**
+   * HOW FAST THE FLINCH ARRIVES — the attack half of the split rate.
+   *
+   * The postural rates above are the train and must stay slow; a flinch on
+   * the train's schedule is not a flinch. These apply ONLY to the proximity
+   * and ride terms, and ONLY while they are moving a section AWAY from what
+   * it is touching. Coming back is a posture again and uses the slow rate.
+   * See `Spine.follow`.
+   */
+  headFlinchRate: number;
+  gasterFlinchRate: number;
 }
 
 /**
@@ -114,6 +125,24 @@ export const SPINE_LIMITS: SpineLimits = {
   headRate: 11,
   thoraxRate: 6.5,
   gasterRate: 5.5,
+  /*
+   * FOUR TIMES THE GASTER'S OWN RATE, and the number came off a measurement
+   * rather than a feeling.
+   *
+   * Walking on the island, every frame her abdomen was inside the ground the
+   * target was already pinned at the full 70-degree clamp and the pose was
+   * 7.6 degrees short of it — a 5.5/s rate is a 180 ms time constant, and the
+   * ground under her tail moves faster than that. Sweeping the tail through
+   * that region against the measured clearance puts the gain at about 0.05 mm
+   * per degree, so 7.6 degrees of lag is 0.38 mm of tail in the soil, which
+   * is the whole of what was reported. Nothing was wrong with the sensor and
+   * nothing was wrong with the authority; she simply had not got there yet.
+   *
+   * 22/s is a 45 ms time constant — under two frames at the 32 ms this device
+   * actually runs at — which leaves under 2 degrees of lag.
+   */
+  headFlinchRate: 22,
+  gasterFlinchRate: 22,
 };
 
 /**
@@ -221,6 +250,18 @@ export interface SpinePose {
   head: number;
   thorax: number;
   gaster: number;
+  /**
+   * HOW MUCH OF `head` IS THE FLINCH rather than the posture, same units
+   * and same sign, so `head - headFlinch` is the postural half.
+   *
+   * The split exists because the two halves want opposite follow rates and
+   * a single number cannot carry two. Optional, and absent means "all of it
+   * is posture" — which is what every caller outside this file's own
+   * `posture()` means, and what they got before the split existed.
+   */
+  headFlinch?: number;
+  /** The same for `gaster`: the proximity bias and the ride term together. */
+  gasterFlinch?: number;
 }
 
 const clamp = (v: number, lim: number): number => Math.min(lim, Math.max(-lim, v));
@@ -346,15 +387,28 @@ export function posture(
    */
   const gasterPose = clamp(behind - (read.tailFold ?? fold) / 3, limits.gasterMax);
 
+  const head = clamp(headPose + headBias, limits.headMax + limits.headNudge);
+  /* Both tail terms subtract, because positive pitch presses the tip DOWN
+   * — see the sign note on `gasterBias` above. The clamp is unchanged:
+   * the ride term lives INSIDE the headroom the emergency already had
+   * rather than widening how far her abdomen can ever swing. */
+  const gaster = clamp(gasterPose - gasterBias - gasterRide,
+    limits.gasterMax + limits.gasterNudge);
   return {
-    head: clamp(headPose + headBias, limits.headMax + limits.headNudge),
+    head,
     thorax: clamp(through + fold / 3, limits.thoraxMax),
-    /* Both tail terms subtract, because positive pitch presses the tip DOWN
-     * — see the sign note on `gasterBias` above. The clamp is unchanged:
-     * the ride term lives INSIDE the headroom the emergency already had
-     * rather than widening how far her abdomen can ever swing. */
-    gaster: clamp(gasterPose - gasterBias - gasterRide,
-      limits.gasterMax + limits.gasterNudge),
+    gaster,
+    /*
+     * THE SPLIT IS TAKEN AFTER THE CLAMP, deliberately.
+     *
+     * Reporting the raw bias would over-state the flinch whenever the clamp
+     * had already eaten some of it, and `Spine` would then be easing a
+     * postural half that never existed. Subtracting the posture from the
+     * clamped total gives exactly the part the clamp let through, so the two
+     * halves always add back up to the number above.
+     */
+    headFlinch: head - headPose,
+    gasterFlinch: gaster - gasterPose,
   };
 }
 
@@ -367,6 +421,15 @@ export function posture(
 export class Spine {
   private readonly now: SpinePose = { head: 0, thorax: 0, gaster: 0 };
 
+  /**
+   * The flinch half of the head and the gaster, held apart from `now` so it
+   * can travel at its own rate. `now` is always the sum of the two, so
+   * everything downstream still reads one number per section.
+   */
+  private readonly held = { head: 0, thorax: 0, gaster: 0 };
+
+  private readonly flinch = { head: 0, gaster: 0 };
+
   constructor(private limits: SpineLimits = SPINE_LIMITS) {}
 
   /** Swap the anatomy out — a major bends differently from a minim. */
@@ -376,9 +439,16 @@ export class Spine {
 
   /** Snap to a posture with no lag — a respawn, a teleport, a first frame. */
   set(to: SpinePose): void {
+    this.flinch.head = to.headFlinch ?? 0;
+    this.flinch.gaster = to.gasterFlinch ?? 0;
+    this.held.head = to.head - this.flinch.head;
+    this.held.thorax = to.thorax;
+    this.held.gaster = to.gaster - this.flinch.gaster;
     this.now.head = to.head;
     this.now.thorax = to.thorax;
     this.now.gaster = to.gaster;
+    this.now.headFlinch = this.flinch.head;
+    this.now.gasterFlinch = this.flinch.gaster;
   }
 
   /**
@@ -394,15 +464,65 @@ export class Spine {
     const ease = (from: number, to: number, rate: number): number =>
       from + (to - from) * (1 - Math.exp(-rate * Math.max(0, dt)));
     /*
+     * FAST ATTACK, SLOW RELEASE, and only on the flinch.
+     *
+     * Making the whole gaster fast would fix the clipping and cost the
+     * train — the trailing tail is the thing that reads as an ant, and
+     * `gasterRate` is what produces it. Making the flinch fast in BOTH
+     * directions would fix the clipping and buy a twitch: the ride term is
+     * live most of the time she is off her resting height, and a 45 ms
+     * response to a sensor that moves with the lattice is chatter.
+     *
+     * So the split is directional. AWAY from what a section is touching is
+     * a reflex and arrives in two frames; back toward the ground is a
+     * posture again and decays on the postural rate. A spike in the
+     * clearance therefore lifts her tail at once and lets it down slowly,
+     * which is both the right behaviour and the wrong shape for chatter.
+     */
+    const flinchRate = (
+      to: number, from: number, lift: 1 | -1, fast: number, slow: number,
+    ): number => ((to - from) * lift > 0 ? fast : slow);
+
+    /*
+     * BOTH NON-POSTURAL TERMS, not just the nudge.
+     *
+     * The gaster's flinch is the proximity bias AND the ride height, and
+     * clamping it at `gasterNudge` alone quietly posted the ride term's own
+     * twenty degrees to the postural channel — where it travelled at the
+     * slow rate, which is the exact fault this split exists to remove. The
+     * total is unchanged either way, so nothing looked wrong; only the
+     * fraction arriving quickly did. The head has no ride term.
+     */
+    const wantHeadFlinch = clamp(want.headFlinch ?? 0, l.headNudge);
+    const wantGasterFlinch = clamp(want.gasterFlinch ?? 0, l.gasterNudge + l.gasterRide);
+    /* Positive pitch lifts the head away from ground beneath it; on the
+     * gaster it presses the tip in, so the tail's escape is negative. */
+    this.flinch.head = ease(this.flinch.head, wantHeadFlinch,
+      flinchRate(wantHeadFlinch, this.flinch.head, 1, l.headFlinchRate, l.headRate));
+    this.flinch.gaster = ease(this.flinch.gaster, wantGasterFlinch,
+      flinchRate(wantGasterFlinch, this.flinch.gaster, -1, l.gasterFlinchRate, l.gasterRate));
+
+    /*
      * Head and gaster keep the nudge's headroom here too — `posture` only
      * exceeds the anatomical limit when the proximity bias is spending its
      * own allowance, and re-clamping at the limit here would take it back.
      */
-    this.now.head = ease(this.now.head, clamp(want.head, l.headMax + l.headNudge), l.headRate);
-    this.now.thorax = ease(this.now.thorax, clamp(want.thorax, l.thoraxMax), l.thoraxRate);
-    this.now.gaster = ease(
-      this.now.gaster, clamp(want.gaster, l.gasterMax + l.gasterNudge), l.gasterRate,
+    this.held.head = ease(
+      this.held.head,
+      clamp(want.head - wantHeadFlinch, l.headMax + l.headNudge), l.headRate,
     );
+    this.held.thorax = ease(this.held.thorax, clamp(want.thorax, l.thoraxMax), l.thoraxRate);
+    this.held.gaster = ease(
+      this.held.gaster,
+      clamp(want.gaster - wantGasterFlinch, l.gasterMax + l.gasterNudge), l.gasterRate,
+    );
+
+    this.now.head = clamp(this.held.head + this.flinch.head, l.headMax + l.headNudge);
+    this.now.thorax = this.held.thorax;
+    this.now.gaster = clamp(this.held.gaster + this.flinch.gaster,
+      l.gasterMax + l.gasterNudge);
+    this.now.headFlinch = this.flinch.head;
+    this.now.gasterFlinch = this.flinch.gaster;
     return this.now;
   }
 }
