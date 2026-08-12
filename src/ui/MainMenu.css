@@ -1,0 +1,116 @@
+/*
+ * The front door, and the PIN pad behind DEV.
+ *
+ * Self-contained for the same reason the pose editor's is: this is the first
+ * thing loaded on a route that has no scene stylesheet behind it, so it
+ * cannot borrow one.
+ */
+
+.main-menu {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  background:
+    radial-gradient(120% 90% at 50% 8%, #22303f 0%, #10141b 62%, #080a0e 100%);
+  color: #e6ecf6;
+  font: 14px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.main-menu__title {
+  margin: 0;
+  font-size: clamp(28px, 7vw, 54px);
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #f2d9a0;
+}
+
+.main-menu__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(300px, 74vw);
+}
+
+.main-menu__button {
+  min-height: 44px;
+  border: 1px solid #3a4761;
+  border-radius: 9px;
+  background: #1b2432;
+  color: #e6ecf6;
+  font: inherit;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+}
+
+.main-menu__button:hover:not(:disabled) { background: #26344a; }
+.main-menu__button:focus-visible { outline: 2px solid #7fb4ff; outline-offset: 2px; }
+
+.main-menu__button:disabled {
+  /* Shown rather than hidden: a greyed SAVE says saving exists and is not
+   * ready yet, where a missing one says nothing at all. */
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.main-menu__pad {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: rgb(6 9 14 / 88%);
+  backdrop-filter: blur(4px);
+}
+
+.main-menu__padtitle {
+  font-size: 20px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: #f2d9a0;
+}
+
+.main-menu__note { opacity: 0.75; }
+
+.main-menu__dots { display: flex; gap: 10px; margin: 4px 0 6px; }
+
+.main-menu__dot {
+  width: 12px;
+  height: 12px;
+  border: 1px solid #6b7a95;
+  border-radius: 50%;
+}
+
+.main-menu__dot.is-on { background: #7fb4ff; border-color: #7fb4ff; }
+
+.main-menu__keys {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  width: min(260px, 66vw);
+}
+
+.main-menu__key {
+  min-height: 52px;
+  border: 1px solid #3a4761;
+  border-radius: 9px;
+  background: #1b2432;
+  color: #e6ecf6;
+  font: 18px/1 ui-monospace, "SF Mono", Menlo, monospace;
+  cursor: pointer;
+}
+
+.main-menu__key:hover { background: #26344a; }
+.main-menu__key:focus-visible { outline: 2px solid #7fb4ff; outline-offset: 2px; }
+
+@media (height <= 480px) {
+  .main-menu { gap: 10px; }
+  .main-menu__button { min-height: 34px; }
+  .main-menu__key { min-height: 38px; }
+}

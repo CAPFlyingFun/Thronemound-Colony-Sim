@@ -1,0 +1,95 @@
+/*
+ * The pose editor's own styling.
+ *
+ * Self-contained on purpose. The obvious move was to reuse the density lab's
+ * `density-lab-*` classes, which look right — but they live in that scene's
+ * stylesheet and are only loaded when that scene is, so an editor borrowing
+ * the names would render unstyled and the mistake would be invisible in a
+ * build. A tool used from a phone in the field needs its controls to be
+ * thumb-sized whether or not another route happens to be loaded.
+ */
+
+.pose-panel {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 10px;
+  background: rgb(14 18 26 / 82%);
+  backdrop-filter: blur(6px);
+  color: #dfe6f2;
+  font: 12px/1.35 ui-monospace, "SF Mono", Menlo, monospace;
+  z-index: 5;
+}
+
+.pose-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pose-button,
+.pose-text {
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid #38445a;
+  border-radius: 7px;
+  background: #1d2534;
+  color: #dfe6f2;
+  font: inherit;
+  cursor: pointer;
+}
+
+.pose-button.is-on {
+  border-color: #7fb4ff;
+  background: #2b3b57;
+  color: #fff;
+}
+
+.pose-text {
+  flex: 1 1 8ch;
+  min-width: 8ch;
+  cursor: text;
+}
+
+.pose-slider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pose-slider > span {
+  flex: 0 0 3.5em;
+  opacity: 0.8;
+}
+
+.pose-slider input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* Comfortable for a thumb: the default track is about half this. */
+  height: 28px;
+}
+
+.pose-readout {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgb(14 18 26 / 78%);
+  color: #dfe6f2;
+  font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: nowrap;
+  z-index: 5;
+}
+
+/* Landscape on a phone is short: keep the panel from eating the turntable. */
+@media (height <= 480px) {
+  .pose-panel { gap: 4px; padding: 6px; }
+  .pose-button, .pose-text { min-height: 28px; padding: 4px 8px; }
+  .pose-slider input[type="range"] { height: 22px; }
+}

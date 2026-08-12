@@ -120,6 +120,8 @@ const WORLD_SPIN = new THREE.Quaternion();
 const LOCAL_SPIN = new THREE.Quaternion();
 const PARENT = new THREE.Quaternion();
 const TILT = new THREE.Quaternion();
+/** Scratch for `applyRotations`, which runs once per posed bone per frame. */
+const POSE_Q = new THREE.Quaternion();
 /** Her pitch axis in her own frame: she faces +Z, so pitching is about X. */
 const RIGHT = new THREE.Vector3(1, 0, 0);
 
@@ -242,6 +244,47 @@ export class QueenModel {
 
   get ready(): boolean {
     return this.loaded;
+  }
+
+  /**
+   * Write bone rotations straight onto the skeleton, RELATIVE to rest.
+   *
+   * The one door a named pose comes through — see `anim/pose.ts`. It keeps
+   * the same rule `update` does, for the same reason: every bone is written
+   * as an offset FROM its rest quaternion, never multiplied onto whatever it
+   * held last frame, because that second kind accumulates rounding and the
+   * legs slowly wind themselves off the body. It is the bug that makes a
+   * procedural rig look fine for ten seconds.
+   *
+   * Bones the map does not name are left alone rather than reset, so this
+   * composes with whatever else has posed her this frame instead of
+   * flattening it — a pose that bends her gaster must not straighten her
+   * legs. Names this rig has not got are ignored: `pose.ts` has already
+   * dropped them, and a caste without mandibles must not throw.
+   */
+  applyRotations(
+    rotations: Iterable<readonly [string, readonly [number, number, number, number]]>,
+  ): void {
+    for (const [name, q] of rotations) {
+      const bone = this.bones.get(name);
+      const rest = this.rest.get(name);
+      if (!bone || !rest) continue;
+      bone.quaternion.copy(rest).multiply(POSE_Q.set(q[0], q[1], q[2], q[3]));
+    }
+  }
+
+  /** Put named bones back exactly where the rigger left them. */
+  restore(names: Iterable<string>): void {
+    for (const name of names) {
+      const bone = this.bones.get(name);
+      const rest = this.rest.get(name);
+      if (bone && rest) bone.quaternion.copy(rest);
+    }
+  }
+
+  /** Does this model actually carry that bone? For an editor's group list. */
+  hasBone(name: string): boolean {
+    return this.bones.has(name);
   }
 
   /**

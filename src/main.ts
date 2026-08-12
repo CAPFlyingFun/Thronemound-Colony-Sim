@@ -45,6 +45,11 @@ const host = document.getElementById('app');
 const island = !colonySim && ![
   'queen', 'block', 'terrainbug', 'world', 'hex', 'dig',
   'ant-sandbox', 'rail', 'pipes', 'sandbox', 'carry',
+  /* The menu and the pose editor are up as soon as their module is — no
+   * curtain to lift, nothing worth holding an update back for. Leaving them
+   * off this list would strand a waiting service worker on the one route a
+   * person sits on longest. */
+  'menu', 'poseedit',
 ].includes(scene ?? '');
 if (!island) markLoaded();
 
@@ -104,6 +109,30 @@ if (host) {
      * proved on a bare field before it meets the island.
      */
     void import('./scenes/SandboxScene').then(({ SandboxScene }) => new SandboxScene(host));
+  } else if (scene === 'menu') {
+    /*
+     * The front door: Start / Resume / Save / Settings / Info / Dev, with the
+     * dev rigs behind the PIN. NOT the default route yet, deliberately —
+     * flipping what a bare `/` loads would change the island's own load gate
+     * and the URL forty probes navigate to at the same time as introducing a
+     * menu, and those are two changes, not one.
+     */
+    void import('./ui/MainMenu').then(({ MainMenu }) => {
+      const go = (q: string): void => { window.location.search = q; };
+      const menu = new MainMenu(host, {
+        onStart: () => go('?scene=island'),
+        onDev: () => go('?scene=poseedit'),
+      });
+      (window as unknown as { mainMenu?: unknown }).mainMenu = menu;
+    });
+  } else if (scene === 'poseedit') {
+    /*
+     * The pose editor: a turntable, one handle per body group, and named
+     * poses saved as bone rotations. Behind the menu's PIN in ordinary use.
+     */
+    void import('./scenes/PoseEditorScene').then(
+      ({ PoseEditorScene }) => new PoseEditorScene(host),
+    );
   } else if (scene === 'carry') {
     /*
      * The carry room: soil as a lattice of 2 mm blocks, and digging as
