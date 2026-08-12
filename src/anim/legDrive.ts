@@ -842,12 +842,31 @@ export class LegDrive {
      * them) while keeping the promise the whole file makes at a corner: one
      * foot moves at a time.
      *
-     * And it waits for an empty sky. `standing` is counted after the
-     * scheduler has had its release, so requiring all of them down means the
-     * two paths into the air can never both fire on one frame — which they
-     * did, and it read as two feet let go together at a corner. A leg held
-     * past its reach for a few frames is a leg that steps next; two in the
-     * air on a wall is most of a fall.
+     * And it keeps `minPlanted` underneath her — but NOT an empty sky, and
+     * that distinction is the whole of this fix.
+     *
+     * It used to require all six down (`standing >= this.legs.length`) so
+     * that the two paths into the air could never both fire on one frame.
+     * The intent was right and the bound was wrong, and the giveaway is that
+     * it made the line beside it dead: with all six planted, `standing - 1
+     * >= minPlanted` is `5 >= 4`, true forever. `minPlanted` is 4 — the
+     * tuning says plainly that four feet under her is enough and two may be
+     * off — and no corner could ever reach that floor.
+     *
+     * What it cost, measured on the wandering probe: a corner ADVANCES by
+     * having a foot in the air, so `standing` is five almost the whole time
+     * and the over-stretched foot could not be let go at all. The clip below
+     * then bisects her twist toward zero against that same foot, so she
+     * freezes — and the next strung-out foot repeats it, each waiting a
+     * whole `SWING_SECONDS` for the sky to clear. Four corners in seventy-
+     * eight seconds reached the new face and then sat clamped for 3.36 s of
+     * their 4.40 s before `stallSeconds` benched them. That is the reported
+     * "she had it and lost it": she never lost a grip, she ran out of time
+     * standing still.
+     *
+     * Still ONE FOOT PER FRAME — only `worst` is released — so nothing about
+     * the corner's one-at-a-time promise changes. What changes is that the
+     * one foot no longer has to wait for every other foot to be home first.
      */
     let worst: Leg | null = null;
     let worstBy = 0;
@@ -867,8 +886,7 @@ export class LegDrive {
       }
       if (over > worstBy) { worstBy = over; worst = leg; }
     }
-    if (worst && standing >= this.legs.length
-      && standing - 1 >= CORNER_TUNING.minPlanted) {
+    if (worst && standing - 1 >= CORNER_TUNING.minPlanted) {
       worst.planted = false;
       worst.t = 0;
       worst.from.copy(worst.at);
