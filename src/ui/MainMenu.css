@@ -18,6 +18,16 @@
     radial-gradient(120% 90% at 50% 8%, #22303f 0%, #10141b 62%, #080a0e 100%);
   color: #e6ecf6;
   font: 14px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+  /*
+   * ABOVE THE ISLAND, which is now building underneath it.
+   *
+   * The menu used to be alone on the page; as the default route it shares a
+   * host with the island's canvas and its whole HUD, and without a stacking
+   * order the game's controls draw straight through the front door. Below
+   * `LoadingOverlay`'s 100000 on purpose — a load that FAILED still has to be
+   * able to put its message over everything, including this.
+   */
+  z-index: 90000;
 }
 
 .main-menu__title {
@@ -56,6 +66,17 @@
   opacity: 0.38;
   cursor: not-allowed;
 }
+
+.main-menu__status {
+  min-height: 1.3em;
+  max-width: 80vw;
+  opacity: 0.72;
+  text-align: center;
+  /* The line keeps its height when empty so the menu does not jump upward
+   * the moment the island finishes loading. */
+}
+
+.main-menu__status.is-bad { color: #ff9b8a; opacity: 1; }
 
 .main-menu__pad {
   position: absolute;

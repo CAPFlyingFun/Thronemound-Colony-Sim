@@ -40,7 +40,12 @@ page.on('pageerror', (e) => errs.push(e.message));
 
 /* ------------------------------------------------------------- the menu */
 
-await page.goto(`${base}/?scene=menu`, { waitUntil: 'domcontentloaded' });
+/*
+ * THE DEFAULT ROUTE, which is now the menu with the island building behind
+ * it. Loaded bare — no `?scene=` — because that is what a player opens and
+ * what a home-screen PWA launches.
+ */
+await page.goto(`${base}/`, { waitUntil: 'domcontentloaded' });
 await page.waitForSelector('.main-menu__button', { timeout: 60000 });
 
 const menu = await page.evaluate(() => {
@@ -59,9 +64,70 @@ for (const want of ['START', 'RESUME', 'SAVE', 'SETTINGS', 'INFO', 'DEV']) {
 }
 if (menu.padOpen) fail.push('the PIN pad was showing before DEV was pressed');
 
+/*
+ * THE MENU IS THE LOADING SCREEN. START must be shut until she is standing,
+ * the status line must actually say what the boot is doing, and pressing
+ * START must reveal an island that is ALREADY there rather than starting one.
+ */
+const booting = await page.evaluate(() => ({
+  startShut: !!document.querySelector('.main-menu__button[data-key="onStart"]')?.disabled,
+  status: document.querySelector('.main-menu__status')?.textContent ?? '',
+  devLive: !document.querySelector('.main-menu__button[data-key="onDev"]')?.disabled,
+}));
+console.log(`booting: START ${booting.startShut ? 'shut' : 'OPEN'}, `
+  + `DEV ${booting.devLive ? 'live' : 'shut'}, status "${booting.status}"`);
+if (!booting.startShut) fail.push('START was pressable before the island had loaded');
+if (!booting.status) fail.push('the menu showed no loading status while the island built');
+/* Everything that does not need terrain stays reachable during the wait —
+ * that is the whole point of spending the boot on a menu. */
+if (!booting.devLive) fail.push('DEV was locked out while the island loaded');
+
+await page.waitForFunction(
+  () => !document.querySelector('.main-menu__button[data-key="onStart"]')?.disabled,
+  null, { timeout: 200000 },
+).catch(() => fail.push('START never opened — the island never reported ready'));
+
+const loaded = await page.evaluate(() => ({
+  islandReady: !!window.islandScene?.ready,
+  player: window.islandScene?.loadingStateForTest?.().player ?? 0,
+  status: document.querySelector('.main-menu__status')?.textContent ?? '',
+}));
+console.log(`loaded : island ready ${loaded.islandReady}, player ${loaded.player}, `
+  + `status "${loaded.status}"`);
+if (!loaded.islandReady) fail.push('START opened while the island was not ready');
+if (loaded.player !== 1) fail.push('START opened before the queen had settled');
+
+/* Pressing START must simply take the menu down. */
+await page.click('.main-menu__button[data-key="onStart"]');
+await page.waitForTimeout(400);
+const started = await page.evaluate(() => ({
+  menuGone: !document.querySelector('.main-menu'),
+  stillIsland: !!window.islandScene?.ready,
+  navigated: window.location.search,
+}));
+console.log(`start  : menu gone ${started.menuGone}, island alive ${started.stillIsland}, `
+  + `url "${started.navigated || '(unchanged)'}"`);
+if (!started.menuGone) fail.push('START left the menu on screen');
+if (!started.stillIsland) fail.push('START lost the island it had already built');
+if (started.navigated) fail.push(`START navigated to "${started.navigated}" — it should not reload`);
+
+/* And the old direct route is untouched, because forty probes use it. */
+await page.goto(`${base}/?scene=island`, { waitUntil: 'domcontentloaded' });
+const direct = await page.evaluate(() => !!document.querySelector('.main-menu'));
+if (direct) fail.push('?scene=island now shows the menu — the direct route changed');
+console.log(`direct : ?scene=island still goes straight in (${direct ? 'NO' : 'yes'})`);
+
+/* Back to the menu for the PIN checks. */
+await page.goto(`${base}/`, { waitUntil: 'domcontentloaded' });
+await page.waitForSelector('.main-menu__button', { timeout: 60000 });
+
 /* DEV opens the keypad rather than the tools. */
 await page.click('.main-menu__button[data-key="onDev"]');
-await page.waitForSelector('.main-menu__pad', { timeout: 5000 });
+/* `waitForSelector` on this one reported the pad visible and then timed out
+ * anyway — the pad is plainly there, so ask the DOM directly. */
+await page.waitForFunction(
+  () => !!document.querySelector('.main-menu__pad'), null, { timeout: 10000 },
+);
 const dots = await page.evaluate(() => document.querySelectorAll('.main-menu__dot').length);
 if (dots !== 4) fail.push(`the keypad drew ${dots} dots for a four-digit PIN`);
 

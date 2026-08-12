@@ -53,7 +53,21 @@ import {
   type SpinePose, type SpineReading,
 } from '../anim/spine';
 import { DebugStatsPanel } from './DebugStatsPanel';
-import { LoadingOverlay } from './LoadingOverlay';
+import { type Curtain, LoadingOverlay } from './LoadingOverlay';
+
+/**
+ * How the island was started, when it was not started on its own.
+ *
+ * Booting BEHIND the main menu is the case this exists for: the menu is
+ * already covering the screen, so the island wants no curtain of its own and
+ * something has to be told when she is finally standing.
+ */
+export interface IslandBoot {
+  /** Something already opaque, or nothing and it draws its own. */
+  curtain?: Curtain;
+  /** Called once the queen has settled and the island is playable. */
+  onReady?: () => void;
+}
 import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
 import { SurfaceWalker } from '../world/surfaceWalk';
@@ -1454,7 +1468,7 @@ export class IslandScene {
   private readonly statsPanel: DebugStatsPanel;
 
   /** The full-screen curtain that hides the raw start-up. */
-  private readonly loading: LoadingOverlay;
+  private readonly loading: Curtain;
 
   private stickPointer: number | null = null;
 
@@ -1490,7 +1504,7 @@ export class IslandScene {
 
   private depthReadout: HTMLElement | null = null;
 
-  constructor(host: HTMLElement) {
+  constructor(host: HTMLElement, private readonly boot: IslandBoot = {}) {
     this.host = host;
     host.classList.add('density-lab-host');
     /*
@@ -1554,7 +1568,15 @@ export class IslandScene {
     /* The curtain goes up LAST in the DOM and FIRST in importance: plain
      * DOM, so it paints before any of the heavy lifting below, and opaque,
      * so the HUD and the blue empty canvas never flash through. */
-    this.loading = new LoadingOverlay(host);
+    /*
+     * WHO COVERS THE BOOT. Alone, the island draws its own opaque curtain —
+     * without one the player watches the clear colour flash blue. Booted
+     * behind the MENU there is already something opaque up, so it takes a
+     * quiet curtain instead and hands its progress to the menu, which shows
+     * the same words on a screen you can actually press things on. Two
+     * full-screen overlays would only be a second thing to fade.
+     */
+    this.loading = this.boot.curtain ?? new LoadingOverlay(host);
 
     this.load().catch((err: unknown) => {
       const why = err instanceof Error ? err.message : String(err);
@@ -1763,6 +1785,11 @@ export class IslandScene {
       this.queenSettled = true;
       this.playerReady = true;
       void this.loading.finish();
+      /* Whoever is holding the curtain — the menu, when there is one — is
+       * told here rather than left to poll, and told AFTER the queen has
+       * settled, so "ready" means she is standing rather than merely that
+       * the ground exists. */
+      this.boot.onReady?.();
       /* The curtain is up: a waiting update may now take the app, because
        * from here a reload costs nothing but the load it already finished. */
       markLoaded();

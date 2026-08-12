@@ -88,7 +88,66 @@ export class MainMenu {
       list.appendChild(b);
     }
     this.root.appendChild(list);
+
+    /*
+     * THE MENU IS THE LOADING SCREEN.
+     *
+     * The island's boot is long and front-loaded, and it used to be spent
+     * watching a black rectangle say "Raising the island…". It is spent here
+     * now: the same words appear on this line while the world builds behind
+     * the menu, so the wait buys a screen you can read, change settings on
+     * and open the dev tools from. By the time START is pressed there is
+     * usually nothing left to wait for.
+     */
+    this.statusLine = document.createElement('div');
+    this.statusLine.className = 'main-menu__status';
+    this.root.appendChild(this.statusLine);
+
     host.appendChild(this.root);
+  }
+
+  private readonly statusLine: HTMLDivElement;
+
+  private loadFailed = false;
+
+  /** Show what the boot behind the menu is doing. */
+  setStatus(text: string): void {
+    if (this.loadFailed) return;
+    this.statusLine.textContent = text;
+  }
+
+  /**
+   * The boot has finished — let the gated buttons through.
+   *
+   * START is disabled until this arrives, because a START that drops you into
+   * a half-built island is worse than one you wait a moment for. Everything
+   * else on the menu stays live throughout: settings and the dev tools have
+   * no reason to wait on terrain.
+   */
+  setLoaded(): void {
+    if (this.loadFailed) return;
+    this.statusLine.textContent = '';
+    this.statusLine.classList.add('is-done');
+    this.setEnabled('onStart', true);
+  }
+
+  /** The boot gave up. Say so here rather than behind the menu. */
+  setFailed(message: string): void {
+    this.loadFailed = true;
+    this.statusLine.textContent = message;
+    this.statusLine.classList.add('is-bad');
+    this.setEnabled('onStart', false);
+  }
+
+  /**
+   * Enable or disable one entry.
+   *
+   * A disabled button keeps its place in the list — the menu's shape must not
+   * change as the boot progresses, or the thing under your thumb moves.
+   */
+  setEnabled(key: keyof MainMenuActions, on: boolean): void {
+    const b = this.root.querySelector<HTMLButtonElement>(`.main-menu__button[data-key="${key}"]`);
+    if (b && this.actions[key]) b.disabled = !on;
   }
 
   /** The PIN keypad, built on demand and torn down on close. */

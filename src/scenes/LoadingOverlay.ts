@@ -118,7 +118,45 @@ function buildStyles(): string {
 `;
 }
 
-export class LoadingOverlay {
+/**
+ * What the island needs from whatever is covering the screen while it loads.
+ *
+ * Extracted so the curtain can be something OTHER than this overlay. The main
+ * menu now covers the boot and shows the same progress on its own face, so
+ * the wait is spent on a screen you can read and press things on rather than
+ * on a black rectangle. The island does not care which it has.
+ */
+export interface Curtain {
+  setStatus(text: string): void;
+  fail(message: string): void;
+  finish(): Promise<void>;
+  readonly done: boolean;
+}
+
+/**
+ * A curtain that draws nothing and hands its progress to a caller.
+ *
+ * For the boot behind the menu: something opaque is already on the screen,
+ * and a second full-screen overlay beneath it would only be a second thing to
+ * fade. `done` is true from the start because there is no curtain of its own
+ * to wait on — the menu is the curtain, and the menu decides when it leaves.
+ */
+export class QuietCurtain implements Curtain {
+  constructor(
+    private readonly onStatus?: (text: string) => void,
+    private readonly onFail?: (message: string) => void,
+  ) {}
+
+  setStatus(text: string): void { this.onStatus?.(text); }
+
+  fail(message: string): void { this.onFail?.(message); }
+
+  finish(): Promise<void> { return Promise.resolve(); }
+
+  readonly done = true;
+}
+
+export class LoadingOverlay implements Curtain {
   private readonly root: HTMLDivElement;
   private readonly statusLine: HTMLParagraphElement;
   private finishPromise: Promise<void> | null = null;

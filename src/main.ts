@@ -45,11 +45,16 @@ const host = document.getElementById('app');
 const island = !colonySim && ![
   'queen', 'block', 'terrainbug', 'world', 'hex', 'dig',
   'ant-sandbox', 'rail', 'pipes', 'sandbox', 'carry',
-  /* The menu and the pose editor are up as soon as their module is — no
-   * curtain to lift, nothing worth holding an update back for. Leaving them
-   * off this list would strand a waiting service worker on the one route a
-   * person sits on longest. */
-  'menu', 'poseedit',
+  /*
+   * The pose editor is up as soon as its module is — no curtain to lift and
+   * nothing worth holding an update back for. The MENU is deliberately NOT
+   * here: it is the default route and it boots the island behind itself, so
+   * the gate has to stay shut until the island says so. Marking it loaded
+   * when the menu paints would hand a waiting service worker the app in the
+   * middle of the queen's megabyte, which is the exact bug the gate exists
+   * for.
+   */
+  'poseedit',
 ].includes(scene ?? '');
 if (!island) markLoaded();
 
@@ -109,22 +114,6 @@ if (host) {
      * proved on a bare field before it meets the island.
      */
     void import('./scenes/SandboxScene').then(({ SandboxScene }) => new SandboxScene(host));
-  } else if (scene === 'menu') {
-    /*
-     * The front door: Start / Resume / Save / Settings / Info / Dev, with the
-     * dev rigs behind the PIN. NOT the default route yet, deliberately —
-     * flipping what a bare `/` loads would change the island's own load gate
-     * and the URL forty probes navigate to at the same time as introducing a
-     * menu, and those are two changes, not one.
-     */
-    void import('./ui/MainMenu').then(({ MainMenu }) => {
-      const go = (q: string): void => { window.location.search = q; };
-      const menu = new MainMenu(host, {
-        onStart: () => go('?scene=island'),
-        onDev: () => go('?scene=poseedit'),
-      });
-      (window as unknown as { mainMenu?: unknown }).mainMenu = menu;
-    });
   } else if (scene === 'poseedit') {
     /*
      * The pose editor: a turntable, one handle per body group, and named
@@ -140,11 +129,55 @@ if (host) {
      * a tunnel is exactly the blocks somebody carried out of it.
      */
     void import('./scenes/CarryScene').then(({ CarryScene }) => new CarryScene(host));
-  } else {
+  } else if (scene === 'island') {
     /*
-     * Default and `?scene=island`: Beyond Extinction's Kauai at 1:1000,
-     * carrying the streamed fine soil, nest plan, rail traversal and designer.
+     * `?scene=island` — straight in, no menu, its own curtain. This is what
+     * forty probes navigate to and what they have always got, so it is kept
+     * exactly as it was rather than routed through the front door.
      */
     void import('./scenes/IslandScene').then(({ IslandScene }) => new IslandScene(host));
+  } else {
+    /*
+     * THE DEFAULT: the menu IS the loading screen.
+     *
+     * The island's boot is long and front-loaded, and it used to be spent
+     * watching a black overlay count off "Raising the island…". Now the menu
+     * paints instantly and the island builds BEHIND it, reporting the same
+     * words onto the menu's own status line — so the wait buys a screen you
+     * can read, open settings on and reach the dev tools from, and by the
+     * time START is pressed there is usually nothing left to wait for.
+     *
+     * The island keeps `markLoaded` on its own schedule, untouched: the gate
+     * that stops a waiting service worker reloading the app mid-download
+     * still fires from the far side of the queen's megabyte, not from the
+     * menu appearing. See `pwa.ts` for the bug that rule exists for.
+     */
+    void Promise.all([
+      import('./ui/MainMenu'),
+      import('./scenes/IslandScene'),
+      import('./scenes/LoadingOverlay'),
+    ]).then(([{ MainMenu }, { IslandScene }, { QuietCurtain }]) => {
+      const menu = new MainMenu(host, {
+        onStart: () => {
+          /* The island is already standing behind this; taking the menu down
+           * IS the transition. Nothing loads, nothing navigates. */
+          menu.dispose();
+        },
+        onDev: () => { window.location.search = '?scene=poseedit'; },
+      });
+      /* Disabled until she is standing — a START that drops you into a
+       * half-built island is worse than one you wait a moment for. */
+      menu.setEnabled('onStart', false);
+      menu.setStatus('Preparing the island…');
+      const island = new IslandScene(host, {
+        curtain: new QuietCurtain(
+          (text) => menu.setStatus(text),
+          (why) => menu.setFailed(why),
+        ),
+        onReady: () => menu.setLoaded(),
+      });
+      (window as unknown as { mainMenu?: unknown }).mainMenu = menu;
+      void island;
+    });
   }
 }
