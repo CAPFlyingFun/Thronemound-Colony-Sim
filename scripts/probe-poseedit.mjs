@@ -438,6 +438,84 @@ if (edit.keys.sort().join(',') !== 'name,rotations') {
 }
 
 /*
+ * THE BONE HANDLES — "raw bone points you can press to select at joints that
+ * aren't labeled, or we could label everything".
+ *
+ * Three separate claims, and a screenshot satisfies none of them: every bone
+ * has a NAME, a tap on the dot in the viewport SELECTS that bone, and turning
+ * one moves that bone WITHOUT moving its neighbours in the same chain. The
+ * last is the one that says the per-bone layer is really per bone — a handle
+ * that quietly spread down the chain would look identical in the panel.
+ */
+const bones = await page.evaluate(() => {
+  const s = window.poseEditor;
+  s.setBoneModeForTest(true);
+  const handles = s.boneHandlesForTest();
+  const rig = s.queen.rig;
+  const leg = rig.legs[0];
+  /* A joint in the MIDDLE of a chain: the one a group handle can never
+   * isolate, and the reason the whole feature was asked for. */
+  const target = leg.bones[2];
+  const neighbour = leg.bones[3];
+  const q = (name) => {
+    const b = s.queen.root.getObjectByName(name);
+    return b ? b.quaternion.clone() : null;
+  };
+  const deg = (a, b) => (a && b
+    ? 2 * Math.acos(Math.min(1, Math.abs(a.dot(b)))) * (180 / Math.PI) : -1);
+
+  const beforeTarget = q(target);
+  const beforeNeighbour = q(neighbour);
+  s.setDialForTest(`bone:${target}`, 'pitch', 45);
+  const movedTarget = deg(beforeTarget, q(target));
+  const movedNeighbour = deg(beforeNeighbour, q(neighbour));
+  s.setDialForTest(`bone:${target}`, 'pitch', 0);
+
+  /* And the tap: aim at where the dot actually is, as a finger would. */
+  const spot = s.markerScreenForTest(target);
+  const tapped = spot ? s.tapForTest(spot.x, spot.y) : null;
+  /* A tap on empty space must NOT steal the orbit drag. */
+  const missed = s.tapForTest(2, 2);
+
+  const named = handles.find((h) => h.bone === target);
+  return {
+    count: handles.length,
+    sample: handles.slice(0, 4).map((h) => h.label),
+    antenna: handles.filter((h) => h.label.startsWith('Antenna R')).map((h) => h.label),
+    targetLabel: named?.label ?? null,
+    movedTarget,
+    movedNeighbour,
+    tapped,
+    wanted: `bone:${target}`,
+    missed,
+    picked: s.pickedForTest(),
+    unnamed: handles.filter((h) => /^Bone_\d+$/.test(h.label)).length,
+  };
+});
+
+console.log(`bones  : ${bones.count} per-bone handles, ${bones.unnamed} still unnamed`);
+console.log(`         ${bones.antenna.join(' · ')}`);
+console.log(`         turning "${bones.targetLabel}" moved it ${bones.movedTarget.toFixed(1)}°, `
+  + `its neighbour ${bones.movedNeighbour.toFixed(1)}°`);
+console.log(`         a tap on its dot selected ${bones.tapped ?? 'nothing'}`);
+
+if (bones.count < 40) fail.push(`only ${bones.count} per-bone handles — the rig has far more`);
+if (bones.unnamed > 0) {
+  fail.push(`${bones.unnamed} bone handles fell back to a raw Bone_ number`);
+}
+if (bones.movedTarget < 1) {
+  fail.push(`turning a single bone moved it ${bones.movedTarget.toFixed(2)}° — not wired`);
+}
+/* The claim that makes it per-BONE rather than another group. */
+if (bones.movedNeighbour > 0.5) {
+  fail.push(`turning one bone also moved its neighbour ${bones.movedNeighbour.toFixed(2)}°`);
+}
+if (bones.tapped !== bones.wanted) {
+  fail.push(`a tap on the dot selected ${bones.tapped ?? 'nothing'}, wanted ${bones.wanted}`);
+}
+if (bones.missed !== null) fail.push('a tap on empty space selected a bone anyway');
+
+/*
  * THE TIMELINE: key, play, and load it back.
  *
  * Measured on the BONE at several moments, because "it plays" is exactly the

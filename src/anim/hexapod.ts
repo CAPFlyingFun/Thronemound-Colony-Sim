@@ -67,14 +67,41 @@ export interface RigMap {
 }
 
 /**
+ * WHICH SIDE IS HER LEFT — the fact all three tables below are built on.
+ *
+ * In every one of these exports her head runs toward +Z and her feet sit at
+ * y ~= 0, so she faces +Z with +Y up. In a right-handed frame that puts HER
+ * LEFT AT +X: face +Z and your left hand goes to +X, exactly as facing -Z
+ * puts it at -X.
+ *
+ * The tables originally read that backwards — "the sign of its X gives the
+ * side" was applied as positive-is-right — and every named part on all three
+ * castes came out mirrored. Reported from the device in those words: "each
+ * antenna and legs are correct as far as placement, but reversed, meaning it
+ * says 'Left Antenna' is actually the right antenna."
+ *
+ * It is measured now rather than argued. `probe:sides` puts a camera in FRONT
+ * of her and checks which half of the image each part lands in — someone
+ * facing you has their left hand on your right, which is not a graphics
+ * convention — and cross-checks that against the inverse bind matrices for
+ * every caste that is loaded. Measuring off the BIND pose is the other half:
+ * a walking colonist's live bone positions are displaced by the gait and the
+ * IK, and reading a side off those reads the animation instead of the animal.
+ *
+ * Nothing downstream reads `side`, and the tripods stay valid either way — an
+ * alternating tripod is the same diagonal set under either naming — so this
+ * was invisible to the walk and visible only where a person reads a label.
+ */
+
+/**
  * The queen's rig, read off the model rather than guessed.
  *
  * Derived from the inverse bind matrices: every foot tip rests at y ~= 0.01 so
  * the origin is already on the ground, the head runs toward +Z so that is her
  * forward, and each leg's tip Z sorts it into front (+2.2), middle (0) or rear
- * (-2.2) while the sign of its X gives the side. Recorded here as a table
- * because the names carry no meaning — if the model is ever re-rigged, this is
- * the one thing that has to be re-derived.
+ * (-2.2) while the sign of its X gives the side — POSITIVE IS HER LEFT, see
+ * above. Recorded here as a table because the names carry no meaning — if the
+ * model is ever re-rigged, this is the one thing that has to be re-derived.
  */
 export const QUEEN_RIG: RigMap = {
   caste: 'queen',
@@ -84,16 +111,16 @@ export const QUEEN_RIG: RigMap = {
   mouth: ['Bone_046', 'Bone_045'],
   // No mandibles: the auto-rigger left hers out, so digging is carried by the
   // head and antennae instead.
-  antennaLeft: ['Bone_049', 'Bone_048', 'Bone_047'],
-  antennaRight: ['Bone_052', 'Bone_051', 'Bone_050'],
+  antennaLeft: ['Bone_052', 'Bone_051', 'Bone_050'],
+  antennaRight: ['Bone_049', 'Bone_048', 'Bone_047'],
   gaster: ['Bone_006', 'Bone_005'],
   legs: [
-    { slot: 'frontLeft', side: -1, bones: ['Bone_024', 'Bone_023', 'Bone_022', 'Bone_021', 'Bone_020', 'Bone_019'] },
-    { slot: 'frontRight', side: 1, bones: ['Bone_030', 'Bone_029', 'Bone_028', 'Bone_027', 'Bone_026', 'Bone_025'] },
-    { slot: 'midLeft', side: -1, bones: ['Bone_012', 'Bone_011', 'Bone_010', 'Bone_009', 'Bone_008', 'Bone_007'] },
-    { slot: 'midRight', side: 1, bones: ['Bone_018', 'Bone_017', 'Bone_016', 'Bone_015', 'Bone_014', 'Bone_013'] },
-    { slot: 'rearLeft', side: -1, bones: ['Bone_037', 'Bone_036', 'Bone_035', 'Bone_034', 'Bone_033', 'Bone_032', 'Bone_031'] },
-    { slot: 'rearRight', side: 1, bones: ['Bone_044', 'Bone_043', 'Bone_042', 'Bone_041', 'Bone_040', 'Bone_039', 'Bone_038'] },
+    { slot: 'frontLeft', side: -1, bones: ['Bone_030', 'Bone_029', 'Bone_028', 'Bone_027', 'Bone_026', 'Bone_025'] },
+    { slot: 'frontRight', side: 1, bones: ['Bone_024', 'Bone_023', 'Bone_022', 'Bone_021', 'Bone_020', 'Bone_019'] },
+    { slot: 'midLeft', side: -1, bones: ['Bone_018', 'Bone_017', 'Bone_016', 'Bone_015', 'Bone_014', 'Bone_013'] },
+    { slot: 'midRight', side: 1, bones: ['Bone_012', 'Bone_011', 'Bone_010', 'Bone_009', 'Bone_008', 'Bone_007'] },
+    { slot: 'rearLeft', side: -1, bones: ['Bone_044', 'Bone_043', 'Bone_042', 'Bone_041', 'Bone_040', 'Bone_039', 'Bone_038'] },
+    { slot: 'rearRight', side: 1, bones: ['Bone_037', 'Bone_036', 'Bone_035', 'Bone_034', 'Bone_033', 'Bone_032', 'Bone_031'] },
   ],
 };
 
@@ -111,18 +138,18 @@ export const WORKER_RIG: RigMap = {
   body: ['Bone_000', 'Bone_001'],
   thorax: ['Bone_004', 'Bone_003', 'Bone_002'],
   mouth: ['Bone_046', 'Bone_045'],
-  mandibleLeft: ['Bone_057', 'Bone_056', 'Bone_055'],
-  mandibleRight: ['Bone_060', 'Bone_059', 'Bone_058'],
-  antennaLeft: ['Bone_050', 'Bone_049', 'Bone_048', 'Bone_047'],
-  antennaRight: ['Bone_054', 'Bone_053', 'Bone_052', 'Bone_051'],
+  mandibleLeft: ['Bone_060', 'Bone_059', 'Bone_058'],
+  mandibleRight: ['Bone_057', 'Bone_056', 'Bone_055'],
+  antennaLeft: ['Bone_054', 'Bone_053', 'Bone_052', 'Bone_051'],
+  antennaRight: ['Bone_050', 'Bone_049', 'Bone_048', 'Bone_047'],
   gaster: ['Bone_008', 'Bone_007', 'Bone_006', 'Bone_005'],
   legs: [
-    { slot: 'frontLeft', side: -1, bones: ['Bone_032', 'Bone_031', 'Bone_030', 'Bone_029', 'Bone_028', 'Bone_027'] },
-    { slot: 'frontRight', side: 1, bones: ['Bone_026', 'Bone_025', 'Bone_024', 'Bone_023', 'Bone_022', 'Bone_021'] },
-    { slot: 'midLeft', side: -1, bones: ['Bone_014', 'Bone_013', 'Bone_012', 'Bone_011', 'Bone_010', 'Bone_009'] },
-    { slot: 'midRight', side: 1, bones: ['Bone_020', 'Bone_019', 'Bone_018', 'Bone_017', 'Bone_016', 'Bone_015'] },
-    { slot: 'rearLeft', side: -1, bones: ['Bone_044', 'Bone_043', 'Bone_042', 'Bone_041', 'Bone_040', 'Bone_039'] },
-    { slot: 'rearRight', side: 1, bones: ['Bone_038', 'Bone_037', 'Bone_036', 'Bone_035', 'Bone_034', 'Bone_033'] },
+    { slot: 'frontLeft', side: -1, bones: ['Bone_026', 'Bone_025', 'Bone_024', 'Bone_023', 'Bone_022', 'Bone_021'] },
+    { slot: 'frontRight', side: 1, bones: ['Bone_032', 'Bone_031', 'Bone_030', 'Bone_029', 'Bone_028', 'Bone_027'] },
+    { slot: 'midLeft', side: -1, bones: ['Bone_020', 'Bone_019', 'Bone_018', 'Bone_017', 'Bone_016', 'Bone_015'] },
+    { slot: 'midRight', side: 1, bones: ['Bone_014', 'Bone_013', 'Bone_012', 'Bone_011', 'Bone_010', 'Bone_009'] },
+    { slot: 'rearLeft', side: -1, bones: ['Bone_038', 'Bone_037', 'Bone_036', 'Bone_035', 'Bone_034', 'Bone_033'] },
+    { slot: 'rearRight', side: 1, bones: ['Bone_044', 'Bone_043', 'Bone_042', 'Bone_041', 'Bone_040', 'Bone_039'] },
   ],
 };
 
@@ -139,18 +166,18 @@ export const MAJOR_RIG: RigMap = {
   body: ['Bone_000', 'Bone_001', 'Bone_003'],
   thorax: ['Bone_002', 'Bone_024', 'Bone_023'],
   mouth: ['Bone_039', 'Bone_038', 'Bone_037'],
-  mandibleLeft: ['Bone_053', 'Bone_052'],
-  mandibleRight: ['Bone_055', 'Bone_054'],
-  antennaLeft: ['Bone_059', 'Bone_058', 'Bone_057', 'Bone_056'],
-  antennaRight: ['Bone_063', 'Bone_062', 'Bone_061', 'Bone_060'],
+  mandibleLeft: ['Bone_055', 'Bone_054'],
+  mandibleRight: ['Bone_053', 'Bone_052'],
+  antennaLeft: ['Bone_063', 'Bone_062', 'Bone_061', 'Bone_060'],
+  antennaRight: ['Bone_059', 'Bone_058', 'Bone_057', 'Bone_056'],
   gaster: ['Bone_008', 'Bone_007', 'Bone_006', 'Bone_005', 'Bone_004'],
   legs: [
-    { slot: 'frontLeft', side: -1, bones: ['Bone_045', 'Bone_044', 'Bone_043', 'Bone_042', 'Bone_041', 'Bone_040'] },
-    { slot: 'frontRight', side: 1, bones: ['Bone_051', 'Bone_050', 'Bone_049', 'Bone_048', 'Bone_047', 'Bone_046'] },
-    { slot: 'midLeft', side: -1, bones: ['Bone_036', 'Bone_035', 'Bone_034', 'Bone_033', 'Bone_032', 'Bone_031'] },
-    { slot: 'midRight', side: 1, bones: ['Bone_030', 'Bone_029', 'Bone_028', 'Bone_027', 'Bone_026', 'Bone_025'] },
-    { slot: 'rearLeft', side: -1, bones: ['Bone_022', 'Bone_021', 'Bone_020', 'Bone_019', 'Bone_018', 'Bone_017', 'Bone_016'] },
-    { slot: 'rearRight', side: 1, bones: ['Bone_015', 'Bone_014', 'Bone_013', 'Bone_012', 'Bone_011', 'Bone_010', 'Bone_009'] },
+    { slot: 'frontLeft', side: -1, bones: ['Bone_051', 'Bone_050', 'Bone_049', 'Bone_048', 'Bone_047', 'Bone_046'] },
+    { slot: 'frontRight', side: 1, bones: ['Bone_045', 'Bone_044', 'Bone_043', 'Bone_042', 'Bone_041', 'Bone_040'] },
+    { slot: 'midLeft', side: -1, bones: ['Bone_030', 'Bone_029', 'Bone_028', 'Bone_027', 'Bone_026', 'Bone_025'] },
+    { slot: 'midRight', side: 1, bones: ['Bone_036', 'Bone_035', 'Bone_034', 'Bone_033', 'Bone_032', 'Bone_031'] },
+    { slot: 'rearLeft', side: -1, bones: ['Bone_015', 'Bone_014', 'Bone_013', 'Bone_012', 'Bone_011', 'Bone_010', 'Bone_009'] },
+    { slot: 'rearRight', side: 1, bones: ['Bone_022', 'Bone_021', 'Bone_020', 'Bone_019', 'Bone_018', 'Bone_017', 'Bone_016'] },
   ],
 };
 
@@ -159,6 +186,29 @@ export const RIGS: Record<RigMap['caste'], RigMap> = {
   worker: WORKER_RIG,
   major: MAJOR_RIG,
 };
+
+/**
+ * HER HEAD JOINT — the last bone of the thorax chain, and not the mouth.
+ *
+ * The chain called `thorax` runs from her waist up to and INCLUDING the head,
+ * which is why `QueenModel` has always taken the head off its end and why the
+ * gait writes the head dip there. `mouth` is what hangs off the front of that
+ * — the face and jaw region, ahead of the antenna sockets.
+ *
+ * Both facts were only written down inside `QueenModel`, so the pose editor
+ * built a handle called "Head" over the mouth chain and one called "Thorax"
+ * that quietly contained the real head joint. Reported from the device: "it
+ * says head, but it's from the antenna bone out to the jaw and not actually
+ * at the head joint." Stated here so there is one answer rather than three.
+ */
+export function headBone(rig: RigMap): string | undefined {
+  return rig.thorax[rig.thorax.length - 1];
+}
+
+/** The thorax PROPER — the chain without the head joint on the end of it. */
+export function thoraxBones(rig: RigMap): string[] {
+  return rig.thorax.slice(0, -1);
+}
 
 /** Every bone a rig map names, for validation and for resting untouched bones. */
 export function rigBones(rig: RigMap): string[] {

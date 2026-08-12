@@ -1,10 +1,75 @@
 import { describe, expect, it } from 'vitest';
 
-import { QUEEN_RIG, WORKER_RIG } from '../src/anim/hexapod';
 import {
-  blendInto, emptyPose, IDENTITY, parsePose, poseBones, poseGroups,
+  MAJOR_RIG, QUEEN_RIG, WORKER_RIG, headBone, thoraxBones,
+} from '../src/anim/hexapod';
+import {
+  blendInto, boneLabels, emptyPose, IDENTITY, parsePose, poseBones, poseGroups,
   type PoseQuat,
 } from '../src/anim/pose';
+
+const ALL_RIGS = [QUEEN_RIG, WORKER_RIG, MAJOR_RIG];
+
+describe('what the handles are called', () => {
+  it('puts HEAD on the head joint and not on the mouth', () => {
+    /*
+     * Reported from the device: "it says head, but it's from the antenna bone
+     * out to the jaw and not actually at the head joint." It was the mouth
+     * chain, and the real head joint was hiding inside the THORAX handle at
+     * the same time, so turning what was labelled Thorax turned her head.
+     */
+    for (const rig of ALL_RIGS) {
+      const by = new Map(poseGroups(rig).map((g) => [g.key, g]));
+      expect(by.get('head')?.bones).toEqual([headBone(rig)]);
+      expect(by.get('mouth')?.bones).toEqual([...rig.mouth]);
+      expect(by.get('head')?.label).toBe('Head');
+      expect(by.get('mouth')?.label).toBe('Mouth');
+      /* And the thorax no longer secretly contains it. */
+      expect(by.get('thorax')?.bones).not.toContain(headBone(rig));
+      expect(by.get('thorax')?.bones).toEqual(thoraxBones(rig));
+    }
+  });
+
+  it('gives every bone its own name, and no two the same', () => {
+    for (const rig of ALL_RIGS) {
+      const names = boneLabels(rig);
+      for (const bone of poseGroups(rig).flatMap((g) => g.bones)) {
+        expect(names.get(bone)).toBeTruthy();
+      }
+      expect(new Set(names.values()).size).toBe(names.size);
+      /* A chain reads root to tip, so those two words have to appear. */
+      const leg = rig.legs[0]!;
+      expect(names.get(leg.bones[0]!)).toMatch(/root$/);
+      expect(names.get(leg.bones[leg.bones.length - 1]!)).toMatch(/tip$/);
+      /* A one-bone group is just its own name, with nothing appended. */
+      expect(names.get(headBone(rig)!)).toBe('Head');
+    }
+  });
+
+  it('never files a bone under both sides', () => {
+    /*
+     * The handedness fix swapped whole chains between the Left and Right
+     * entries — see the note above `QUEEN_RIG`. Swapping one and forgetting
+     * its partner would put the same bones under both names, and every
+     * downstream count would still look perfectly plausible.
+     */
+    for (const rig of ALL_RIGS) {
+      const lefts = new Set([...rig.antennaLeft, ...(rig.mandibleLeft ?? [])]);
+      for (const bone of [...rig.antennaRight, ...(rig.mandibleRight ?? [])]) {
+        expect(lefts.has(bone)).toBe(false);
+      }
+      const seen = new Set<string>();
+      for (const leg of rig.legs) {
+        for (const bone of leg.bones) {
+          expect(seen.has(bone)).toBe(false);
+          seen.add(bone);
+        }
+      }
+      expect(rig.legs.filter((l) => l.side === -1)).toHaveLength(3);
+      expect(rig.legs.filter((l) => l.side === 1)).toHaveLength(3);
+    }
+  });
+});
 
 describe('the editable groups of a rig', () => {
   it('offers every bone the rig owns, exactly once', () => {

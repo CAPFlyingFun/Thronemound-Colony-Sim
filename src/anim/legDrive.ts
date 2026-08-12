@@ -139,7 +139,12 @@ export const STRIDE_MM = { walk: 2.0, turn: 0.8 } as const;
  */
 export const REACH_DOWN_MM: Record<string, number> = {
   frontLeft: 1.12, frontRight: 1.12,
-  midLeft: 1.10, midRight: 1.08,
+  /* The two middles swapped WITH their bone chains when the rig's handedness
+   * was corrected — see the note above `QUEEN_RIG`. These are per-leg
+   * measurements, so each number has to follow the leg it was taken from
+   * rather than stay with the name it was filed under. The other two pairs
+   * measured the same either way and read identically. */
+  midLeft: 1.08, midRight: 1.10,
   rearLeft: 1.83, rearRight: 1.83,
 };
 

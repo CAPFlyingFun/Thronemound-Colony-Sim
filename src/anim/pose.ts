@@ -28,7 +28,7 @@
  * it. See `blendInto`.
  */
 
-import type { RigMap } from './hexapod';
+import { headBone, thoraxBones, type RigMap } from './hexapod';
 
 /** A quaternion as it is stored: x, y, z, w. */
 export type PoseQuat = readonly [number, number, number, number];
@@ -66,21 +66,65 @@ const LEG_LABELS: Record<string, string> = {
  * have the same bones — the queen's auto-rig left her mandibles out entirely
  * — and a hard-coded list would silently produce empty handles for her and
  * miss the workers' jaws. A group with no bones is not offered at all.
+ *
+ * HEAD IS THE HEAD JOINT. It used to be the mouth chain, which is the face
+ * and jaw hanging off the front of the head — reported from the device as
+ * "it says head, but it's from the antenna bone out to the jaw and not
+ * actually at the head joint", and correct. The head joint lives on the end
+ * of the thorax chain (see `headBone`), so it was inside the THORAX handle
+ * at the same time: turning what was labelled Thorax turned her head too.
+ * Both handles now say what they turn.
  */
 export function poseGroups(rig: RigMap): PoseGroup[] {
   const out: PoseGroup[] = [];
-  const add = (key: string, label: string, bones?: string[]): void => {
-    if (bones && bones.length) out.push({ key, label, bones: [...bones] });
+  const add = (key: string, label: string, bones?: (string | undefined)[]): void => {
+    const named = (bones ?? []).filter((b): b is string => !!b);
+    if (named.length) out.push({ key, label, bones: named });
   };
   add('body', 'Body', rig.body);
-  add('thorax', 'Thorax', rig.thorax);
-  add('mouth', 'Head', rig.mouth);
+  add('thorax', 'Thorax', thoraxBones(rig));
+  add('head', 'Head', [headBone(rig)]);
+  add('mouth', 'Mouth', rig.mouth);
   add('mandibleLeft', 'Jaw L', rig.mandibleLeft);
   add('mandibleRight', 'Jaw R', rig.mandibleRight);
   add('antennaLeft', 'Antenna L', rig.antennaLeft);
   add('antennaRight', 'Antenna R', rig.antennaRight);
   add('gaster', 'Gaster', rig.gaster);
   for (const leg of rig.legs) add(leg.slot, LEG_LABELS[leg.slot] ?? leg.slot, leg.bones);
+  return out;
+}
+
+/**
+ * WHAT EACH SEGMENT OF A CHAIN IS CALLED — the granular half of the labelling.
+ *
+ * Asked for in these words: "could also show raw bone points you can press to
+ * select at joints that aren't labeled, or we could label everything like
+ * right antenna tip, right antenna upper section, right antenna middle joint,
+ * right antenna lower section". This does both at once — every bone in the rig
+ * gets a name, so the points a person can press are labelled points rather
+ * than raw `Bone_047`s, and nothing is left unnamed to fall back on.
+ *
+ * The names are POSITIONAL rather than anatomical, and deliberately. A six-
+ * bone leg is not reliably coxa / trochanter / femur / tibia / tarsus /
+ * pretarsus on an auto-rig — the rigger split where it liked, the three castes
+ * do not agree with each other, and naming a joint after a segment it might
+ * not be is worse than saying where it is. Root, then numbered sections down
+ * the chain, then Tip, which is true of any chain of any length.
+ */
+export function boneLabels(rig: RigMap): Map<string, string> {
+  const out = new Map<string, string>();
+  const chain = (label: string, bones: (string | undefined)[]): void => {
+    const named = bones.filter((b): b is string => !!b);
+    if (named.length === 1) { out.set(named[0]!, label); return; }
+    named.forEach((bone, i) => {
+      /* A chain reads root-first, so the last one is the far end. */
+      const where = i === 0 ? 'root'
+        : i === named.length - 1 ? 'tip'
+          : `${i}`;
+      out.set(bone, `${label} ${where}`);
+    });
+  };
+  for (const group of poseGroups(rig)) chain(group.label, group.bones);
   return out;
 }
 

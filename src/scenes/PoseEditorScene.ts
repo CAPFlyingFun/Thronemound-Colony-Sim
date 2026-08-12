@@ -30,7 +30,8 @@ import './PoseEditorScene.css';
 import { QueenModel } from '../anim/QueenModel';
 import { CASTE_LENGTH_MM, VOXEL_MM, type RigMap } from '../anim/hexapod';
 import {
-  blendInto, emptyPose, poseGroups, type AntPose, type PoseGroup, type PoseQuat,
+  blendInto, boneLabels, emptyPose, poseGroups,
+  type AntPose, type PoseGroup, type PoseQuat,
 } from '../anim/pose';
 import { PoseStore } from '../anim/poseStore';
 import {
@@ -57,6 +58,11 @@ const AXES: { key: Axis; label: string; vec: THREE.Vector3 }[] = [
 const SWING_DEG = 120;
 
 const Q = new THREE.Quaternion();
+/** The per-bone layer's own scratch — `Q` is busy holding the group's. */
+const SOLO_Q = new THREE.Quaternion();
+const MARK = new THREE.Vector3();
+const RAY = new THREE.Raycaster();
+const NDC = new THREE.Vector2();
 
 export class PoseEditorScene {
   private readonly renderer: THREE.WebGLRenderer;
@@ -70,6 +76,31 @@ export class PoseEditorScene {
   private readonly store: PoseStore;
 
   private groups: PoseGroup[] = [];
+
+  /**
+   * ONE HANDLE PER BONE, alongside the grouped ones.
+   *
+   * Asked for from the device: "show raw bone points you can press to select
+   * at joints that aren't labeled, or we could label everything like right
+   * antenna tip, right antenna upper section...". This is both halves — every
+   * bone is its own handle AND carries a name from `boneLabels`, so a joint
+   * that used to be an unreachable middle of a six-bone chain is now a thing
+   * you can press, by name, in the panel or on the model.
+   *
+   * They COMPOSE with the group handles rather than replacing them: a group's
+   * rotation is applied first and a bone's own is multiplied on top, so
+   * "curl the whole leg, then bend that one joint further" is expressible and
+   * neither handle has to know about the other. See `rebuild`.
+   */
+  private solo: PoseGroup[] = [];
+
+  /** Whether the handle row is showing parts or individual bones. */
+  private boneMode = false;
+
+  /** Pressable dots at every joint, and what each one is. */
+  private markers: THREE.Points | null = null;
+
+  private markerBones: string[] = [];
 
   private picked: PoseGroup | null = null;
 
@@ -163,8 +194,17 @@ export class PoseEditorScene {
       this.groups = poseGroups(this.queen.rig)
         .map((g) => ({ ...g, bones: g.bones.filter((b) => this.queen.hasBone(b)) }))
         .filter((g) => g.bones.length > 0);
+      /* Every bone the groups cover, as its own named handle. Built off the
+       * same filtered list so a bone the GLB does not carry cannot appear. */
+      const names = boneLabels(this.queen.rig);
+      this.solo = this.groups.flatMap((g) => g.bones).map((bone) => ({
+        key: `bone:${bone}`,
+        label: names.get(bone) ?? bone,
+        bones: [bone],
+      }));
       this.pick(this.groups[0] ?? null);
       this.buildGroupRow();
+      this.buildMarkers();
       this.refreshList();
     });
     void this.loadBaked();
@@ -197,24 +237,50 @@ export class PoseEditorScene {
    * return her to where it started. The dials are the truth and the pose is
    * derived, so dragging any slider to nought is exactly rest.
    */
+  /** A handle's dial as a quaternion, its angles spread down its own chain. */
+  private dialQuat(handle: PoseGroup, into: THREE.Quaternion): boolean {
+    const d = this.dial.get(handle.key);
+    if (!d || (!d.pitch && !d.yaw && !d.roll)) return false;
+    /* Spread down the chain: a leg curls, it does not hinge. A solo handle
+     * owns one bone, so its share is the whole angle. */
+    const share = 1 / handle.bones.length;
+    into.identity();
+    for (const axis of AXES) {
+      const deg = d[axis.key];
+      if (!deg) continue;
+      into.multiply(new THREE.Quaternion().setFromAxisAngle(
+        axis.vec, (deg * Math.PI) / 180 * share,
+      ));
+    }
+    return true;
+  }
+
   private rebuild(): void {
     const rotations: Record<string, PoseQuat> = {};
     for (const group of this.groups) {
-      const d = this.dial.get(group.key);
-      if (!d) continue;
-      if (!d.pitch && !d.yaw && !d.roll) continue;
-      /* Spread down the chain: a leg curls, it does not hinge. */
-      const share = 1 / group.bones.length;
-      Q.identity();
-      for (const axis of AXES) {
-        const deg = d[axis.key];
-        if (!deg) continue;
-        Q.multiply(new THREE.Quaternion().setFromAxisAngle(
-          axis.vec, (deg * Math.PI) / 180 * share,
-        ));
-      }
+      if (!this.dialQuat(group, Q)) continue;
       const q: PoseQuat = [Q.x, Q.y, Q.z, Q.w];
       for (const bone of group.bones) rotations[bone] = q;
+    }
+    /*
+     * THEN THE PER-BONE HANDLES, MULTIPLIED ON TOP.
+     *
+     * Multiplied rather than assigned, so the two layers compose: the group
+     * says what the whole limb is doing and a bone's own dial is the extra
+     * bend at that joint. It also makes `load` exact — the residual is just
+     * the group's inverse times what was stored — where an assignment would
+     * leave no way to tell the two apart when reading a pose back.
+     */
+    for (const one of this.solo) {
+      if (!this.dialQuat(one, SOLO_Q)) continue;
+      const bone = one.bones[0]!;
+      const base = rotations[bone];
+      if (base) {
+        Q.set(base[0], base[1], base[2], base[3]).multiply(SOLO_Q);
+        rotations[bone] = [Q.x, Q.y, Q.z, Q.w];
+      } else {
+        rotations[bone] = [SOLO_Q.x, SOLO_Q.y, SOLO_Q.z, SOLO_Q.w];
+      }
     }
     this.pose = { name: this.nameBox?.value.trim() || 'Untitled', rotations };
     this.applyToModel();
@@ -277,7 +343,107 @@ export class PoseEditorScene {
       this.dial.set(group.key, { pitch: 0, yaw: 0, roll: 0 });
     }
     this.buildGroupRow();
+    /* Here as well as in the frame loop, because switching into bone mode and
+     * pressing a dot are one gesture on a touchscreen: waiting for the next
+     * frame leaves the dots at the origin and invisible, and an invisible
+     * object is one the raycaster skips. Measured as a tap that selected
+     * nothing at all. */
+    this.syncMarkers();
     this.draw();
+  }
+
+  /* --------------------------------------------------------- the bone dots */
+
+  /**
+   * A PRESSABLE DOT AT EVERY JOINT.
+   *
+   * `THREE.Points` rather than a mesh per bone: fifty-three little spheres is
+   * fifty-three draw calls and fifty-three things to dispose of, where this is
+   * one of each, and `Raycaster.params.Points.threshold` gives the picking
+   * tolerance a fingertip needs for free. Positions are refreshed every frame
+   * from the bones themselves — the whole point is to press the joint where it
+   * IS, and where it is changes as the pose does.
+   */
+  private buildMarkers(): void {
+    this.markerBones = this.solo.map((s) => s.bones[0]!);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(
+      new Float32Array(this.markerBones.length * 3), 3,
+    ));
+    geometry.setAttribute('color', new THREE.BufferAttribute(
+      new Float32Array(this.markerBones.length * 3), 3,
+    ));
+    const material = new THREE.PointsMaterial({
+      size: 9,
+      sizeAttenuation: false,
+      vertexColors: true,
+      /* Drawn over her rather than inside her: a joint dot buried in the mesh
+       * is a joint you cannot press. */
+      depthTest: false,
+      transparent: true,
+      opacity: 0.95,
+    });
+    const points = new THREE.Points(geometry, material);
+    points.renderOrder = 10;
+    points.frustumCulled = false;
+    this.markers = points;
+    this.scene.add(points);
+    this.cleanups.push(() => {
+      this.scene.remove(points);
+      geometry.dispose();
+      material.dispose();
+    });
+    this.syncMarkers();
+  }
+
+  /** Move the dots onto the bones, and colour the selected one. */
+  private syncMarkers(): void {
+    const points = this.markers;
+    if (!points) return;
+    points.visible = this.boneMode;
+    if (!this.boneMode) return;
+    const pos = points.geometry.getAttribute('position') as THREE.BufferAttribute;
+    const col = points.geometry.getAttribute('color') as THREE.BufferAttribute;
+    const chosen = this.picked?.bones.length === 1 ? this.picked.bones[0] : null;
+    const inGroup = new Set(this.picked?.bones ?? []);
+    this.markerBones.forEach((bone, i) => {
+      this.queen.boneWorldPosition(bone, MARK);
+      pos.setXYZ(i, MARK.x, MARK.y, MARK.z);
+      const d = this.dial.get(`bone:${bone}`);
+      const posed = !!d && !!(d.pitch || d.yaw || d.roll);
+      /* Selected is white, posed is amber, everything else is a dim blue —
+       * so what has been touched is visible without pressing anything. */
+      if (bone === chosen) col.setXYZ(i, 1, 1, 1);
+      else if (posed) col.setXYZ(i, 1, 0.72, 0.25);
+      else if (inGroup.has(bone)) col.setXYZ(i, 0.55, 0.78, 1);
+      else col.setXYZ(i, 0.28, 0.36, 0.5);
+    });
+    pos.needsUpdate = true;
+    col.needsUpdate = true;
+  }
+
+  /**
+   * Which joint a tap landed on, if any.
+   *
+   * Only while the dots are showing, so an ordinary orbit drag in PARTS mode
+   * can never be swallowed by a pick.
+   */
+  private pickAt(e: PointerEvent): PoseGroup | null {
+    const points = this.markers;
+    if (!points || !this.boneMode) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    NDC.set(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    RAY.setFromCamera(NDC, this.camera);
+    /* In world units, and generous: these are millimetre-scale joints being
+     * pressed with a fingertip. */
+    RAY.params.Points = { threshold: this.queen.lengthVoxels * 0.035 };
+    const hit = RAY.intersectObject(points, false)[0];
+    if (hit?.index === undefined) return null;
+    const bone = this.markerBones[hit.index];
+    return this.solo.find((s) => s.bones[0] === bone) ?? null;
   }
 
   /* --------------------------------------------------------------- the UI */
@@ -491,7 +657,18 @@ export class PoseEditorScene {
     const row = this.host.querySelector('#pose-groups');
     if (!row) return;
     row.textContent = '';
-    for (const group of this.groups) {
+    /* PARTS or BONES, in the row itself rather than off in the button strip:
+     * it is the thing that says what everything to its right means. */
+    const swap = document.createElement('button');
+    swap.className = 'pose-button is-on';
+    swap.id = 'pose-scope';
+    swap.textContent = this.boneMode ? '🦴 BONES' : '🦴 PARTS';
+    swap.addEventListener('click', () => {
+      this.boneMode = !this.boneMode;
+      this.pick((this.boneMode ? this.solo : this.groups)[0] ?? null);
+    });
+    row.appendChild(swap);
+    for (const group of this.boneMode ? this.solo : this.groups) {
       const b = document.createElement('button');
       b.className = 'pose-button';
       if (this.picked?.key === group.key) b.classList.add('is-on');
@@ -566,6 +743,34 @@ export class PoseEditorScene {
       }
       this.dial.set(group.key, dial);
     }
+    /*
+     * AND WHATEVER THE GROUP COULD NOT ACCOUNT FOR, per bone.
+     *
+     * The group dial is recovered from its FIRST bone, so any bone in the
+     * chain that was stored differently — a single joint bent on its own —
+     * has no way to survive a round trip through the group alone. The
+     * residual is exactly the group's inverse times what was stored, which is
+     * identity for a pose authored purely with group handles, so nothing
+     * changes for one of those.
+     */
+    for (const one of this.solo) {
+      const bone = one.bones[0]!;
+      const stored = pose.rotations[bone];
+      const dial: Record<Axis, number> = { pitch: 0, yaw: 0, roll: 0 };
+      if (stored) {
+        const owner = this.groups.find((g) => g.bones.includes(bone));
+        SOLO_Q.identity();
+        if (owner) this.dialQuat(owner, SOLO_Q);
+        Q.set(stored[0], stored[1], stored[2], stored[3]);
+        SOLO_Q.invert().multiply(Q);
+        const e = new THREE.Euler().setFromQuaternion(SOLO_Q, 'XYZ');
+        const back = 180 / Math.PI;
+        dial.pitch = Math.round(e.x * back);
+        dial.yaw = Math.round(e.y * back);
+        dial.roll = Math.round(e.z * back);
+      }
+      this.dial.set(one.key, dial);
+    }
     if (this.nameBox) this.nameBox.value = pose.name;
     this.buildGroupRow();
     this.rebuild();
@@ -588,7 +793,10 @@ export class PoseEditorScene {
       `<b>${this.pose.name}</b> · ${this.queen.rig.caste} ${mm} mm`
         + `${this.store.persistent ? '' : ' · memory only'}`,
       this.picked
-        ? `${this.picked.label} (${this.picked.bones.length}) `
+        /* A solo handle names the BONE it is, because "Front L 3" is only
+         * useful if you can tell which joint the editor thinks that is. */
+        ? `${this.picked.label} `
+          + `(${this.picked.bones.length === 1 ? this.picked.bones[0] : this.picked.bones.length}) `
           + `${d?.pitch ?? 0}° / ${d?.yaw ?? 0}° / ${d?.roll ?? 0}°`
         : 'no group',
       this.clip.keys.length
@@ -605,6 +813,10 @@ export class PoseEditorScene {
   private bindOrbit(): void {
     const el = this.renderer.domElement;
     const down = (e: PointerEvent) => {
+      /* A joint under the finger is a selection, not the start of an orbit —
+       * otherwise pressing a dot spins the camera off it as you let go. */
+      const joint = this.pickAt(e);
+      if (joint) { this.pick(joint); return; }
       this.dragging = e.pointerId;
       this.lastX = e.clientX;
       this.lastY = e.clientY;
@@ -703,6 +915,9 @@ export class PoseEditorScene {
       } else {
         this.applyToModel();
       }
+      /* After the pose has been written, so a dot sits on the joint where it
+       * ended up rather than where it was last frame. */
+      this.syncMarkers();
     }
     /*
      * FRAMED FROM HER OWN SIZE, the way the queen preview does it. The first
@@ -740,6 +955,43 @@ export class PoseEditorScene {
     if (!this.dial.has(key)) this.dial.set(key, { pitch: 0, yaw: 0, roll: 0 });
     this.dial.get(key)![axis] = deg;
     this.rebuild();
+  }
+
+  /** For probes: switch the handle row between whole parts and single bones. */
+  setBoneModeForTest(on: boolean): void {
+    this.boneMode = on;
+    this.pick((on ? this.solo : this.groups)[0] ?? null);
+  }
+
+  /** For probes: every per-bone handle, with the name a person would read. */
+  boneHandlesForTest(): { key: string; label: string; bone: string }[] {
+    return this.solo.map((s) => ({ key: s.key, label: s.label, bone: s.bones[0]! }));
+  }
+
+  /** For probes: which handle is selected. */
+  pickedForTest(): string | null {
+    return this.picked?.key ?? null;
+  }
+
+  /**
+   * For probes: where a bone's dot sits on screen, in client pixels, so a tap
+   * can be aimed at it the way a finger would be rather than at a guess.
+   */
+  markerScreenForTest(bone: string): { x: number; y: number } | null {
+    if (!this.queen.boneWorldPosition(bone, MARK)) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    MARK.project(this.camera);
+    return {
+      x: rect.left + ((MARK.x + 1) / 2) * rect.width,
+      y: rect.top + ((1 - MARK.y) / 2) * rect.height,
+    };
+  }
+
+  /** For probes: what a tap at those client coordinates would select. */
+  tapForTest(x: number, y: number): string | null {
+    const hit = this.pickAt({ clientX: x, clientY: y } as PointerEvent);
+    if (hit) this.pick(hit);
+    return hit?.key ?? null;
   }
 
   get ready(): boolean {
