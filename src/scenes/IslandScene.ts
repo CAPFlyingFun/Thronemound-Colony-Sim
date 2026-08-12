@@ -4723,6 +4723,48 @@ export class IslandScene {
     p.copy(this.at);
   }
 
+  /**
+   * THE BACKSTOP FORGETS ITS OWN CORRECTION — and that, not a missing
+   * damper, is the jitter.
+   *
+   * A first cut here eased this correction like everything else in the
+   * file, on the reasoning below about why it fires every frame instead of
+   * rarely. Measured against `probe-lens`, that was WRONG: it cost the one
+   * guarantee this backstop exists for — 32 frames out of 1,200 came back
+   * with soil inside the picture, where the un-eased original had never
+   * once, in any scenario, in this file's whole history. A correction that
+   * takes several frames to complete is a correction that shows the thing
+   * it exists to hide, for those frames. Smoothing it was never safe.
+   *
+   * The real fault is `settleEye` (below): it keeps its OWN memory of the
+   * lens position, `eyeAt`, and copies that into `camera.position` every
+   * single frame. This backstop was correcting `camera.position` alone —
+   * so the instant it fixed the picture, the NEXT frame's `settleEye` call
+   * overwrote the fix with the stale, uncorrected `eyeAt` and dragged the
+   * lens straight back into the soil, and the backstop fired again to
+   * correct it again. Every individual frame's FINAL position was clean,
+   * which is why `probe-lens` — which only ever samples the settled end of
+   * a frame — saw nothing wrong for as long as this file has existed. A
+   * human eye sees the whole sequence, not just its end, and a full-strength
+   * correction repeating every frame is indistinguishable from a shake.
+   * That is what "needs a damper of sorts" was actually describing.
+   *
+   * So the fix is not to slow the correction down; it is to stop
+   * forgetting it. The correction stays instant — `probe-lens` is the
+   * proof that it must — and `eyeAt` is written through at the same time,
+   * so next frame's filter starts from where the picture actually is
+   * rather than from where it was a frame before the backstop last moved
+   * it. With nothing left to silently undo, the backstop simply does not
+   * need to fire again next frame, and the repeat-every-frame shake — not
+   * the correction itself — is what stops.
+   */
+  private settleLensBackstop(look?: THREE.Vector3): void {
+    const p = this.camera.position;
+    if (this.soilDensityAt(p.x, p.y, p.z) <= 0) return;
+    this.liftCameraClear(look, p);
+    if (this.eyeAt) this.eyeAt.copy(p);
+  }
+
   private aimCamera(dt: number): void {
     /* In her eyes her own body would fill the frame — hidden there, shown
      * everywhere else (and only once her model has actually loaded). */
@@ -5010,11 +5052,9 @@ export class IslandScene {
        * a trunk read as her leaning rather than the world tipping.
        */
       this.camera.up.copy(steadyUp);
-      /* The same backstop the chase keeps: the target was clear, so this
-       * only ever catches the lens crossing a lip on its way there. */
-      if (this.soilDensityAt(
-        this.camera.position.x, this.camera.position.y, this.camera.position.z,
-      ) > 0) this.liftCameraClear(dir);
+      /* The same backstop the chase keeps, and now writing its correction
+       * through to `eyeAt` too — see `settleLensBackstop`. */
+      this.settleLensBackstop(dir);
       /* Aim from where the lens ACTUALLY ended up. The guard above may have
        * nudged it out of a roof, and looking at a target measured from the
        * old spot tilts the whole view by however far it moved — a pitch
@@ -5231,11 +5271,13 @@ export class IslandScene {
      * old spot and a target already known to be clear, so it can only be
      * inside soil while crossing a thin lip. That is worth correcting and
      * is not worth another full search — and because the target is clear,
-     * this fires on a handful of frames instead of every one.
+     * this fires on a handful of frames instead of every one. Shares first
+     * person's fix too, harmlessly: the chase keeps no separate position
+     * memory for the correction to be undone by (`camera.position` IS its
+     * own memory here), so `settleLensBackstop`'s `eyeAt` write is simply a
+     * no-op in this view — see the note on it.
      */
-    if (this.soilDensityAt(
-      this.camera.position.x, this.camera.position.y, this.camera.position.z,
-    ) > 0) this.liftCameraClear();
+    this.settleLensBackstop();
 
     const look = S_UP.copy(this.at).addScaledVector(this.up, 0.3);
     if (!this.camLook) this.camLook = look.clone();
