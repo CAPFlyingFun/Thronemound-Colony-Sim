@@ -78,7 +78,11 @@ export class PoseEditorScene {
 
   private tilt = 0.15;
 
-  private distance = 4;
+  /** A multiple of HER OWN length, not a distance in world units. */
+  private zoom = 4;
+
+  /** How much of the frame the control panel eats, 0..1 — see `frame`. */
+  private panelShare = 0;
 
   private dragging: number | null = null;
 
@@ -221,6 +225,10 @@ export class PoseEditorScene {
     row.id = 'pose-groups';
     panel.appendChild(row);
 
+    const sliders = document.createElement('div');
+    sliders.className = 'pose-sliders';
+    panel.appendChild(sliders);
+
     for (const axis of AXES) {
       const wrap = document.createElement('label');
       wrap.className = 'pose-slider';
@@ -241,7 +249,7 @@ export class PoseEditorScene {
         this.rebuild();
       });
       wrap.append(label, slider);
-      panel.appendChild(wrap);
+      sliders.appendChild(wrap);
     }
 
     const buttons = document.createElement('div');
@@ -287,10 +295,10 @@ export class PoseEditorScene {
       a.click();
       URL.revokeObjectURL(a.href);
     });
-    panel.appendChild(buttons);
-
-    const nameRow = document.createElement('div');
-    nameRow.className = 'pose-row';
+    /* The actions and the name share ONE row. Two rows cost a whole line of
+     * a 430-pixel-tall phone held sideways, which is the shape this is most
+     * likely to be used in; wrapping puts them back on two when there is no
+     * width for one. */
     this.nameBox = document.createElement('input');
     this.nameBox.type = 'text';
     this.nameBox.value = 'Untitled';
@@ -302,8 +310,8 @@ export class PoseEditorScene {
       const found = this.list?.value ? this.store.get(this.list.value) : null;
       if (found) this.load(found);
     });
-    nameRow.append(this.nameBox, this.list);
-    panel.appendChild(nameRow);
+    buttons.append(this.nameBox, this.list);
+    panel.appendChild(buttons);
 
     this.readout = document.createElement('div');
     this.readout.className = 'pose-readout';
@@ -333,6 +341,10 @@ export class PoseEditorScene {
     for (const slider of this.host.querySelectorAll<HTMLInputElement>('input[data-axis]')) {
       slider.value = String(d ? d[slider.dataset.axis as Axis] : 0);
     }
+    /* The row only exists once the model has loaded, and it is most of the
+     * panel's height — so what the camera has to clear is only knowable
+     * after this has run. */
+    this.resize();
   }
 
   private refreshList(): void {
@@ -388,15 +400,20 @@ export class PoseEditorScene {
       return d && (d.pitch || d.yaw || d.roll);
     });
     const d = this.picked ? this.dial.get(this.picked.key) : null;
+    /* THREE SHORT LINES. It was five, and with the panel below it the ant
+     * had a strip of screen left to be looked at in — which is the whole
+     * point of the scene. Everything still here is something you cannot get
+     * from looking at her: what the pose is called, what the selected handle
+     * is doing in degrees, and how much of her is posed at all. */
     this.readout.innerHTML = [
-      `<b>${this.pose.name}</b>${this.store.persistent ? '' : ' (memory only)'}`,
-      `${this.queen.rig.caste}, ${mm} mm · ${this.groups.length} handles`,
+      `<b>${this.pose.name}</b> · ${this.queen.rig.caste} ${mm} mm`
+        + `${this.store.persistent ? '' : ' · memory only'}`,
       this.picked
-        ? `${this.picked.label}: ${this.picked.bones.length} bones · `
+        ? `${this.picked.label} (${this.picked.bones.length}) `
           + `${d?.pitch ?? 0}° / ${d?.yaw ?? 0}° / ${d?.roll ?? 0}°`
         : 'no group',
-      `posed: ${posed.length ? posed.map((g) => g.label).join(', ') : 'rest'}`,
-      `bones written: ${Object.keys(this.pose.rotations).length}`,
+      `posed ${posed.length}/${this.groups.length} · `
+        + `${Object.keys(this.pose.rotations).length} bones`,
     ].join('<br>');
   }
 
@@ -422,7 +439,7 @@ export class PoseEditorScene {
     };
     const wheel = (e: WheelEvent) => {
       e.preventDefault();
-      this.distance = Math.max(1, Math.min(20, this.distance * (1 + e.deltaY * 0.001)));
+      this.zoom = Math.max(1.2, Math.min(14, this.zoom * (1 + e.deltaY * 0.001)));
     };
     el.addEventListener('pointerdown', down);
     el.addEventListener('pointermove', move);
@@ -441,7 +458,23 @@ export class PoseEditorScene {
   private resize(): void {
     const w = this.host.clientWidth || window.innerWidth;
     const h = this.host.clientHeight || window.innerHeight;
-    this.renderer.setSize(w, h, false);
+    const panel = this.host.querySelector('.pose-panel');
+    this.panelShare = panel ? Math.min(0.6, panel.getBoundingClientRect().height / h) : 0;
+    /*
+     * `setSize(w, h)` — WITHOUT the third argument, and that argument was the
+     * whole bug.
+     *
+     * `updateStyle: false` skips setting the canvas's CSS size, leaving it to
+     * fall back on its width/height ATTRIBUTES as if they were CSS pixels.
+     * Those attributes are the drawing buffer, which is `size x pixelRatio` —
+     * so on a device at two dots per pixel the canvas was laid out at 2560 by
+     * 1600 inside a 1280 by 800 window and only its top-left quarter was on
+     * screen. The render was correct throughout: an ant centred in the full
+     * image lands exactly in the bottom-right corner of a quarter of it,
+     * which is precisely what the device showed and what every projection
+     * measurement said could not be happening.
+     */
+    this.renderer.setSize(w, h);
     this.camera.aspect = w / Math.max(1, h);
     this.camera.updateProjectionMatrix();
   }
@@ -449,13 +482,49 @@ export class PoseEditorScene {
   private frame = (): void => {
     if (this.disposed) return;
     requestAnimationFrame(this.frame);
-    const r = this.distance;
+    /*
+     * HER OWN PER-FRAME PASS RUNS FIRST, then the pose on top.
+     *
+     * The editor used to skip `update` entirely — it has no gait to show, so
+     * it looked like dead weight. It is not: `update` is where the body bone
+     * is placed each frame, and without it she was drawn somewhere other than
+     * where her own scene graph said she was. Every measurement said centred
+     * and the picture said bottom-right, which is exactly what a skeleton
+     * that has never been posed looks like.
+     *
+     * `dt` is nought, so the gait's cycle does not advance and she stands
+     * still — and running it in this order is also how a pose is meant to
+     * compose in the game: the live system writes, the pose blends over it.
+     */
+    if (this.queen.ready) {
+      this.queen.update(0, {
+        speed: 0, turn: 0, digging: 0, carrying: 0,
+      });
+      this.applyToModel();
+    }
+    /*
+     * FRAMED FROM HER OWN SIZE, the way the queen preview does it. The first
+     * cut hard-coded four world units and a look-target of 0.35, which put a
+     * nine-millimetre ant — 1.8 voxels long — off in a corner of the shot,
+     * and would have silently re-framed itself the next time a caste's
+     * length changed. `zoom` is a multiple of however big she happens to be.
+     */
+    const reach = Math.max(0.4, this.queen.lengthVoxels) * this.zoom * 0.75;
+    const centre = this.queen.lengthVoxels * 0.18;
+    /*
+     * AND LIFTED CLEAR OF THE PANEL. The controls cover the bottom of the
+     * canvas, so centring her in the CANVAS centres her behind them. Looking
+     * a little below her centre lifts her into the part that is actually
+     * visible, by however much the panel is actually covering — measured, so
+     * it stays right when the panel wraps to another row on a narrow phone.
+     */
+    const lift = reach * this.panelShare * 0.5;
     this.camera.position.set(
-      Math.sin(this.orbit) * Math.cos(this.tilt) * r,
-      Math.sin(this.tilt) * r + 0.6,
-      Math.cos(this.orbit) * Math.cos(this.tilt) * r,
+      Math.sin(this.orbit) * Math.cos(this.tilt) * reach,
+      centre + Math.sin(this.tilt) * reach + reach * 0.22,
+      Math.cos(this.orbit) * Math.cos(this.tilt) * reach,
     );
-    this.camera.lookAt(0, 0.35, 0);
+    this.camera.lookAt(0, centre - lift, 0);
     this.renderer.render(this.scene, this.camera);
   };
 

@@ -5,39 +5,60 @@
  * `density-lab-*` classes, which look right — but they live in that scene's
  * stylesheet and are only loaded when that scene is, so an editor borrowing
  * the names would render unstyled and the mistake would be invisible in a
- * build. A tool used from a phone in the field needs its controls to be
- * thumb-sized whether or not another route happens to be loaded.
+ * build.
+ *
+ * SMALL, because the first cut was not. Reported from the device: "the UI is
+ * way too big in the editor" — fourteen handles at 34 px, three 28 px
+ * sliders, a five-line readout and a name row came to roughly half the
+ * screen, which on a phone leaves the ant peering out from behind her own
+ * controls. This is a TOOL: the subject is the thing being looked at, and
+ * the controls should be legible and no larger. Everything below is sized
+ * from a thumb (a 30 px target is still comfortably tappable) rather than
+ * from a desktop button.
  */
 
 .pose-panel {
   position: absolute;
-  left: 8px;
-  right: 8px;
-  bottom: 8px;
+  left: 6px;
+  right: 6px;
+  bottom: 6px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px;
-  border-radius: 10px;
+  gap: 4px;
+  padding: 6px;
+  border-radius: 8px;
   background: rgb(14 18 26 / 82%);
   backdrop-filter: blur(6px);
   color: #dfe6f2;
-  font: 12px/1.35 ui-monospace, "SF Mono", Menlo, monospace;
+  font: 11px/1.3 ui-monospace, "SF Mono", Menlo, monospace;
   z-index: 5;
 }
 
 .pose-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 3px;
 }
+
+/*
+ * The handles are the long row, so they get their own scroller rather than
+ * wrapping onto a second and third line and pushing the panel up the screen.
+ */
+#pose-groups {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  padding-bottom: 2px;
+}
+
+#pose-groups .pose-button { flex: 0 0 auto; }
 
 .pose-button,
 .pose-text {
-  min-height: 34px;
-  padding: 6px 10px;
+  min-height: 26px;
+  padding: 3px 8px;
   border: 1px solid #38445a;
-  border-radius: 7px;
+  border-radius: 6px;
   background: #1d2534;
   color: #dfe6f2;
   font: inherit;
@@ -56,40 +77,61 @@
   cursor: text;
 }
 
+.pose-sliders {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .pose-slider {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .pose-slider > span {
-  flex: 0 0 3.5em;
-  opacity: 0.8;
+  flex: 0 0 3em;
+  opacity: 0.75;
 }
 
 .pose-slider input[type="range"] {
   flex: 1 1 auto;
   min-width: 0;
-  /* Comfortable for a thumb: the default track is about half this. */
-  height: 28px;
+  /* Still a comfortable drag target; the default track is about half this. */
+  height: 18px;
 }
 
 .pose-readout {
   position: absolute;
-  top: 8px;
-  left: 8px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: rgb(14 18 26 / 78%);
+  top: 6px;
+  left: 6px;
+  max-width: calc(100vw - 12px);
+  padding: 5px 8px;
+  border-radius: 7px;
+  background: rgb(14 18 26 / 74%);
   color: #dfe6f2;
-  font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  font: 11px/1.35 ui-monospace, "SF Mono", Menlo, monospace;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   z-index: 5;
 }
 
-/* Landscape on a phone is short: keep the panel from eating the turntable. */
-@media (height <= 480px) {
-  .pose-panel { gap: 4px; padding: 6px; }
-  .pose-button, .pose-text { min-height: 28px; padding: 4px 8px; }
-  .pose-slider input[type="range"] { height: 22px; }
+/*
+ * Landscape on a phone is SHORT AND WIDE, and the two are opposite problems.
+ * Stacked, the panel came to 47% of a 430-pixel screen — measured — which
+ * leaves the subject of the tool peering out from behind its controls. There
+ * is width going spare, so the three sliders go side by side and the row of
+ * actions shares its line with the name: two lines saved, and the ant gets
+ * them.
+ */
+@media (height <= 520px) {
+  .pose-panel { gap: 3px; padding: 4px; font-size: 10px; }
+  .pose-button, .pose-text { min-height: 22px; padding: 2px 6px; }
+  .pose-slider input[type="range"] { height: 15px; }
+  .pose-readout { padding: 4px 6px; font-size: 10px; line-height: 1.25; }
+
+  .pose-sliders { flex-direction: row; gap: 8px; }
+  .pose-slider { flex: 1 1 0; min-width: 0; }
+  .pose-slider > span { flex-basis: 2.4em; }
 }
