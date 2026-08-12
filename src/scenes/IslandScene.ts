@@ -52,6 +52,7 @@ import {
   CLEARANCE_MM, GASTER_RIDE_MM, posture, PROBES, Spine,
   type SpinePose, type SpineReading,
 } from '../anim/spine';
+import { BodyPosture } from './bodyPosture';
 import { DebugStatsPanel } from './DebugStatsPanel';
 import { type Curtain, LoadingOverlay } from './LoadingOverlay';
 import {
@@ -1057,6 +1058,52 @@ export class IslandScene {
    */
 
   /**
+   * WHO THE STICK IS TALKING TO — locomotion, or her posture.
+   *
+   * There is one stick and now two things wanting it, and the alternative
+   * considered was a second on-screen stick in the style of a game pad. It
+   * was rejected on a hard constraint rather than on taste: the dig aim IS
+   * the camera, the camera is the right half of the screen, and a phone has
+   * two thumbs. A second stick would have to take the camera's half, and a
+   * camera that cannot move is a shovel that cannot aim.
+   *
+   * So posture is MODAL: arm ↕ or 🚁 and the same stick means height or
+   * attitude instead of walking, and walking is zeroed while it does — one
+   * stick serving two masters at once is how you get a turn that quietly
+   * crouches her.
+   */
+  /**
+   * The pose chips' faces: which control has the stick, and what she is
+   * currently holding.
+   *
+   * The readout appears only when she is off her neutral stance, because a
+   * row of zeroes on the rail is four more characters of headroom spent
+   * saying nothing — and because "there is a number on screen" is then
+   * itself the answer to "why is she standing like that?", which is a
+   * question this control is otherwise very good at causing.
+   */
+  private refreshPoseChips(): void {
+    this.rideChip?.classList.toggle('is-grip', this.posture.mode === 'ride');
+    this.tiltChip?.classList.toggle('is-grip', this.posture.mode === 'tilt');
+    if (!this.poseReadout) return;
+    const show = !this.posture.neutral || this.posture.armed;
+    this.poseReadout.style.display = show ? '' : 'none';
+    if (show) this.poseReadout.textContent = this.posture.readout();
+  }
+
+  private routeStick(): void {
+    if (this.posture.armed) {
+      this.input.walk = 0;
+      this.input.yaw = 0;
+      this.posture.command(this.stickX, this.stickY);
+      return;
+    }
+    /* Left and right TURN her. The side step is the view's job now. */
+    this.input.yaw = this.stickX;
+    this.input.walk = this.stickY;
+  }
+
+  /**
    * The CRAWL / WALK / RUN latch — 0, 1, 2 — and the only pace a thumb has.
    *
    * Shift has always doubled her pace for the PC hand and there was never a
@@ -1496,6 +1543,24 @@ export class IslandScene {
 
   private readonly stickOrigin = { x: 0, y: 0 };
 
+  /**
+   * WHERE THE STICK IS, kept apart from what it MEANS.
+   *
+   * The handler used to write `input.walk` and `input.yaw` straight out of
+   * the pointer event, which made the stick and locomotion the same object —
+   * and a stick that can also drive a posture needs somewhere to put a
+   * deflection that is not a walk. Held here, routed once, in `routeStick`.
+   */
+  private stickX = 0;
+
+  private stickY = 0;
+
+  /**
+   * Her height and attitude — the two things a real ant adjusts on a slope
+   * and this rig had no way to express. See `bodyPosture.ts`.
+   */
+  readonly posture = new BodyPosture();
+
   private readonly stickEl = document.createElement('div');
 
   private readonly stickKnob = document.createElement('div');
@@ -1503,6 +1568,13 @@ export class IslandScene {
   private readonly crosshair = document.createElement('div');
 
   private aimReadout: HTMLElement | null = null;
+
+  /** The ↕ and 🚁 chips, and the live pose numbers beside them. */
+  private rideChip: HTMLButtonElement | null = null;
+
+  private tiltChip: HTMLButtonElement | null = null;
+
+  private poseReadout: HTMLElement | null = null;
 
   private headingReadout: HTMLElement | null = null;
 
@@ -3347,8 +3419,15 @@ export class IslandScene {
      * would put the hovering back on the ground instead.
      */
     /* One height law everywhere now: her legs' own rest plane, plus the
-     * hundredth of a millimetre of air that keeps her out of the ground. */
-    (walker.tune as { ride: number }).ride = this.legRide + FOOT_AIR;
+     * hundredth of a millimetre of air that keeps her out of the ground —
+     * and plus whatever the ↕ control is holding, which is the only thing
+     * allowed to move her off that plane. Handing the walker one number
+     * keeps the body height and the leg geometry a single fact, which is
+     * what stopped the skating; the posture adds to it rather than
+     * competing with it for the same reason. */
+    this.posture.update(dt);
+    (walker.tune as { ride: number }).ride = this.legRide + FOOT_AIR
+      + this.posture.rideMm / MM;
     /*
      * THE SEATING, MEASURED — how much the WALKER moved her this frame, as
      * distinct from how much her legs did.
@@ -4143,6 +4222,11 @@ export class IslandScene {
     this.input.yaw = 0;
     this.input.dig = false;
     this.stickPointer = null;
+    this.stickX = 0;
+    this.stickY = 0;
+    /* The designer owns the body too: a held crouch would sit under its
+     * camera for the whole session and be blamed on the plan. */
+    this.posture.reset();
     this.lookPointer = null;
     this.stickEl.style.display = 'none';
     if (this.nestView) this.nestView.root.visible = false;
@@ -4294,15 +4378,32 @@ export class IslandScene {
       ? Math.max(-BANK_MAX, Math.min(BANK_MAX, turnRate * BANK_PER_TURN))
       : 0;
     this.bodyBank += (wantBank - this.bodyBank) * (1 - Math.exp(-LEAN_RATE * dt));
-    if (Math.abs(this.bodyLean) > 1e-5) {
+    /*
+     * THE CYCLIC RIDES ON TOP OF THE LEAN, and is added AFTER its clamp.
+     *
+     * Folding the 🚁 control into `wantLean` instead would have been fewer
+     * lines and wrong: that value is bounded by `LEAN_MAX` at nine degrees,
+     * which is the right authority for an involuntary lean into an
+     * acceleration and nowhere near enough to lift a gaster off a wall. A
+     * deliberate attitude is a different quantity with a different limit, so
+     * it is summed here and clamped in `bodyPosture.ts`.
+     *
+     * Her feet still do not hear about it — see the note above. The legs
+     * take up the whole difference, which is what makes this a hub tilting
+     * on its legs rather than the whole animal being rotated through the
+     * floor.
+     */
+    const leanTotal = this.bodyLean + this.posture.pitch;
+    const bankTotal = this.bodyBank + this.posture.roll;
+    if (Math.abs(leanTotal) > 1e-5) {
       this.queen.root.quaternion.multiply(
-        S_QLEAN.setFromAxisAngle(S_LEAN_AXIS, this.bodyLean),
+        S_QLEAN.setFromAxisAngle(S_LEAN_AXIS, leanTotal),
       );
     }
-    if (Math.abs(this.bodyBank) > 1e-5) {
+    if (Math.abs(bankTotal) > 1e-5) {
       /* About her own FORWARD: rolling, not steering. */
       this.queen.root.quaternion.multiply(
-        S_QLEAN.setFromAxisAngle(S_BANK_AXIS, this.bodyBank),
+        S_QLEAN.setFromAxisAngle(S_BANK_AXIS, bankTotal),
       );
     }
     this.queen.update(dt, {
@@ -5325,6 +5426,27 @@ export class IslandScene {
      * a colony-scale tool, but the queen digs with her jaws, not a CAD. */
 
 
+    /*
+     * THE DEV DRAWER — "move all the debug buttons in like a DEV menu or
+     * something so it doesn't take up a lot of the screen".
+     *
+     * The rail is bottom-anchored and grows UPWARD, so every chip costs
+     * headroom exactly where the dig controls live — which is how the DIG
+     * toggle, the only way OUT of dig mode, once got pushed off the top of a
+     * phone. Four of the chips on it (the sonar overlay, the aim overlay and
+     * the flight recorder's three) are instruments rather than controls:
+     * reached deliberately, when something already looks wrong, and never
+     * mid-crawl. Those fold behind one chip.
+     *
+     * Not PIN-gated, unlike the front door's DEV button. That gate exists so
+     * a curious player does not land in a terrain sculptor; this drawer only
+     * holds readouts and two overlays, and the person who wants it wants it
+     * several times a session with a phone in one hand.
+     */
+    const devPanel = document.createElement('div');
+    devPanel.className = 'density-lab-subrow tm-dev-panel';
+    devPanel.style.display = 'none';
+
     const plan = document.createElement('button');
     plan.className = 'density-lab-button density-lab-mode';
     plan.textContent = 'SONAR';
@@ -5333,7 +5455,7 @@ export class IslandScene {
       this.showPlan = !this.showPlan;
       if (this.nestView) this.nestView.root.visible = this.showPlan;
     });
-    actions.appendChild(plan);
+    devPanel.appendChild(plan);
 
     /*
      * AIM — the dig overlay's switch, and it lives with the dig controls
@@ -5355,7 +5477,7 @@ export class IslandScene {
       e.preventDefault();
       this.setAimDebug(!this.aimDebug);
     });
-    actions.appendChild(this.aimChip);
+    devPanel.appendChild(this.aimChip);
 
     const view = document.createElement('button');
     view.className = 'density-lab-button density-lab-mode';
@@ -5415,7 +5537,7 @@ export class IslandScene {
      */
     const logRow = document.createElement('div');
     logRow.className = 'tm-log-row';
-    actions.appendChild(logRow);
+    devPanel.appendChild(logRow);
 
     this.telemetryChip = document.createElement('button');
     this.telemetryChip.className = 'density-lab-button density-lab-mode';
@@ -5463,6 +5585,105 @@ export class IslandScene {
       }
     });
     logRow.appendChild(logCopy);
+
+    /*
+     * ↕ AND 🚁 — her height and her attitude, on the stick that walks her.
+     *
+     * These are not debug chips and do not go in the drawer. A real ant
+     * reads the slope it is on and sets its body to suit; this rig had no
+     * way to say either thing, so a 90° crease was crawled at exactly the
+     * height and attitude flat ground is, which is where the abdomen scrapes
+     * and the belly rides the bend. Until the postural controller can choose
+     * these from what her feet report, a thumb chooses them — and once it
+     * can, these stay as the override and as the way to SEE what it chose.
+     *
+     * One row rather than two rail slots: they are a pair, they are never
+     * both armed, and the rail has no headroom to spare.
+     */
+    const poseRow = document.createElement('div');
+    poseRow.className = 'tm-log-row';
+    actions.appendChild(poseRow);
+
+    /*
+     * Arming is a TAP; centring is a LONG PRESS.
+     *
+     * Releasing the stick deliberately holds the pose — you set an attitude
+     * in order to walk a crease with it — so "back to normal" has to be its
+     * own gesture rather than a side effect of letting go. A long press is
+     * the one gesture left on a phone that no other control here uses.
+     */
+    const poseBtn = (
+      label: string, mode: 'ride' | 'tilt', title: string,
+    ): HTMLButtonElement => {
+      const btn = document.createElement('button');
+      btn.className = 'density-lab-button density-lab-mode tm-pose-btn';
+      btn.textContent = label;
+      btn.title = title;
+      let held: number | null = null;
+      let longPressed = false;
+      btn.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        longPressed = false;
+        held = window.setTimeout(() => {
+          longPressed = true;
+          held = null;
+          /* Centre BOTH, not just this one: "put her back how she was" is
+           * one intention, and having to find which of two buttons is
+           * holding a stray two degrees is not a thing to do on a phone. */
+          this.posture.centre();
+          this.posture.disarm();
+          this.refreshPoseChips();
+        }, 500);
+      });
+      const finish = (e: PointerEvent): void => {
+        e.preventDefault();
+        if (held !== null) { window.clearTimeout(held); held = null; }
+        if (longPressed) return;
+        this.posture.toggle(mode);
+        /* A stick already under a thumb when the mode changes would keep
+         * meaning whatever it meant a moment ago. Re-route it now, and zero
+         * the walk the instant posture takes over. */
+        this.routeStick();
+        this.refreshPoseChips();
+      };
+      btn.addEventListener('pointerup', finish);
+      btn.addEventListener('pointercancel', (e) => {
+        if (held !== null) { window.clearTimeout(held); held = null; }
+        e.preventDefault();
+      });
+      poseRow.appendChild(btn);
+      return btn;
+    };
+    this.rideChip = poseBtn(
+      '↕', 'ride', 'Body height — stick forward lowers, back raises. Hold to centre.',
+    );
+    this.tiltChip = poseBtn(
+      '\u{1F681}', 'tilt', 'Body attitude — stick tilts her like a rotor hub. Hold to centre.',
+    );
+
+    /*
+     * The numbers the pose was found at, live, so a good crease posture can
+     * be read off the screen and become the automatic version's target
+     * rather than a constant somebody guessed.
+     */
+    this.poseReadout = document.createElement('div');
+    this.poseReadout.className = 'density-lab-aim-readout tm-pose-readout';
+    this.poseReadout.style.display = 'none';
+    poseRow.appendChild(this.poseReadout);
+    this.refreshPoseChips();
+
+    actions.appendChild(devPanel);
+
+    const devChip = document.createElement('button');
+    devChip.className = 'density-lab-button density-lab-mode';
+    devChip.textContent = 'DEV';
+    devChip.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      const open = devPanel.style.display === 'none';
+      devPanel.style.display = open ? '' : 'none';
+      devChip.classList.toggle('is-grip', open);
+    });
+    actions.appendChild(devChip);
 
     /*
      * WASD for the PC hand (playtest: "I was having trouble moving"):
@@ -5562,9 +5783,9 @@ export class IslandScene {
       if (e.pointerId === this.stickPointer) {
         const dx = Math.max(-48, Math.min(48, e.clientX - this.stickOrigin.x));
         const dy = Math.max(-48, Math.min(48, e.clientY - this.stickOrigin.y));
-        /* Left and right TURN her. The side step is the view's job now. */
-        this.input.yaw = stickCurve(dx / 48);
-        this.input.walk = stickCurve(-dy / 48);
+        this.stickX = stickCurve(dx / 48);
+        this.stickY = stickCurve(-dy / 48);
+        this.routeStick();
         this.stickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
       } else if (e.pointerId === this.lookPointer) {
         /* Path length, not displacement: a drag that wandered out and back
@@ -5633,6 +5854,16 @@ export class IslandScene {
      */
     const dropStick = (): void => {
       this.stickPointer = null;
+      this.stickX = 0;
+      this.stickY = 0;
+      /*
+       * THE POSE IS NOT DROPPED WITH THE FINGER — deliberately, and it is
+       * the one place this differs from every other control on the rail.
+       * You set an attitude in order to WALK with it (that is the whole
+       * point of it on a crease), so `posture.command` is not called here:
+       * the last deflection stands until the stick moves again, the control
+       * is disarmed and re-armed, or it is centred by a long press.
+       */
       this.input.walk = 0;
       this.input.yaw = 0;
       /* `strafe` stays nought: nothing writes it any more except the dodge
@@ -6203,6 +6434,10 @@ export class IslandScene {
         : st === 'stopped' ? `LOG ${this.telemetry.count}f` : 'REC';
       this.telemetryChip.style.color = st === 'recording' ? '#f87171' : '';
     }
+    /* The pose numbers ease toward what the stick asked for, so they change
+     * on frames where nothing was touched — the readout has to be driven by
+     * the clock rather than by the button that started it. */
+    this.refreshPoseChips();
   }
 
   /** The recording as pasteable text — the console hook, for a probe. */

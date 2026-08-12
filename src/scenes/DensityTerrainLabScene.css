@@ -140,6 +140,41 @@
 }
 
 /*
+ * THE DEV DRAWER — the sonar and aim overlays and the flight recorder,
+ * folded behind one chip so they stop eating the rail's headroom.
+ *
+ * It reuses `.density-lab-subrow`'s wrapping right-aligned layout and only
+ * adds the tint that says "this is instrumentation, not a control", plus a
+ * cap on how much of the screen it may take when open.
+ */
+.tm-dev-panel {
+  padding: 7px 9px;
+  border-radius: 14px;
+  background: rgba(24, 20, 14, 0.55);
+  max-width: min(72vw, 460px);
+}
+
+/*
+ * ↕ and 🚁 carry emoji rather than words, so they need a face that can draw
+ * one: the rail's monospace stack has no glyph for either and falls back to
+ * something ragged. Fixed width as well, because a chip that changes size
+ * when it latches moves the row under a thumb that is mid-press.
+ */
+.tm-pose-btn {
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+  font-size: 15px;
+  min-width: 46px;
+  text-align: center;
+}
+
+/* The live pose numbers sit in the same row as the chips, so they must not
+ * stretch it: this is a readout and takes no touches. */
+.tm-pose-readout {
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+/*
  * A short landscape phone is the tight case: the rail is bottom-anchored
  * and grows upward, and in dig mode it carries the most chips it ever
  * will. Squeezing the gaps keeps the DIG toggle — the way out — on
