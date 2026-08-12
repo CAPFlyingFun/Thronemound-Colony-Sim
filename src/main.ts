@@ -156,7 +156,7 @@ if (host) {
       import('./ui/MainMenu'),
       import('./scenes/IslandScene'),
       import('./scenes/LoadingOverlay'),
-    ]).then(([{ MainMenu }, { IslandScene }, { QuietCurtain }]) => {
+    ]).then(([{ MainMenu }, { IslandScene }, { LoadingOverlay, QuietCurtain }]) => {
       /*
        * THE MENU IS ALSO THE PAUSE MENU, which is what makes SAVE worth
        * having on it. Escape brings it back over the running island, and
@@ -165,23 +165,64 @@ if (host) {
        */
       let menu: InstanceType<typeof MainMenu>;
       let island: InstanceType<typeof IslandScene> | null = null;
+      let curtain: InstanceType<typeof LoadingOverlay> | null = null;
+      let said = 'Preparing the island…';
+      /*
+       * STANDING, not merely `ready`. `IslandScene.ready` means the world is
+       * built; the queen, her drive and the soil stream arrive after it, and
+       * `onReady` is the signal that all of them have. Gating on the earlier
+       * one let RESUME fire before there was a stream to restore into, which
+       * returned false and looked like a broken save.
+       */
+      let standing = false;
+      /** What to do the moment she is standing, if someone is waiting. */
+      let waiting: (() => void) | null = null;
 
       /*
-       * EVERY ACTION EXISTS FROM THE START and is switched on when it can do
-       * something, rather than being wired in later. The menu decides whether
-       * a button is greyed by whether it was GIVEN an action, so handing it
-       * `undefined` while the island is still building would need a second
-       * menu built over the first — a visible flash, to solve a problem that
-       * `setEnabled` already solves.
+       * PRESSABLE STRAIGHT AWAY, and the wait moved behind the button.
+       *
+       * START used to sit greyed until the island had finished, which reads
+       * as broken: the one thing on the screen you came to press refuses,
+       * for no reason you can see. So it is live from the first frame, and
+       * pressing it puts up the ORIGINAL loading curtain — the one this
+       * route replaced — which lifts by itself the moment she is standing.
+       *
+       * The wait is the same length either way; what changes is that it now
+       * starts when you ask for it and is spent on a screen that says so.
+       * And because the island has been building behind the menu the whole
+       * time, most of it is already gone: press it late and the curtain
+       * never appears at all.
        */
+      const enter = (then?: () => void): void => {
+        menu.dispose();
+        if (standing) { then?.(); return; }
+        curtain = new LoadingOverlay(host);
+        curtain.setStatus(said);
+        waiting = then ?? (() => {});
+      };
+
       const build = (): void => {
         menu = new MainMenu(host, {
-          onStart: () => menu.dispose(),
-          /* RESUME restores into the island already standing behind the
-           * menu, then goes straight in. */
+          onStart: () => enter(),
+          /*
+           * RESUME WAITS FOR AN ISLAND, unlike START.
+           *
+           * START can be pressed into a curtain because there is nothing to
+           * do but wait. A resume has to restore INTO something: the soil
+           * stream it puts the nest back into does not exist until the boot
+           * is done, so deferring it behind the curtain means holding a
+           * promise across the one event that matters and hoping. It was
+           * built that way first and measured never firing — the menu closed,
+           * the curtain lifted, and the nest was not there. A button that
+           * waits for the thing it needs is worth more than one that is
+           * pressable a few seconds sooner and sometimes lies.
+           */
           onResume: () => {
-            if (island?.resumeFromStorage()) menu.dispose();
-            else menu.setStatus('That save could not be read');
+            if (!island?.resumeFromStorage()) {
+              menu.setStatus('That save could not be read');
+              return;
+            }
+            menu.dispose();
           },
           onSave: () => {
             menu.setStatus(island?.saveToStorage()
@@ -189,39 +230,55 @@ if (host) {
           },
           onDev: () => { window.location.search = '?scene=poseedit'; },
         });
-        const playable = !!island?.ready;
-        menu.setEnabled('onStart', playable);
-        menu.setEnabled('onSave', playable);
-        /* Only offer a resume there is actually one of. */
-        menu.setEnabled('onResume', playable && IslandScene.hasSave());
-        if (playable) menu.setLoaded();
-        else menu.setStatus('Preparing the island…');
+        /*
+         * START and RESUME need no island to be PRESSED, only to finish; the
+         * curtain covers the difference. SAVE genuinely cannot do anything
+         * until there is something to save, which is what "if applicable"
+         * means — a live button that silently does nothing is worse than a
+         * grey one.
+         */
+        menu.setEnabled('onStart', true);
+        menu.setEnabled('onResume', standing && IslandScene.hasSave());
+        menu.setEnabled('onSave', standing);
+        if (standing) menu.setLoaded();
+        else menu.setStatus(said);
         (window as unknown as { mainMenu?: unknown }).mainMenu = menu;
       };
 
       build();
       island = new IslandScene(host, {
         curtain: new QuietCurtain(
-          (text) => menu.setStatus(text),
-          (why) => menu.setFailed(why),
+          (text) => {
+            /* One status, wherever it needs to appear: on the menu while it
+             * is up, and on the curtain once someone is waiting behind it. */
+            said = text;
+            if (document.querySelector('.main-menu')) menu.setStatus(text);
+            curtain?.setStatus(text);
+          },
+          (why) => {
+            if (curtain) curtain.fail(why);
+            else menu.setFailed(why);
+          },
         ),
         onReady: () => {
-          menu.setLoaded();
-          menu.setEnabled('onStart', true);
-          menu.setEnabled('onSave', true);
-          menu.setEnabled('onResume', IslandScene.hasSave());
+          standing = true;
+          /* Whoever is waiting gets what they asked for FIRST — a resume
+           * must put the nest back before the curtain lifts on it. */
+          const then = waiting;
+          waiting = null;
+          then?.();
+          if (curtain) { void curtain.finish(); curtain = null; }
+          if (document.querySelector('.main-menu')) {
+            menu.setLoaded();
+            menu.setEnabled('onSave', true);
+            menu.setEnabled('onResume', IslandScene.hasSave());
+          }
         },
       });
 
-      /*
-       * ESCAPE BRINGS IT BACK, which is what makes SAVE worth having on a
-       * menu at all — otherwise it could only ever save an island nobody had
-       * played yet. The island is never torn down, so pausing and resuming
-       * costs nothing.
-       */
       window.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
-        if (document.querySelector('.main-menu') || !island?.ready) return;
+        if (document.querySelector('.main-menu') || !standing) return;
         build();
       });
     });

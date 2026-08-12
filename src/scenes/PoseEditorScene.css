@@ -101,6 +101,20 @@
   height: 18px;
 }
 
+.pose-line { align-items: center; }
+
+.pose-scrub {
+  flex: 1 1 auto;
+  min-width: 4em;
+  height: 18px;
+}
+
+.pose-time {
+  flex: 0 0 auto;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
 .pose-readout {
   position: absolute;
   top: 6px;
@@ -129,8 +143,23 @@
   .pose-panel { gap: 3px; padding: 4px; font-size: 10px; }
   .pose-button, .pose-text { min-height: 22px; padding: 2px 6px; }
   .pose-slider input[type="range"] { height: 15px; }
-  .pose-readout { padding: 4px 6px; font-size: 10px; line-height: 1.25; }
+  .pose-line { align-items: center; }
 
+.pose-scrub {
+  flex: 1 1 auto;
+  min-width: 4em;
+  height: 18px;
+}
+
+.pose-time {
+  flex: 0 0 auto;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
+.pose-readout { padding: 4px 6px; font-size: 10px; line-height: 1.25; }
+
+  .pose-scrub { height: 15px; }
   .pose-sliders { flex-direction: row; gap: 8px; }
   .pose-slider { flex: 1 1 0; min-width: 0; }
   .pose-slider > span { flex-basis: 2.4em; }

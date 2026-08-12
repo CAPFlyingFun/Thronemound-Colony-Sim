@@ -33,6 +33,10 @@ import {
   blendInto, emptyPose, poseGroups, type AntPose, type PoseGroup, type PoseQuat,
 } from '../anim/pose';
 import { PoseStore } from '../anim/poseStore';
+import {
+  dropKey, emptyClip, keyAt, neededDuration, putKey, sampleClip, type AntClip,
+} from '../anim/clip';
+import { ClipStore } from '../anim/clipStore';
 
 type Axis = 'pitch' | 'yaw' | 'roll';
 const AXES: { key: Axis; label: string; vec: THREE.Vector3 }[] = [
@@ -73,6 +77,29 @@ export class PoseEditorScene {
   private dial = new Map<string, Record<Axis, number>>();
 
   private pose: AntPose = emptyPose('Untitled');
+
+  /* ------------------------------------------------------------ the clip */
+
+  /**
+   * The timeline. A clip is keys, each a WHOLE pose — see `clip.ts` for why
+   * that rather than per-bone tracks.
+   */
+  private clip: AntClip = emptyClip('Untitled');
+
+  /** Where the playhead is, in seconds. */
+  private head = 0;
+
+  private playing = false;
+
+  private lastFrameMs = 0;
+
+  private readonly clipStore: ClipStore;
+
+  private scrub: HTMLInputElement | null = null;
+
+  private timeLabel: HTMLSpanElement | null = null;
+
+  private playButton: HTMLButtonElement | null = null;
 
   private orbit = 0.6;
 
@@ -122,10 +149,9 @@ export class PoseEditorScene {
 
     this.queen = new QueenModel(caste);
     this.scene.add(this.queen.root);
-    this.store = new PoseStore(
-      this.queen.rig,
-      typeof localStorage === 'undefined' ? undefined : localStorage,
-    );
+    const disk = typeof localStorage === 'undefined' ? undefined : localStorage;
+    this.store = new PoseStore(this.queen.rig, disk);
+    this.clipStore = new ClipStore(this.queen.rig, disk);
 
     this.buildUi();
     this.bindOrbit();
@@ -193,6 +219,48 @@ export class PoseEditorScene {
     this.pose = { name: this.nameBox?.value.trim() || 'Untitled', rotations };
     this.applyToModel();
     this.draw();
+  }
+
+  /**
+   * Load a clip: its keys, its length, and its first key onto the dials.
+   *
+   * The dials land on the FIRST key rather than on nothing, so an author who
+   * loads a clip is immediately editing something they can see, and pressing
+   * KEY without touching anything re-keys what is already there instead of
+   * flattening it to rest.
+   */
+  private loadClip(clip: AntClip): void {
+    this.clip = { ...clip, keys: [...clip.keys] };
+    this.head = 0;
+    this.playing = false;
+    if (this.nameBox) this.nameBox.value = clip.name;
+    const first = clip.keys[0];
+    if (first) this.load({ ...first.pose, name: clip.name });
+    this.syncLine();
+    this.showAt(0);
+    this.draw();
+  }
+
+  /** Draw the clip at a moment, without touching the dials. */
+  private showAt(t: number): void {
+    const sampled = sampleClip(this.clip, t);
+    if (!sampled) { this.applyToModel(); return; }
+    this.queen.restore(this.groups.flatMap((g) => g.bones));
+    this.queen.applyRotations(blendInto(new Map<string, PoseQuat>(), sampled, 1));
+  }
+
+  /** Put the scrubber, the clock and the PLAY label back in agreement. */
+  private syncLine(): void {
+    if (this.scrub) {
+      this.scrub.max = String(Math.max(0.1, this.clip.duration));
+      this.scrub.value = String(Math.min(this.head, this.clip.duration));
+    }
+    if (this.playButton) this.playButton.textContent = this.playing ? 'STOP' : 'PLAY';
+    if (this.timeLabel) {
+      const on = keyAt(this.clip, this.head) ? '*' : '';
+      this.timeLabel.textContent =
+        `${this.head.toFixed(2)}${on}/${this.clip.duration.toFixed(1)}s · ${this.clip.keys.length}k`;
+    }
   }
 
   private applyToModel(): void {
@@ -275,20 +343,41 @@ export class PoseEditorScene {
     });
     button('SAVE', () => {
       this.rebuild();
-      if (!this.pose.name || this.pose.name === 'Untitled') return;
-      this.store.save(this.pose);
+      const name = this.pose.name;
+      if (!name || name === 'Untitled') return;
+      /*
+       * A CLIP IF IT HAS KEYS, A POSE IF IT HAS NOT, and the author never has
+       * to say which. A single shape held still is a pose; the moment it has
+       * a timeline it is a clip. Two books, one button — and the list below
+       * offers both, so loading is the same act either way.
+       */
+      if (this.clip.keys.length > 0) this.clipStore.save({ ...this.clip, name });
+      else this.store.save(this.pose);
       this.refreshList();
       this.draw();
     });
     button('REVERT', () => {
       const name = this.list?.value;
       if (!name) return;
+      if (this.clipStore.get(name)) {
+        const clip = this.clipStore.revert(name);
+        this.refreshList();
+        if (clip) this.loadClip(clip);
+        return;
+      }
       const back = this.store.revert(name);
       this.refreshList();
       if (back) this.load(back);
     });
     button('EXPORT', () => {
-      const blob = new Blob([this.store.exportJson()], { type: 'application/json' });
+      /* Both books, in one file, under the names the game will look them up
+       * by — a download that only carried half of what is on screen would be
+       * a trap. */
+      const text = `${JSON.stringify({
+        poses: JSON.parse(this.store.exportJson()),
+        clips: JSON.parse(this.clipStore.exportJson()),
+      }, null, 2)}\n`;
+      const blob = new Blob([text], { type: 'application/json' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = 'poses.json';
@@ -307,11 +396,89 @@ export class PoseEditorScene {
     this.list = document.createElement('select');
     this.list.className = 'pose-button';
     this.list.addEventListener('change', () => {
-      const found = this.list?.value ? this.store.get(this.list.value) : null;
+      const name = this.list?.value;
+      if (!name) return;
+      /* Clips first: a name in both books is one the author has turned from a
+       * pose into an animation, and the animation is what they meant. */
+      const clip = this.clipStore.get(name);
+      if (clip) { this.loadClip(clip); return; }
+      const found = this.store.get(name);
       if (found) this.load(found);
     });
     buttons.append(this.nameBox, this.list);
     panel.appendChild(buttons);
+
+    /*
+     * THE TIMELINE. Key, delete, play, and a scrubber.
+     *
+     * The dials stay the truth while the playhead sits ON a key or on empty
+     * time — that is authoring. The moment playback runs, the CLIP is the
+     * truth and the dials follow it, so what you see playing is what is
+     * stored rather than a second interpretation of it.
+     */
+    const line = document.createElement('div');
+    line.className = 'pose-row pose-line';
+
+    const lineButton = (text: string, onClick: () => void): HTMLButtonElement => {
+      const el = document.createElement('button');
+      el.className = 'pose-button';
+      el.textContent = text;
+      el.addEventListener('click', onClick);
+      line.appendChild(el);
+      return el;
+    };
+
+    lineButton('KEY', () => {
+      this.rebuild();
+      this.clip = putKey(this.clip, this.head, {
+        name: this.clip.name, rotations: { ...this.pose.rotations },
+      });
+      /* A key past the end would be unreachable — the clip grows to hold it
+       * rather than silently swallowing the thing just asked for. */
+      this.clip.duration = Math.max(this.clip.duration, neededDuration(this.clip));
+      this.syncLine();
+      this.draw();
+    });
+    lineButton('DEL', () => {
+      this.clip = dropKey(this.clip, this.head);
+      this.syncLine();
+      this.draw();
+    });
+    this.playButton = lineButton('PLAY', () => {
+      this.playing = !this.playing;
+      this.lastFrameMs = 0;
+      this.syncLine();
+    });
+    lineButton('CLEAR', () => {
+      this.clip = emptyClip(this.clip.name, this.clip.duration);
+      this.head = 0;
+      this.playing = false;
+      this.syncLine();
+      this.draw();
+    });
+
+    this.scrub = document.createElement('input');
+    this.scrub.type = 'range';
+    this.scrub.min = '0';
+    this.scrub.step = '0.01';
+    this.scrub.value = '0';
+    this.scrub.className = 'pose-scrub';
+    this.scrub.addEventListener('input', () => {
+      this.playing = false;
+      this.head = Number(this.scrub?.value ?? 0);
+      /* Scrubbing SHOWS the clip; it does not rewrite the dials, so letting
+       * go leaves the pose you were building exactly as it was. */
+      this.showAt(this.head);
+      this.syncLine();
+      this.draw();
+    });
+    line.appendChild(this.scrub);
+
+    this.timeLabel = document.createElement('span');
+    this.timeLabel.className = 'pose-time';
+    line.appendChild(this.timeLabel);
+
+    panel.appendChild(line);
 
     this.readout = document.createElement('div');
     this.readout.className = 'pose-readout';
@@ -355,7 +522,19 @@ export class PoseEditorScene {
     none.value = '';
     none.textContent = '— saved —';
     this.list.appendChild(none);
+    /* Both books in one list, clips marked, so loading a saved thing is one
+     * act whether it is a single shape or an animation. */
+    const seen = new Set<string>();
+    for (const name of this.clipStore.names()) {
+      seen.add(name);
+      const o = document.createElement('option');
+      o.value = name;
+      const keys = this.clipStore.get(name)?.keys.length ?? 0;
+      o.textContent = `${name} (${keys}k)${this.clipStore.isEdited(name) ? ' *' : ''}`;
+      this.list.appendChild(o);
+    }
     for (const name of this.store.names()) {
+      if (seen.has(name)) continue;
       const o = document.createElement('option');
       o.value = name;
       o.textContent = this.store.isEdited(name) ? `${name} *` : name;
@@ -412,8 +591,12 @@ export class PoseEditorScene {
         ? `${this.picked.label} (${this.picked.bones.length}) `
           + `${d?.pitch ?? 0}° / ${d?.yaw ?? 0}° / ${d?.roll ?? 0}°`
         : 'no group',
-      `posed ${posed.length}/${this.groups.length} · `
-        + `${Object.keys(this.pose.rotations).length} bones`,
+      this.clip.keys.length
+        ? `${this.playing ? '▶' : '❚❚'} ${this.clip.keys.length} keys · `
+          + `${this.head.toFixed(2)}/${this.clip.duration.toFixed(1)}s`
+          + `${this.clip.loop ? ' · loop' : ''}`
+        : `posed ${posed.length}/${this.groups.length} · `
+          + `${Object.keys(this.pose.rotations).length} bones`,
     ].join('<br>');
   }
 
@@ -500,7 +683,26 @@ export class PoseEditorScene {
       this.queen.update(0, {
         speed: 0, turn: 0, digging: 0, carrying: 0,
       });
-      this.applyToModel();
+      /*
+       * PLAYING, THE CLIP IS THE TRUTH. Real elapsed time rather than a
+       * fixed step, so a clip authored at two seconds lasts two seconds on a
+       * slow phone as well as a fast desktop — a timeline that ran at frame
+       * rate would be a different animation on every device.
+       */
+      if (this.playing && this.clip.keys.length > 0) {
+        const now = performance.now();
+        const dt = this.lastFrameMs ? Math.min(0.25, (now - this.lastFrameMs) / 1000) : 0;
+        this.lastFrameMs = now;
+        this.head += dt;
+        if (this.head > this.clip.duration) {
+          if (this.clip.loop) this.head %= Math.max(0.001, this.clip.duration);
+          else { this.head = this.clip.duration; this.playing = false; }
+        }
+        this.showAt(this.head);
+        this.syncLine();
+      } else {
+        this.applyToModel();
+      }
     }
     /*
      * FRAMED FROM HER OWN SIZE, the way the queen preview does it. The first

@@ -65,44 +65,81 @@ for (const want of ['START', 'RESUME', 'SAVE', 'SETTINGS', 'INFO', 'DEV']) {
 if (menu.padOpen) fail.push('the PIN pad was showing before DEV was pressed');
 
 /*
- * THE MENU IS THE LOADING SCREEN. START must be shut until she is standing,
- * the status line must actually say what the boot is doing, and pressing
- * START must reveal an island that is ALREADY there rather than starting one.
+ * THE MENU IS THE LOADING SCREEN, AND START IS PRESSABLE FROM THE FIRST
+ * FRAME.
+ *
+ * It used to sit greyed until the island had finished, which was reported as
+ * feeling broken — the one thing you came to press refusing, for no visible
+ * reason. So the wait moved BEHIND the button: START is live immediately, and
+ * pressing it early puts up the original loading curtain, which lifts by
+ * itself when she is standing. Pressed late, the curtain never appears,
+ * because the island has been building behind the menu the whole time.
  */
 const booting = await page.evaluate(() => ({
-  startShut: !!document.querySelector('.main-menu__button[data-key="onStart"]')?.disabled,
+  startLive: !document.querySelector('.main-menu__button[data-key="onStart"]')?.disabled,
+  saveShut: !!document.querySelector('.main-menu__button[data-key="onSave"]')?.disabled,
   status: document.querySelector('.main-menu__status')?.textContent ?? '',
   devLive: !document.querySelector('.main-menu__button[data-key="onDev"]')?.disabled,
+  ready: !!window.islandScene?.ready,
 }));
-console.log(`booting: START ${booting.startShut ? 'shut' : 'OPEN'}, `
-  + `DEV ${booting.devLive ? 'live' : 'shut'}, status "${booting.status}"`);
-if (!booting.startShut) fail.push('START was pressable before the island had loaded');
+console.log(`booting: START ${booting.startLive ? 'live' : 'SHUT'}, `
+  + `SAVE ${booting.saveShut ? 'shut' : 'live'}, DEV ${booting.devLive ? 'live' : 'shut'}, `
+  + `island ready ${booting.ready}, status "${booting.status}"`);
+if (!booting.startLive) fail.push('START was not pressable while the island loaded');
 if (!booting.status) fail.push('the menu showed no loading status while the island built');
-/* Everything that does not need terrain stays reachable during the wait —
- * that is the whole point of spending the boot on a menu. */
 if (!booting.devLive) fail.push('DEV was locked out while the island loaded');
+/* SAVE is the one that genuinely cannot do anything yet — a live button that
+ * silently does nothing is worse than a grey one. */
+if (!booting.ready && !booting.saveShut) fail.push('SAVE was live before there was anything to save');
 
+/*
+ * PRESS IT WHILE IT IS STILL LOADING. The menu must go, the original curtain
+ * must appear in its place, and it must lift on its own.
+ */
+if (!booting.ready) {
+  await page.$eval('.main-menu__button[data-key="onStart"]', (el) => el.click());
+  await page.waitForTimeout(300);
+  const mid = await page.evaluate(() => ({
+    menuGone: !document.querySelector('.main-menu'),
+    curtain: !!document.querySelector('.tm-loading-root'),
+    text: document.querySelector('.tm-loading-root')?.textContent ?? '',
+  }));
+  console.log(`pressed: menu gone ${mid.menuGone}, curtain up ${mid.curtain}`);
+  if (!mid.menuGone) fail.push('START left the menu up while loading');
+  if (!mid.curtain) fail.push('START while loading showed no loading screen — it just hangs');
+  if (mid.curtain && !mid.text.trim()) fail.push('the loading screen says nothing');
+} else {
+  console.log('pressed: (the island had already finished — no curtain needed)');
+}
+
+/* PLAYER ready, not world ready — the queen settles after the world is
+ * built, and the curtain is tied to the later of the two. */
 await page.waitForFunction(
-  () => {
-    const b = document.querySelector('.main-menu__button[data-key="onStart"]');
-    return !!b && !b.disabled;
-  },
+  () => window.islandScene?.loadingStateForTest?.().player === 1,
   null, { timeout: 200000 },
-).catch(() => fail.push('START never opened — the island never reported ready'));
+).catch(() => fail.push('the island never became playable'));
+/* And the curtain lets go by itself. */
+await page.waitForFunction(
+  () => !document.querySelector('.tm-loading-root'), null, { timeout: 30000 },
+).catch(() => fail.push('the loading screen never lifted after the island was ready'));
 
 const loaded = await page.evaluate(() => ({
   islandReady: !!window.islandScene?.ready,
   player: window.islandScene?.loadingStateForTest?.().player ?? 0,
-  status: document.querySelector('.main-menu__status')?.textContent ?? '',
+  menuGone: !document.querySelector('.main-menu'),
+  curtainGone: !document.querySelector('.tm-loading-root'),
 }));
 console.log(`loaded : island ready ${loaded.islandReady}, player ${loaded.player}, `
-  + `status "${loaded.status}"`);
-if (!loaded.islandReady) fail.push('START opened while the island was not ready');
-if (loaded.player !== 1) fail.push('START opened before the queen had settled');
+  + `menu gone ${loaded.menuGone}, curtain gone ${loaded.curtainGone}`);
+if (!loaded.islandReady) fail.push('the island never reported ready');
+if (loaded.player !== 1) fail.push('the curtain lifted before the queen had settled');
+if (!loaded.curtainGone) fail.push('the loading screen is still up');
 
-/* Pressing START must simply take the menu down. */
-await page.click('.main-menu__button[data-key="onStart"]');
-await page.waitForTimeout(400);
+/* If she had already finished before START was pressed, press it now. */
+if (!loaded.menuGone) {
+  await page.$eval('.main-menu__button[data-key="onStart"]', (el) => el.click());
+  await page.waitForTimeout(300);
+}
 const started = await page.evaluate(() => ({
   menuGone: !document.querySelector('.main-menu'),
   stillIsland: !!window.islandScene?.ready,
@@ -175,6 +212,24 @@ const waitEnabled = (key) => page.waitForFunction(
 await waitEnabled('onResume')
   .catch(() => fail.push('RESUME never lit up after a save'));
 
+/*
+ * WATCH THE BUTTON'S OWN CALL. Twice now the run has gone green on a RESUME
+ * that did nothing, because the diagnostic below restored the nest itself and
+ * the edit count then matched. Wrapping the method records whether the button
+ * path ever called it and what it answered — so "the button works" is
+ * something observed rather than inferred from a number anything could have
+ * produced.
+ */
+await page.evaluate(() => {
+  const s = window.islandScene;
+  const orig = s.resumeFromStorage.bind(s);
+  window.__resumeCalls = [];
+  s.resumeFromStorage = (...a) => {
+    const r = orig(...a);
+    window.__resumeCalls.push(r);
+    return r;
+  };
+});
 const beforeResume = await page.evaluate(() => window.islandScene?.stream?.editedSamples ?? 0);
 /*
  * Dispatched rather than `page.click`ed. RESUME rebuilds every chunk in the
@@ -218,6 +273,14 @@ const resumed = await page.evaluate(() => {
   const s = window.islandScene;
   /* If the button's restore did not take, call it directly and report what
    * it says — a probe that only knows "it did not work" cannot be acted on. */
+  /*
+   * READ FIRST, BEFORE THE DIAGNOSTIC CALLS ANYTHING. The previous cut took
+   * this snapshot at the END of the block, by which point the diagnostic
+   * below had made its own call and been recorded as if it were the button's
+   * — the same contamination, one level up. What the button did has to be
+   * captured before anything else is allowed to touch it.
+   */
+  const byButton = [...(window.__resumeCalls ?? [])];
   let why = document.querySelector('.main-menu__status')?.textContent ?? '';
   /*
    * DIAGNOSTIC ONLY, and only when the BUTTON failed to restore.
@@ -241,6 +304,8 @@ const resumed = await page.evaluate(() => {
     at: [s.at.x, s.at.y, s.at.z],
     menuGone: !document.querySelector('.main-menu'),
     why,
+    /* What the BUTTON's own path did, captured before the diagnostic ran. */
+    byButton,
   };
 });
 const moved = Math.hypot(
@@ -257,6 +322,12 @@ if (resumed.edits !== dug.edits) {
     + ` (it said: "${resumed.why}")`);
 }
 if (!resumed.menuGone) fail.push('RESUME left the menu up');
+/* The BUTTON has to be the thing that did it. */
+if (resumed.byButton.length === 0) {
+  fail.push('the RESUME button never called the restore at all');
+} else if (resumed.byButton[0] !== true) {
+  fail.push(`the RESUME button's own call returned ${resumed.byButton[0]}`);
+}
 /* Where she stood is part of the save; centimetres out means it was ignored. */
 if (moved > 5) fail.push(`RESUME put her ${moved.toFixed(1)} mm from where she saved`);
 
@@ -271,7 +342,11 @@ await page.goto(`${base}/`, { waitUntil: 'domcontentloaded' });
 await page.waitForSelector('.main-menu__button', { timeout: 60000 });
 
 /* DEV opens the keypad rather than the tools. */
-await page.click('.main-menu__button[data-key="onDev"]');
+await page.waitForFunction(
+  () => !!document.querySelector('.main-menu__button[data-key="onDev"]'),
+  null, { timeout: 60000 },
+);
+await page.$eval('.main-menu__button[data-key="onDev"]', (el) => el.click());
 /* `waitForSelector` on this one reported the pad visible and then timed out
  * anyway — the pad is plainly there, so ask the DOM directly. */
 await page.waitForFunction(
@@ -281,7 +356,18 @@ const dots = await page.evaluate(() => document.querySelectorAll('.main-menu__do
 if (dots !== 4) fail.push(`the keypad drew ${dots} dots for a four-digit PIN`);
 
 /* A wrong PIN must not open anything, and must clear itself. */
-for (const d of '1234') await page.click(`.main-menu__key >> text="${d}"`);
+/*
+ * Dispatched, not `page.click`ed. The last digit of a CORRECT PIN navigates,
+ * and `click` then waits for that navigation to settle — which is the pose
+ * editor booting a model, well past its timeout. The keypad is plain DOM;
+ * pressing it is not what is under test here.
+ */
+const tap = (d) => page.evaluate((digit) => {
+  const key = [...document.querySelectorAll('.main-menu__key')]
+    .find((el) => el.textContent === digit);
+  key?.click();
+}, d);
+for (const d of '1234') await tap(d);
 const afterWrong = await page.evaluate(() => ({
   stillOnMenu: !!document.querySelector('.main-menu__pad'),
   lit: document.querySelectorAll('.main-menu__dot.is-on').length,
@@ -292,7 +378,7 @@ if (afterWrong.lit !== 0) fail.push(`a wrong PIN left ${afterWrong.lit} digits t
 console.log(`wrong PIN: still gated, entry cleared, says "${afterWrong.note}"`);
 
 /* And the right one goes through. */
-for (const d of '2026') await page.click(`.main-menu__key >> text="${d}"`);
+for (const d of '2026') await tap(d);
 await page.waitForFunction(
   () => window.location.search.includes('poseedit'), null, { timeout: 10000 },
 ).catch(() => fail.push('the right PIN did not open the dev tools'));
@@ -350,6 +436,86 @@ if (!edit.gasterWritten) fail.push('the gaster chain was not written by its own 
 if (edit.keys.sort().join(',') !== 'name,rotations') {
   fail.push(`a pose carries ${edit.keys.join(', ')} — it must be name and rotations only`);
 }
+
+/*
+ * THE TIMELINE: key, play, and load it back.
+ *
+ * Measured on the BONE at several moments, because "it plays" is exactly the
+ * kind of claim a button can appear to satisfy while nothing moves. A clip
+ * with two different keys must put the skeleton somewhere DIFFERENT at three
+ * different times, come back to the same place at the same time, and survive
+ * a save and a reload.
+ */
+const anim = await page.evaluate(async () => {
+  const s = window.poseEditor;
+  const rig = s.queen.rig;
+  const bone = rig.gaster[0];
+  const read = () => {
+    const b2 = s.queen.root.getObjectByName(bone);
+    return b2 ? b2.quaternion.clone() : null;
+  };
+  const angle = (a, b2) => (a && b2
+    ? 2 * Math.acos(Math.min(1, Math.abs(a.dot(b2)))) * (180 / Math.PI) : 0);
+
+  /* Key a neutral gaster at 0, a bent one at 1. */
+  s.setDialForTest('gaster', 'pitch', 0);
+  s.clip = { name: 'Sting', duration: 2, loop: true, keys: [] };
+  s.head = 0;
+  document.querySelectorAll('.pose-line .pose-button').forEach((el) => {
+    if (el.textContent === 'KEY') el.click();
+  });
+  s.setDialForTest('gaster', 'pitch', -70);
+  s.head = 1;
+  document.querySelectorAll('.pose-line .pose-button').forEach((el) => {
+    if (el.textContent === 'KEY') el.click();
+  });
+  const keys = s.clip.keys.length;
+
+  /* Scrub to three moments and read the skeleton at each. */
+  const at = {};
+  for (const t of [0, 0.5, 1]) { s.head = t; s.showAt(t); at[t] = read(); }
+  const spread = [angle(at[0], at[0.5]), angle(at[0.5], at[1]), angle(at[0], at[1])];
+
+  /* Play, and see the playhead actually advance. */
+  s.head = 0;
+  s.playing = true;
+  const t0 = s.head;
+  await new Promise((r) => setTimeout(r, 500));
+  const moved = s.head - t0;
+  s.playing = false;
+
+  /* Save it, then load it back from the list. */
+  s.nameBox.value = 'Sting';
+  document.querySelectorAll('.pose-row .pose-button').forEach((el) => {
+    if (el.textContent === 'SAVE') el.click();
+  });
+  const inList = [...s.list.options].map((o) => o.value).includes('Sting');
+  s.clip = { name: 'x', duration: 2, loop: true, keys: [] };
+  const back = s.clipStore.get('Sting');
+  if (back) s.loadClip(back);
+  return {
+    keys, spread, moved, inList, reloadedKeys: s.clip.keys.length, saved: !!back,
+  };
+});
+
+console.log(`clip   : ${anim.keys} keys, bone moved ${anim.spread.map((v) => v.toFixed(1)).join('° / ')}° `
+  + `between 0, 0.5 and 1s`);
+console.log(`play   : the playhead advanced ${anim.moved.toFixed(2)}s in half a second`);
+console.log(`store  : saved ${anim.saved}, in the list ${anim.inList}, `
+  + `reloaded with ${anim.reloadedKeys} keys`);
+
+if (anim.keys !== 2) fail.push(`KEY dropped ${anim.keys} keys instead of 2`);
+/* Different at each moment, and travelling BETWEEN them rather than snapping
+ * — a mid-point identical to an end is a clip that is not interpolating. */
+if (anim.spread[2] < 5) fail.push('the two keys put the bone in the same place — nothing is keyed');
+if (anim.spread[0] < 1 || anim.spread[1] < 1) {
+  fail.push(`the half-way pose is not between the keys (${anim.spread.join(', ')})`);
+}
+if (anim.moved < 0.2 || anim.moved > 1.2) {
+  fail.push(`PLAY advanced the playhead ${anim.moved.toFixed(2)}s in half a second`);
+}
+if (!anim.saved || !anim.inList) fail.push('the clip did not save into the list');
+if (anim.reloadedKeys !== 2) fail.push(`loading the clip back gave ${anim.reloadedKeys} keys`);
 
 console.log(`\npage errors: ${errs.length ? errs.join(' | ') : 'none'}`);
 if (errs.length) fail.push(`${errs.length} page error(s)`);
