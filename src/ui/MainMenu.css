@@ -39,6 +39,18 @@
   color: #f2d9a0;
 }
 
+/*
+ * Under the title and deliberately quiet: it has to be READABLE without
+ * competing with START. Monospace so a version reads as a build stamp
+ * rather than as part of the wordmark.
+ */
+.main-menu__version {
+  margin-top: 6px;
+  font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.14em;
+  color: rgba(242, 217, 160, 0.55);
+}
+
 .main-menu__list {
   display: flex;
   flex-direction: column;

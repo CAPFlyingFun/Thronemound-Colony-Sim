@@ -67,6 +67,24 @@ export class MainMenu {
     title.textContent = 'Thronemound';
     this.root.appendChild(title);
 
+    /*
+     * THE BUILD, ON THE FRONT DOOR.
+     *
+     * It was only ever on the in-game STATS chip, which means the one
+     * moment you most want it — before pressing START, deciding whether the
+     * phone is showing you today's build or a cached one — is the one
+     * moment it was not on screen. That question has already cost a "this
+     * is still broken" report against code that was two versions old.
+     *
+     * Its own element rather than the status line below, because that line
+     * is the BOOT's (it says "Waking the queen…") and `setLoaded` wipes it
+     * — the version has to outlive that.
+     */
+    const version = document.createElement('div');
+    version.className = 'main-menu__version';
+    version.textContent = `v${__APP_VERSION__}`;
+    this.root.appendChild(version);
+
     const list = document.createElement('div');
     list.className = 'main-menu__list';
     for (const entry of ENTRIES) {

@@ -289,6 +289,8 @@ const S_RAD = new THREE.Vector3();
 const S_CENTER = new THREE.Vector3();
 /** The aim debug's own scratches. It runs at the very end of the frame,
  *  after every other consumer of the S_ pool has finished. */
+/** The jaw, while `biteRay` measures how far along the aim it sits. */
+const S_BITE_JAW = new THREE.Vector3();
 const S_DBG_CENTRE = new THREE.Vector3();
 const S_DBG_DIR = new THREE.Vector3();
 const S_DBG_END = new THREE.Vector3();
@@ -3700,12 +3702,40 @@ export class IslandScene {
      * and nothing else. The cut is centred on the ray the camera looks
      * down, so what the crosshair covers is what disappears.
      */
+    /*
+     * AND THE RAY STARTS AT THE LENS, IN HER OWN EYES.
+     *
+     * The DIRECTION was already the crosshair's — `boreAim` returns
+     * `lookDir` in first person, which is the vector the frame was built
+     * on. The ORIGIN was not: the march ran from `this.at`, her body
+     * centre, which sits below and behind the lens. Two rays with the same
+     * direction and different origins hit different soil, and how
+     * different depends entirely on the angle — level, they agree; steep,
+     * they do not. Reported at -77 degrees, where they disagree most:
+     * "it's too low and not exactly at my crosshair aiming location".
+     * From her belly a steep ray meets the floor almost at once, directly
+     * beneath her, while the crosshair is pointing somewhere out in front.
+     *
+     * Firing from the lens makes the crosshair a laser: the ray the player
+     * is sighting down IS the ray the soil is taken from, at every angle,
+     * because it is numerically the same ray.
+     *
+     * It also lands the intent from way back — "digging should originate
+     * from the queen's mandibles/jaw/head rig, not from the queen's body
+     * centre" — WITHOUT re-introducing the bug that moved it to the centre
+     * line in the first place. That fix was escaping a jaw BONE that rides
+     * the animation: above the centre line, a frame of easing behind, so
+     * the cut opened high and settled only after the model bedded in. The
+     * lens is not the bone. It is placed on the eye anchor and filtered,
+     * so it is the stable head-mounted origin that note asked for and the
+     * animation cannot drag it around.
+     *
+     * Third person keeps her centre: there the crosshair is hidden and the
+     * shovel's line is the body's, not the camera's.
+     */
     const centre = new THREE.Vector3();
-    let hull = NOSE_REACH + JAW_PAST_NOSE;
-    if (this.queenReady && this.queen.jawPosition(centre)) {
-      hull = Math.max(hull, centre.sub(this.at).dot(aim));
-    }
-    this.biteCentre(aim, hull, centre);
+    const ray = this.biteRay(aim);
+    this.biteCentre(aim, ray.reach, centre, ray.origin);
 
     let touched = 0;
     let minX = Infinity; let minY = Infinity; let minZ = Infinity;
@@ -3818,13 +3848,44 @@ export class IslandScene {
    * dig being broken again. Wood is not diggable, so the shovel does not
    * see it.
    */
-  private biteCentre(aim: THREE.Vector3, reach: number, out: THREE.Vector3): boolean {
+  /**
+   * WHERE THE STROKE'S RAY STARTS, AND HOW FAR IT MAY GO — decided once,
+   * so the shovel, the debug overlay and the probe hook cannot disagree.
+   *
+   * That they must agree is the overlay's entire value: "if the shovel is
+   * aiming somewhere strange, this line is strange in exactly the same
+   * way". Three copies of this arithmetic is three chances for the picture
+   * to be reassuring about a cut it is no longer describing.
+   */
+  private biteRay(aim: THREE.Vector3): { origin: THREE.Vector3; reach: number } {
+    let hull = NOSE_REACH + JAW_PAST_NOSE;
+    if (this.queenReady && this.queen.jawPosition(S_BITE_JAW)) {
+      hull = Math.max(hull, S_BITE_JAW.sub(this.at).dot(aim));
+    }
+    if (!this.firstPerson) return { origin: this.at, reach: hull };
+    /*
+     * The reach stays measured from HER. How far her jaws go is a fact
+     * about the animal, not about where the lens sits — and the lens is
+     * stepped forward of her centre along this very aim, so charging the
+     * distance it has already covered is what stops a first-person stroke
+     * quietly out-reaching a third-person one.
+     */
+    const eye = this.camera.position;
+    const ahead = (eye.x - this.at.x) * aim.x
+      + (eye.y - this.at.y) * aim.y + (eye.z - this.at.z) * aim.z;
+    return { origin: eye, reach: Math.max(0, hull - ahead) };
+  }
+
+  private biteCentre(
+    aim: THREE.Vector3, reach: number, out: THREE.Vector3,
+    origin: THREE.Vector3 = this.at,
+  ): boolean {
     const step = CELL_SIZE * 0.5;
     const far = reach + SCOOP_DEEP_MM / MM;
     for (let d = 0; d <= far; d += step) {
-      const x = this.at.x + aim.x * d;
-      const y = this.at.y + aim.y * d;
-      const z = this.at.z + aim.z * d;
+      const x = origin.x + aim.x * d;
+      const y = origin.y + aim.y * d;
+      const z = origin.z + aim.z * d;
       if (this.groundSolidAt(x, y, z)) {
         out.set(x, y, z).addScaledVector(aim, SCOOP_DEEP_MM / 2 / MM);
         return true;
@@ -3846,7 +3907,7 @@ export class IslandScene {
      * the surface, which is a scrape. That is what an ant aiming level at
      * a hillside actually does.
      */
-    out.copy(this.at).addScaledVector(aim, reach);
+    out.copy(origin).addScaledVector(aim, reach);
     for (let d = 0; d <= RIDE * 4; d += step) {
       const x = out.x - this.up.x * d;
       const y = out.y - this.up.y * d;
@@ -3894,8 +3955,8 @@ export class IslandScene {
    * THE AIM, DRAWN — diagnostic only, and it computes nothing of its own.
    *
    * GREEN is the line the stroke actually works along: the same
-   * `boreAim()` vector `bite()` calls, from the same origin (her centre),
-   * ending at the same `biteCentre` the cut is seated on. It is not a
+   * `boreAim()` vector `bite()` calls, from the same origin `biteRay`
+   * gives it, ending at the same `biteCentre` the cut is seated on. It is not a
    * reconstruction — if the shovel is aiming somewhere strange, this line
    * is strange in exactly the same way, which is the whole point.
    *
@@ -3971,13 +4032,12 @@ export class IslandScene {
      */
     const aim = this.boreAim();
     const centre = S_DBG_CENTRE;
-    let hull = NOSE_REACH + JAW_PAST_NOSE;
     const haveJaw = this.queenReady && this.queen.jawPosition(S_DBG_JAW);
-    if (haveJaw) {
-      centre.copy(S_DBG_JAW);
-      hull = Math.max(hull, centre.sub(this.at).dot(aim));
-    }
-    const willBite = this.biteCentre(aim, hull, centre);
+    /* The SAME origin and reach the shovel uses — see `biteRay`. Drawing
+     * this from her centre while the stroke fires from the lens is exactly
+     * the "line the cut does not follow" this overlay exists to catch. */
+    const ray = this.biteRay(aim);
+    const willBite = this.biteCentre(aim, ray.reach, centre, ray.origin);
 
     const put = (obj: THREE.Line, a: THREE.Vector3, b: THREE.Vector3): void => {
       const pos = obj.geometry.getAttribute('position') as THREE.BufferAttribute;
@@ -3987,9 +4047,10 @@ export class IslandScene {
       obj.visible = true;
     };
 
-    /* GREEN — her centre to the exact seat of the next scoop. This is the
-     * origin under audit: `bite()` works from `this.at`, not the jaws. */
-    put(this.aimDbgDig!, this.at, centre);
+    /* GREEN — the stroke's real ray: from wherever `biteRay` starts it (the
+     * lens in first person, her centre over the shoulder) to the exact seat
+     * of the next scoop. */
+    put(this.aimDbgDig!, ray.origin, centre);
     /* About a degree across, whatever the range — see `bead`. */
     const sizeAt = (at: THREE.Vector3): number =>
       Math.max(0.02, this.camera.position.distanceTo(at) * 0.012);
@@ -6389,13 +6450,10 @@ export class IslandScene {
     const aim = this.boreAim();
     const centre = new THREE.Vector3();
     const jaw = new THREE.Vector3();
-    let hull = NOSE_REACH + JAW_PAST_NOSE;
     const haveJaw = this.queenReady && this.queen.jawPosition(jaw);
-    if (haveJaw) {
-      centre.copy(jaw);
-      hull = Math.max(hull, centre.sub(this.at).dot(aim));
-    }
-    const willBite = this.biteCentre(aim, hull, centre);
+    /* The shovel's own ray, not a rebuild of it — see `biteRay`. */
+    const ray = this.biteRay(aim);
+    const willBite = this.biteCentre(aim, ray.reach, centre, ray.origin);
     this.camera.updateMatrixWorld();
     const camDir = this.camera.getWorldDirection(new THREE.Vector3());
     const head = new THREE.Vector3();
