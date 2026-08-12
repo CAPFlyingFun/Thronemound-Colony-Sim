@@ -103,7 +103,13 @@ describe('the posture the terrain asks for', () => {
      * exactly as the cresting test above already says.
      */
     const tight = posture({ ...flat, gasterClear: CLEARANCE_MM.hard }, AHEAD, BEHIND);
-    expect(tight.gaster).toBeCloseTo(-SPINE_LIMITS.gasterNudge, 6);
+    /* BOTH tail authorities, because an abdomen that is actually touching is
+     * a near-miss AND far below its ride height at once, and the two are
+     * meant to add there. The emergency alone was the whole answer before
+     * the ride band existed; it is now the larger half of it. */
+    expect(tight.gaster).toBeCloseTo(
+      -(SPINE_LIMITS.gasterNudge + SPINE_LIMITS.gasterRide), 6,
+    );
     /* And it must COMBINE with a crest, never fight it: higher ground
      * behind plus a touching abdomen is more tail-up than either alone. */
     const crest = posture({ ...flat, behindRise: 0.2 }, AHEAD, BEHIND);
@@ -113,6 +119,46 @@ describe('the posture the terrain asks for', () => {
     expect(both.gaster).toBeLessThan(crest.gaster);
     /* Clear of everything: no bias at all, same as the head. */
     expect(posture(flat, AHEAD, BEHIND).gaster).toBeCloseTo(0, 9);
+  });
+
+  it('holds the abdomen at a ride height, and floats inside the band', () => {
+    /*
+     * Asked for from the device: the abdomen should keep its normal idle
+     * height above the ground and float around it rather than being rigid.
+     * That is a two-sided law, and the SECOND side is the new part — the
+     * proximity bias could only ever shove the tail away, so over ground
+     * falling behind her it rode high and stayed there.
+     *
+     * The band is in the same units as the reading, so these pass their own
+     * millimetres rather than borrowing the caller's conversion.
+     */
+    const band = { low: 0.5, high: 1.1 };
+    const at = (gap: number) => posture(
+      { ...flat, gasterClear: gap }, AHEAD, BEHIND, SPINE_LIMITS,
+      { soft: -1, hard: 0.1 }, band,
+    ).gaster;
+
+    /* INSIDE: nothing at all. This is the ragdoll half — her tail is left to
+     * the terrain, and only leaving the band is an event. */
+    expect(at(0.6)).toBeCloseTo(0, 9);
+    expect(at(0.8)).toBeCloseTo(0, 9);
+    expect(at(1.0)).toBeCloseTo(0, 9);
+
+    /* BELOW: lift, and more of it the deeper she is. */
+    expect(at(0.4)).toBeLessThan(0);
+    expect(at(0.2)).toBeLessThan(at(0.4));
+    expect(at(0.1)).toBeCloseTo(-SPINE_LIMITS.gasterRide, 6);
+
+    /* ABOVE: the half that did not exist — the tail is drawn back DOWN
+     * toward its height instead of drifting up and staying there. */
+    expect(at(1.4)).toBeGreaterThan(0);
+    expect(at(2.2)).toBeGreaterThan(at(1.4));
+    /* And it is bounded, so a tail in open air never pitches into the floor
+     * chasing a height it cannot reach. */
+    expect(at(50)).toBeCloseTo(SPINE_LIMITS.gasterRide, 6);
+
+    /* No reading at all is not a large clearance — it is no event. */
+    expect(at(Infinity)).toBeCloseTo(0, 9);
   });
 
   it('never derives clearance from the SIGN of a rise', () => {

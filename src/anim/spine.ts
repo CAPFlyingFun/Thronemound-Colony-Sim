@@ -51,6 +51,11 @@ export interface SpineLimits {
   headNudge: number;
   gasterNudge: number;
   /**
+   * How far the RIDE-HEIGHT term alone may pitch the gaster — the two-sided
+   * one that holds her tail at its resting clearance. See `GASTER_RIDE_MM`.
+   */
+  gasterRide: number;
+  /**
    * Exponential follow rates, per second. HEAD > THORAX > GASTER is the
    * whole mechanism — see the header. Making them equal removes the train.
    */
@@ -99,6 +104,13 @@ export const SPINE_LIMITS: SpineLimits = {
    */
   headNudge: (30 * Math.PI) / 180,
   gasterNudge: (40 * Math.PI) / 180,
+  /*
+   * Twenty degrees, and deliberately the smallest of the three authorities.
+   * The ride term is a POSTURE — it is acting most of the time she is off
+   * her resting height, so it has to be the gentle one; the emergency shove
+   * is `gasterNudge`, which is double it and fires only on a near-miss.
+   */
+  gasterRide: (20 * Math.PI) / 180,
   headRate: 11,
   thoraxRate: 6.5,
   gasterRate: 5.5,
@@ -122,6 +134,34 @@ export const SPINE_LIMITS: SpineLimits = {
  * frame's movement away.
  */
 export const CLEARANCE_MM = { soft: 1.2, hard: 0.1 };
+
+/**
+ * THE ABDOMEN'S RIDE HEIGHT — a band she floats inside, not a rail.
+ *
+ * Asked for from the device, in these words: "can the abdomen try and stay
+ * the normal idle height that it's above the ground? Like if it defaults to
+ * 0.6 mm, it will float between 0.3 and 0.9 to not be so rigid, but can kind
+ * of have a ragdoll body."
+ *
+ * That is a different law from `CLEARANCE_MM`, which is a proximity bias:
+ * one-sided, silent until something is nearly touching, with no notion of a
+ * height at all. It can shove the tail away from ground rising into it and
+ * it can do nothing else — nothing ever asks the tail to come back DOWN, so
+ * over ground falling away behind her it sits wherever the terrain pitch
+ * left it. Both laws are wanted: this one holds the height, that one is the
+ * emergency underneath it.
+ *
+ * THE NUMBERS ARE MEASURED, NOT THE ONES IN THE REQUEST. `probe-gaster`
+ * puts her resting clearance at 0.79 mm rather than 0.6 — a good guess from
+ * watching her, but a band centred on a height she never sits at is a band
+ * she fights instead of floats in. So these are the request's own
+ * proportions, plus or minus three tenths, about the real default.
+ *
+ * INSIDE IT NOTHING HAPPENS, and that is the ragdoll half. The tail is left
+ * entirely to the terrain pitch and the corner's tail fold, exactly as
+ * before; only LEAVING the band is an event.
+ */
+export const GASTER_RIDE_MM = { low: 0.5, high: 1.1 };
 
 /**
  * What the probes found. TWO KINDS, and conflating them was a real bug.
@@ -199,6 +239,8 @@ export function posture(
   limits: SpineLimits = SPINE_LIMITS,
   /** In the SAME units as the clearances in `read`. */
   clearance: { soft: number; hard: number } = CLEARANCE_MM,
+  /** Likewise — the gaster's ride band. See `GASTER_RIDE_MM`. */
+  ride: { low: number; high: number } = GASTER_RIDE_MM,
 ): SpinePose {
   const ahead = aheadDist > 1e-9 ? Math.atan2(read.aheadRise, aheadDist) : 0;
   /* Behind her, a rise means the ground she LEFT was higher, so her tail
@@ -225,6 +267,39 @@ export function posture(
   };
   const headBias = nearness(read.headClear) * limits.headNudge;
   const gasterBias = nearness(read.gasterClear) * limits.gasterNudge;
+
+  /*
+   * THE RIDE HEIGHT, which is the proximity bias's missing other half.
+   *
+   * Positive lifts the tail, negative lets it back down, and between the two
+   * edges it is exactly nought — she floats, and the terrain pitch owns her
+   * tail as it always did. Two things make it a ride height rather than a
+   * second shove:
+   *
+   *   - it is SIGNED. Above the band it pulls DOWN. Nothing in this file
+   *     has ever done that, which is why the tail could ride high over
+   *     ground falling away behind her and simply stay there.
+   *   - the lift ramps over the distance from the band's floor to CONTACT,
+   *     so it is at its gentlest the moment she leaves the band and at full
+   *     authority only when the shell is actually touching. Ramping over a
+   *     fixed width instead would hand her the whole term for a tenth of a
+   *     millimetre of dip.
+   *
+   * The settle side is deliberately slacker — a tail that is too HIGH is not
+   * urgent, it is just stiff-looking, so it is given a whole millimetre to
+   * come back over rather than snapping to the band's edge.
+   */
+  const SETTLE_OVER = 1;
+  const rideOf = (gap: number): number => {
+    if (!Number.isFinite(gap)) return 0;
+    if (gap < ride.low) {
+      const fall = Math.max(1e-9, ride.low - clearance.hard);
+      return Math.min(1, (ride.low - gap) / fall);
+    }
+    if (gap > ride.high) return -Math.min(1, (gap - ride.high) / SETTLE_OVER);
+    return 0;
+  };
+  const gasterRide = rideOf(read.gasterClear) * limits.gasterRide;
 
   /*
    * AND THE FOLD, which is the one thing a rise cannot say.
@@ -274,7 +349,12 @@ export function posture(
   return {
     head: clamp(headPose + headBias, limits.headMax + limits.headNudge),
     thorax: clamp(through + fold / 3, limits.thoraxMax),
-    gaster: clamp(gasterPose - gasterBias, limits.gasterMax + limits.gasterNudge),
+    /* Both tail terms subtract, because positive pitch presses the tip DOWN
+     * — see the sign note on `gasterBias` above. The clamp is unchanged:
+     * the ride term lives INSIDE the headroom the emergency already had
+     * rather than widening how far her abdomen can ever swing. */
+    gaster: clamp(gasterPose - gasterBias - gasterRide,
+      limits.gasterMax + limits.gasterNudge),
   };
 }
 

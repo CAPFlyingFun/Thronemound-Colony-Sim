@@ -49,7 +49,8 @@ import { chamberBox, chamberNorm, type ChamberBox } from './ChamberMovement';
 import { BoreRig, YAW_RATE } from './BoreControl';
 import { Dodge, readFlick } from './dodge';
 import {
-  CLEARANCE_MM, posture, PROBES, Spine, type SpinePose, type SpineReading,
+  CLEARANCE_MM, GASTER_RIDE_MM, posture, PROBES, Spine,
+  type SpinePose, type SpineReading,
 } from '../anim/spine';
 import { DebugStatsPanel } from './DebugStatsPanel';
 import { LoadingOverlay } from './LoadingOverlay';
@@ -3071,6 +3072,9 @@ export class IslandScene {
     const want = posture(reading, ahead, behind, undefined, {
       soft: CLEARANCE_MM.soft / MM,
       hard: CLEARANCE_MM.hard / MM,
+    }, {
+      low: GASTER_RIDE_MM.low / MM,
+      high: GASTER_RIDE_MM.high / MM,
     });
     /* Diagnostics for `shot-spine.mjs` — every input and both outputs, so
      * the bobbing can be attributed rather than guessed at. */
@@ -3120,7 +3124,35 @@ export class IslandScene {
     for (let d = 0; d <= reach; d += step) {
       if (this.soilSolidAt(
         S_SPOT.x - up.x * d, S_SPOT.y - up.y * d, S_SPOT.z - up.z * d,
-      )) { clear = d - shell; break; }
+      )) {
+        /*
+         * BISECTED, BECAUSE THE MARCH'S STEP IS HALF A MILLIMETRE.
+         *
+         * `CELL_MM` is 1 and the step is half a cell, so the raw answer is
+         * quantised to 0.5 mm — and biased, because the march stops at the
+         * first SOLID sample and the surface is anywhere in the step before
+         * it, so it over-reports clearance by up to a step. Measured, that
+         * is not subtle: her abdomen's clearance came back as 0.73, 1.23,
+         * 1.73, 2.23 and nothing in between, on every situation sampled.
+         *
+         * A control law wants to hold this quantity inside a band a few
+         * tenths of a millimetre wide, and a sensor coarser than its own
+         * dead-band cannot do that — it chatters between lattice steps. So
+         * the same six bisections `SurfaceWalker.nearestSurface` uses, for
+         * the same reason and to the same tolerance: half a millimetre over
+         * sixty-four, which is under a hundredth.
+         */
+        let lo = Math.max(0, d - step);
+        let hi = d;
+        for (let i = 0; i < 6; i += 1) {
+          const mid = (lo + hi) * 0.5;
+          if (this.soilSolidAt(
+            S_SPOT.x - up.x * mid, S_SPOT.y - up.y * mid, S_SPOT.z - up.z * mid,
+          )) hi = mid; else lo = mid;
+        }
+        clear = hi - shell;
+        break;
+      }
     }
     /*
      * THE HEAD ALSO LOOKS WHERE SHE IS GOING.
