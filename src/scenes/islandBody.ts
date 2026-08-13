@@ -32,10 +32,10 @@ import { CELL_SIZE, MM } from '../world/worldScape';
 import { VOXEL_MM } from '../anim/hexapod';
 import {
   BODY_FIT_SCALE, BODY_FLOOR_MARGIN, BODY_HALF_TALL, BORE_HUG_WIDE,
-  CRAWL, ENCLOSED_MM, FOOT_AIR, LEAD_MAX, LEAD_S, LEAN_MAX, LEAN_RATE,
+  CRAWL, FOOT_AIR, LEAD_MAX, LEAD_S, LEAN_MAX, LEAN_RATE,
   MESH_BUDGET, NOSE_REACH, RIDE, RISE_RATE, SCROLL_COOLDOWN_MS,
   SHELL_REACH, SHELL_SHARE, SOIL_DARK, SPRINT, TURN_RATE, UNDER_MM,
-  WALK_SPEED, QUEST_DEPTH_MM, SPAN_MM, SUPPORT_SHARE, TAIL_HOLD_RAD,
+  senseAt, WALK_SPEED, QUEST_DEPTH_MM, SPAN_MM, SUPPORT_SHARE, TAIL_HOLD_RAD,
   S_LEAN, S_RAD, S_RIGHT, S_SPOT, S_SUPPORT,
 } from './islandTuning';
 
@@ -77,6 +77,8 @@ export interface BodyHost {
   queenReady: boolean;
   underground: boolean;
   enclosed: boolean;
+  /** How far the sense has been ASKED for, 0..1 — see `SENSE_ON_MM`. */
+  senseWant: number;
 
   /* --- the world --- */
   readonly queue: { cx: number; cy: number; cz: number }[];
@@ -219,7 +221,16 @@ export function simulate(host: BodyHost, dt: number): void {
    * `ENCLOSED_MM` for why the sense may not afford a cast of its own. */
   const overhead = host.walkGroundAt(host.at.x, host.at.z) - (host.at.y + RIDE);
   host.underground = overhead > UNDER_MM / MM;
-  host.enclosed = overhead > ENCLOSED_MM / MM;
+  /*
+   * A RAMP, NOT A SWITCH. See `SENSE_ON_MM`: the old 16 mm threshold kept
+   * the wireframe off for the whole of the entrance dig and then snapped it
+   * on near the bottom. This fades it in over the four millimetres either
+   * side of her going under, which is what sinking actually looks like.
+   */
+  host.senseWant = senseAt(overhead * MM);
+  /* Kept as the boolean a probe reads: the sense is UP rather than merely
+   * fading in. */
+  host.enclosed = host.senseWant >= 1;
 
   host.questTick(dt);
   /* The small tiers follow her; the big ones were planted once. */
@@ -324,7 +335,7 @@ export function simulate(host: BodyHost, dt: number): void {
    * one of the moments this game has, and half a second of contours
    * resolving into daylight is the whole of the effect. */
   if (host.sense) {
-    host.sense.uSense.value += ((host.enclosed ? 1 : 0) - host.sense.uSense.value)
+    host.sense.uSense.value += (host.senseWant - host.sense.uSense.value)
       * (1 - Math.exp(-SENSE_EASE * dt));
     /*
      * AND THE VOID BEHIND A MISSING CHUNK IS SOIL, NOT NOTHING.

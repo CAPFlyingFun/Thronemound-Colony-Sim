@@ -211,9 +211,26 @@ export function buildControls(host: HudHost, ): void {
    * quietly goes too deep — which is exactly what happened. This is a
    * readout and not a control: the drag still does the aiming.
    */
+  /*
+   * THE THREE INSTRUMENTS SHARE ONE ROW.
+   *
+   * They were a column, one chip per rail slot, which is 66px of a rail
+   * that has to hold DIG, SCOOP and VIEW as well. On a landscape phone
+   * that is the difference between VIEW being on screen and VIEW being cut
+   * in half by the bottom edge — reported with a screenshot of exactly
+   * that. They are a navigation panel and read better together anyway:
+   * angle, bearing, depth, in the order you use them.
+   */
+  const instruments = document.createElement('div');
+  instruments.className = 'tm-instruments';
+  actions.appendChild(instruments);
+  /* The row goes when its contents do, or walking leaves an empty flex
+   * item and the gap either side of it. */
+  host.railPart(instruments, 'dig', 'pose');
+
   host.aimReadout = document.createElement('div');
   host.aimReadout.className = 'density-lab-aim-readout';
-  actions.appendChild(host.aimReadout);
+  instruments.appendChild(host.aimReadout);
   /* An AIM readout, so it goes out with the aiming. Walking, it reports
    * her lean — which is a thing the posture readout says better, in the
    * mode where it matters — and 29px of rail is the difference between
@@ -231,12 +248,12 @@ export function buildControls(host: HudHost, ): void {
    */
   host.headingReadout = document.createElement('div');
   host.headingReadout.className = 'density-lab-aim-readout';
-  actions.appendChild(host.headingReadout);
+  instruments.appendChild(host.headingReadout);
   host.railPart(host.headingReadout, 'dig');
 
   host.depthReadout = document.createElement('div');
   host.depthReadout.className = 'density-lab-aim-readout';
-  actions.appendChild(host.depthReadout);
+  instruments.appendChild(host.depthReadout);
   host.railPart(host.depthReadout, 'dig');
 
 

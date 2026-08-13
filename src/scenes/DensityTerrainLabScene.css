@@ -193,7 +193,10 @@
      * This is the backstop for the day a control is added and nobody
      * re-measures.
      */
-    max-height: calc(100% - 106px);
+    /* The inset matters on the phone this is for: a landscape iPhone
+     * spends ~21px of its bottom edge on the home indicator, and a rail
+     * measured against the raw viewport overflows by exactly that. */
+    max-height: calc(100% - 106px - env(safe-area-inset-bottom));
   }
   .density-lab-actions .density-lab-button {
     padding: 8px 12px;
@@ -2105,3 +2108,44 @@
 .tm-ci-worker { background-image: url('/ui/worker.webp'); }
 .tm-ci-brood { background-image: url('/ui/brood.webp'); }
 .tm-ci-food { background-image: url('/ui/icon-food.webp'); }
+
+/*
+ * THE INSTRUMENT ROW — angle, bearing, depth, side by side.
+ *
+ * One rail slot instead of three. They were a column of chips, which cost
+ * 66px of a rail that also has to hold DIG, SCOOP and VIEW; on a landscape
+ * phone that was the difference between VIEW being on screen and VIEW
+ * being cut in half by the bottom edge.
+ */
+.tm-instruments {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  flex: 0 0 auto;
+  pointer-events: none;
+}
+
+/* In a row rather than a column they no longer need to reach the rail's
+ * right edge on their own, and the minimum width was sized for a column. */
+.tm-instruments .density-lab-aim-readout {
+  align-self: center;
+  min-width: 0;
+  padding: 5px 7px;
+}
+
+/*
+ * A SHORT LANDSCAPE PHONE — 375px tall is a real device, and dig mode is
+ * the rail's fullest state.
+ *
+ * The instrument row bought most of the room back; this buys the rest of
+ * the margin by taking it out of the two biggest plates, which are the
+ * two that can most afford it. Everything stays comfortably over the 44px
+ * touch-target floor.
+ */
+@media (max-height: 400px) {
+  .tm-art-dig { width: 76px; height: 76px; background-size: 64px 64px; }
+  .tm-art-scoop { width: 58px; height: 58px; background-size: 48px 48px; }
+  .tm-instruments .density-lab-aim-readout { font-size: 11px; padding: 4px 6px; }
+}

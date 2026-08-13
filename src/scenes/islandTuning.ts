@@ -425,7 +425,47 @@ export const UNDER_MM = 5;
  * sky test belongs with the tri-state solid/air/unavailable query work,
  * where it can be answered without a per-frame march.
  */
+/*
+ * SUPERSEDED BY THE RAMP BELOW, and kept because the reasoning above is
+ * still the reasoning: the sense may not afford a cast of its own, so it
+ * reads a height this frame already sampled. What changed is that ONE
+ * comparison became a slope, which costs nothing extra and fixes what the
+ * threshold got wrong.
+ */
 export const ENCLOSED_MM = 16;
+
+/*
+ * WHEN THE SENSE COMES UP, and how fast.
+ *
+ * 16 mm was chosen as a stand-in for "there is a roof over her", and as a
+ * stand-in it was far too deep: the wireframe stayed off through the whole
+ * of the entrance dig and snapped on near the bottom of it. Reported from
+ * the phone at seventeen millimetres down, which is exactly the threshold
+ * doing its job and the job being the wrong one.
+ *
+ * A depth RAMP instead, because that is what a player actually experiences
+ * — the light going as she sinks, not a switch at a magic number. On at
+ * one millimetre, full by five.
+ *
+ * This is depth below her own ORIGINAL grade, not below whatever she is
+ * standing on, so a slope does not trigger it and a pit she dug herself
+ * does. `uSense` still eases toward this rather than tracking it exactly,
+ * so a step in the height sample cannot make the picture jump.
+ */
+export const SENSE_ON_MM = 1;
+export const SENSE_FULL_MM = 5;
+
+/**
+ * How much sensed view a given depth asks for, 0..1.
+ *
+ * A function rather than four lines inline, because it is the whole of
+ * what changed and the whole of what can be wrong: the shape of the fade
+ * is the feature, and a shape is a thing worth pinning in a test.
+ */
+export function senseAt(depthMm: number): number {
+  const t = (depthMm - SENSE_ON_MM) / (SENSE_FULL_MM - SENSE_ON_MM);
+  return t <= 0 ? 0 : t >= 1 ? 1 : t;
+}
 
 /** Soil mesh chunks: the slide tile IS the chunk, the world room's trick. */
 export const CH = TILE_CELLS;

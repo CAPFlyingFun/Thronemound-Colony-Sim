@@ -776,6 +776,9 @@ export class IslandScene {
    */
   private enclosed = false;
 
+  /** How much of the sensed view is wanted, 0..1 — see `SENSE_ON_MM`. */
+  private senseWant = 0;
+
   /** The room camera's share of the underground view, eased 0..1. */
   private chamberCam = 0;
 
