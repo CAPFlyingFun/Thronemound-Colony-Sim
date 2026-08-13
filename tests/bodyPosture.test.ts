@@ -37,16 +37,31 @@ describe('BodyPosture', () => {
     expect(p.rideMm).toBeCloseTo(POSTURE_LIMITS.riseMm, 3);
   });
 
-  it('tilts nose-down on a forward stick and drops the right side on a right one', () => {
+  it('tilts nose-down on a forward stick and banks right on a right one', () => {
     const p = new BodyPosture();
     p.toggle('tilt');
     p.command(1, 1);
     settle(p);
-    /* Positive pitch carries her nose toward her feet — see the note on
-     * POSTURE_SIGN. Positive roll drops her right side, and the rotation
-     * that does that about her own forward is a negative one. */
+    /* Both axes follow the stick with the sign the SCREEN showed, not the
+     * sign the quaternion was reasoned to want — the roll was reported
+     * backwards from a phone and this is the corrected direction. */
     expect(p.pitch).toBeCloseTo(POSTURE_LIMITS.tiltRad, 4);
-    expect(p.roll).toBeCloseTo(-POSTURE_LIMITS.tiltRad, 4);
+    expect(p.roll).toBeCloseTo(POSTURE_LIMITS.tiltRad, 4);
+  });
+
+  /* A stick pushed LEFT must not come out as a roll to the right. It is the
+   * whole of the bug report, and it is one sign away from happening again. */
+  it('banks the way the stick is pushed, on both sides', () => {
+    const left = new BodyPosture();
+    left.toggle('tilt');
+    left.command(-1, 0);
+    settle(left);
+    const right = new BodyPosture();
+    right.toggle('tilt');
+    right.command(1, 0);
+    settle(right);
+    expect(Math.sign(left.roll)).toBe(-Math.sign(right.roll));
+    expect(left.roll).toBeCloseTo(-POSTURE_LIMITS.tiltRad, 4);
   });
 
   it('never exceeds its limits however hard the stick is pushed', () => {

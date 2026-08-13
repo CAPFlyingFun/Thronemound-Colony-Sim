@@ -1857,15 +1857,45 @@
 .tm-colony-cell.is-soon { opacity: 0.42; filter: grayscale(0.5); }
 
 /*
- * THE DEBUG READOUTS MOVE DOWN, because the corner they were parked in now
- * belongs to the player. Scoped to the island — the density lab wears the
- * same stylesheet and has no vitals to make room for — and specific enough
- * to beat the stats panel's own injected rule, which lands after this file.
+ * THE QUEST PANEL — third in the left column.
+ *
+ * 225 wide, inside the design's 210-235. `!important` on the geometry
+ * because `.rail-status` sets `right` and a centring transform for the
+ * density lab's own readout, and this element wears both classes to keep
+ * that stylesheet's look while overriding where it sits.
  */
-.tm-vitals-on .tm-stats-chip {
-  top: calc(max(12px, env(safe-area-inset-top)) + 136px);
+.tm-quest {
+  top: calc(max(12px, env(safe-area-inset-top)) + 150px) !important;
+  left: max(12px, env(safe-area-inset-left)) !important;
+  right: auto !important;
+  transform: none !important;
+  box-sizing: border-box;
+  width: 225px;
+  max-width: calc(100vw - 24px);
 }
 
-.tm-vitals-on .density-lab-status {
-  top: calc(max(12px, env(safe-area-inset-top)) + 164px);
+/*
+ * THE STATS CHIP TAKES THE TOP-CENTRE the quest just left.
+ *
+ * Stacking it under the quest instead was the obvious move and it does not
+ * survive a short phone: vitals + colony + quest + chip is 233px of column,
+ * and the parked stick's top edge on a 375px-tall landscape screen is 209.
+ * The column would have run into it. Top-centre is empty now, the chip is
+ * 137 wide, and it clears the vitals at 304 and the utility plates at 793
+ * on any screen wide enough to be in landscape at all.
+ */
+.tm-vitals-on .tm-stats-chip {
+  /* Scoped to the island — the density lab wears the same stylesheet, has
+   * no vitals to make room for, and must keep its corner. Two class names
+   * deep so it beats the stats panel's own injected rule, which lands
+   * after this file. */
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+/* Its expanded body stays in the column, below the quest. It only exists
+ * while someone has deliberately opened it, so it is allowed to sit over
+ * the parked stick — which takes no touches and is half transparent. */
+.tm-vitals-on .density-lab-status:not(.tm-quest) {
+  top: calc(max(12px, env(safe-area-inset-top)) + 214px);
 }

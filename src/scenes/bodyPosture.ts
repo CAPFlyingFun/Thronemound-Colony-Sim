@@ -118,10 +118,17 @@ export const POSTURE_LIMITS = {
  * toward her feet — so pushing the stick forward (a positive y) putting her
  * nose down is a straight +1.
  *
- * `roll` is about her own forward. A positive rotation there takes her right
- * side UP, so pushing the stick right and wanting that side to DROP is a -1.
+ * `roll` is about her own forward, and this is the third time handedness has
+ * been wrong in this rig — reported from the glass: "I have left stick and
+ * it's rotating to the right." The -1 was reasoned from an assumption about
+ * which side a positive rotation about her forward raises, and the assumption
+ * was simply backwards. Measured on a real screen it is +1, so a stick pushed
+ * left banks her left, the way a cyclic does.
+ *
+ * Worth noting the pitch axis was right first time and is untouched: the two
+ * were never wrong together, which is exactly why they are two numbers.
  */
-export const POSTURE_SIGN = { pitch: 1, roll: -1 };
+export const POSTURE_SIGN = { pitch: 1, roll: 1 };
 
 /**
  * The body's height and attitude, and the only thing allowed to hold them.

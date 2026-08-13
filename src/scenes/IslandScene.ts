@@ -5453,14 +5453,20 @@ export class IslandScene {
   private buildQuestHud(): void {
     this.buildVitalsHud();
     this.questEl = document.createElement('div');
-    this.questEl.className = 'density-lab-status rail-status';
-    /* Up against the top edge. The shared status style sits 42px down to
-     * clear the STATS chip, which the quest box does not need to — it is
-     * centred and the chip is hard left, so they never meet. */
-    this.questEl.style.top = 'max(8px, env(safe-area-inset-top))';
-    this.questEl.style.left = '50%';
-    this.questEl.style.right = 'auto';
-    this.questEl.style.transform = 'translateX(-50%)';
+    /*
+     * THIRD IN THE LEFT COLUMN, under the vitals and the colony strip.
+     *
+     * It used to be centred on the top edge, which worked while the top-left
+     * held nothing but a chip. It does not work now: on a phone narrower
+     * than the design canvas the centred box reaches back across the vitals
+     * panel and the two draw on top of each other — reported with a
+     * screenshot of exactly that. Centring cannot be made safe here, because
+     * the narrower the screen the further left the box starts.
+     *
+     * So it joins the column it belongs to. The design asks for a quest
+     * PANEL at 210-235 wide, which is what this now is.
+     */
+    this.questEl.className = 'density-lab-status rail-status tm-quest';
     this.hud.appendChild(this.questEl);
 
     /*
