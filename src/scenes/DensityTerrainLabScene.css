@@ -183,6 +183,17 @@
 @media (max-height: 480px) {
   .density-lab-actions {
     gap: 7px;
+    /*
+     * A CEILING, so the rail can never reach the corner it shares with
+     * SENSE and MENU. Those plates end 68px down; this stops the stack 84
+     * down and leaves the margin visible rather than trusting the sum of
+     * eleven heights to stay under a number nobody is checking.
+     *
+     * Mode switching is what keeps the rail SHORT — see `applyHudMode`.
+     * This is the backstop for the day a control is added and nobody
+     * re-measures.
+     */
+    max-height: calc(100% - 106px);
   }
   .density-lab-actions .density-lab-button {
     padding: 8px 12px;
@@ -1479,9 +1490,18 @@
   opacity: 0.92;
 }
 
-/* GRIP: the same amber "currently on" the rest of the HUD speaks. */
-.density-lab-mode.is-grip,
-.density-lab-dig.is-grip {
+/*
+ * GRIP: the same amber "currently on" the rest of the HUD speaks — for the
+ * CSS chips, which is all there were when this was written.
+ *
+ * `:not(.tm-art)` because it is a SOLID FILL, and a solid fill over a plate
+ * erases the plate: armed DIG became a featureless pale disc where the
+ * artwork had been. This rule lands after `.tm-art.is-grip` at equal
+ * specificity, so it was winning by nothing but position in the file. Art
+ * plates light up with a glow instead — see `.tm-art.is-grip`.
+ */
+.density-lab-mode.is-grip:not(.tm-art),
+.density-lab-dig.is-grip:not(.tm-art) {
   background: #e9c36f;
   box-shadow: 0 0 0 2px rgba(255, 250, 238, 0.75), 0 7px 20px rgba(0, 0, 0, 0.32);
 }
@@ -1957,3 +1977,58 @@
   color: #fff1c5;
   filter: brightness(1.25) drop-shadow(0 0 10px rgba(240, 200, 110, 0.85));
 }
+
+/*
+ * ============================================================
+ * THE SECOND SHEET — the rest of the rail gets its pictures
+ * ============================================================
+ */
+.tm-art-view, .tm-art-ride, .tm-art-tilt {
+  width: 62px;
+  height: 62px;
+  background-size: 50px 50px;
+}
+
+.tm-art-view { background-image: url('/ui/view.webp'); }
+.tm-art-ride { background-image: url('/ui/ride.webp'); }
+.tm-art-tilt { background-image: url('/ui/tilt.webp'); }
+
+/* Held rather than tapped, so it gets the medium plate. */
+.tm-art-scoop {
+  width: 66px;
+  height: 66px;
+  background-image: url('/ui/scoop.webp');
+  background-size: 54px 54px;
+}
+
+/*
+ * THE VITAL ICONS — which are LABELS, not readings.
+ *
+ * A hatched capsule says "no signal" honestly and says nothing at all about
+ * WHICH sense is missing. The heart, the leg, the seed and the drop name
+ * the four bars without claiming a value for any of them, which is exactly
+ * the line this panel has to walk until the systems behind them exist.
+ *
+ * They cost width — the panel grows past the design's ~285 to about 316 —
+ * and an unlabelled row of grey capsules is not worth 30px of tidiness.
+ */
+.tm-vital {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+}
+
+.tm-vital-icon {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  background: center / contain no-repeat;
+  /* Dimmed with the bar it labels — the icon is lit when the reading is. */
+  opacity: 0.62;
+}
+
+.tm-vi-health { background-image: url('/ui/icon-health.webp'); }
+.tm-vi-stamina { background-image: url('/ui/icon-stamina.webp'); }
+.tm-vi-food { background-image: url('/ui/icon-food.webp'); }
+.tm-vi-water { background-image: url('/ui/icon-water.webp'); }

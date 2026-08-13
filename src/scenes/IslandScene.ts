@@ -131,6 +131,16 @@ import {
 } from './islandTuning';
 import { Colonist } from './Colonist';
 import { SoilQuery } from './soilQuery';
+
+/**
+ * WHAT THE THUMB IS DOING, which is also what the rail should be showing.
+ *
+ * Three, and they are mutually exclusive because the STICK is: walking her,
+ * driving the shovel, or setting her body. Everything on the rail belongs to
+ * one or more of them — see `applyHudMode`.
+ */
+type HudMode = 'walk' | 'dig' | 'pose';
+
 export class IslandScene {
   /** Every 'is there soil here' in one place. See `soilQuery.ts`. */
   private readonly ground = new SoilQuery();
@@ -338,9 +348,44 @@ export class IslandScene {
    * itself the answer to "why is she standing like that?", which is a
    * question this control is otherwise very good at causing.
    */
+  /**
+   * WHAT THE RAIL IS FOR, RIGHT NOW.
+   *
+   * The rail grew until it did not fit: eleven controls stacked up a
+   * bottom-anchored column on a 430px-tall phone, and DIG climbed into the
+   * MENU plate in the top-right corner. Reported exactly that way — "the
+   * Menu and Dig are overlapping a little" — and dig mode, which is the only
+   * time SCOOP and the two instruments are up, is worse still.
+   *
+   * The fix is not smaller buttons. It is that most of the rail is IRRELEVANT
+   * at any given moment: BITE and CLIMB mean nothing with the shovel out, and
+   * the whole action cluster means nothing while the stick is driving her
+   * body rather than her legs. So every control declares which modes it
+   * belongs to and one function hangs the right set.
+   *
+   * It buys legibility as well as room. The stick does three different jobs
+   * depending on mode, and a rail that changes with it is the clearest
+   * possible statement of which job is live.
+   */
+  private applyHudMode(): void {
+    const mode: HudMode = this.digMode ? 'dig'
+      : this.posture.armed ? 'pose' : 'walk';
+    for (const part of this.railParts) {
+      part.el.style.display = part.modes.includes(mode) ? '' : 'none';
+    }
+  }
+
+  /** Register a rail control against the modes it belongs in. */
+  private railPart(el: HTMLElement, ...modes: HudMode[]): void {
+    this.railParts.push({ el, modes });
+  }
+
   private refreshPoseChips(): void {
     this.rideChip?.classList.toggle('is-grip', this.posture.mode === 'ride');
     this.tiltChip?.classList.toggle('is-grip', this.posture.mode === 'tilt');
+    /* Arming or dropping a posture IS a mode change, so the rail follows it
+     * on the same call that lights the plate. */
+    this.applyHudMode();
     if (!this.poseReadout) return;
     const show = !this.posture.neutral || this.posture.armed;
     this.poseReadout.style.display = show ? '' : 'none';
@@ -407,6 +452,9 @@ export class IslandScene {
 
   /** DIG is a MODE now: the DIG chip arms it, the 🪏 button strokes. */
   private digMode = false;
+
+  /** Rail controls and the modes each one is relevant in. See `applyHudMode`. */
+  private readonly railParts: { el: HTMLElement; modes: HudMode[] }[] = [];
 
   /** The shovel, revealed once DIG is armed. */
   private scoopBtn: HTMLButtonElement | null = null;
@@ -4569,11 +4617,13 @@ export class IslandScene {
       dig.classList.toggle('is-grip', this.digMode);
       /* The overlay's switch belongs to the shovel, and leaves with it —
        * along with the overlay itself, which `updateAimDebug` hides on
-       * the same condition. */
+       * the same condition. It lives inside the DEV drawer rather than on
+       * the rail, so it is not a `railPart` and keeps its own line. */
       if (this.aimChip) this.aimChip.style.display = this.digMode ? '' : 'none';
-      this.scoopBtn!.style.display = this.digMode ? '' : 'none';
-      this.headingReadout!.style.display = this.digMode ? '' : 'none';
-      this.depthReadout!.style.display = this.digMode ? '' : 'none';
+      /* SCOOP and the two instruments used to be switched here by hand.
+       * They are declared against 'dig' now and this one call hangs the
+       * whole rail — including everything that has to LEAVE. */
+      this.applyHudMode();
       if (!this.digMode) this.input.dig = false;
       /* Digging is aiming, and aiming is done down her own eyes: arming
        * DIG drops into first person with a wide 100° field so the tunnel
@@ -4584,6 +4634,7 @@ export class IslandScene {
       this.camera.updateProjectionMatrix();
     });
     actions.appendChild(dig);
+    this.railPart(dig, 'walk', 'dig', 'pose');
 
     /*
      * THE SHOVEL: hold it and she strokes, each stroke one mouthful along
@@ -4591,8 +4642,8 @@ export class IslandScene {
      * tunnels out of mis-taps, and a scoop this size deserves the intent.
      */
     const scoopBtn = document.createElement('button');
-    scoopBtn.className = 'density-lab-button tm-plate tm-plate-lg';
-    scoopBtn.textContent = 'SCOOP';
+    scoopBtn.className = 'density-lab-button tm-art tm-art-scoop';
+    scoopBtn.setAttribute('aria-label', 'Scoop — hold to dig');
     scoopBtn.style.display = 'none';
     this.scoopBtn = scoopBtn;
     scoopBtn.addEventListener('pointerdown', (e) => {
@@ -4605,6 +4656,7 @@ export class IslandScene {
     scoopBtn.addEventListener('pointercancel', stopDig);
     scoopBtn.addEventListener('lostpointercapture', stopDig);
     actions.appendChild(scoopBtn);
+    this.railPart(scoopBtn, 'dig');
 
 
     /*
@@ -4630,6 +4682,11 @@ export class IslandScene {
     this.aimReadout = document.createElement('div');
     this.aimReadout.className = 'density-lab-aim-readout';
     actions.appendChild(this.aimReadout);
+    /* An AIM readout, so it goes out with the aiming. Walking, it reports
+     * her lean — which is a thing the posture readout says better, in the
+     * mode where it matters — and 29px of rail is the difference between
+     * DIG clearing the MENU plate and climbing into it. */
+    this.railPart(this.aimReadout, 'dig', 'pose');
 
     /*
      * THE OTHER TWO INSTRUMENTS, while the shovel is out.
@@ -4642,13 +4699,13 @@ export class IslandScene {
      */
     this.headingReadout = document.createElement('div');
     this.headingReadout.className = 'density-lab-aim-readout';
-    this.headingReadout.style.display = 'none';
     actions.appendChild(this.headingReadout);
+    this.railPart(this.headingReadout, 'dig');
 
     this.depthReadout = document.createElement('div');
     this.depthReadout.className = 'density-lab-aim-readout';
-    this.depthReadout.style.display = 'none';
     actions.appendChild(this.depthReadout);
+    this.railPart(this.depthReadout, 'dig');
 
 
     /* The PLAN button is gone: the shovel is how tunnels get made now.
@@ -4710,13 +4767,14 @@ export class IslandScene {
     devPanel.appendChild(this.aimChip);
 
     const view = document.createElement('button');
-    view.className = 'density-lab-button tm-plate tm-plate-md';
-    view.textContent = 'VIEW';
+    view.className = 'density-lab-button tm-art tm-art-view';
+    view.setAttribute('aria-label', 'View — first or third person');
     view.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       this.firstPerson = !this.firstPerson;
     });
     actions.appendChild(view);
+    this.railPart(view, 'walk', 'dig', 'pose');
 
     /*
      * CRAWL / WALK / RUN — and on a touch screen it is the ONLY pace there is.
@@ -4749,6 +4807,7 @@ export class IslandScene {
     const cluster = document.createElement('div');
     cluster.className = 'tm-cluster';
     actions.appendChild(cluster);
+    this.railPart(cluster, 'walk');
 
     const plate = (
       name: string, label: string, onPress: (() => void) | null,
@@ -4886,6 +4945,7 @@ export class IslandScene {
     const poseRow = document.createElement('div');
     poseRow.className = 'tm-log-row';
     actions.appendChild(poseRow);
+    this.railPart(poseRow, 'walk', 'pose');
 
     /*
      * Arming is a TAP; centring is a LONG PRESS.
@@ -4899,8 +4959,8 @@ export class IslandScene {
       label: string, mode: 'ride' | 'tilt', title: string,
     ): HTMLButtonElement => {
       const btn = document.createElement('button');
-      btn.className = 'density-lab-button tm-plate tm-plate-md';
-      btn.textContent = label;
+      btn.className = `density-lab-button tm-art tm-art-${mode === 'ride' ? 'ride' : 'tilt'}`;
+      btn.setAttribute('aria-label', label);
       btn.title = title;
       let held: number | null = null;
       let longPressed = false;
@@ -4974,6 +5034,15 @@ export class IslandScene {
       devChip.classList.toggle('is-grip', open);
     });
     actions.appendChild(devChip);
+
+    /* DEV and its drawer are deliberately NOT rail parts. They are
+     * instrumentation, they have their own open/closed state, and a drawer
+     * that vanished when you armed the shovel would be useless precisely
+     * when it is most wanted. */
+
+    /* Hang the opening set. Every `railPart` above is invisible until this
+     * runs, which is why it has to be the last thing the rail does. */
+    this.applyHudMode();
 
     /*
      * WASD for the PC hand (playtest: "I was having trouble moving"):
@@ -5416,7 +5485,16 @@ export class IslandScene {
     bars.className = 'tm-vitals-bars';
     panel.appendChild(bars);
 
+    /*
+     * The icon LABELS the bar; it does not report it. Both are dimmed
+     * together, so a lit heart will mean a real reading the day one exists
+     * and never before.
+     */
     const bar = (kind: string, label: string): HTMLElement => {
+      const row = document.createElement('div');
+      row.className = 'tm-vital';
+      const icon = document.createElement('i');
+      icon.className = `tm-vital-icon tm-vi-${kind}`;
       const el = document.createElement('div');
       /* `is-soon` on every one of them, for now, and it is not a placeholder
        * for a number — it is the statement that there is no number. */
@@ -5426,7 +5504,8 @@ export class IslandScene {
       const fill = document.createElement('div');
       fill.className = 'tm-bar-fill';
       el.appendChild(fill);
-      return el;
+      row.append(icon, el);
+      return row;
     };
 
     bars.appendChild(bar('health', 'Health'));
