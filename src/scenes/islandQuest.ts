@@ -199,19 +199,36 @@ export function buildVitalsHud(host: QuestHost, ): void {
   carry.className = 'tm-meter tm-meter-carry is-soon';
   carry.setAttribute('role', 'img');
   carry.setAttribute('aria-label', 'Carrying — not implemented yet');
-  /* The readout is its own box inside the frame rather than the frame's
-   * padding box: `border-width` has to be whole pixels and the interior
-   * the artist drew is not on whole pixels, so the two can never be made
-   * to agree. The track is placed on the art; see the CSS. */
+  /*
+   * STONE, THEN READOUT, THEN RIM — and the order is the whole point.
+   *
+   * The readout overshoots into the rim and the rim is painted over the top
+   * of it, so the gold hides the join. That is the only arrangement that
+   * cannot show a seam: landing the readout exactly on the frame's boundary
+   * was tried three times and the boundary is a fraction of a pixel wide,
+   * so it either left a black gap or covered the gold.
+   *
+   * The frame is therefore drawn TWICE — the lower pass brings the stone
+   * the art has always carried, the upper pass brings only the rim. A child
+   * always paints above its parent's border, so neither can be the
+   * container's own border-image; both are siblings. See the CSS.
+   */
+  const stone = document.createElement('div');
+  stone.className = 'tm-meter-stone';
   const track = document.createElement('div');
   track.className = 'tm-meter-track';
+  const channel = document.createElement('div');
+  channel.className = 'tm-meter-channel';
   const fill = document.createElement('div');
   fill.className = 'tm-meter-fill';
+  channel.appendChild(fill);
   const label = document.createElement('span');
   label.className = 'tm-meter-label';
   label.textContent = 'CARRY';
-  track.append(fill, label);
-  carry.appendChild(track);
+  track.append(channel, label);
+  const frame = document.createElement('div');
+  frame.className = 'tm-meter-frame';
+  carry.append(stone, track, frame);
   host.hud.appendChild(carry);
 }
 

@@ -1859,7 +1859,16 @@
   background: rgba(8, 6, 4, 0.55);
   background-clip: padding-box;
   border-image-source: url('/ui/frame-bar.webp');
-  border-image-slice: 11 37 16 37 fill;
+  /*
+   * THE SLICE IS NAMED ONCE. `is-soon` has to restate it to drop `fill`,
+   * and a number written twice is a number that goes out of step — which is
+   * exactly what happened to the meter: its bottom slice was corrected in
+   * the base rule, the `is-soon` rule kept the old value, and being the more
+   * specific rule it won. The fix looked applied, the computed style said
+   * otherwise, and the frame went on drawing the wrong bottom.
+   */
+  --bar-slice: 11 37 16 37;
+  border-image-slice: var(--bar-slice) fill;
   border-image-repeat: stretch;
 }
 
@@ -1926,7 +1935,7 @@
    * bar that says "no signal" in a layer nobody can see. Dropping the
    * keyword leaves the middle unpainted and the hatch showing through the
    * frame, which is the whole point of the state. */
-  border-image-slice: 11 37 16 37;
+  border-image-slice: var(--bar-slice);
   background-image: repeating-linear-gradient(
     116deg,
     rgba(247, 226, 176, 0.16) 0 3px,
@@ -1980,8 +1989,19 @@
  * than a vital — the disc is a thing held, the run beside it is how full
  * her mandibles are.
  *
- *     frame-meter  285 x 128    rim 27 top / 26 bottom, medallion 115 wide,
+ *     frame-meter  285 x 128    rim 28 top / 36 bottom, medallion 115 wide,
  *                               right cap 29
+ *
+ * THE BOTTOM WAS 26 AND IT IS 36, which is the whole of a bug reported as
+ * "should see the gold frame at the bottom and I don't". The rim was found
+ * by flood-filling the dark interior, and this frame — like every frame in
+ * the set — has a DARK LOWER LIP outside its bottom rim. The fill ran
+ * through the rim's soft edge into the lip and reported the interior as
+ * ending 10px lower than it does, so the stretched middle was painted over
+ * 9px of gold and the bottom rim rendered as half a pixel of brown against
+ * 5px of gold in the art. `npm run probe:frames` now finds the rim by its
+ * BRIGHTNESS rather than by the dark, and fails loudly on a slice that
+ * lands inside it.
  *
  * Same uniform rule as the bars — height 34 is 128 * 0.2656, and every
  * border is its slice * 0.2656 — so the disc is drawn round rather than
@@ -2006,16 +2026,12 @@
   box-sizing: border-box;
   width: 165px;
   height: 34px;
-  border-style: solid;
-  /* The medallion is the reason this one cannot be fudged. Floored, its
-   * 30.5px came out at 30 and the disc was drawn as an oval — a round thing
-   * going oval is visible at a glance in a way a thin rim is not. Integers
-   * for layout, exact for the art; see the note on `.tm-bar`. */
-  border-width: 8px 8px 7px 31px;
-  border-image-source: url('/ui/frame-meter.webp');
-  border-image-slice: 27 29 26 115 fill;
-  border-image-width: 7.17px 7.7px 6.91px 30.55px;
-  border-image-repeat: stretch;
+  /* Named once, used by the frame layer and by `is-soon`. A slice written
+   * twice is a slice that goes out of step — it already did: the bottom was
+   * corrected in one rule, the other kept the old value and, being more
+   * specific, won. The fix looked applied and the frame went on drawing the
+   * wrong bottom. */
+  --meter-slice: 28 29 36 128;
   color: #f3e2b0;
   font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
   letter-spacing: 0.14em;
@@ -2046,38 +2062,125 @@
  * is placed against the padding box rather than the border box, and hiding
  * that subtraction would make five honest numbers look like five wrong ones.
  */
+/*
+ * THE READOUT GOES UNDERNEATH THE FRAME, and that is the whole trick.
+ *
+ * Three attempts landed the readout ON the frame's boundary and all three
+ * were wrong the same way. That boundary is anti-aliased and it falls on a
+ * fraction of a pixel, so a pixel out one way leaves a BLACK GAP between
+ * fill and gold, and a pixel the other way COVERS the gold. Both were
+ * reported, in that order. There is no third position that is right; the
+ * boundary simply cannot be hit.
+ *
+ * So it is not hit. The readout is drawn first and OVERSHOOTS into the rim,
+ * and the frame is drawn over the top of it — the rim is opaque gold, so it
+ * hides the overshoot exactly. A gap is now impossible because the fill
+ * runs under the gold, and covering the gold is impossible because the gold
+ * is painted last. Nothing has to be measured to a fraction of a pixel.
+ *
+ * The cost is one more element: the frame can no longer be the container's
+ * own border, because a child always paints ABOVE its parent's border. So
+ * the frame is a sibling that comes after — `.tm-meter-frame` below.
+ */
 .tm-meter-track {
   position: absolute;
-  top: calc(7.17px - 8px);
-  right: calc(7.7px - 8px);
-  bottom: calc(6.91px - 7px);
-  left: calc(30.55px - 31px);
+  /*
+   * THE WHOLE BOX, AND THE MASK DECIDES THE SHAPE.
+   *
+   * Four goes at describing this channel with insets and radii were each
+   * off by a pixel somewhere — too wide, no curve at the max, a black
+   * border, then daylight between the stripes and the cap in close-up. The
+   * channel is not a rounded rectangle. It is whatever is left when a
+   * nine-sliced photograph of a gold frame is drawn at 165 x 34, and no
+   * pair of radii describes that.
+   *
+   * So the readout covers the entire box and wears a mask traced from the
+   * frame itself — `npm run gen:meter-mask`, which draws the frame at this
+   * exact size, finds the stone, and dilates by a pixel so the readout runs
+   * UNDER the gold rather than stopping at it. The rim is painted on top,
+   * so the overshoot is hidden and no hairline can survive at the edge.
+   *
+   * Re-run the generator if the meter's size or the frame art changes.
+   */
+  inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  /*
-   * A SOFT END, NOT A CAP. The cap is not the track's to draw — it lives in
-   * the right BORDER tile and the art draws it, so a track that reaches it
-   * paints over the gold instead of filling the stone. Painted solid red to
-   * find that out: it covered the whole right cap and sat proud of the rim.
-   *
-   * So the track stops at the middle tile, and the radius is only enough to
-   * take the blunt corner off where it meets the drawn curve — elliptical,
-   * because the run is five times wider than it is tall and one number
-   * would round the wrong axis.
-   */
-  border-radius: 0 3px 3px 0 / 0 9px 9px 0;
-  overflow: hidden;
+  -webkit-mask-image: url('/ui/mask-meter.png');
+  mask-image: url('/ui/mask-meter.png');
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
 }
+
+/*
+ * The run the level is measured along: from the medallion's tile to the far
+ * end. It exists so a percentage means what it says — the fill is a
+ * percentage of the CHANNEL, not of the whole meter, which would put an
+ * empty bar at 20% and a full one somewhere inside the cap. The mask trims
+ * whatever hangs off the end, so this only has to be roughly right.
+ */
+.tm-meter-channel {
+  position: absolute;
+  left: 34px;
+  right: 0;
+  top: 0;
+  bottom: 0;
+}
+
+
+/*
+ * THE FRAME IS DRAWN TWICE, and the readout goes between the two passes.
+ *
+ * The first attempt at the underlay dropped `fill` and gave the track a flat
+ * colour instead, which lost the stone texture the art brings with it — a
+ * real regression, and a visible one: the interior went from mottled rock to
+ * a dead brown. The stone cannot simply stay on the single frame layer,
+ * because that layer is on TOP of the readout and would paint the stone over
+ * the fill.
+ *
+ * So: STONE below, readout, RIM above. Two passes of the same image with the
+ * same slice and the same widths, differing only in `fill` — the lower pass
+ * paints the middle and the upper one does not. The image is decoded once
+ * and cached, so the second pass costs a draw, not a download.
+ */
+.tm-meter-stone,
+.tm-meter-frame {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  border-style: solid;
+  /* The medallion is the reason these cannot be fudged. Floored, its 30.5px
+   * came out at 30 and the disc was drawn as an oval — a round thing going
+   * oval is visible at a glance in a way a thin rim is not. Integers for
+   * layout, exact for the art; see the note on `.tm-bar`. */
+  border-width: 8px 8px 10px 34px;
+  border-image-source: url('/ui/frame-meter.webp');
+  border-image-width: 7.44px 7.7px 9.56px 34px;
+  border-image-repeat: stretch;
+  pointer-events: none;
+}
+
+/* Below the readout, and the only pass that paints the middle. */
+.tm-meter-stone { border-image-slice: var(--meter-slice) fill; }
+
+/* Above the readout. No `fill`: the middle is the readout's now. */
+.tm-meter-frame { border-image-slice: var(--meter-slice); }
+
 
 /* The level itself. Nothing sets it yet — CARRY is `built: false` — so it
  * is here at zero width rather than absent, because the day it becomes real
  * should be a line that assigns a number, not a new element. */
+/* The level itself, and the ONLY thing that ever moves. Nothing sets it yet
+ * — CARRY is `built: false` — so it sits at zero width rather than being
+ * absent, because the day it becomes real should be a line that assigns a
+ * number, not a new element. No radius: the mask on the track is what gives
+ * it a shape, at both ends and along both rims. */
 .tm-meter-fill {
   position: absolute;
   inset: 0;
   width: 0;
-  border-radius: inherit;
   background: linear-gradient(180deg, #c9a35e 0%, #8a6522 100%);
   transition: width 0.2s ease;
 }
@@ -2086,9 +2189,11 @@
 
 /* The same hatch the vital bars wear, and `fill` dropped from the slice for
  * the same reason: the frame's own stone middle would paint over it. */
+/* Nothing to say about the slice here any more: the frame is its own layer
+ * and never painted the middle in the first place, so the hatch has nowhere
+ * to be covered from. */
 .tm-meter.is-soon {
   opacity: 0.5;
-  border-image-slice: 27 29 26 115;
 }
 
 .tm-meter.is-soon .tm-meter-track {

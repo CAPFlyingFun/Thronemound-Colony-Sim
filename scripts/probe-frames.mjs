@@ -1,5 +1,5 @@
 /**
- * WHERE DOES THE DECORATION END? — the frames' slice numbers, measured.
+ * WHERE DOES THE FRAME END AND THE STONE BEGIN? — the slice numbers.
  *
  *     npm run probe:frames
  *
@@ -8,39 +8,39 @@
  * design of 220x42, because the slice and the border-width were given the
  * same number.
  *
- * A slice is not "how thick is the rim". It is WHERE THE PLAIN RUN STARTS —
- * the point past which the frame is the same all the way along, so stretching
- * it costs nothing. Before that point live the round caps, the carved ends and
- * the corner leaves, and any of those caught inside the stretched middle
- * smears. So:
+ * A slice is where the PLAIN RUN starts — past which the frame repeats, so
+ * stretching it costs nothing. Before it live the round caps, the carved ends
+ * and the corner leaves, and any of those caught in the stretched middle
+ * smears.
  *
- *   1. Flood-fill the dark interior from the centre. A fill, not a threshold
- *      walk — every frame here has shadow OUTSIDE the gold and grain INSIDE
- *      the stone, and both fool a walk that stops at the first dark pixel.
- *   2. Per column, how far down does the interior start? Per row, how far in?
- *   3. The plain run is where those profiles go FLAT. Where they are still
- *      moving, the frame is still drawing something.
+ * HOW IT IS MEASURED, and why not the obvious way. The first version of this
+ * probe flood-filled the dark interior from the centre. That is wrong, and it
+ * was wrong in a way that looked completely plausible: every frame in this
+ * set has a DARK LOWER LIP outside its bottom rim, and the fill ran straight
+ * through the rim's anti-aliased edge into it. It reported the meter's
+ * interior as ending 10px lower than it does, so the bottom slice came out
+ * 26 where it should be 36, and the bottom rim rendered as half a pixel of
+ * brown where there is 5px of gold in the art. Reported as "should see the
+ * gold frame at the bottom and I don't".
  *
- * It also holds the numbers the stylesheet is actually using, and says so
- * when they disagree — so a re-exported sheet that moves a rim by three
- * pixels is a line of output rather than a frame that quietly goes soft.
+ * So the gold is found instead, which is unambiguous: walk in from each edge,
+ * skip the transparent margin, cross the BRIGHT band, and the interior starts
+ * where that band ends. The frame's own rim is the landmark, not the dark.
  */
 import { chromium } from 'playwright';
 import { readFileSync } from 'node:fs';
 
 /*
- * WHAT THE STYLESHEET SAYS TODAY, as `slice: [T, R, B, L]` and where it is
- * used. The toast slices at 30/92 rather than at its own measured rim and
- * end — it was cut by eye before this probe existed, it looks right, and it
- * is recorded as-is rather than quietly retuned.
+ * WHAT THE STYLESHEET SAYS TODAY, as `slice: [T, R, B, L]`. The toast is cut
+ * by eye rather than to these numbers — it was done before this probe
+ * existed, it looks right, and it is recorded as-is rather than retuned.
  */
 const WIRED = {
   'frame-bar': { slice: [11, 37, 16, 37], where: '.tm-bar — the four vitals' },
   'frame-panel': { slice: [24, 27, 30, 28], where: '.tm-quest' },
-  'frame-meter': { slice: [27, 29, 26, 115], where: '.tm-meter — carry' },
+  'frame-meter': { slice: [28, 29, 36, 128], where: '.tm-meter — carry' },
   'frame-toast': { slice: [30, 92, 30, 92], where: '.tm-toast (cut by eye)' },
 };
-const FRAMES = Object.keys(WIRED);
 
 const b = await chromium.launch({
   executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
@@ -48,7 +48,7 @@ const b = await chromium.launch({
 });
 const p = await b.newPage();
 
-for (const name of FRAMES) {
+for (const [name, wired] of Object.entries(WIRED)) {
   const data = readFileSync(new URL(`../public/ui/${name}.webp`, import.meta.url)).toString('base64');
   const out = await p.evaluate(async (b64) => {
     const img = new Image();
@@ -60,59 +60,48 @@ for (const name of FRAMES) {
     g.drawImage(img, 0, 0);
     const { data: px, width: w, height: h } = g.getImageData(0, 0, c.width, c.height);
 
-    /* FULLY opaque, not just mostly. The drop shadow outside the gold is dark
-     * AND soft, so `alpha > 200` lets the fill escape the frame entirely and
-     * run around the outside — which is what made the meter report a 2px
-     * bottom rim on a frame whose bottom rim is plainly not 2px. */
-    const dark = (x, y) => {
+    const at = (x, y) => {
       const i = (y * w + x) * 4;
-      if (px[i + 3] < 252) return false;
-      return 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2] < 78;
+      return {
+        a: px[i + 3],
+        lum: 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2],
+      };
+    };
+    const solid = (x, y) => at(x, y).a > 200;
+    const gold = (x, y) => { const q = at(x, y); return q.a > 200 && q.lum > 90; };
+
+    /*
+     * Walk in along one axis: skip the transparent margin, cross the bright
+     * rim, and report the inset of the first stone pixel after it. Returns
+     * -1 if the line never crosses a rim into stone, which is what a corner
+     * ornament or the end of a cap looks like.
+     */
+    const insetOf = (make, n) => {
+      let seenGold = false;
+      for (let i = 0; i < n; i++) {
+        const [x, y] = make(i);
+        if (!solid(x, y)) { if (seenGold) return -1; continue; }
+        if (gold(x, y)) { seenGold = true; continue; }
+        if (seenGold) return i;
+      }
+      return -1;
     };
 
-    /* 1. FLOOD FILL the interior from the middle. */
-    const mask = new Uint8Array(w * h);
     const cx = Math.floor(w / 2); const cy = Math.floor(h / 2);
-    const stack = [[cx, cy]];
-    mask[cy * w + cx] = 1;
-    while (stack.length) {
-      const [x, y] = stack.pop();
-      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const nx = x + dx; const ny = y + dy;
-        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-        const k = ny * w + nx;
-        if (mask[k] || !dark(nx, ny)) continue;
-        mask[k] = 1; stack.push([nx, ny]);
-      }
-    }
+    const colTop = (x) => insetOf((i) => [x, i], h);
+    const colBot = (x) => insetOf((i) => [x, h - 1 - i], h);
+    const rowLeft = (y) => insetOf((i) => [i, y], w);
+    const rowRight = (y) => insetOf((i) => [w - 1 - i, y], w);
 
-    /* 2. EDGE PROFILES of the filled region. */
-    const colTop = new Int32Array(w).fill(-1);
-    const colBot = new Int32Array(w).fill(-1);
-    const rowLeft = new Int32Array(h).fill(-1);
-    const rowRight = new Int32Array(h).fill(-1);
-    for (let x = 0; x < w; x++) {
-      for (let y = 0; y < h; y++) if (mask[y * w + x]) { colTop[x] = y; break; }
-      for (let y = h - 1; y >= 0; y--) if (mask[y * w + x]) { colBot[x] = h - 1 - y; break; }
-    }
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) if (mask[y * w + x]) { rowLeft[y] = x; break; }
-      for (let x = w - 1; x >= 0; x--) if (mask[y * w + x]) { rowRight[y] = w - 1 - x; break; }
-    }
-
-    /* 3. WHERE THE PROFILE GOES FLAT. The plateau value is the thinnest the
-     * rim ever gets (the middle of a straight run); the slice is the first
-     * index from each end at which the profile has settled onto it and
-     * STAYS there — a lone pixel that happens to hit the plateau inside an
-     * ornament does not end the ornament. */
+    /*
+     * The plain run: where the interior's edge stops moving. Scanned from
+     * each side, requiring a settled stretch so a single pixel that happens
+     * to match inside an ornament does not end the ornament early.
+     */
     const settle = (prof, from, dir) => {
-      const seen = [...prof].filter((v) => v >= 0).sort((a, b) => a - b);
+      const seen = [...prof].filter((v) => v >= 0).sort((a, b2) => a - b2);
       if (!seen.length) return -1;
-      /* The plateau is the run's own thickness, taken as the low quartile
-       * rather than the minimum — one anti-aliased pixel a shade darker than
-       * its neighbours is not a thinner rim. Tolerance of 2 for the same
-       * reason: these are photographs of gold, not vector art. */
-      const plateau = seen[Math.floor(seen.length * 0.25)];
+      const plateau = seen[Math.floor(seen.length * 0.5)];
       const n = prof.length; const RUN = 14; let run = 0;
       for (let i = from; i >= 0 && i < n; i += dir) {
         if (prof[i] >= 0 && Math.abs(prof[i] - plateau) <= 2) {
@@ -122,53 +111,47 @@ for (const name of FRAMES) {
       }
       return -1;
     };
-    const coarse = (prof) => {
-      const step = Math.max(1, Math.round(prof.length / 24));
-      const out = [];
-      for (let i = 0; i < prof.length; i += step) out.push(prof[i]);
-      return out.join(' ');
-    };
+    const colTopProf = []; const rowLeftProf = [];
+    for (let x = 0; x < w; x++) colTopProf.push(colTop(x));
+    for (let y = 0; y < h; y++) rowLeftProf.push(rowLeft(y));
+
     return {
       w, h,
-      sliceLeft: settle(rowLeft, 0, 1) >= 0 ? settle(colTop, 0, 1) : -1,
-      left: settle(colTop, 0, 1),
-      right: settle(colTop, w - 1, -1),
-      top: settle(rowLeft, 0, 1),
-      bottom: settle(rowLeft, h - 1, -1),
-      rimTop: Math.min(...[...colTop].filter((v) => v >= 0)),
-      rimBottom: Math.min(...[...colBot].filter((v) => v >= 0)),
-      rimLeft: Math.min(...[...rowLeft].filter((v) => v >= 0)),
-      rimRight: Math.min(...[...rowRight].filter((v) => v >= 0)),
-      interiorRows: [...rowLeft].filter((v) => v >= 0).length,
-      interiorCols: [...colTop].filter((v) => v >= 0).length,
-      profTop: coarse(colTop), profLeft: coarse(rowLeft),
+      /* Measured on the centre lines, which for every frame here run down
+       * and along the plain part. */
+      rim: { top: colTop(cx), bottom: colBot(cx), left: rowLeft(cy), right: rowRight(cy) },
+      decoration: {
+        left: settle(colTopProf, 0, 1),
+        right: settle(colTopProf, w - 1, -1),
+        top: settle(rowLeftProf, 0, 1),
+        bottom: settle(rowLeftProf, h - 1, -1),
+      },
     };
   }, data);
 
-  const wired = WIRED[name];
   console.log(`\n${name}  ${out.w} x ${out.h}   ${wired.where}`);
-  console.log(`  thinnest rim   : T ${out.rimTop}  B ${out.rimBottom}  L ${out.rimLeft}  R ${out.rimRight}`);
-  console.log(`  decoration ends: T ${out.top}  R ${out.right}  B ${out.bottom}  L ${out.left}`);
-  console.log(`  wired slice    : ${wired.slice.join(' ')}   (T R B L)`);
+  console.log(`  stone starts at : T ${out.rim.top}  R ${out.rim.right}  B ${out.rim.bottom}  L ${out.rim.left}`);
+  console.log(`  decoration ends : T ${out.decoration.top}  R ${out.decoration.right}  B ${out.decoration.bottom}  L ${out.decoration.left}`);
+  console.log(`  wired slice     : ${wired.slice.join(' ')}   (T R B L)`);
 
   /*
-   * A slice may sit at the rim or at the decoration, and both are correct —
+   * A slice may sit at the rim or out at the decoration and both are right —
    * the bars slice top and bottom at the RIM so the fill lands on the stone,
    * and left and right at the CAP so the curve is not stretched. What is
-   * never correct is a slice SHORTER than the decoration on an edge that
-   * stretches, because that is the smear. Only those are called out.
+   * never right is a slice INSIDE the rim, because then the stretched middle
+   * is painted over the frame's own gold and the rim goes thin or vanishes.
    */
-  const measured = [out.top, out.right, out.bottom, out.left];
-  const rim = [out.rimTop, out.rimRight, out.rimBottom, out.rimLeft];
+  const rim = [out.rim.top, out.rim.right, out.rim.bottom, out.rim.left];
   const EDGE = ['top', 'right', 'bottom', 'left'];
+  let clean = true;
   for (let i = 0; i < 4; i++) {
-    const w = wired.slice[i];
-    if (w < rim[i]) console.log(`  !! ${EDGE[i]} slice ${w} is inside the rim (${rim[i]}) — the frame will be cut`);
-    else if (w < measured[i] && w > rim[i] + 2) {
-      console.log(`  ?  ${EDGE[i]} slice ${w} is short of the decoration (${measured[i]})`);
+    const wv = wired.slice[i]; const rv = rim[i];
+    if (rv >= 0 && wv < rv - 1) {
+      console.log(`  !! ${EDGE[i]} slice ${wv} is INSIDE the rim (stone starts at ${rv}) — that much gold is painted over`);
+      clean = false;
     }
   }
-  if (measured.some((v) => v < 0)) console.log('  ?  an edge never went flat — the frame may have no plain run');
+  if (clean) console.log('  ok — every slice is at or outside the rim');
 }
 
 await b.close();
