@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 
+import './sandboxTouch.css';
 import { QueenModel } from '../../anim/QueenModel';
 import { FOOT_CLEARANCE_MM } from '../../anim/legDrive';
 import {
@@ -53,6 +54,18 @@ const CLOD_SIZE_MM = 3.2;
 const CLOD_GRAB_RANGE_MM = 13;
 const CLOD_DROP_AHEAD_MM = 7;
 const CARRY_FOLLOW_RATE = 18;
+
+/** How far the touch stick's knob travels before it reads as full tilt. */
+const STICK_RADIUS = 48;
+/**
+ * Radians of head aim per pixel of drag on the right half.
+ *
+ * Sized against the arrow keys rather than picked: they sweep at 1.5 rad/s,
+ * so a brisk half-second press is about 0.75 rad. This puts that same sweep
+ * in roughly a 190-pixel drag — a comfortable thumb's travel on a phone,
+ * and the clamps (±45° yaw, ±30° pitch) stop it either way.
+ */
+const HEAD_DRAG_RATE = 0.004;
 
 const TERRAIN: TerrainOptions = {
   surfaceY: SURFACE_Y,
@@ -162,6 +175,33 @@ export class AntMechanicsSandbox {
   private heldClod: THREE.Mesh | null = null;
   private readonly carryTarget = new THREE.Vector3();
 
+  /* ------------------------------------------------------- the thumb layer */
+
+  /** The stick's contribution, in the same -1..1 the keys produce. */
+  private touchWalk = 0;
+
+  private touchTurn = 0;
+
+  private stickPointer: number | null = null;
+
+  private stickOrigin = { x: 0, y: 0 };
+
+  /** While latched, the right half orbits the camera instead of aiming her
+   *  head. Off by default: aiming is what this room is for. */
+  private camLatch = false;
+
+  private hud: HTMLDivElement | null = null;
+
+  private stickEl: HTMLDivElement | null = null;
+
+  private stickKnob: HTMLDivElement | null = null;
+
+  private digBtn: HTMLButtonElement | null = null;
+
+  private grabBtn: HTMLButtonElement | null = null;
+
+  private camBtn: HTMLButtonElement | null = null;
+
   private disposed = false;
 
   constructor(host: HTMLElement) {
@@ -245,9 +285,127 @@ export class AntMechanicsSandbox {
     this.renderer.domElement.addEventListener('pointercancel', this.onOrbitUp);
     this.renderer.domElement.addEventListener('wheel', this.onWheel, { passive: false });
 
+    this.buildTouchHud();
     this.resize();
+    /* Reachable from a console and from a probe, the way the island scene
+     * is — a room whose controls cannot be driven from a test is a room
+     * whose controls get verified by hand, once, and then trusted. */
+    (window as unknown as { antSandbox?: unknown }).antSandbox = this;
     this.ready = true;
     this.animate();
+  }
+
+  /** Where she is and where she is looking — for a probe. */
+  probeForTest(): {
+    x: number; z: number; facing: number; headYaw: number; headPitch: number;
+    digging: boolean; carrying: boolean;
+  } {
+    return {
+      x: this.antPos.x,
+      z: this.antPos.z,
+      facing: this.facing,
+      headYaw: this.headYaw,
+      headPitch: this.headPitch,
+      digging: this.session.digging !== null,
+      carrying: this.heldClod !== null,
+    };
+  }
+
+  /**
+   * THE ON-SCREEN CONTROLS — the same actions the keys fire, nothing new.
+   *
+   * Every button calls the method the key calls, so there is one definition
+   * of what DIG means and the two input routes cannot drift apart. Built
+   * unconditionally rather than sniffing for a touch screen: a desktop
+   * player loses nothing by having them, and a "is this mobile" test is a
+   * thing that is wrong on somebody's device.
+   */
+  private buildTouchHud(): void {
+    this.host.classList.add('tms-host');
+    const hud = document.createElement('div');
+    hud.className = 'tms-hud';
+
+    const stick = document.createElement('div');
+    stick.className = 'tms-stick';
+    stick.style.display = 'none';
+    const knob = document.createElement('div');
+    knob.className = 'tms-stick-knob';
+    stick.appendChild(knob);
+    hud.appendChild(stick);
+
+    const actions = document.createElement('div');
+    actions.className = 'tms-actions';
+
+    const button = (
+      label: string, big: boolean, onPress: () => void,
+    ): HTMLButtonElement => {
+      const b = document.createElement('button');
+      b.className = `tms-btn${big ? ' is-big' : ''}`;
+      b.textContent = label;
+      /* pointerdown, not click: a click waits to see whether the touch was
+       * a drag, and a shovel that answers 300 ms late feels broken. */
+      b.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onPress();
+      });
+      actions.appendChild(b);
+      return b;
+    };
+
+    this.digBtn = button('\u{1FA8F}', true, () => this.toggleDigAction());
+    this.grabBtn = button('\u{270B}', true, () => this.grabAction());
+    this.camBtn = button('CAM', false, () => {
+      this.camLatch = !this.camLatch;
+      this.refreshTouchChips();
+    });
+    button('RESET', false, () => this.recentreCamera());
+
+    hud.appendChild(actions);
+
+    const hint = document.createElement('div');
+    hint.className = 'tms-hint';
+    hint.textContent = 'left half: move · right half: aim her head'
+      + ' · CAM: orbit instead';
+    hud.appendChild(hint);
+
+    this.host.appendChild(hud);
+    this.hud = hud;
+    this.stickEl = stick;
+    this.stickKnob = knob;
+    this.refreshTouchChips();
+  }
+
+  /** DIG latches while a dig is locked; CAM latches while it owns the drag. */
+  private refreshTouchChips(): void {
+    this.digBtn?.classList.toggle('is-on', this.session.digging !== null);
+    this.grabBtn?.classList.toggle('is-on', this.heldClod !== null);
+    this.camBtn?.classList.toggle('is-on', this.camLatch);
+  }
+
+  private showStick(x: number, y: number, dx: number, dy: number): void {
+    if (!this.stickEl || !this.stickKnob) return;
+    this.stickEl.style.left = `${x}px`;
+    this.stickEl.style.top = `${y}px`;
+    this.stickEl.style.display = '';
+    this.stickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
+  }
+
+  /* Pointer capture is best-effort. A synthetic event, a pointer the browser
+   * has already forgotten, an id from a device that has gone away — all of
+   * them throw, and none of them should take the frame down with them. */
+  private capture(id: number): void {
+    try { this.renderer.domElement.setPointerCapture(id); } catch { /* fine */ }
+  }
+
+  private release(id: number): void {
+    try { this.renderer.domElement.releasePointerCapture(id); } catch { /* fine */ }
+  }
+
+  private hideStick(): void {
+    if (!this.stickEl || !this.stickKnob) return;
+    this.stickEl.style.display = 'none';
+    this.stickKnob.style.transform = 'translate(0px, 0px)';
   }
 
   dispose(): void {
@@ -264,6 +422,9 @@ export class AntMechanicsSandbox {
     this.renderer.domElement.removeEventListener('pointerup', this.onOrbitUp);
     this.renderer.domElement.removeEventListener('pointercancel', this.onOrbitUp);
     this.renderer.domElement.removeEventListener('wheel', this.onWheel);
+
+    this.hud?.remove();
+    this.hud = null;
 
     for (const mesh of this.meshes.values()) {
       this.terrainRoot.remove(mesh);
@@ -465,30 +626,40 @@ export class AntMechanicsSandbox {
       event.preventDefault();
     }
 
-    // Match DigScene's action behavior: press starts a locked dig; press again cancels.
-    if (code === 'space' && !event.repeat) {
-      if (this.session.digging) {
-        this.session.cancelDig();
-        this.digPreview.visible = false;
-      } else {
-        this.startReachableDig();
-      }
-    }
-
-    if (code === 'keye' && !event.repeat && !this.session.digging) {
-      if (this.heldClod) this.dropHeldClod();
-      else this.tryGrabClod();
-    }
-
-    // R returns to a familiar rear chase view after free orbiting.
-    if (code === 'keyr' && !event.repeat) {
-      this.orbitYaw = 0;
-      this.orbitPitch = CAM_PITCH;
-      this.orbitDistance = CAM_DIST_MM;
-    }
+    /* The three ACTIONS live in their own methods so the on-screen buttons
+     * press exactly what the keys press. Two code paths for one action is
+     * how a control ends up behaving differently depending on which hand
+     * you used. */
+    if (code === 'space' && !event.repeat) this.toggleDigAction();
+    if (code === 'keye' && !event.repeat) this.grabAction();
+    if (code === 'keyr' && !event.repeat) this.recentreCamera();
 
     this.keys.add(code);
   };
+
+  /** Press starts a locked dig; press again cancels. DigScene's behaviour. */
+  private toggleDigAction(): void {
+    if (this.session.digging) {
+      this.session.cancelDig();
+      this.digPreview.visible = false;
+    } else {
+      this.startReachableDig();
+    }
+  }
+
+  /** Hands full? put it down. Hands empty? pick the nearest one up. */
+  private grabAction(): void {
+    if (this.session.digging) return;
+    if (this.heldClod) this.dropHeldClod();
+    else this.tryGrabClod();
+  }
+
+  /** Back to a familiar rear chase view after free orbiting. */
+  private recentreCamera(): void {
+    this.orbitYaw = 0;
+    this.orbitPitch = CAM_PITCH;
+    this.orbitDistance = CAM_DIST_MM;
+  }
 
   private readonly onKeyUp = (event: KeyboardEvent): void => {
     this.keys.delete(event.code.toLowerCase());
@@ -497,36 +668,90 @@ export class AntMechanicsSandbox {
   private readonly onBlur = (): void => {
     this.keys.clear();
     this.session.cancelDig();
+    /* The stick goes with them. A finger that left while the tab did has no
+     * pointerup coming, and she would walk on for ever. */
+    this.stickPointer = null;
+    this.touchWalk = 0;
+    this.touchTurn = 0;
+    this.hideStick();
   };
 
+  /*
+   * ONE PLACE DECIDES WHAT A DRAG MEANS, and the screen is split the way
+   * the island splits it: the LEFT half is the stick, the RIGHT half is the
+   * aim. A player who has held the island already knows this room.
+   *
+   * The right half AIMS HER HEAD — it is the arrow keys, which is what was
+   * asked for ("the mouse pan as the arrow keys"), and it is the right
+   * default because head aim is what this room exists to exercise: the dig
+   * and the grab both work off where her jaws point. Orbiting the camera is
+   * still there, on the CAM latch, because a room you cannot look around is
+   * not much of a sandbox.
+   */
   private readonly onOrbitDown = (event: PointerEvent): void => {
-    // Mouse/touch drag orbits the camera. Ant movement remains ant-relative.
+    const half = (this.host.clientWidth || window.innerWidth) * 0.5;
+    if (event.clientX < half) {
+      if (this.stickPointer !== null) return;
+      this.stickPointer = event.pointerId;
+      this.stickOrigin = { x: event.clientX, y: event.clientY };
+      this.showStick(event.clientX, event.clientY, 0, 0);
+      this.capture(event.pointerId);
+      return;
+    }
     if (this.orbitPointer !== null) return;
-
     this.orbitPointer = event.pointerId;
     this.orbitLast = { x: event.clientX, y: event.clientY };
-    this.renderer.domElement.setPointerCapture?.(event.pointerId);
+    this.capture(event.pointerId);
   };
 
   private readonly onOrbitMove = (event: PointerEvent): void => {
+    if (event.pointerId === this.stickPointer) {
+      const dx = Math.max(-STICK_RADIUS, Math.min(STICK_RADIUS,
+        event.clientX - this.stickOrigin.x));
+      const dy = Math.max(-STICK_RADIUS, Math.min(STICK_RADIUS,
+        event.clientY - this.stickOrigin.y));
+      /* Up the screen walks her forward; across TURNS her, matching W/S and
+       * A/D rather than inventing a third meaning for sideways. */
+      this.touchWalk = -dy / STICK_RADIUS;
+      this.touchTurn = -dx / STICK_RADIUS;
+      this.showStick(this.stickOrigin.x, this.stickOrigin.y, dx, dy);
+      return;
+    }
     if (event.pointerId !== this.orbitPointer) return;
 
     const dx = event.clientX - this.orbitLast.x;
     const dy = event.clientY - this.orbitLast.y;
     this.orbitLast = { x: event.clientX, y: event.clientY };
 
-    this.orbitYaw -= dx * ORBIT_DRAG_YAW;
-    this.orbitPitch = THREE.MathUtils.clamp(
-      this.orbitPitch + dy * ORBIT_DRAG_PITCH,
-      CAM_MIN_PITCH,
-      CAM_MAX_PITCH,
-    );
+    if (this.camLatch) {
+      this.orbitYaw -= dx * ORBIT_DRAG_YAW;
+      this.orbitPitch = THREE.MathUtils.clamp(
+        this.orbitPitch + dy * ORBIT_DRAG_PITCH,
+        CAM_MIN_PITCH,
+        CAM_MAX_PITCH,
+      );
+      return;
+    }
+    /* Her head, on the same clamps the arrow keys answer to — applied in
+     * `animate`, so there is still exactly one place that bounds them. */
+    this.headYaw -= dx * HEAD_DRAG_RATE;
+    this.headPitch -= dy * HEAD_DRAG_RATE;
   };
 
   private readonly onOrbitUp = (event: PointerEvent): void => {
+    if (event.pointerId === this.stickPointer) {
+      this.release(event.pointerId);
+      this.stickPointer = null;
+      /* A stick whose finger vanished — capture stolen, tab hidden — must
+       * not leave her walking. The island learned this one twice. */
+      this.touchWalk = 0;
+      this.touchTurn = 0;
+      this.hideStick();
+      return;
+    }
     if (event.pointerId !== this.orbitPointer) return;
 
-    this.renderer.domElement.releasePointerCapture?.(event.pointerId);
+    this.release(event.pointerId);
     this.orbitPointer = null;
   };
 
@@ -826,13 +1051,24 @@ export class AntMechanicsSandbox {
 
     const dt = Math.min(this.clock.getDelta(), 0.05);
 
-    const walk =
+    /* Keys OR stick, whichever is actually being asked for — clamped so
+     * holding both cannot double her pace. */
+    const walk = THREE.MathUtils.clamp(
       (this.keys.has('keyw') ? 1 : 0)
-      - (this.keys.has('keys') ? 1 : 0);
+      - (this.keys.has('keys') ? 1 : 0)
+      + this.touchWalk, -1, 1,
+    );
 
-    const turn =
+    const turn = THREE.MathUtils.clamp(
       (this.keys.has('keya') ? 1 : 0)
-      - (this.keys.has('keyd') ? 1 : 0);
+      - (this.keys.has('keyd') ? 1 : 0)
+      + this.touchTurn, -1, 1,
+    );
+
+    /* The latches are driven by state rather than by the taps that set it:
+     * a dig ends on its own, and a carried clod is dropped by the same
+     * button that picked it up. */
+    this.refreshTouchChips();
 
     const headAimSpeed = 1.5;
     if (this.keys.has('arrowleft')) this.headYaw += headAimSpeed * dt;
