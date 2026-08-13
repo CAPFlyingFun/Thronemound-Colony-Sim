@@ -141,12 +141,48 @@ export function readFlick(s: Swipe, t: typeof FLICK = FLICK): DodgeDir | null {
   /* Straight enough: a flick's displacement is most of its path. */
   if (s.travelPx > reach * 1.6) return null;
   if ((reach / s.ms) * 1000 < t.minPxPerSec) return null;
+  return aimOf(s.dx, s.dy, t);
+}
 
-  const ax = Math.abs(s.dx);
-  const ay = Math.abs(s.dy);
-  if (ax > ay * t.axisBias) return s.dx > 0 ? 'right' : 'left';
+/**
+ * WHICH WAY A DRAG POINTS — the axis rule, on its own.
+ *
+ * Pulled out of `readFlick` so the DODGE BUTTON can share it. The button
+ * asks a different question about WHETHER a gesture counts (see
+ * `readNudge`) and must give the identical answer about which way it went,
+ * or the same thumb movement would dodge left off the button and forward
+ * off the screen. One rule, two callers.
+ */
+export function aimOf(dx: number, dy: number, t: typeof FLICK = FLICK): DodgeDir {
+  const ax = Math.abs(dx);
+  const ay = Math.abs(dy);
+  if (ax > ay * t.axisBias) return dx > 0 ? 'right' : 'left';
   /* Screen y grows DOWNWARD, so a drag up is negative. */
-  return s.dy < 0 ? 'forward' : 'back';
+  return dy < 0 ? 'forward' : 'back';
+}
+
+/** How far a thumb must travel off the DODGE plate to mean a direction. */
+export const NUDGE_PX = 18;
+
+/**
+ * THE BUTTON'S GESTURE, which is deliberately NOT the flick's.
+ *
+ * The swipe reader has to tell a dodge apart from a look, because they
+ * happen on the same patch of glass — hence the speed gate, the duration
+ * cap and the straightness test. On a dedicated button none of that
+ * ambiguity exists: the finger came down on DODGE, so it already said what
+ * it wants and only has left to say which way. Requiring it to also be
+ * FAST would reject the deliberate, aimed press this control is for, and
+ * "I pressed the dodge button and nothing happened" is the worst outcome
+ * available.
+ *
+ * So: displacement only, small threshold, no clock. `null` if the thumb
+ * stayed put — a tap is not a direction, and guessing one would send her
+ * somewhere the player did not ask for.
+ */
+export function readNudge(dx: number, dy: number): DodgeDir | null {
+  if (Math.hypot(dx, dy) < NUDGE_PX) return null;
+  return aimOf(dx, dy);
 }
 
 /** What the scene should be moving her by, this frame. */

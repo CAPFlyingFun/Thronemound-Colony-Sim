@@ -47,7 +47,7 @@ import { addNode } from '../nest/nestEdit';
 import { type NestPlan } from '../nest/nestPlan';
 import { chamberBox, chamberNorm, type ChamberBox } from './ChamberMovement';
 import { BoreRig, YAW_RATE } from './BoreControl';
-import { Dodge, readFlick } from './dodge';
+import { Dodge, readFlick, readNudge } from './dodge';
 import {
   CLEARANCE_MM, GASTER_RIDE_MM, posture, PROBES, Spine,
   type SpinePose, type SpineReading,
@@ -422,9 +422,32 @@ export class IslandScene {
     this.input.sprint = now === 2;
     this.input.crawl = now === 0;
     if (this.paceChip) this.paceChip.textContent = PACE_NAMES[this.pace];
-    /* The plate carries the state the chip used to spell out: lit while she
-     * is running, so the latch is readable without a second control. */
-    this.sprintBtn?.classList.toggle('is-grip', this.pace === 2);
+    /*
+     * THE PLATE WEARS THE PACE IT IS IN, not a light for one of three.
+     *
+     * Lighting it only on RUN left crawl and walk drawing the identical
+     * button, so two of the three states were indistinguishable and the
+     * plate said WALK while she crawled. Found in an audit of the room, and
+     * it is the thing that made "we already have SPRINT, we don't need
+     * CRAWL" wrong: a three-state latch has to be able to show three states.
+     *
+     * WALK and RUN have their own art. CRAWL does not yet, so it falls back
+     * to the lettered blank plate rather than borrowing a picture that says
+     * the wrong word — the same stand-in DODGE is using, and it is never
+     * wrong, only plainer.
+     */
+    const btn = this.sprintBtn;
+    if (btn) {
+      const art = this.pace === 2 ? 'sprint' : this.pace === 1 ? 'walk' : null;
+      btn.className = art
+        ? `density-lab-button tm-art tm-art-${art}`
+        : 'density-lab-button tm-plate tm-plate-md';
+      btn.textContent = art ? '' : 'CRAWL';
+      btn.setAttribute('aria-label', `Pace — ${PACE_NAMES[this.pace]}`);
+      /* Lit on RUN still: it is the pace with a cost, and the one worth
+       * seeing from the corner of an eye. */
+      btn.classList.toggle('is-grip', this.pace === 2);
+    }
   }
 
   /** Shift runs and C crawls, both held; the chip latches. The keys match
@@ -4773,8 +4796,83 @@ export class IslandScene {
       e.preventDefault();
       this.firstPerson = !this.firstPerson;
     });
-    actions.appendChild(view);
+    /*
+     * ONE WRAPPING CLUSTER, NOT SIX STACKED ROWS.
+     *
+     * VIEW, DODGE, RIDE and TILT were each taking a rail row to hold one
+     * 62px plate, and six rows of one do not fit a 430px-tall phone: walk
+     * mode measured 400px of content in a 324px budget, which flex pays for
+     * by quietly squashing whichever row is least protected.
+     *
+     * They are all the same size and they all wrap, so they belong in the
+     * same box. Mode visibility is per-PLATE rather than per-row, so the
+     * cluster simply holds fewer of them in dig mode and shrinks to suit.
+     */
+    const cluster = document.createElement('div');
+    cluster.className = 'tm-cluster';
+    actions.appendChild(cluster);
+
+    cluster.appendChild(view);
     this.railPart(view, 'walk', 'dig', 'pose');
+
+    /*
+     * DODGE — A BUTTON YOU SWIPE, not a button you press.
+     *
+     * The evade already exists and has only ever had one way in: a flick
+     * across the open canvas. That gesture is off in first person and off
+     * with DIG armed, because in her own eyes a drag turns HER and lining
+     * up a bite is a dozen quick short strokes that all look exactly like
+     * flicks. Which is a sound decision and leaves a real hole: from inside
+     * her own head there is currently NO WAY TO DODGE AT ALL.
+     *
+     * A dedicated plate closes it, and it takes the direction the same way
+     * the canvas does — "press and swipe and release in the direction of
+     * dodge" — because a dodge with no direction is not a dodge. What it
+     * does NOT copy is the flick's speed and duration gates: those exist to
+     * tell an evade apart from a look, and on a button that was down on
+     * DODGE there is nothing to tell apart. See `readNudge`.
+     *
+     * The pointer is captured, so the thumb may finish the stroke anywhere
+     * on the glass; only where it STARTED has to be the button.
+     */
+    const dodgeBtn = document.createElement('button');
+    dodgeBtn.className = 'density-lab-button tm-plate tm-plate-md tm-dodge';
+    dodgeBtn.textContent = 'DODGE';
+    dodgeBtn.title = 'Dodge — press, swipe the way you want to go, release.';
+    const nudge = { x: 0, y: 0, id: -1 };
+    dodgeBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      try { dodgeBtn.setPointerCapture(e.pointerId); } catch { /* fine */ }
+      nudge.id = e.pointerId;
+      nudge.x = e.clientX;
+      nudge.y = e.clientY;
+      dodgeBtn.classList.add('is-grip');
+    });
+    const endNudge = (e: PointerEvent): void => {
+      if (e.pointerId !== nudge.id) return;
+      nudge.id = -1;
+      dodgeBtn.classList.remove('is-grip');
+      const dir = readNudge(e.clientX - nudge.x, e.clientY - nudge.y);
+      /* A tap is not a direction. Guessing one would send her somewhere
+       * the player did not ask to go, which on a control whose whole job
+       * is escaping something is the worst possible failure. */
+      if (dir) this.dodge.start(dir, MM);
+    };
+    dodgeBtn.addEventListener('pointerup', endNudge);
+    dodgeBtn.addEventListener('pointercancel', () => {
+      nudge.id = -1;
+      dodgeBtn.classList.remove('is-grip');
+    });
+    cluster.appendChild(dodgeBtn);
+    /*
+     * Not in dig mode, and that is not an oversight: arming DIG already
+     * CANCELS a burst in flight, deliberately, because a dodge mid-stroke
+     * carries her off the spot she was lining up. Handing her a dodge
+     * button in there would quietly reverse a decision someone made on
+     * purpose. Available walking and while setting her body, which is
+     * where the swipe cannot reach.
+     */
+    this.railPart(dodgeBtn, 'walk', 'pose');
 
     /*
      * CRAWL / WALK / RUN — and on a touch screen it is the ONLY pace there is.
@@ -4804,10 +4902,9 @@ export class IslandScene {
      * actually have, not at the density of the subset that happens to work
      * today. The ones without systems behind them carry `is-soon`.
      */
-    const cluster = document.createElement('div');
-    cluster.className = 'tm-cluster';
-    actions.appendChild(cluster);
-    this.railPart(cluster, 'walk');
+    /* Already built, above — the single plates join it rather than each
+     * taking a rail row of their own. */
+
 
     const plate = (
       name: string, label: string, onPress: (() => void) | null,
@@ -4820,6 +4917,10 @@ export class IslandScene {
         b.addEventListener('pointerdown', (e) => { e.preventDefault(); onPress(); });
       }
       cluster.appendChild(b);
+      /* Per PLATE, not per row: these four are about her legs and jaws out
+       * in the world, so they leave when the shovel comes out or the stick
+       * starts driving her body — while VIEW, sharing the same box, stays. */
+      this.railPart(b, 'walk');
       return b;
     };
 
@@ -4944,8 +5045,10 @@ export class IslandScene {
      */
     const poseRow = document.createElement('div');
     poseRow.className = 'tm-log-row';
+    /* The row survives only to carry the live pose numbers now that its
+     * two chips have moved into the cluster. */
     actions.appendChild(poseRow);
-    this.railPart(poseRow, 'walk', 'pose');
+    this.railPart(poseRow, 'pose');
 
     /*
      * Arming is a TAP; centring is a LONG PRESS.
@@ -4994,7 +5097,8 @@ export class IslandScene {
         if (held !== null) { window.clearTimeout(held); held = null; }
         e.preventDefault();
       });
-      poseRow.appendChild(btn);
+      cluster.appendChild(btn);
+      this.railPart(btn, 'walk', 'pose');
       return btn;
     };
     /*

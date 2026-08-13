@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  DEFAULT_DODGE, Dodge, FLICK, readFlick, type Swipe,
+  DEFAULT_DODGE, Dodge, FLICK, NUDGE_PX, readFlick, readNudge, type Swipe,
 } from '../src/scenes/dodge';
 
 const MM = 5;
@@ -187,5 +187,51 @@ describe('the burst it starts', () => {
     d.cancel();
     expect(d.active).toBe(false);
     expect(d.sample(1 / 60).authority).toBe(0);
+  });
+});
+
+/*
+ * THE DODGE BUTTON'S GESTURE. It answers a different question about
+ * WHETHER a drag counts and must answer the identical one about WHICH WAY,
+ * or the same thumb movement would dodge left off the plate and forward
+ * off the canvas.
+ */
+describe('reading a nudge off the dodge button', () => {
+  it('names the four directions the way the flick reader does', () => {
+    expect(readNudge(60, 0)).toBe('right');
+    expect(readNudge(-60, 0)).toBe('left');
+    /* Screen y grows downward: a drag UP is forward. */
+    expect(readNudge(0, -60)).toBe('forward');
+    expect(readNudge(0, 60)).toBe('back');
+  });
+
+  it('agrees with the flick reader on every direction it accepts', () => {
+    for (const [dx, dy] of [[60, 0], [-60, 0], [0, -60], [0, 60],
+      [70, 30], [-70, 30], [30, -70], [-30, 70]] as [number, number][]) {
+      const flick = readFlick({ dx, dy, travelPx: Math.hypot(dx, dy), ms: 100 });
+      expect(flick).not.toBeNull();
+      expect(readNudge(dx, dy)).toBe(flick);
+    }
+  });
+
+  it('takes a SLOW deliberate drag, which the flick reader rejects', () => {
+    /* The whole reason the button has its own reader: a press-aim-release
+     * on a dedicated control is not a twitch, and demanding one would mean
+     * "I pressed dodge and nothing happened". */
+    const slow: Swipe = { dx: 0, dy: 60, travelPx: 60, ms: 900 };
+    expect(readFlick(slow)).toBeNull();
+    expect(readNudge(slow.dx, slow.dy)).toBe('back');
+  });
+
+  it('refuses a tap — a dodge with no direction is not a dodge', () => {
+    expect(readNudge(0, 0)).toBeNull();
+    expect(readNudge(NUDGE_PX - 1, 0)).toBeNull();
+    expect(readNudge(NUDGE_PX + 1, 0)).toBe('right');
+  });
+
+  it('will not fire a second burst while one is in flight', () => {
+    const d = new Dodge(DEFAULT_DODGE);
+    expect(d.start(readNudge(60, 0)!, 5)).toBe(true);
+    expect(d.start(readNudge(0, 60)!, 5)).toBe(false);
   });
 });
