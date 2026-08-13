@@ -7,7 +7,7 @@ import { TripodGait, type SurfaceAt } from '../anim/tripod';
 import { DigHud } from './DigHud';
 import { LabMenu } from './LabMenu';
 import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
-import { CASTE_BITE_MM, CASTE_LENGTH_MM } from '../anim/hexapod';
+import { CASTE_BITE_MM, CASTE_LENGTH_MM, stanceRadius } from '../anim/hexapod';
 import { buildSurfaceNets } from '../density/SurfaceNets';
 import { TerrainStream } from '../density/TerrainStream';
 import {
@@ -372,6 +372,22 @@ interface LabSave {
 
 /** Scratch for the camera sight-line march, so it allocates nothing. */
 const PROBE = new THREE.Vector3();
+
+/**
+ * Her outline, in eleven questions: nose, tail, both shoulders, back and
+ * belly, and the four diagonals of her waist — as fractions of the oval's
+ * half-extents.
+ */
+const BODY_SHELL: number[][] = [
+  [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+  [0.6, 0.6, 0], [0.6, -0.6, 0], [-0.6, 0.6, 0], [-0.6, -0.6, 0],
+  [0, 0, 0],
+];
+
+/** How far clear of her own feet the oval's belly rides. */
+const BODY_FLOOR_MARGIN = 0.3 / WORLD_UNIT_MM;
+
+const BODY_PROBE = new THREE.Vector3();
 /** Scratch for the roof sense, which runs while PROBE may be in use. */
 const SENSE = new THREE.Vector3();
 
@@ -784,7 +800,10 @@ export class DensityTerrainLabScene {
       this.scene.add(ant.model.root);
       void ant.model.load().then((ok) => {
         ant.ready = ok;
-        if (i === this.driven) this.onDrivenLoaded(ok);
+        if (i === this.driven) {
+          this.onDrivenLoaded(ok);
+          if (ok) this.measureBody();
+        }
       });
     }
     this.antPosition.copy(this.ants[this.driven]!.position);
@@ -1325,6 +1344,13 @@ export class DensityTerrainLabScene {
     // Pitch steps on the press, not on the hold: ten degrees a tap.
     if (event.code === 'ArrowUp') { this.bore.aim(1); this.updateStatus(); return; }
     if (event.code === 'ArrowDown') { this.bore.aim(-1); this.updateStatus(); return; }
+    /* The collision oval, drawn: green where she fits, red where she does
+     * not. It is the thing deciding where she may go, so it is worth being
+     * able to look at it. */
+    if (event.key.toLowerCase() === 'c') {
+      this.showCapsule = !this.showCapsule;
+      return;
+    }
     if (event.key.toLowerCase() === 'r') {
       this.resetTerrain();
       return;
@@ -2183,6 +2209,97 @@ export class DensityTerrainLabScene {
       if (this.solidAt(probe)) return probe.clone();
     }
     return null;
+  }
+
+  /**
+   * DOES HER BODY FIT HERE — the oval, not the point.
+   *
+   * Every collision in this room has been a single point at her centre,
+   * which fits anywhere: she could squeeze through gaps narrower than she
+   * is and her model wore the walls. This asks about the space she
+   * actually occupies — as long as her body, as wide as her legs, as tall
+   * as her tallest point — sampled on the SHELL of that oval, because what
+   * traps an animal is soil at its edges and the middle of it is wherever
+   * the middle of the tunnel is.
+   *
+   * Measured off the rig where the model has loaded, so a worker and a
+   * major get their own size without anyone typing one in.
+   */
+  bodyFits(at: THREE.Vector3, facing = this.facing): boolean {
+    const len = this.bodyHalf.len;
+    const wide = this.bodyHalf.wide;
+    const tall = this.bodyHalf.tall;
+    const fx = Math.sin(facing);
+    const fz = Math.cos(facing);
+    for (let i = 0; i < BODY_SHELL.length; i += 1) {
+      const o = BODY_SHELL[i]!;
+      const along = o[0]! * len;
+      const across = o[1]! * wide;
+      /* Her oval sits ON her position, not centred through it: her origin
+       * is where she stands, so an oval centred there has its belly half a
+       * body below her own feet and the ground she is standing on counts
+       * as soil in the way. Lifted, and cleared of the floor by a hair. */
+      BODY_PROBE.set(
+        at.x + fx * along + fz * across,
+        at.y + tall + BODY_FLOOR_MARGIN + o[2]! * tall,
+        at.z + fz * along - fx * across,
+      );
+      if (this.solidAt(BODY_PROBE)) return false;
+    }
+    return true;
+  }
+
+  private capsule: THREE.Mesh | null = null;
+
+  private showCapsule = true;
+
+  /**
+   * Her oval, made visible. Drawn as the ellipsoid it is — her measured
+   * half-extents, turned to her heading — and coloured by the live answer,
+   * so a refusal to move has a reason you can see rather than guess at.
+   */
+  private updateCapsule(): void {
+    if (!this.showCapsule) {
+      if (this.capsule) this.capsule.visible = false;
+      return;
+    }
+    if (!this.capsule) {
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(1, 16, 12),
+        new THREE.MeshBasicMaterial({
+          color: 0x51e07a, wireframe: true, transparent: true, opacity: 0.55,
+          depthTest: false,
+        }),
+      );
+      mesh.renderOrder = 8;
+      this.capsule = mesh;
+      this.scene.add(mesh);
+    }
+    const mesh = this.capsule;
+    mesh.visible = true;
+    mesh.scale.set(this.bodyHalf.wide, this.bodyHalf.tall, this.bodyHalf.len);
+    mesh.position.copy(this.antPosition);
+    mesh.position.y += this.bodyHalf.tall + BODY_FLOOR_MARGIN;
+    mesh.rotation.set(0, this.facing, 0);
+    const fits = this.bodyFits(this.antPosition);
+    (mesh.material as THREE.MeshBasicMaterial).color.setHex(fits ? 0x51e07a : 0xe0553f);
+  }
+
+  /** Her oval's half-extents, off the rig once she has loaded. */
+  private readonly bodyHalf = {
+    len: (CASTE_LENGTH_MM.queen / 2) / WORLD_UNIT_MM,
+    wide: stanceRadius(),
+    tall: 1.7 / WORLD_UNIT_MM,
+  };
+
+  private measureBody(): void {
+    const box = new THREE.Box3().setFromObject(this.queen.root);
+    if (box.isEmpty()) return;
+    const size = box.getSize(new THREE.Vector3());
+    if (!Number.isFinite(size.x) || size.x <= 0) return;
+    this.bodyHalf.len = Math.max(size.z / 2, (CASTE_LENGTH_MM.queen / 2) / WORLD_UNIT_MM);
+    this.bodyHalf.wide = Math.max(size.x / 2, stanceRadius());
+    this.bodyHalf.tall = Math.max(size.y / 2, 1.7 / WORLD_UNIT_MM);
   }
 
   /** Is this world point inside packed soil? */
@@ -3241,7 +3358,8 @@ export class DensityTerrainLabScene {
        * question and the one that paces her to the digging.
        */
       PROBE.copy(next);
-      if (this.solidAt(PROBE)) return;
+      /* THE OVAL DECIDES, not a point at her middle. */
+      if (!this.bodyFits(PROBE)) return;
       this.antPosition.y = next.y;
     } else if (this.roofedNow || this.wedged) {
       /*
@@ -3870,6 +3988,7 @@ export class DensityTerrainLabScene {
     const delta = Math.min(0.05, (now - this.previousTime) / 1000);
     this.previousTime = now;
     this.simulate(delta);
+    this.updateCapsule();
     this.drainPending(now - this.previousFrameStart);
     this.previousFrameStart = now;
     this.renderer.render(this.scene, this.camera);

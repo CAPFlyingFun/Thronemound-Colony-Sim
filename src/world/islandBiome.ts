@@ -46,9 +46,37 @@ export async function loadBiomeTextures(baseUrl: string): Promise<BiomeTextureSe
   return out as BiomeTextureSet;
 }
 
+/**
+ * `soilSlope`: band by the ORIGINAL terrain's slope (per-vertex aGroundNy)
+ * instead of the mesh's own normal. The diggable soil window re-meshes the
+ * same ground with surface nets, whose smoothed normals read FLATTER than
+ * the island's data-grid slopes — so a mound face the island paints as dark
+ * cliff banded as open mountain/snow in the window, and the ground turned
+ * white wherever she walked. Same slope source, same paint, invisible seam.
+ * (Dug surfaces never get here — the aOrig dirt override wins first.)
+ */
 export function makeBiomeMaterial(
   tex: BiomeTextureSet,
   clip?: { value: THREE.Vector4 },
+  soilSlope = false,
+  /**
+   * The TOP of the streamed soil's depth band, in world units.
+   *
+   * The band is a fixed 256 mm of samples anchored under the ground at the
+   * window's centre, which leaves about 80 mm of headroom overhead — plenty
+   * on a plain and not nearly enough on Kauai, where a 192 mm window can
+   * hold hundreds of millimetres of relief. Where the hillside climbs past
+   * that ceiling the field has nowhere to put it, so the column caps and
+   * the mesher lays a FLAT LID at the ceiling: the flat shelf in the
+   * screenshot, painted as excavation because its top reads far below the
+   * original ground.
+   *
+   * Both variants need to know where that lid is. The soil throws its own
+   * lid away, and the island — which is otherwise cut out wherever the
+   * window covers — keeps drawing above it, so what shows through is the
+   * real hillside instead of a hole.
+   */
+  ceiling?: { value: number },
 ): THREE.MeshStandardMaterial {
   const mat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
@@ -56,6 +84,15 @@ export function makeBiomeMaterial(
     metalness: 0,
     side: THREE.DoubleSide,
   });
+  /*
+   * One compiled program PER VARIANT. three.js keys its program cache on
+   * onBeforeCompile.toString(), and every material this factory makes
+   * shares that source text even though the GLSL it emits differs (clip
+   * discard, slope source) — so whichever variant compiled first got its
+   * program silently REUSED by the others, whose own injections never ran.
+   */
+  mat.customProgramCacheKey = () =>
+    `biome${clip ? '-clip' : ''}${soilSlope ? '-soil' : ''}${ceiling ? '-cap' : ''}`;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.tSand = { value: tex.sand };
     shader.uniforms.tGrass = { value: tex.grass };
@@ -65,10 +102,14 @@ export function makeBiomeMaterial(
     shader.uniforms.tSnow = { value: tex.snow };
     shader.uniforms.tReef = { value: tex.reef };
     if (clip) shader.uniforms.uClip = clip;
+    if (ceiling) shader.uniforms.uCeil = ceiling;
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
-        '#include <common>\nattribute float aElev;\nvarying float vElev;\nvarying vec3 vBiomeW;\nvarying vec3 vBiomeN;',
+        '#include <common>\nattribute float aElev;\nattribute float aOrig;\n'
+          + 'attribute float aGroundNy;\n'
+          + 'varying float vElev;\nvarying float vOrig;\nvarying float vGroundNy;\n'
+          + 'varying vec3 vBiomeW;\nvarying vec3 vBiomeN;',
       )
       .replace(
         '#include <beginnormal_vertex>',
@@ -76,17 +117,20 @@ export function makeBiomeMaterial(
       )
       .replace(
         '#include <begin_vertex>',
-        '#include <begin_vertex>\n  vBiomeW = (modelMatrix * vec4(transformed, 1.0)).xyz;\n  vElev = aElev;',
+        '#include <begin_vertex>\n  vBiomeW = (modelMatrix * vec4(transformed, 1.0)).xyz;\n  vElev = aElev;\n  vOrig = aOrig;\n  vGroundNy = aGroundNy;',
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
         '#include <common>',
         `#include <common>
 varying float vElev;
+varying float vOrig;
+varying float vGroundNy;
 varying vec3 vBiomeW;
 varying vec3 vBiomeN;
 uniform sampler2D tSand, tGrass, tJungle, tRock, tMtn, tSnow, tReef;
 ${clip ? 'uniform vec4 uClip;' : ''}
+${ceiling ? 'uniform float uCeil;' : ''}
 float gWet = 0.0; // shoreline wetness (set in map_fragment, used for roughness)
 // three uploads sRGB textures with an sRGB internal format on WebGL2, so
 // texture2D already returns LINEAR — no manual decode needed.
@@ -128,9 +172,19 @@ vec3 triplanar(sampler2D tex, vec3 wp, vec3 n, float scale) {
       .replace(
         '#include <clipping_planes_fragment>',
         (clip
+          /* Cut out for the fine soil only where the fine soil actually
+           * REACHES: below the band's ceiling. Above it the window holds
+           * nothing but its own flat lid, and cutting the island away there
+           * was what replaced a hillside with a shelf. */
           ? 'if (vBiomeW.x > uClip.x && vBiomeW.x < uClip.z\n'
-            + '  && vBiomeW.z > uClip.y && vBiomeW.z < uClip.w) discard;\n'
-          : '')
+            + '  && vBiomeW.z > uClip.y && vBiomeW.z < uClip.w\n'
+            + (ceiling ? '  && vBiomeW.y < uCeil\n' : '')
+            + ') discard;\n'
+          /* And the soil never draws its lid. A capped column is not ground,
+           * it is the band running out of room, so the one surface it can
+           * offer up there is a lie — thrown away, and the island sheet
+           * behind it is the truth. */
+          : (ceiling ? 'if (vBiomeW.y > uCeil) discard;\n' : ''))
         + '#include <clipping_planes_fragment>',
       )
       .replace(
@@ -138,7 +192,7 @@ vec3 triplanar(sampler2D tex, vec3 wp, vec3 n, float scale) {
         `{
   float e = vElev;                               // elevation (real m)
   vec3 nrm = normalize(vBiomeN);                 // varying denormalizes across a triangle
-  float slope = 1.0 - clamp(nrm.y, 0.0, 1.0);
+  float slope = 1.0 - clamp(${soilSlope ? 'vGroundNy' : 'nrm.y'}, 0.0, 1.0);
   vec3 wpM = vBiomeW * ${M_PER_WU.toFixed(1)};   // ant world units -> real metres
   vec2 uv = wpM.xz;                              // world-space tiling (flat areas)
   // Jittered band elevation: two octaves of world noise wobble the biome
@@ -191,6 +245,14 @@ vec3 triplanar(sampler2D tex, vec3 wp, vec3 n, float scale) {
     vec3 underwater = mix(reef, vec3(0.015, 0.06, 0.10), d * d);
     c = mix(c, underwater, smoothstep(-0.5, -3.6, e));
   }
+  // DUG GROUND IS DIRT. Soil vertices carry the ORIGINAL surface elevation
+  // in aOrig (the island mesh carries none, so vOrig is 0 there and this
+  // whole term vanishes); anything meaningfully below it is an excavation,
+  // and an excavation shows soil — the cliff texture, tiled tight — not the
+  // altitude biome. Without this a burrow near the summit painted its walls
+  // with the SNOW band, which reads as white plaster, not a hole in dirt.
+  float dug = smoothstep(1.5, 4.0, vOrig - vElev);
+  if (dug > 0.004) c = mix(c, s2l(triplanar(tRock, wpM, nrm, 3.0)) * 0.8, dug);
   diffuseColor.rgb *= c;
 }`,
       )

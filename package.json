@@ -1,7 +1,7 @@
 {
   "name": "thronemound-colony-sim",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.0.25",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -23,6 +23,8 @@
     "probe:clod": "node scripts/probe-clod.mjs",
     "probe:blocksize": "node scripts/probe-blocksize.mjs",
     "probe:bench": "node scripts/probe-bench.mjs",
+    "probe:rail": "node scripts/probe-rail.mjs",
+    "probe:carry": "node scripts/probe-carry.mjs",
     "smoke:pwa": "node scripts/smoke-pwa.mjs",
     "icons": "node scripts/make-icons.mjs"
   },

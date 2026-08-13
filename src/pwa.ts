@@ -42,6 +42,28 @@ function prompt(onAccept: () => void): void {
 /** Set only when the player has pressed RELOAD on the prompt. */
 let accepted = false;
 
+/**
+ * At LAUNCH, updates are taken automatically — a banner says so and the
+ * page reloads itself once the new worker is in charge. Nothing has been
+ * played yet, so there is no tunnel to eat; making the player load the
+ * game twice to get today's build was the real cost. Mid-session updates
+ * keep the ask. The window is measured from registration, and a session
+ * flag stops a broken update from reload-looping: the second attempt in
+ * one tab falls back to the prompt.
+ */
+const AUTO_UPDATE_WINDOW_MS = 20_000;
+const AUTO_FLAG = 'tm-auto-updated';
+let bootAt = 0;
+
+function autoBanner(): void {
+  if (document.querySelector('.tm-update')) return;
+  const bar = document.createElement('div');
+  bar.className = 'tm-update';
+  bar.setAttribute('role', 'status');
+  bar.innerHTML = '<span class="tm-update__text">New version: updating now…</span>';
+  document.body.appendChild(bar);
+}
+
 export function registerServiceWorker(): void {
   if (!('serviceWorker' in navigator)) return;
   /*
@@ -52,6 +74,7 @@ export function registerServiceWorker(): void {
   if (import.meta.env.DEV) return;
 
   window.addEventListener('load', () => {
+    bootAt = performance.now();
     const url = `${import.meta.env.BASE_URL}sw.js?v=${encodeURIComponent(__BUILD_TIME__)}`;
     void navigator.serviceWorker.register(url, { scope: import.meta.env.BASE_URL })
       .then((registration) => {
@@ -105,6 +128,20 @@ export function registerServiceWorker(): void {
 }
 
 function offer(registration: ServiceWorkerRegistration): void {
+  const atLaunch = performance.now() - bootAt < AUTO_UPDATE_WINDOW_MS;
+  let looped = false;
+  try {
+    looped = sessionStorage.getItem(AUTO_FLAG) === '1';
+  } catch { /* storage refused: treat as first time */ }
+  if (atLaunch && !looped) {
+    try {
+      sessionStorage.setItem(AUTO_FLAG, '1');
+    } catch { /* refused storage only costs the loop guard */ }
+    autoBanner();
+    accepted = true;
+    registration.waiting?.postMessage('SKIP_WAITING');
+    return;
+  }
   prompt(() => {
     accepted = true;
     registration.waiting?.postMessage('SKIP_WAITING');

@@ -423,7 +423,14 @@ export function railFromPlan(
     // the same construction `sample` uses, so a planned track and a dug one
     // describe up the same way.
     const dot = fy;
-    let [ux, uy, uz] = norm(-fx * dot, 1 - fy * dot, -fz * dot);
+    /* VERTICAL IS ALLOWED. The world-up projection vanishes at |fy|=1;
+     * its continuous limit is the heading line itself — up faces back
+     * along the approach heading in a climb, along it in a dive — and
+     * `heading` is integrator state here, defined straight through the
+     * vertical run. */
+    let [ux, uy, uz] = Math.abs(fy) > 0.9995
+      ? norm(-Math.sin(heading) * fy, 0, -Math.cos(heading) * fy)
+      : norm(-fx * dot, 1 - fy * dot, -fz * dot);
     if (Math.abs(roll) > 1e-9) {
       const c = Math.cos(roll);
       const sn = Math.sin(roll);

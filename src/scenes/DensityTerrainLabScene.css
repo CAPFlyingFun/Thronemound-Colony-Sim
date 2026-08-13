@@ -4,6 +4,25 @@
   height: 100%;
   overflow: hidden;
   background: #8db4d6;
+  /* No page zoom at all. `manipulation` was only half of it — it stops a
+   * quick second tap being read as zoom, and leaves PINCH alone, so two
+   * fingers landing anywhere off the canvas still magnified the whole
+   * game. `none` hands every touch gesture to us; the canvas already had
+   * it, and this is the rest of the room. */
+  touch-action: none;
+}
+
+.density-lab-host canvas {
+  /* The canvas owns its drags entirely — joysticks, orbits, pinches are
+   * ours, and the browser gets none of them. */
+  touch-action: none;
+}
+
+.density-lab-host button {
+  /* Buttons included: a double tap on DIG is two digs, never a zoom.
+   * Pointer events are unaffected — this only refuses the BROWSER's
+   * gesture interpretation, not ours. */
+  touch-action: none;
 }
 
 .density-lab-hud {
@@ -90,6 +109,20 @@
   flex-direction: column;
   gap: 11px;
   align-items: flex-end;
+  /*
+   * THE COLUMN IS AIR; ONLY ITS CONTROLS ARE SOLID.
+   *
+   * This box is as wide as its widest child and as tall as the whole
+   * stack, and with `pointer-events: auto` on the box itself every gap
+   * between the buttons — and all the empty space beside them — ate the
+   * drag that turns the camera. The brush row made it obvious: it is up
+   * to 460px wide and only exists while DIG is armed, so the look-drag
+   * worked everywhere right up until you armed the shovel.
+   */
+  pointer-events: none;
+}
+
+.density-lab-actions > * {
   pointer-events: auto;
 }
 
@@ -139,6 +172,185 @@
 .density-lab-mode:active {
   transform: scale(0.96);
   background: rgba(255, 250, 238, 0.96);
+}
+
+/* ARMED, coaster-editor style: the chip you aimed glows amber until you
+ * either tap it again to place the piece or stand it down. */
+.density-lab-armed {
+  background: #e9c36f !important;
+  box-shadow: 0 0 0 3px #d97c2b, 0 7px 20px rgba(0, 0, 0, 0.32);
+}
+
+/*
+ * THE WHEEL: the radial piece adjuster, pinned to the track's working end
+ * by the scene each frame (left/top are set from a 3D projection). Spokes
+ * are compass-placed — pitch N/S, turn W/E, bank on the upper diagonals,
+ * length on the lower — and the hub commits.
+ */
+.rail-wheel {
+  position: absolute;
+  z-index: 5;
+  width: 172px;
+  height: 172px;
+  margin: -86px 0 0 -86px;
+  pointer-events: none;
+}
+
+.rail-wheel::before {
+  content: '';
+  position: absolute;
+  inset: 20px;
+  border: 2px solid rgba(244, 236, 216, 0.4);
+  border-radius: 50%;
+}
+
+.rail-wheel-btn {
+  position: absolute;
+  pointer-events: auto;
+  width: 42px;
+  height: 42px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(244, 236, 216, 0.92);
+  color: #2a241c;
+  font: 700 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  touch-action: manipulation;
+}
+
+.rail-wheel-btn:active {
+  transform: scale(0.94);
+  background: rgba(255, 250, 238, 0.98);
+}
+
+.rw-n { left: 65px; top: 0; }
+.rw-s { left: 65px; bottom: 0; }
+.rw-w { left: 0; top: 65px; }
+.rw-e { right: 0; top: 65px; }
+.rw-nw { left: 18px; top: 18px; }
+.rw-ne { right: 18px; top: 18px; }
+.rw-sw { left: 18px; bottom: 18px; }
+.rw-se { right: 18px; bottom: 18px; }
+
+/* The hub: the commit. Amber like everything that builds in this game. */
+.rw-c {
+  left: 65px;
+  top: 65px;
+  background: #e9c36f;
+  font-size: 16px;
+}
+
+/*
+ * THE READOUT, coaster style: a one-line strip so the tunnel stays in
+ * view, opened to the full panel by a tap. It is a button now, in effect.
+ */
+.rail-status {
+  pointer-events: auto;
+  max-width: min(46vw, 340px);
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: rgba(20, 14, 8, 0.55);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.rail-status.is-open {
+  background: rgba(20, 14, 8, 0.78);
+}
+
+/*
+ * THE ROOM HUBS: one ⌂ button pinned on every room (left/top set from a
+ * 3D projection each frame). Open, the six exits fan out — UP on top,
+ * DOWN below, spent exits amber, the way you came in dimmed.
+ */
+.rail-hub-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+
+.rail-hub {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
+.rail-hub-c {
+  position: absolute;
+  left: -17px;
+  top: -17px;
+  width: 34px;
+  height: 34px;
+  border: 2px solid rgba(120, 84, 40, 0.9);
+  border-radius: 50%;
+  background: rgba(232, 190, 108, 0.95);
+  color: #3a2a14;
+  font: 700 15px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+  touch-action: manipulation;
+}
+
+.rail-hub.is-open .rail-hub-c {
+  background: #fff1c5;
+}
+
+.rail-hub-btn {
+  position: absolute;
+  width: 52px;
+  height: 34px;
+  margin: -17px 0 0 -26px;
+  border: none;
+  border-radius: 17px;
+  background: rgba(244, 236, 216, 0.94);
+  color: #2a241c;
+  font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  pointer-events: auto;
+  touch-action: manipulation;
+}
+
+.rail-hub-btn:active {
+  transform: scale(0.94);
+}
+
+/* A spent exit: a tunnel already goes that way — tap to go build it. */
+.rail-hub-btn.is-taken {
+  background: #e9c36f;
+}
+
+.rail-hub-btn.is-taken.is-active {
+  box-shadow: 0 0 0 3px #d97c2b, 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* The way you came in: shown, dimmed, not tappable. */
+.rail-hub-btn.is-entry {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.rh-n { left: 0; top: -58px; }
+.rh-s { left: 0; top: 58px; }
+.rh-w { left: -72px; top: 0; }
+.rh-e { left: 72px; top: 0; }
+.rh-ne { left: 56px; top: -40px; }
+.rh-nw { left: -56px; top: -40px; }
+
+/* The ⋯ chip while its drawer is out: latched, visibly so. */
+.density-lab-mode.is-latched {
+  background: #e9c36f;
+  box-shadow: 0 0 0 2px rgba(217, 124, 43, 0.8), 0 7px 20px rgba(0, 0, 0, 0.32);
+}
+
+/* The one chip that deletes something: unmistakably not a builder. */
+.density-lab-danger {
+  background: #c86248 !important;
+  color: #fff4ea;
+}
+
+.density-lab-danger:active {
+  background: #d8745a !important;
 }
 
 /*
@@ -1073,7 +1285,8 @@
 }
 
 /* GRIP: the same amber "currently on" the rest of the HUD speaks. */
-.density-lab-mode.is-grip {
+.density-lab-mode.is-grip,
+.density-lab-dig.is-grip {
   background: #e9c36f;
   box-shadow: 0 0 0 2px rgba(255, 250, 238, 0.75), 0 7px 20px rgba(0, 0, 0, 0.32);
 }
@@ -1122,12 +1335,84 @@
 }
 
 .density-lab-aim-readout {
-  min-width: 44px;
+  align-self: flex-end;
+  min-width: 52px;
   text-align: center;
-  padding: 4px 6px;
+  padding: 5px 8px;
   border-radius: 8px;
   background: rgba(20, 15, 10, 0.72);
   color: #f0d88e;
   font: 800 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
   font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+/* Steeply down is where a bore runs away from you — say so. */
+.density-lab-aim-readout.is-steep {
+  background: rgba(90, 30, 15, 0.82);
+  color: #ffd0a8;
+}
+
+/*
+ * THE BUILDER'S ROWS — palette, joint chips, points.
+ *
+ * They live INSIDE `.density-lab-actions`, as ordinary flex children, and
+ * that is the whole fix for the screenshot where Y-SPLIT sat on top of DIG
+ * and DOWN sat behind FOOD: `.density-lab-actions` is absolutely positioned
+ * against the same corner, so every row given that class landed in exactly
+ * the same place. One positioned container, many rows in its column.
+ *
+ * Right-aligned to match the column they hang under, wrapping rather than
+ * running off the edge — seven joint chips will not fit a phone's width in
+ * one line and must not try.
+ */
+.density-lab-subrow {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  align-items: center;
+  max-width: min(58vw, 460px);
+  /* Same rule as the column it sits in: the row is a layout box, not a
+   * target. Its chips and its slider take their own touches; the space
+   * between and beside them belongs to the camera. */
+  pointer-events: none;
+}
+
+.density-lab-subrow > * {
+  pointer-events: auto;
+}
+
+/*
+ * Compact chips in the builder's rows.
+ *
+ * The right-hand column is bottom-anchored and grows UPWARD, so at full
+ * height — joint chips, palette, points, and the standing buttons — it ran
+ * into the quest banner across the top of the screen. These are chosen by
+ * tapping rather than held under a thumb mid-crawl, so they can afford to
+ * be smaller than the mode buttons below them.
+ */
+.density-lab-subrow .density-lab-button {
+  padding: 7px 11px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+/* A struck-through chip is one that would cost stamina and change nothing —
+ * a turn laid on a plumb shaft. Only the strike lives here; the DIMMING is
+ * an inline style, because stamina drives it frame by frame and an inline
+ * style would win over this rule anyway. One owner per property. */
+.density-lab-subrow .density-lab-button[data-useless="1"] {
+  text-decoration: line-through;
+}
+
+/* The brush-size slider. Wide enough for a thumb, and it keeps its own
+ * touches — the look-drag lives on the same screen and would otherwise
+ * swallow every adjustment as a camera pan. */
+.density-lab-brush {
+  width: 132px;
+  accent-color: #6fc8e9;
+  touch-action: none;
+  pointer-events: auto;
 }

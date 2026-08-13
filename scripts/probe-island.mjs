@@ -10,11 +10,10 @@
  *      one red pixel below the horizon line means not one hole anywhere
  *   6. no page errors
  *
- * And THE PROLOGUE PATH, end to end, which is what the stabilisation pass
- * exists to keep true: the curtain lifts only when island AND queen are
- * ready · DIG seeds a mouth at the queen · the shaft GRIPs her · she rides
- * every orientation · the room frees her · she roams it without clipping ·
- * the mouth GRIPs her back · riding toward the gate auto-surfaces her.
+ * And THE DIG: one movement law — her legs, above ground and below — and a
+ * shovel that takes a mouthful 10 mm wide, 5 mm tall and 3 mm deep. There
+ * is no rail, no body capsule and no threshold prompt any more; a tunnel is
+ * a hole wide enough to walk into, and walking into it is all there is.
  *
  *   SMOKE_URL=http://localhost:4173/Thronemound-Colony-Sim/ node scripts/probe-island.mjs
  */
@@ -82,9 +81,9 @@ check('tap expands it and telemetry flows in', statsChip.openNow && statsBody.ha
 check('tap again folds it away', statsBody.closedAgain);
 
 /*
- * Every probe below that wants to be UNDERGROUND has to knock: walking onto
- * the mouth asks ENTER? and waits, so the old "walk east across the gate and
- * fall in" preamble no longer descends on its own. This is that knock.
+ * Getting UNDERGROUND is now just walking there: the mouth is a hole in the
+ * ground and her own legs carry her into it, so the knock that used to
+ * answer an ENTER? prompt is a plain walk.
  */
 await page.evaluate(() => {
   window.__goIn = (fromXMm, fromZMm, facing, steps = 700) => {
@@ -95,12 +94,9 @@ await page.evaluate(() => {
     s.input.walk = 1;
     for (let i = 0; i < steps; i += 1) {
       s.stepForTest(1 / 30, 1);
-      const ask = s.gateAskForTest();
-      if (ask && ask.kind === 'enter') {
-        s.answerGateForTest(true);
-        return true;
-      }
+      if (s.statsForTest().underground === 1) { s.input.walk = 0; return true; }
     }
+    s.input.walk = 0;
     return false;
   };
 });
@@ -200,8 +196,8 @@ check('the seeded mouth sits AT the queen, on the ground',
   founding.antOffMm < 2 && founding.groundOffMm < 1.5,
   `${founding.antOffMm.toFixed(1)} mm from her, ${founding.groundOffMm.toFixed(2)} mm off the surface`);
 check('and DONE would carve it untouched', founding.carvesOnDone === true);
-check('the founding dig took', founding.nodes === 4 && founding.rails === 3,
-  `${founding.nodes} nodes, ${founding.rails} rails`);
+check('the founding dig took', founding.nodes === 4,
+  `${founding.nodes} nodes`);
 
 console.log('\nTHE PRE-TUNNEL (streamed soil, nest folded into the function)');
 /* One stance at (28100, 28020) puts the whole plan in the window: gate at
@@ -256,80 +252,6 @@ check('store is air AGAIN', roundtrip.storeAgain === false, `solidAtMm=${roundtr
 check('reconstruction still cost zero saved samples', roundtrip.edited === 0,
   `${roundtrip.edited} edits stored`);
 
-console.log('\nA HAND-DIG: SHE CUTS HER OWN SHAFT, WITH NO PLAN AT ALL');
-/*
- * The bore, end to end and on its own terms. Two rules shape this test and
- * both are the dig room's: the AIM steers her travel, not just the bite, so
- * a shaft is made by aiming down; and DIGGING NEVER MOVES HER, so the hole
- * only deepens as she walks into the room she has cleared. Chewing on the
- * spot cuts one sphere and then nothing, which is why this holds the stick
- * as well as the jaws.
- */
-const dig = await page.evaluate(() => {
-  const s = window.islandScene;
-  const atX = 27950;
-  const atZ = 27950;
-  s.teleportMm(atX, atZ);
-  s.drainQueueForTest();
-  s.setFacingForTest(0);
-  /* Measured where the shaft ENDS, not where it starts. Aiming down and
-   * walking in cuts a ramp, so the entry column is its shallow mouth and
-   * the hole proper is wherever she got to. */
-  const columnAt = (xMm, zMm) => {
-    const h = s.stream.surfaceHeightAt(xMm / 5, zMm / 5);
-    return h === null ? null : h * 5;
-  };
-  for (let i = 0; i < 5; i += 1) s.bore.aim(-1); // fifty degrees down
-  s.input.dig = true;
-  s.input.walk = 1;
-  let embedded = 0;
-  for (let i = 0; i < 600; i += 1) {
-    s.stepForTest(1 / 30, 1);
-    if (i % 60 === 0) s.drainQueueForTest();
-    if (s.stream.solidAtWu(s.at.x, s.at.y, s.at.z) === true) embedded += 1;
-  }
-  s.input.dig = false;
-  s.input.walk = 0;
-  for (let i = 0; i < 5; i += 1) s.bore.aim(1);
-  s.drainQueueForTest();
-  const endX = s.at.x * 5;
-  const endZ = s.at.z * 5;
-  const endY = s.at.y * 5;
-  const drawnAtEnd = s.renderedHeightAtMm(endX, endZ);
-  const soilAtEnd = columnAt(endX, endZ);
-  const depth = drawnAtEnd - endY;
-  /* A TUNNEL, not a trench: air where she stands, and undisturbed ground
-   * still overhead. Aiming down and walking in should leave a roof on it —
-   * an open slot all the way to the sky would mean she had ploughed a
-   * furrow rather than bored in. */
-  const voidAtHer = s.solidAtMm(endX, endY, endZ);
-  const roofAbove = s.solidAtMm(endX, endY + 30, endZ);
-  // Leave far enough that the shaft's column unloads, then come back.
-  s.teleportMm(20000, 20000);
-  s.drainQueueForTest();
-  const goneWhileAway = s.solidAtMm(endX, 1300, endZ);
-  s.teleportMm(endX, endZ);
-  s.drainQueueForTest();
-  const voidAfter = s.solidAtMm(endX, endY, endZ);
-  return {
-    depth, embedded, goneWhileAway, soilAtEnd, drawnAtEnd,
-    voidAtHer, roofAbove, voidAfter,
-    returned: columnAt(endX, endZ),
-    edited: s.statsForTest().edited,
-  };
-});
-check('aiming down and holding the jaws carried her into the ground',
-  dig.depth > 20, `${dig.depth.toFixed(1)} mm below the drawn surface`);
-check('what she cut is a TUNNEL — air at her, ground still overhead',
-  dig.voidAtHer === false && dig.roofAbove === true,
-  `at her solid=${dig.voidAtHer}, 30 mm above solid=${dig.roofAbove}`);
-check('she is never inside soil while cutting', dig.embedded === 0,
-  `${dig.embedded} frames of 600`);
-check('the dig is in the sparse store', dig.edited > 0, `${dig.edited} samples`);
-check('hole column unloaded while away', dig.goneWhileAway === null);
-check('the tunnel SURVIVED the round trip', dig.voidAfter === false,
-  `solid where she stood: ${dig.voidAfter}`);
-
 console.log('\nTHE WALKS (clearance is against the DRAWN triangles — below zero');
 console.log('is "she went underground", the playtest bug this pins down forever)');
 const runWalk = (xMm, zMm, facing) => page.evaluate(([x0, z0, face]) => {
@@ -367,202 +289,6 @@ for (const [name, walk] of walks) {
     `worst clearance ${walk.minClearMm.toFixed(2)} mm`);
 }
 
-console.log('\nINTO THE HOLE (asked at the mouth, then down; the playtest bug:');
-console.log('"it bounced me back up" — and the newer one, being dropped in unasked)');
-const descent = await page.evaluate(() => {
-  const s = window.islandScene;
-  const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
-  // Start two body lengths west of the gate, walk east across it.
-  s.teleportMm(n.gate.x - 18, n.gate.z);
-  s.drainQueueForTest();
-  s.setFacingForTest(Math.PI / 2);
-  s.input.walk = 1;
-  /* Walking onto her own mouth must ASK rather than drop her in — the
-   * anthill is not a trapdoor. She only goes down once the thumb says so. */
-  let askedIn = -1;
-  let droppedUnasked = 0;
-  for (let i = 0; i < 400; i += 1) {
-    s.stepForTest(1 / 30, 1);
-    const surface = s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5);
-    if (s.at.y * 5 < surface - 6) droppedUnasked += 1;
-    const ask = s.gateAskForTest();
-    if (ask && ask.kind === 'enter') { askedIn = i; s.answerGateForTest(true); break; }
-  }
-  let deepest = Infinity;
-  let bouncedUp = 0;
-  let wasUnder = false;
-  for (let i = 0; i < 900; i += 1) {
-    s.stepForTest(1 / 30, 1);
-    const y = s.at.y * 5;
-    const surface = s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5);
-    const under = y < surface - 6;
-    if (under) wasUnder = true;
-    // Once she is underground, popping back ABOVE the surface without
-    // climbing (no wall contact reported) is the old roof-yank bug.
-    if (wasUnder && y > surface + 3) bouncedUp += 1;
-    deepest = Math.min(deepest, y - surface);
-    if (deepest < -40) break; // she's properly down the shaft — stop there
-  }
-  s.input.walk = 0;
-  return {
-    deepest, bouncedUp, askedIn, droppedUnasked,
-    under: s.statsForTest().underground,
-  };
-});
-check('walking onto the mouth ASKS instead of dropping her in',
-  descent.askedIn >= 0 && descent.droppedUnasked === 0,
-  `ENTER? after ${descent.askedIn} steps, ${descent.droppedUnasked} unasked frames below ground`);
-check('and YES gets her INTO the hole', descent.deepest < -30,
-  `deepest ${descent.deepest.toFixed(1)} mm below the surface`);
-check('and is never yanked back through the roof', descent.bouncedUp === 0,
-  `${descent.bouncedUp} bounce frames`);
-check('the scene knows she is underground', descent.under === 1);
-
-console.log('\nTHE UNDERGROUND CHASE CAMERA');
-const chase = await page.evaluate(() => {
-  const s = window.islandScene;
-  // Keep walking along the drift so the trail has shape, then let the
-  // camera settle.
-  s.input.walk = 1;
-  s.stepForTest(1 / 30, 120);
-  s.input.walk = 0;
-  s.stepForTest(1 / 30, 40);
-  const camY = s.camera.position.y * 5;
-  const surfaceAtCam = s.renderedHeightAtMm(s.camera.position.x * 5, s.camera.position.z * 5);
-  return {
-    dist: s.camera.position.distanceTo(s.at) * 5,
-    camBelowSurface: camY < surfaceAtCam,
-  };
-});
-check('the camera follows a few mm behind her', chase.dist > 2 && chase.dist < 12,
-  `${chase.dist.toFixed(1)} mm back`);
-check('and is itself inside the tunnel, not the hillside sky',
-  chase.camBelowSurface === true);
-
-console.log('\nTHE RAIL (down the middle of the tube — playtest\'s own spec)');
-const rail = await page.evaluate(() => {
-  const s = window.islandScene;
-  // She fell into the shaft in the descent test — the rail should have her.
-  const bound = s.statsForTest().railBound;
-  // Ride the whole nest: forward to the store dead end...
-  s.input.walk = 1;
-  // She CRAWLS the bore wall now (back to the centerline, legs on the
-  // tube): her riding depth is r - 1.3 mm, and the gap between where she
-  // is and that wall says whether she floats or clips. Joint hand-offs
-  // blend for a few frames, so the probe scores the SHARE of bad frames.
-  let gapWorst = 0;
-  let gapBad = 0;
-  let railFrames = 0;
-  let pitchOk = 0;
-  for (let i = 0; i < 900; i += 1) {
-    s.stepForTest(1 / 30, 1);
-    const st = s.railStateForTest();
-    if (st.edge >= 0) {
-      railFrames += 1;
-      const gap = (st.rMm - 1.3) - st.offMm;
-      gapWorst = Math.max(gapWorst, Math.abs(gap));
-      if (Math.abs(gap) > 2.5) gapBad += 1;
-      // Body pitch follows the bore: quaternion forward vs the rail axis.
-      // (Pose only runs once her model loads — skip the frames before.)
-      if (s.queenReady) {
-        const V = Object.getPrototypeOf(s.at).constructor;
-        const fwd = new V(0, 0, 1).applyQuaternion(s.queen.root.quaternion);
-        if (Math.abs(fwd.dot(s.railForward)) > 0.9) pitchOk += 1;
-      } else {
-        pitchOk += 1; // no model, no pose — nothing to misalign
-      }
-    }
-  }
-  const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
-  const atStore = Math.hypot(
-    s.at.x * 5 - n.store.x, s.at.y * 5 - n.store.y, s.at.z * 5 - n.store.z,
-  );
-  // THE ROOM: arriving in the chamber the rail lets go by itself — FREE
-  // inside a room, no button. Roam it (avoiding the west mouth, which is
-  // the door and SHOULD take her): contained, never in soil, never gripped.
-  const roomState = s.statsForTest();
-  const inRoom = roomState.railBound === 0 && roomState.chamberNow === 1;
-  let roomSolid = 0;
-  let roomGripped = 0;
-  const roamFacings = [Math.PI / 2, Math.PI, 0]; // east, south, north
-  s.input.walk = 1;
-  for (let i = 0; i < 180; i += 1) {
-    if (i % 60 === 0) s.setFacingForTest(roamFacings[i / 60]);
-    s.stepForTest(1 / 30, 1);
-    if (s.stream.solidAtWu(s.at.x, s.at.y, s.at.z) === true) roomSolid += 1;
-    if (s.statsForTest().railBound === 1) roomGripped += 1;
-  }
-  s.input.walk = 0;
-  const roamedInRoom = s.statsForTest().chamberNow === 1 && roomGripped === 0;
-  // Walk out at the tunnel mouth: GRIP takes her back by itself...
-  s.setFacingForTest(-Math.PI / 2); // the run leaves the store westward
-  s.input.walk = 1;
-  let regripAt = -1;
-  for (let i = 0; i < 400; i += 1) {
-    s.stepForTest(1 / 30, 1);
-    if (s.statsForTest().railBound === 1) { regripAt = i; break; }
-  }
-  // ...and riding TOWARD the gate ASKS. Nothing crosses the threshold in
-  // either direction without an answer: the probe's thumb taps YES the
-  // moment SURFACE? appears, and expects daylight.
-  let outAt = -1;
-  let askedOut = -1;
-  for (let i = 0; i < 1600; i += 1) {
-    s.stepForTest(1 / 30, 1);
-    const ask = s.gateAskForTest();
-    if (ask && ask.kind === 'surface') {
-      if (askedOut < 0) askedOut = i;
-      s.answerGateForTest(true);
-    }
-    if (s.statsForTest().railBound === 0
-      && s.at.y * 5 >= s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5) - 2) {
-      outAt = i;
-      break;
-    }
-  }
-  s.input.walk = 0;
-  const surface = s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5);
-  const gateOffMm = Math.hypot(s.at.x * 5 - n.gate.x, s.at.z * 5 - n.gate.z);
-  return {
-    bound,
-    railFrames,
-    gapWorst,
-    gapBadShare: railFrames > 0 ? gapBad / railFrames : 1,
-    pitchShare: railFrames > 0 ? pitchOk / railFrames : 0,
-    atStore,
-    inRoom,
-    roomSolid,
-    roamedInRoom,
-    regripAt,
-    outAt,
-    askedOut,
-    railBoundAfter: s.statsForTest().railBound,
-    aboveMm: s.at.y * 5 - surface,
-    gateOffMm,
-  };
-});
-check('the shaft handed her to the rail', rail.bound === 1);
-check('she crawls ON the bore wall, back to the centerline', rail.gapBadShare < 0.1,
-  `off the wall on ${(rail.gapBadShare * 100).toFixed(0)}% of ${rail.railFrames} rail frames, worst ${rail.gapWorst.toFixed(1)} mm`);
-check('her body pitch follows the tube', rail.pitchShare > 0.85,
-  `${(rail.pitchShare * 100).toFixed(0)}% of ${rail.railFrames} rail frames aligned`);
-check('the rail delivered her to the store', rail.atStore < 14,
-  `${rail.atStore.toFixed(1)} mm from the chamber`);
-check('the room frees her on arrival — GRIP off, FREE in the chamber',
-  rail.inRoom === true);
-check('she roams the room contained, never in the walls',
-  rail.roamedInRoom === true && rail.roomSolid === 0,
-  `${rail.roomSolid} solid frames of 180`);
-check('the mouth GRIPs her back on the way out', rail.regripAt >= 0,
-  `regripped after ${rail.regripAt} steps`);
-check('riding toward the gate ASKS instead of ejecting', rail.askedOut >= 0,
-  `SURFACE? after ${rail.askedOut} steps`);
-check('and YES puts her in daylight beside it',
-  rail.outAt >= 0 && rail.railBoundAfter === 0 && rail.aboveMm > -6
-  && rail.gateOffMm < 30,
-  `out after ${rail.outAt} steps, ${rail.aboveMm.toFixed(1)} mm vs surface, `
-  + `${rail.gateOffMm.toFixed(1)} mm from the gate`);
-
 console.log('\nNO HOLES EVEN STARVED (budget capped at 1 chunk/frame)');
 const churn = await page.evaluate(() => {
   const s = window.islandScene;
@@ -586,56 +312,6 @@ const churn = await page.evaluate(() => {
 check('the clip NEVER exposed an unbuilt chunk', churn.uncovered === 0,
   `${churn.uncovered} uncovered samples of 120 during starved sprint`);
 check('and full coverage returns after the drain', churn.covered === true);
-
-console.log('\nNEVER IN THE WALLS (grinding every direction at the joints)');
-/* The playtest disaster this pins down: at tunnel joints, "there is a
- * floor below the destination" used to walk her centre into thin soil
- * ribs. Embedded, the camera sits inside soil and the world renders
- * see-through — reported as "holes all over" and "forced into the
- * terrain". Grind into the joint region from every direction and assert
- * her body centre NEVER samples solid. */
-const grind = await page.evaluate(() => {
-  const s = window.islandScene;
-  const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
-  window.__goIn(n.gate.x - 18, n.gate.z, Math.PI / 2);
-  s.input.walk = 1;
-  for (let i = 0; i < 500; i += 1) {
-    s.stepForTest(1 / 30, 1);
-    if (s.at.y * 5 < s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5) - 40) break;
-  }
-  let embedded = 0;
-  let run = 0;
-  let worstRunFree = 0;
-  let worstRunRail = 0;
-  let deepestMm = Infinity;
-  for (let i = 0; i < 1200; i += 1) {
-    if (i % 40 === 0) s.setFacingForTest(s.facing + 2.4);
-    s.stepForTest(1 / 30, 1);
-    if (s.stream.solidAtWu(s.at.x, s.at.y, s.at.z) === true) {
-      embedded += 1;
-      run += 1;
-      if (s.statsForTest().railBound === 1) worstRunRail = Math.max(worstRunRail, run);
-      else worstRunFree = Math.max(worstRunFree, run);
-    } else {
-      run = 0;
-    }
-    deepestMm = Math.min(
-      deepestMm, s.at.y * 5 - s.renderedHeightAtMm(s.at.x * 5, s.at.z * 5),
-    );
-  }
-  s.input.walk = 0;
-  return { embedded, worstRunFree, worstRunRail, deepestMm };
-});
-/* Free mode: single-frame solids are rounding flicker (snap-back fires at
- * three consecutive). Rail mode: the position lerp squeezes joint corners
- * for a few frames — she is following the bore by construction, so a brief
- * corner brush is a squeeze, not the see-through embedding. */
-check('free mode never embedded past the snap threshold', grind.worstRunFree <= 2,
-  `worst free run ${grind.worstRunFree}, ${grind.embedded} transient frames of 1200`);
-check('rail corner squeezes stay brief', grind.worstRunRail <= 6,
-  `worst rail run ${grind.worstRunRail}`);
-check('and she was genuinely down among the joints for it', grind.deepestMm < -30,
-  `deepest ${grind.deepestMm.toFixed(1)} mm`);
 
 console.log('\nKEYBOARD (WASD writes the same inputs the stick does)');
 const keys = await page.evaluate(async () => {
@@ -683,6 +359,51 @@ const fp = await page.evaluate(() => {
   return { d, bodyHidden, crosshairOn, bodyBack, crosshairOff };
 });
 check('the camera sits on the ant', fp.d < 4, `${fp.d.toFixed(1)} mm from her centre`);
+
+/*
+ * THE EYE MUST NOT ROLL. Handing `lookAt` a fixed world up and a look
+ * parallel to it leaves the roll undefined, and straight down a shaft is
+ * exactly that — the opening aims her at exactly -90°, so it was hit every
+ * time. Measured before the fix: camera right ran (-1,0,0) to -89° and
+ * snapped to (+1,0,0) at -90°, reported as the view sitting ninety degrees
+ * off the ant. Both poles are swept, at two headings, because a singularity
+ * that only shows at one bearing is still a singularity.
+ */
+const eyeRoll = await page.evaluate(() => {
+  const s = window.islandScene;
+  s.teleportMm(27950, 27950);
+  s.drainQueueForTest();
+  s.firstPerson = true;
+  const worst = [];
+  for (const facing of [0, Math.PI / 3]) {
+    s.setFacingForTest(facing);
+    // Her right hand, on the flat: the axis the camera's right must track.
+    const rx = -Math.cos(facing);
+    const rz = Math.sin(facing);
+    let least = 1;
+    for (let deg = 0; deg >= -90; deg -= 5) {
+      s.aimPitch = (deg * Math.PI) / 180;
+      s.fpPitch = s.aimPitch;
+      s.stepForTest(1 / 30, 2);
+      const m = s.camera.matrixWorld.elements;
+      least = Math.min(least, m[0] * rx + m[2] * rz);
+    }
+    for (let deg = 0; deg <= 80; deg += 5) {
+      s.aimPitch = (deg * Math.PI) / 180;
+      s.fpPitch = s.aimPitch;
+      s.stepForTest(1 / 30, 2);
+      const m = s.camera.matrixWorld.elements;
+      least = Math.min(least, m[0] * rx + m[2] * rz);
+    }
+    worst.push(least);
+  }
+  s.aimPitch = 0; s.fpPitch = 0; s.firstPerson = false;
+  s.stepForTest(1 / 30, 4);
+  return worst;
+});
+check('the eye never rolls, not even straight down a shaft',
+  eyeRoll.every((d) => d > 0.99),
+  `worst right-axis agreement ${eyeRoll.map((d) => d.toFixed(3)).join(', ')}`);
 check('her body is hidden in her own eyes, crosshair on',
   fp.bodyHidden && fp.crosshairOn);
 check('body and crosshair restore in third person',
@@ -719,158 +440,14 @@ const pan = await page.evaluate(() => {
   };
 });
 check('she is underground for the pan test', pan.under === 1);
-check('held drag orbits close around her', pan.heldDist > 3 && pan.heldDist < 9
-  && pan.heldY > 0.5, `${pan.heldDist.toFixed(1)} mm out, ${(pan.heldY * 5).toFixed(1)} mm up`);
+/* Closer than it used to sit, and deliberately: a burrow is barely wider
+ * than she is, so a camera that refuses to be inside the wall has to give
+ * up its distance. The orbit still has to be BEHIND her and above, just
+ * not out in the soil. */
+check('held drag orbits close around her', pan.heldDist > 1.5 && pan.heldDist < 9
+  && pan.heldY > 0.2, `${pan.heldDist.toFixed(1)} mm out, ${(pan.heldY * 5).toFixed(1)} mm up`);
 check('released, the trail capsule takes the camera back',
   pan.backDist > 2 && pan.backDist < 12, `${pan.backDist.toFixed(1)} mm back`);
-
-console.log('\nGRIP AND FREE (GRIP is the law of the tunnels; the chip only reports)');
-const modes = await page.evaluate(() => {
-  const s = window.islandScene;
-  const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
-  const chip = () => document.querySelector('.density-lab-mode.is-indicator');
-  // On the surface: FREE, and the chip says so.
-  s.teleportMm(n.gate.x - 18, n.gate.z);
-  s.drainQueueForTest();
-  s.stepForTest(1 / 30, 5);
-  const surfaceFree = s.statsForTest().free;
-  const surfaceLabel = chip()?.textContent;
-  const surfaceGripClass = chip()?.classList.contains('is-grip');
-  // Go in at the mouth: past the threshold, the bore MUST grip her — that
-  // part has no opt-out, and the chip has to say so.
-  window.__goIn(n.gate.x - 18, n.gate.z, Math.PI / 2);
-  s.input.walk = 1;
-  let grabbedAt = -1;
-  for (let i = 0; i < 900; i += 1) {
-    s.stepForTest(1 / 30, 1);
-    if (s.statsForTest().railBound === 1) { grabbedAt = i; break; }
-  }
-  s.input.walk = 0;
-  s.stepForTest(1 / 30, 2);
-  const tunnelLabel = chip()?.textContent;
-  const tunnelGripClass = chip()?.classList.contains('is-grip');
-  const tunnelFree = s.statsForTest().free;
-  return {
-    surfaceFree, surfaceLabel, surfaceGripClass,
-    grabbedAt, tunnelLabel, tunnelGripClass, tunnelFree,
-  };
-});
-check('on the surface the chip reads FREE',
-  modes.surfaceFree === 1 && modes.surfaceLabel === 'FREE'
-  && modes.surfaceGripClass === false);
-check('a bore GRIPs her — no opt-out in a tunnel',
-  modes.grabbedAt >= 0 && modes.tunnelFree === 0,
-  `gripped after ${modes.grabbedAt} steps`);
-check('and the chip reads GRIP, lit',
-  modes.tunnelLabel === 'GRIP' && modes.tunnelGripClass === true);
-
-console.log("\nTHE DESIGNER'S DIG IT (a planned tunnel becomes soil and rail)");
-const digIt = await page.evaluate(() => {
-  const s = window.islandScene;
-  const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
-  s.teleportMm(n.store.x, n.store.z);
-  s.drainQueueForTest();
-  // The designer opens and closes without touching the world.
-  s.openDesigner();
-  const opened = s.statsForTest().designing;
-  const panelUp = document.querySelector('.nest-designer') !== null;
-  // CONTEXT-SENSITIVE panel: opening picks the entrance (a node), so the
-  // edit row and move pad show with LINK, not FLOW. Nothing picked — only
-  // the place and finish rows. An edge picked — FLOW, no LINK, no pad.
-  const d = s.designer;
-  const disp = (sel) => {
-    const el = document.querySelector(sel);
-    return el ? el.style.display : 'missing';
-  };
-  const withNode = {
-    acts: disp('.nest-row-acts'),
-    pad: disp('.nest-row-pad'),
-    kinds: disp('.nest-row-kinds'),
-    done: disp('.nest-row-done'),
-    link: d.buttons.get('link').style.display,
-    flow: d.buttons.get('flow').style.display,
-  };
-  d.picked = null;
-  d.refreshPanel();
-  const withNothing = { acts: disp('.nest-row-acts'), pad: disp('.nest-row-pad') };
-  d.selectForTest('edge', d.current().edges[0].id);
-  const withEdge = {
-    acts: disp('.nest-row-acts'),
-    pad: disp('.nest-row-pad'),
-    link: d.buttons.get('link').style.display,
-    flow: d.buttons.get('flow').style.display,
-  };
-  s.closeDesignerForTest();
-  const closed = s.statsForTest().designing;
-  // Space opens it too — and a release WHILE it is open must not swallow
-  // the next press (the sticky-edge bug).
-  const press = (key, type) => window.dispatchEvent(new KeyboardEvent(type, { key }));
-  /* Space is the JAWS now — the nest tools moved to B. The edge still has
-   * to survive a release while the panel is open, which was the sticky-key
-   * bug, so the check follows the key rather than being dropped. */
-  press('b', 'keydown');
-  const spaceOpened = s.statsForTest().designing;
-  press('b', 'keyup');
-  s.closeDesignerForTest();
-  press('b', 'keydown');
-  const spaceReopened = s.statsForTest().designing;
-  press('b', 'keyup');
-  s.closeDesignerForTest();
-  // Extend the plan the way DIG IT does: a new run east off the store.
-  const plan = s.currentPlanForTest();
-  const store = plan.nodes.find((p) => p.id === 'store');
-  plan.nodes.push({
-    id: 'probe-room', kind: 'chamber',
-    x: store.x + 48, y: store.y - 30, z: store.z, radiusMm: 8,
-  });
-  plan.edges.push({
-    id: 'probe-run', from: 'store', to: 'probe-room', radiusMm: 4, flow: 'both',
-  });
-  const railsBefore = s.statsForTest().rails;
-  s.applyPlanForTest(plan);
-  s.drainQueueForTest();
-  const mid = { x: store.x + 24, y: store.y - 15, z: store.z };
-  return {
-    opened,
-    panelUp,
-    withNode,
-    withNothing,
-    withEdge,
-    closed,
-    spaceOpened,
-    spaceReopened,
-    railsBefore,
-    railsAfter: s.statsForTest().rails,
-    midAir: s.solidAtMm(mid.x, mid.y, mid.z),
-    roomAir: s.solidAtMm(store.x + 48, store.y - 30, store.z),
-    // The hillside SLOPES here — above the run is soon open sky, so the
-    // over-carve guard samples the deep soil below the new room instead.
-    soilBelow: s.solidAtMm(store.x + 48, store.y - 60, store.z),
-  };
-});
-check('DIG opens the nest tools, DONE closes them',
-  digIt.opened === 1 && digIt.panelUp && digIt.closed === 0);
-check('node picked: edit row + move pad, LINK not FLOW',
-  digIt.withNode.acts === '' && digIt.withNode.pad === ''
-  && digIt.withNode.link === '' && digIt.withNode.flow === 'none');
-check('the place and finish rows are always there',
-  digIt.withNode.kinds !== 'none' && digIt.withNode.done !== 'none');
-check('nothing picked: only the place and finish rows',
-  digIt.withNothing.acts === 'none' && digIt.withNothing.pad === 'none');
-check('edge picked: FLOW not LINK, and no move pad',
-  digIt.withEdge.acts === '' && digIt.withEdge.pad === 'none'
-  && digIt.withEdge.flow === '' && digIt.withEdge.link === 'none');
-check('B opens the nest tools, and reopens after a release while open',
-  digIt.spaceOpened === 1 && digIt.spaceReopened === 1,
-  `first=${digIt.spaceOpened} again=${digIt.spaceReopened}`);
-check('DIG IT bored the planned run open', digIt.midAir === false,
-  `solidAtMm=${digIt.midAir}`);
-check('and hollowed the new chamber', digIt.roomAir === false,
-  `solidAtMm=${digIt.roomAir}`);
-check('the soil below the new chamber is still soil', digIt.soilBelow === true,
-  `solidAtMm=${digIt.soilBelow}`);
-check('the new run joined the rail network', digIt.railsAfter === digIt.railsBefore + 1,
-  `${digIt.railsBefore} -> ${digIt.railsAfter}`);
 
 console.log('\nTHE GROUNDED ENTRANCE (mouths snap to the terrain, GRND toggles it)');
 const grounded = await page.evaluate(() => {
@@ -908,6 +485,52 @@ check('dragging it re-finds the ground', grounded.movedXZ > 3 && grounded.steppe
   `moved ${grounded.movedXZ.toFixed(1)} mm, ${grounded.steppedOff.toFixed(2)} mm off`);
 check('GRND off frees the height', grounded.rose > 3,
   `rose ${grounded.rose.toFixed(1)} mm with the toggle off`);
+
+/*
+ * The reported symptom was "empty space underground when the camera dips" —
+ * unlit soil is black soil, and black soil reads as a hole in the world. The
+ * density lab already solved it by sensing rather than lighting the dirt, so
+ * what is checked here is the crossover: dark below, lit above, and the ramp
+ * between the two rather than a switch.
+ */
+console.log('\nTHE UNDERGROUND SENSE (soil is sensed down there, lit up here)');
+const sensed = await page.evaluate(() => {
+  const s = window.islandScene;
+  const n = Object.fromEntries(s.planForTest().map((p) => [p.id, p]));
+  s.stepForTest(1 / 30, 30);
+  const above = s.sense ? s.sense.uSense.value : -1;
+  window.__goIn(n.gate.x - 18, n.gate.z, Math.PI / 2);
+  s.input.walk = 1;
+  for (let i = 0; i < 400; i += 1) s.stepForTest(1 / 30, 1);
+  s.input.walk = 0;
+  const under = s.sense ? s.sense.uSense.value : -1;
+  const wasUnder = s.statsForTest().underground;
+  // And back to daylight: a sense that never lets go would tint the island.
+  s.teleportMm(28000, 28000);
+  s.drainQueueForTest();
+  const half = (() => {
+    s.stepForTest(1 / 30, 3);
+    return s.sense ? s.sense.uSense.value : -1;
+  })();
+  s.stepForTest(1 / 30, 60);
+  return {
+    wired: !!s.sense,
+    soilOnly: s.islandMaterial !== s.soilMaterial,
+    above,
+    under,
+    wasUnder,
+    half,
+    back: s.sense ? s.sense.uSense.value : -1,
+  };
+});
+check('the soil knows how to be sensed', sensed.wired && sensed.soilOnly,
+  'uniforms on the soil, not on the island sheet');
+check('above ground the dirt is simply lit', sensed.above < 0.02,
+  `uSense ${sensed.above.toFixed(3)}`);
+check('in a bore it is sensed instead', sensed.wasUnder === 1 && sensed.under > 0.95,
+  `uSense ${sensed.under.toFixed(3)} underground`);
+check('and surfacing eases back rather than snapping', sensed.half > 0.1 && sensed.back < 0.05,
+  `${sensed.half.toFixed(2)} three frames out, ${sensed.back.toFixed(3)} settled`);
 
 console.log('\nTHE RED-SKY TEST (fog off, red background, island panorama)');
 await page.evaluate(() => {

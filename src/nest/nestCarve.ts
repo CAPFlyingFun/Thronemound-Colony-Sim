@@ -50,7 +50,7 @@ export interface Bounds { min: Point; max: Point }
  * is THERE, which is exact when the two ends match — the ordinary case — and a
  * hair conservative across a taper, where consecutive segments overlap anyway.
  */
-function taper(from: Point, to: Point, r0: number, r1: number): Field {
+function taper(from: Point, to: Point, r0: number, r1: number, squashY = 1): Field {
     const ax = to[0] - from[0];
     const ay = to[1] - from[1];
     const az = to[2] - from[2];
@@ -62,13 +62,22 @@ function taper(from: Point, to: Point, r0: number, r1: number): Field {
         let t = len2 > 1e-12 ? (px * ax + py * ay + pz * az) / len2 : 0;
         t = Math.min(1, Math.max(0, t));
         const r = r0 + (r1 - r0) * t;
-        return r - Math.hypot(px - ax * t, py - ay * t, pz - az * t);
+        /*
+         * The squash divides only the VERTICAL leg of the perpendicular
+         * distance, which is exactly the right wrong-looking thing: a level
+         * tunnel's perpendicular is mostly vertical, so its ceiling drops to
+         * r·squash while its floor stays r wide — the egg. A plumb shaft's
+         * perpendicular is horizontal, the squash divides a zero, and the
+         * drop stays round for the rail. No case analysis required.
+         */
+        return r - Math.hypot(px - ax * t, (py - ay * t) / squashY, pz - az * t);
     };
 }
 
-/** A round tunnel sample. */
-function ball(at: Point, radius: number): Field {
-    return (x, y, z) => radius - Math.hypot(x - at[0], y - at[1], z - at[2]);
+/** A round tunnel sample — squashed vertically where the bore is. */
+function ball(at: Point, radius: number, squashY = 1): Field {
+    return (x, y, z) => radius
+        - Math.hypot(x - at[0], (y - at[1]) / squashY, z - at[2]);
 }
 
 /** A standardized oval room, wider/longer than it is tall. */
@@ -184,14 +193,16 @@ export function edgeHollow(plan: NestPlan, edge: NestEdge, opts: CarveOptions = 
     const stepMm = opts.stepMm ?? DEFAULT_STEP_MM;
     const samples = sampleEdge(plan, edge, stepMm);
     if (samples.length < 2) return null;
+    const squashY = edge.squashY ?? 1;
     const parts: Field[] = [];
     for (let i = 0; i < samples.length; i += 1) {
         const s = samples[i]!;
-        parts.push(ball([s.at.x, s.at.y, s.at.z], s.radiusMm));
+        parts.push(ball([s.at.x, s.at.y, s.at.z], s.radiusMm, squashY));
         if (i > 0) {
             const p = samples[i - 1]!;
             parts.push(taper(
-                [p.at.x, p.at.y, p.at.z], [s.at.x, s.at.y, s.at.z], p.radiusMm, s.radiusMm,
+                [p.at.x, p.at.y, p.at.z], [s.at.x, s.at.y, s.at.z],
+                p.radiusMm, s.radiusMm, squashY,
             ));
         }
     }
