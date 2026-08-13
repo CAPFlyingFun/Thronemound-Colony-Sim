@@ -90,6 +90,8 @@ const S_UP = new THREE.Vector3();
 const S_RIGHT = new THREE.Vector3();
 const S_MAT = new THREE.Matrix4();
 const S_QUAT = new THREE.Quaternion();
+const S_BODY_QUAT = new THREE.Quaternion();
+const S_CLIMB = new THREE.Vector3();
 
 /** The tallest ledge she steps up in one stride; anything higher is a WALL
  *  and blocks her — the fix for walking "through" tunnel ends. */
@@ -98,6 +100,12 @@ const CLIMB_STEP = 2.5 / MM;
 /** Pressed against a wall with the stick held, she climbs it slowly —
  *  enough to scale the nest's shaft and get back out of a dug hole. */
 const CLIMB_RATE = 2.4;
+/** Surface-follow while climbing steep terrain: slow enough to read as a climb. */
+const STEEP_CLIMB_SPEED = 1.25;
+/** Root orientation chase rate. Smoothing avoids snapping at slope transitions. */
+const BODY_ORIENT_RATE = 10;
+/** Probe radius used to estimate the local surface frame under the body. */
+const BODY_SURFACE_PROBE_MM = 2.2;
 
 /** How far below the drawn island counts as "underground" for the camera. */
 const UNDER_MM = 5;
@@ -1300,6 +1308,47 @@ export class IslandScene {
     this.modeBtn.classList.toggle('is-grip', grip);
   }
 
+  /** Local drawn-surface normal from the same footing the feet use. */
+  private surfaceNormalAt(x: number, z: number): THREE.Vector3 {
+    const probe = BODY_SURFACE_PROBE_MM / MM;
+    const hx = (this.footingAt(x + probe, z) - this.footingAt(x - probe, z)) / (probe * 2);
+    const hz = (this.footingAt(x, z + probe) - this.footingAt(x, z - probe)) / (probe * 2);
+    return new THREE.Vector3(-hx, 1, -hz).normalize();
+  }
+
+  /**
+   * A steep slope is not a wall. When the destination floor is above the
+   * normal one-stride step, advance slowly uphill while raising the body to
+   * the drawn surface. The centre-space solid test still owns safety, so this
+   * cannot push the queen through a cliff or tunnel wall.
+   */
+  private trySteepClimb(nx: number, nz: number, floorY: number, dt: number): boolean {
+    const rise = floorY - this.at.y;
+    if (rise <= CLIMB_STEP || rise > 12 / MM) return false;
+
+    const dx = nx - this.at.x;
+    const dz = nz - this.at.z;
+    const planar = Math.hypot(dx, dz);
+    if (planar < 1e-6) return false;
+
+    const step = Math.min(planar, STEEP_CLIMB_SPEED * dt);
+    const tx = this.at.x + (dx / planar) * step;
+    const tz = this.at.z + (dz / planar) * step;
+    const ty = this.footingAt(tx, tz) + RIDE;
+
+    // Body centre and a small head-height probe must both remain air.
+    if (this.stream?.solidAtWu(tx, ty, tz) === true) return false;
+    if (this.stream?.solidAtWu(tx, ty + 0.45, tz) === true) return false;
+
+    this.at.x = tx;
+    this.at.z = tz;
+    this.at.y += (ty - this.at.y) * Math.min(1, dt * 16);
+    this.lastSafe.copy(this.at);
+    this.hasSafe = true;
+    this.embedFrames = 0;
+    return true;
+  }
+
   /**
    * The free walker: walls are walls, holes are holes. The floor at the
    * DESTINATION is looked up from her own height downward: a tunnel floor
@@ -1336,6 +1385,10 @@ export class IslandScene {
     let blocked = false;
     if (there !== null) {
       if (there - this.at.y > CLIMB_STEP || !fits(there)) {
+        // A tall but continuous drawn surface is a slope to climb, not an
+        // automatic wall. If the centre-space probes say there is room, creep
+        // onto it while raising the body instead of clipping or stopping dead.
+        if (fits(there) && this.trySteepClimb(nx, nz, there, dt)) return;
         blocked = true;
         want = this.at.y;
       } else {
@@ -1608,8 +1661,22 @@ export class IslandScene {
     return best;
   }
 
+  /**
+   * The actual dig direction. In first person the crosshair is the authority;
+   * in third person the bore dial remains the authority. This keeps the hole
+   * where the player is visibly aiming instead of where an older bore pitch
+   * happened to be pointing.
+   */
+  private digAim(): THREE.Vector3 {
+    if (this.firstPerson) {
+      return new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+    }
+    return this.boreAim();
+  }
+
   private bite(): void {
-    const mouth = this.at.clone().addScaledVector(this.boreAim(), JAW_REACH);
+    const aim = this.digAim();
+    const mouth = this.at.clone().addScaledVector(aim, JAW_REACH);
     const result = this.stream!.subtractSphere(mouth, BITE_RADIUS);
     if (result.changedSamples === 0) return;
     const lo = (v: number) => Math.max(0, Math.floor((v - 1) / CH));
@@ -1862,23 +1929,25 @@ export class IslandScene {
       );
       return;
     }
-    const probe = 2 / MM;
-    const hx = (this.footingAt(this.at.x + probe, this.at.z)
-      - this.footingAt(this.at.x - probe, this.at.z)) / (probe * 2);
-    const hz = (this.footingAt(this.at.x, this.at.z + probe)
-      - this.footingAt(this.at.x, this.at.z - probe)) / (probe * 2);
-    const up = S_UP.set(-hx, 1, -hz).normalize();
+    const normal = this.surfaceNormalAt(this.at.x, this.at.z);
+    const up = S_UP.copy(normal);
     const forward = S_FWD.set(Math.sin(this.facing), 0, Math.cos(this.facing));
     forward.addScaledVector(up, -forward.dot(up)).normalize();
     const right = S_RIGHT.crossVectors(up, forward).normalize();
     this.queen.root.position.copy(this.at);
-    this.queen.root.quaternion.setFromRotationMatrix(S_MAT.makeBasis(right, up, forward));
+
+    // Treat the whole ant like the middle tank of a three-body gimbal: the
+    // root chases the local surface frame instead of snapping to it. QueenModel
+    // then drives the head and gaster independently on top of this frame.
+    S_BODY_QUAT.setFromRotationMatrix(S_MAT.makeBasis(right, up, forward));
+    this.queen.root.quaternion.slerp(S_BODY_QUAT, Math.min(1, dt * BODY_ORIENT_RATE));
     this.queen.update(dt, {
       speed: Math.hypot(this.velocity.x, this.velocity.z),
       turn: -this.input.yaw * TURN_RATE,
       digging: this.input.dig ? 1 : 0,
       carrying: 0,
-      headYaw: 0,
+      headYaw: this.firstPerson ? this.camYaw : 0,
+      headPitch: this.firstPerson ? this.fpPitch : 0,
     });
     this.queen.solveFeet(
       (x, z) => this.footingAt(x, z),

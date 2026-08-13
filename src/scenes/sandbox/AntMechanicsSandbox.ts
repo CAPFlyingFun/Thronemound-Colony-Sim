@@ -20,8 +20,9 @@ import {
 /**
  * Ant mechanics sandbox — visual alignment + real digging pass.
  *
- * Preserves the working controls:
- *   W/S walk, A/D turn, arrows aim the head, Space starts/cancels digging.
+ * Controls:
+ *   W/S walk, A/D turn, arrows aim the head.
+ *   Space starts/cancels digging. E grabs/drops a loose clod.
  *
  * Presentation follows Joshy's current ?scene=sandbox scale/camera while the
  * terrain uses DigScene's smooth voxel-material path so it no longer looks
@@ -46,6 +47,12 @@ const ORBIT_DRAG_PITCH = 0.006;
 const WORLD_SIZE = 56;
 const SURFACE_Y = 32;
 const DIG_REACH_VOXELS = 2.2;
+const DIG_PARTICLE_CAP = 28;
+const DIG_PARTICLE_GRAVITY = 32;
+const CLOD_SIZE_MM = 3.2;
+const CLOD_GRAB_RANGE_MM = 13;
+const CLOD_DROP_AHEAD_MM = 7;
+const CARRY_FOLLOW_RATE = 18;
 
 const TERRAIN: TerrainOptions = {
   surfaceY: SURFACE_Y,
@@ -55,6 +62,14 @@ const TERRAIN: TerrainOptions = {
 
 const SKY_FALLBACK = 0xb9c7d4;
 const SKY_URL = `${import.meta.env.BASE_URL}sky/puresky_2k.jpg`;
+
+interface DigParticle {
+  position: THREE.Vector3;
+  velocity: THREE.Vector3;
+  life: number;
+  maxLife: number;
+  size: number;
+}
 
 export class AntMechanicsSandbox {
   ready = false;
@@ -128,6 +143,25 @@ export class AntMechanicsSandbox {
     this.digPreviewMaterial,
   );
 
+  private readonly digParticles: DigParticle[] = [];
+  private readonly particleDummy = new THREE.Object3D();
+  private readonly particleMesh = new THREE.InstancedMesh(
+    new THREE.IcosahedronGeometry(0.45, 0),
+    new THREE.MeshStandardMaterial({ color: 0x6b543a, roughness: 1, metalness: 0 }),
+    DIG_PARTICLE_CAP,
+  );
+  private lastParticleStep = 0;
+
+  private readonly looseClods: THREE.Mesh[] = [];
+  private readonly clodGeometry = new THREE.DodecahedronGeometry(CLOD_SIZE_MM / 2, 0);
+  private readonly clodMaterial = new THREE.MeshStandardMaterial({
+    color: 0x70543b,
+    roughness: 0.98,
+    metalness: 0,
+  });
+  private heldClod: THREE.Mesh | null = null;
+  private readonly carryTarget = new THREE.Vector3();
+
   private disposed = false;
 
   constructor(host: HTMLElement) {
@@ -170,6 +204,20 @@ export class AntMechanicsSandbox {
     this.digPreview.visible = false;
     this.digPreview.renderOrder = 4;
     this.scene.add(this.digPreview);
+
+    this.particleMesh.count = 0;
+    this.particleMesh.visible = false;
+    this.particleMesh.frustumCulled = false;
+    this.scene.add(this.particleMesh);
+    for (let i = 0; i < DIG_PARTICLE_CAP; i += 1) {
+      this.digParticles.push({
+        position: new THREE.Vector3(),
+        velocity: new THREE.Vector3(),
+        life: 0,
+        maxLife: 1,
+        size: 0.3,
+      });
+    }
 
     const sx = Math.floor(WORLD_SIZE / 2);
     const sz = Math.floor(WORLD_SIZE / 2);
@@ -230,6 +278,16 @@ export class AntMechanicsSandbox {
     this.scene.remove(this.digPreview);
     this.digPreview.geometry.dispose();
     this.digPreviewMaterial.dispose();
+
+    this.scene.remove(this.particleMesh);
+    this.particleMesh.geometry.dispose();
+    (this.particleMesh.material as THREE.Material).dispose();
+
+    for (const clod of this.looseClods) this.scene.remove(clod);
+    if (this.heldClod) this.scene.remove(this.heldClod);
+    this.looseClods.length = 0;
+    this.clodGeometry.dispose();
+    this.clodMaterial.dispose();
 
     this.worker.dispose();
     this.renderer.dispose();
@@ -402,6 +460,7 @@ export class AntMechanicsSandbox {
       || code === 'keys'
       || code === 'keyd'
       || code === 'keyr'
+      || code === 'keye'
     ) {
       event.preventDefault();
     }
@@ -414,6 +473,11 @@ export class AntMechanicsSandbox {
       } else {
         this.startReachableDig();
       }
+    }
+
+    if (code === 'keye' && !event.repeat && !this.session.digging) {
+      if (this.heldClod) this.dropHeldClod();
+      else this.tryGrabClod();
     }
 
     // R returns to a familiar rear chase view after free orbiting.
@@ -485,6 +549,110 @@ export class AntMechanicsSandbox {
     this.camera.updateProjectionMatrix();
   };
 
+  // --------------------------------------------------------- dig/carry feedback
+
+  private spawnDigParticles(origin: THREE.Vector3, count: number): void {
+    let spawned = 0;
+    for (const p of this.digParticles) {
+      if (spawned >= count) break;
+      if (p.life > 0) continue;
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 4 + Math.random() * 9;
+      p.position.copy(origin);
+      p.velocity.set(
+        Math.cos(angle) * speed,
+        8 + Math.random() * 10,
+        Math.sin(angle) * speed,
+      );
+      p.life = 0.35 + Math.random() * 0.45;
+      p.maxLife = p.life;
+      p.size = 0.28 + Math.random() * 0.5;
+      spawned += 1;
+    }
+  }
+
+  private updateDigParticles(dt: number): void {
+    let live = 0;
+    for (const p of this.digParticles) {
+      if (p.life <= 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) continue;
+      p.velocity.y -= DIG_PARTICLE_GRAVITY * dt;
+      p.velocity.multiplyScalar(1 - Math.min(0.9, dt * 2.8));
+      p.position.addScaledVector(p.velocity, dt);
+      const fade = Math.max(0, p.life / p.maxLife);
+      this.particleDummy.position.copy(p.position);
+      this.particleDummy.scale.setScalar(p.size * (0.45 + fade * 0.55));
+      this.particleDummy.updateMatrix();
+      this.particleMesh.setMatrixAt(live, this.particleDummy.matrix);
+      live += 1;
+    }
+    this.particleMesh.count = live;
+    this.particleMesh.visible = live > 0;
+    if (live > 0) this.particleMesh.instanceMatrix.needsUpdate = true;
+  }
+
+  private spawnLooseClod(cell: { x: number; y: number; z: number }): void {
+    const clod = new THREE.Mesh(this.clodGeometry, this.clodMaterial);
+    clod.position.set(
+      (cell.x + 0.5) * VOXEL_MM,
+      (cell.y + 1.15) * VOXEL_MM,
+      (cell.z + 0.5) * VOXEL_MM,
+    );
+    clod.rotation.set(Math.random(), Math.random(), Math.random());
+    this.scene.add(clod);
+    this.looseClods.push(clod);
+  }
+
+  private tryGrabClod(): void {
+    if (!this.workerReady || this.looseClods.length === 0) return;
+    const jaw = this.jawPositionMm(this.jawScratch);
+    const forward = this.scratch.set(Math.sin(this.facing), 0, Math.cos(this.facing)).normalize();
+
+    let best: THREE.Mesh | null = null;
+    let bestScore = Infinity;
+    for (const clod of this.looseClods) {
+      const delta = clod.position.clone().sub(jaw);
+      const distance = delta.length();
+      if (distance > CLOD_GRAB_RANGE_MM) continue;
+      const ahead = distance > 1e-4 ? delta.normalize().dot(forward) : 1;
+      if (ahead < -0.15) continue;
+      const score = distance - ahead * 2.5;
+      if (score < bestScore) {
+        bestScore = score;
+        best = clod;
+      }
+    }
+    if (!best) return;
+    const index = this.looseClods.indexOf(best);
+    if (index >= 0) this.looseClods.splice(index, 1);
+    this.heldClod = best;
+  }
+
+  private dropHeldClod(): void {
+    const clod = this.heldClod;
+    if (!clod) return;
+    const forward = this.scratch.set(Math.sin(this.facing), 0, Math.cos(this.facing)).normalize();
+    const x = this.antPos.x + forward.x * CLOD_DROP_AHEAD_MM;
+    const z = this.antPos.z + forward.z * CLOD_DROP_AHEAD_MM;
+    const y = this.surfaceAtMm(x, z) + CLOD_SIZE_MM * 0.55;
+    clod.position.set(x, y, z);
+    clod.rotation.set(Math.random(), Math.random(), Math.random());
+    this.looseClods.push(clod);
+    this.heldClod = null;
+  }
+
+  private syncHeldClod(dt: number): void {
+    const clod = this.heldClod;
+    if (!clod || !this.workerReady) return;
+    const jaw = this.jawPositionMm(this.carryTarget);
+    jaw.x += Math.sin(this.facing) * 1.1;
+    jaw.y -= 0.25;
+    jaw.z += Math.cos(this.facing) * 1.1;
+    clod.position.lerp(jaw, Math.min(1, dt * CARRY_FOLLOW_RATE));
+    clod.rotation.y += dt * 1.2;
+  }
+
   // ------------------------------------------------------------------- digging
 
   private jawPositionMm(into: THREE.Vector3): THREE.Vector3 {
@@ -523,6 +691,7 @@ export class AntMechanicsSandbox {
     const outcome = this.session.toggleDig(hit.x, hit.y, hit.z);
 
     if (outcome.kind === 'progress') {
+      this.lastParticleStep = 0;
       this.digPreview.position.set(
         (hit.x + 0.5) * VOXEL_MM,
         (hit.y + 0.5) * VOXEL_MM,
@@ -539,42 +708,45 @@ export class AntMechanicsSandbox {
 
     if (!working) {
       this.digPreview.visible = false;
+      this.lastParticleStep = 0;
       return;
     }
 
-    // The target appears immediately, then visibly "works loose" while the
-    // DigSession timer advances. The hole itself is still authoritative:
-    // VoxelWorld changes only when the dig completes.
     const ratio = this.session.chewRatio;
-    this.digPreview.visible = true;
-    this.digPreview.rotation.y += dt * (0.8 + ratio * 2.5);
-    this.digPreview.rotation.x = ratio * 0.18;
-    this.digPreview.scale.setScalar(1 - ratio * 0.28);
-    this.digPreviewMaterial.opacity = 0.30 + ratio * 0.42;
+    const origin = new THREE.Vector3(
+      (working.x + 0.5) * VOXEL_MM,
+      (working.y + 0.75) * VOXEL_MM,
+      (working.z + 0.5) * VOXEL_MM,
+    );
 
+    this.digPreview.visible = true;
+    this.digPreview.rotation.y += dt * (0.8 + ratio * 3.2);
+    this.digPreview.rotation.x = ratio * 0.22;
+    this.digPreview.scale.setScalar(1 - ratio * 0.34);
+    this.digPreviewMaterial.opacity = 0.24 + ratio * 0.5;
+
+    const particleStep = Math.floor(ratio * 8);
+    if (particleStep > this.lastParticleStep) {
+      this.spawnDigParticles(origin, 2 + Math.min(4, particleStep));
+      this.lastParticleStep = particleStep;
+    }
+
+    const dugCell = { x: working.x, y: working.y, z: working.z };
     const outcome = this.session.tickDig(dt);
 
-    if (outcome.kind === 'progress') {
-      const next = outcome.ratio;
-      this.digPreview.scale.setScalar(1 - next * 0.28);
-      this.digPreviewMaterial.opacity = 0.30 + next * 0.42;
-      return;
-    }
+    if (outcome.kind === 'progress') return;
 
     if (outcome.kind === 'dug') {
+      this.spawnDigParticles(origin, 10);
+      this.spawnLooseClod(dugCell);
       this.digPreview.visible = false;
+      this.lastParticleStep = 0;
       this.drainDirty();
       return;
     }
 
-    if (
-      outcome.kind === 'cancelled'
-      || outcome.kind === 'none'
-      || outcome.kind === 'full'
-      || outcome.kind === 'bedrock'
-    ) {
-      this.digPreview.visible = false;
-    }
+    this.digPreview.visible = false;
+    this.lastParticleStep = 0;
   }
 
   // -------------------------------------------------------------- movement/gait
@@ -601,6 +773,7 @@ export class AntMechanicsSandbox {
     if (!this.workerReady) return;
 
     const digging = this.session.digging !== null;
+    const carrying = this.heldClod !== null;
 
     this.worker.root.position.copy(this.antPos);
     this.worker.root.position.y = this.antPos.y - RIDE_MM;
@@ -610,7 +783,7 @@ export class AntMechanicsSandbox {
       speed: Math.abs(walk) > 0.05 ? WALK_SPEED_MM_S / MODEL_SCALE : 0,
       turn: turn * TURN_RATE,
       digging: digging ? 1 : 0,
-      carrying: 0,
+      carrying: carrying ? 1 : 0,
       headYaw: this.headYaw,
       headPitch: this.headPitch,
     });
@@ -692,7 +865,9 @@ export class AntMechanicsSandbox {
     this.antPos.y += (floor - this.antPos.y) * Math.min(1, dt * 12);
 
     this.updateDig(dt);
+    this.updateDigParticles(dt);
     this.poseWorker(dt, canWalk ? walk : 0, turn);
+    this.syncHeldClod(dt);
     this.updateCamera(dt);
     this.drainDirty();
 
