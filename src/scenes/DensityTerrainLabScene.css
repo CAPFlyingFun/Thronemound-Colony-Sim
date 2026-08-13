@@ -1807,20 +1807,72 @@
   gap: 5px;
 }
 
+/*
+ * THE BAR WEARS frame-bar — and the slice arithmetic is not the toast's.
+ *
+ * MEASURED, not guessed (scratch-frames.mjs, flood-filling the interior and
+ * finding where the edge profile goes flat — a threshold walk from the edge
+ * reports a 2px rim, because every frame in this set has a soft shadow
+ * OUTSIDE the gold):
+ *
+ *     frame-bar   285 x 100    rim 11 top / 16 bottom, round cap 37 wide
+ *
+ * THE RULE THAT MAKES IT COME OUT RIGHT, and it is not the same trap the
+ * toast hit. Nine-slicing stretches only the MIDDLE, so the two directions
+ * behave differently:
+ *
+ *  - VERTICALLY nothing may stretch. Set the height to the frame's own
+ *    aspect — every bar here is `height = 100 * s` for its own scale `s` —
+ *    and make every border `slice * s`. Then all nine tiles scale by exactly
+ *    `s` and the cap's curve is drawn, not smeared.
+ *  - HORIZONTALLY only the plain run stretches, which is what a run is for.
+ *    So left/right must slice at 37 — the whole round cap. Anything less
+ *    puts part of the curve in the stretched middle, which is the failure
+ *    the frames were flagged for.
+ *
+ * Top and bottom slice at the RIM rather than the cap on purpose: it puts
+ * the padding box exactly on the frame's drawn interior, so the fill fills
+ * the stone instead of a rectangle floating inside it.
+ *
+ * The scales are s = 0.14 / 0.11 / 0.08 — a 14px bar gets a 1.5px gold rim,
+ * an 8px bar gets under 1. That is thin, and it is meant to be: at this size
+ * the frame reads as a gold-edged capsule, which is the set's language, and
+ * anything heavier would leave no readout between the rims.
+ */
 .tm-bar {
   position: relative;
-  /* The design's numbers are the OUTSIDE of the bar. Content-box would put
-   * the 1 px rim outside 205 and make every bar two pixels wrong. */
+  /* The design's numbers are the OUTSIDE of the bar — and now that the rim
+   * is a border rather than a 1px line, content-box would be wrong by the
+   * whole cap rather than by two pixels. */
   box-sizing: border-box;
   overflow: hidden;
   border-radius: 999px;
-  border: 1px solid rgba(247, 226, 176, 0.28);
+  border-style: solid;
+  /* Under the art, not instead of it: if the webp fails this is still a
+   * bar-shaped dark box rather than a hole.
+   *
+   * CLIPPED TO THE PADDING BOX, which is not the default. A background is
+   * painted across the whole BORDER box, so it also fills the region the
+   * frame occupies — and the frame is transparent outside its gold, so the
+   * backing (and the `is-soon` hatch above) shows through the rounded caps
+   * and reads as the bar leaking past its own rim. */
   background: rgba(8, 6, 4, 0.55);
+  background-clip: padding-box;
+  border-image-source: url('/ui/frame-bar.webp');
+  border-image-slice: 11 37 16 37 fill;
+  border-image-repeat: stretch;
+  /* `border-image-width` is left at its default of 1, which means exactly
+   * one times `border-width` — the two numbers the toast had to be told
+   * apart are the same number here, and saying it twice invites them to
+   * drift. */
 }
 
-.tm-bar-health { width: 205px; height: 14px; }
-.tm-bar-stamina { width: 190px; height: 11px; }
-.tm-bar-energy, .tm-bar-water { width: 90px; height: 8px; }
+/* s = 0.14 */
+.tm-bar-health { width: 205px; height: 14px; border-width: 1.54px 5.18px 2.24px; }
+/* s = 0.11 */
+.tm-bar-stamina { width: 190px; height: 11px; border-width: 1.21px 4.07px 1.76px; }
+/* s = 0.08 */
+.tm-bar-energy, .tm-bar-water { width: 90px; height: 8px; border-width: 0.88px 2.96px 1.28px; }
 
 .tm-bar-fill {
   position: absolute;
@@ -1835,6 +1887,12 @@
  * on the action cluster: this is coming, and it is not ready. */
 .tm-bar.is-soon {
   opacity: 0.5;
+  /* NO `fill`. The frame's own stone middle paints OVER the element's
+   * background, so with it the hatch would be drawn and then covered — a
+   * bar that says "no signal" in a layer nobody can see. Dropping the
+   * keyword leaves the middle unpainted and the hatch showing through the
+   * frame, which is the whole point of the state. */
+  border-image-slice: 11 37 16 37;
   background-image: repeating-linear-gradient(
     116deg,
     rgba(247, 226, 176, 0.16) 0 3px,
@@ -1880,6 +1938,76 @@
 .tm-colony-cell.is-soon { opacity: 0.42; filter: grayscale(0.5); }
 
 /*
+ * THE CARRY METER — frame-meter, and the third frame's job.
+ *
+ * The frame is not a bar: it is a MEDALLION WITH A BAR GROWING OUT OF IT,
+ * mandibles struck into the disc on the left. That asymmetry is the whole
+ * reason it needs its own slice, and it is why it suits carrying rather
+ * than a vital — the disc is a thing held, the run beside it is how full
+ * her mandibles are.
+ *
+ *     frame-meter  285 x 128    rim 27 top / 26 bottom, medallion 115 wide,
+ *                               right cap 29
+ *
+ * Same uniform rule as the bars — height 34 is 128 * 0.2656, and every
+ * border is its slice * 0.2656 — so the disc is drawn round rather than
+ * squashed into an oval. Only the run between the two stretches.
+ *
+ * BESIDE the colony strip rather than under it. The left column is already
+ * 209px deep on a screen that can be 375 tall in landscape, and the parked
+ * stick's top edge is the number that column has to stay above; a fourth
+ * row would have been the one that ran into it. The colony strip is 260
+ * wide in a 932 canvas, so the room was sideways.
+ *
+ * DIMMED, because CARRY is registered `built: false` in antKinds.ts and
+ * nothing on this island can be picked up yet. Same promise the energy and
+ * water bars made until v0.1.24 made them real: the hatch says NO SIGNAL,
+ * and an empty frame is honest where a zero would be a lie.
+ */
+.tm-meter {
+  position: absolute;
+  z-index: 1;
+  top: calc(max(12px, env(safe-area-inset-top)) + 88px);
+  left: calc(max(12px, env(safe-area-inset-left)) + 272px);
+  box-sizing: border-box;
+  width: 165px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-style: solid;
+  border-width: 7.17px 7.7px 6.9px 30.5px;
+  border-image-source: url('/ui/frame-meter.webp');
+  border-image-slice: 27 29 26 115 fill;
+  border-image-repeat: stretch;
+  color: #f3e2b0;
+  font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.14em;
+  pointer-events: none;
+}
+
+/* The same hatch the vital bars wear, and `fill` dropped for the same
+ * reason: the frame's stone middle would otherwise paint over it. */
+.tm-meter.is-soon {
+  opacity: 0.5;
+  border-image-slice: 27 29 26 115;
+  /* The padding box is a RECTANGLE and the frame's run ends in a ROUND CAP,
+   * so a square hatch fills the two corners the gold curves away from and
+   * reads as the pattern leaking out of the frame. Rounded on the right
+   * only: the left end of the run is not an end at all, it is where the
+   * medallion is, and a radius there would open a gap between them. */
+  border-radius: 0 999px 999px 0;
+  /* Same reason as the bars: without this the hatch is painted under the
+   * frame too, and the frame is transparent above and below its run. */
+  background-clip: padding-box;
+  background-image: repeating-linear-gradient(
+    116deg,
+    rgba(247, 226, 176, 0.16) 0 3px,
+    rgba(247, 226, 176, 0) 3px 8px
+  );
+}
+
+/*
  * THE QUEST PANEL — third in the left column.
  *
  * 225 wide, inside the design's 210-235. `!important` on the geometry
@@ -1895,6 +2023,44 @@
   box-sizing: border-box;
   width: 225px;
   max-width: calc(100vw - 24px);
+  /*
+   * frame-panel, and this one CANNOT be uniformly scaled the way the bars
+   * are. A panel stretches in both directions — the text inside decides the
+   * height — so there is no single scale that fits the box. Nine-slicing
+   * handles exactly that: pick ONE scale for the border so the corner
+   * leaves stay in proportion to each other, and let the middle stretch in
+   * both directions, because the middle is plain stone and stretching plain
+   * stone costs nothing.
+   *
+   *     frame-panel  309 x 169    rim 10-14, corner leaves reach 28 x 30
+   *
+   * Scale is 0.73, matched to the width the panel actually gets (225 / 309),
+   * so the rim is the thickness the artist drew it at for a box this wide.
+   * The leaves land at 20 x 22 and are never squashed, because both borders
+   * use that same 0.73.
+   *
+   * Slicing at the LEAF (28/30) rather than the rim (12): a leaf that pokes
+   * past the slice line gets stretched with the middle and smears into the
+   * run, which is the failure these frames were flagged for.
+   */
+  border-style: solid;
+  border-width: 17.5px 19.7px 21.9px 20.4px;
+  border-image-source: url('/ui/frame-panel.webp');
+  border-image-slice: 24 27 30 28 fill;
+  border-image-repeat: stretch;
+  /* The frame brings its own stone and its own edge; the flat pill the
+   * status box wears elsewhere would draw a second, squarer panel just
+   * inside this one. */
+  background: none !important;
+  backdrop-filter: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  /* The status box's own 8/11 padding held the text off a drawn edge that
+   * did not exist yet. The frame is that edge now, and 20px of gold plus
+   * 8px of air is a margin twice over — which cost 12px of a column that
+   * has to clear the parked stick at 209 on a 375-tall landscape screen.
+   * Enough to keep the text off the stone, no more. */
+  padding: 2px 5px !important;
 }
 
 /*
@@ -2148,6 +2314,26 @@
   .tm-art-dig { width: 76px; height: 76px; background-size: 64px 64px; }
   .tm-art-scoop { width: 58px; height: 58px; background-size: 48px 48px; }
   .tm-instruments .density-lab-aim-readout { font-size: 11px; padding: 4px 6px; }
+
+  /*
+   * THE QUEST PANEL, ON THE SCREEN THAT HAS NO ROOM FOR IT.
+   *
+   * A frame costs height, and this is where that bill comes due. The flat
+   * box was 47px tall and the column cleared the parked stick's top edge at
+   * 209 by a fifth of a pixel — measured, not designed, and the frame spent
+   * 30px it did not have. On a 667x375 landscape phone the panel ran to 239
+   * and drew across the top of the stick.
+   *
+   * Two economies rather than one, because neither is enough alone: the
+   * frame comes down to half scale (leaves at 14 x 12, still drawn rather
+   * than smeared), and the panel moves up into the 20px of air between it
+   * and the colony strip, which is doing nothing on a screen this short.
+   */
+  .tm-quest {
+    top: calc(max(12px, env(safe-area-inset-top)) + 132px) !important;
+    border-width: 12px 13.5px 15px 14px;
+    font-size: 11px;
+  }
 }
 
 /*

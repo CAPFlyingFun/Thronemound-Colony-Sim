@@ -182,6 +182,25 @@ export function buildVitalsHud(host: QuestHost, ): void {
     cell('food', '—', 'FOOD', false),
   );
   host.hud.appendChild(colony);
+
+  /*
+   * THE CARRY METER, beside the colony strip and dimmed.
+   *
+   * CARRY is registered in antKinds.ts with `built: false`, so there is
+   * nothing to report and the meter says so: hatched, no fill element at
+   * all, exactly as energy and water read before v0.1.24 made them live.
+   * Drawn rather than withheld for the reason the dimmed plates are drawn —
+   * absent says nothing, dimmed says coming.
+   *
+   * It is here now because frame-meter is here now. The frame is a
+   * medallion with a run beside it, which is a picture of a thing held.
+   */
+  const carry = document.createElement('div');
+  carry.className = 'tm-meter tm-meter-carry is-soon';
+  carry.setAttribute('role', 'img');
+  carry.setAttribute('aria-label', 'Carrying — not implemented yet');
+  carry.textContent = 'CARRY';
+  host.hud.appendChild(carry);
 }
 
 export function buildQuestHud(host: QuestHost, ): void {
