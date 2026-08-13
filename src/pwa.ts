@@ -13,7 +13,7 @@
  * file would be identical on every deploy and no update would ever be found.
  */
 
-import { decideUpdate } from './pwaPolicy';
+import { decideUpdate, isDifferentBuild as isNewBuild } from './pwaPolicy';
 
 declare const __BUILD_TIME__: string;
 
@@ -132,7 +132,7 @@ export function registerServiceWorker(): void {
          * arrived last visit and was never taken up.
          */
         if (registration.waiting && navigator.serviceWorker.controller) {
-          offer(registration);
+          if (isDifferentBuild(registration)) offer(registration);
         }
         registration.addEventListener('updatefound', () => {
           const next = registration.installing;
@@ -144,7 +144,7 @@ export function registerServiceWorker(): void {
              * needs no prompt — there is nothing to replace.
              */
             if (next.state === 'installed' && navigator.serviceWorker.controller) {
-              offer(registration);
+              if (isDifferentBuild(registration)) offer(registration);
             }
           });
         });
@@ -174,6 +174,31 @@ export function registerServiceWorker(): void {
     accepted = false;
     window.location.reload();
   });
+}
+
+/**
+ * IS THE THING WAITING ACTUALLY A DIFFERENT BUILD?
+ *
+ * Reported as a restart loop: the game loaded v0.1.9, START went into the
+ * island, and then it announced an update to the build it was already
+ * running and did it again.
+ *
+ * The cause is that a WAITING worker was being treated as proof of a new
+ * version, and it is not. A worker can sit in `waiting` for reasons that
+ * have nothing to do with there being newer code — activation still
+ * pending, or another tab of the game holding the old one alive. Accepting
+ * it posts SKIP_WAITING, `controllerchange` fires, the page reloads, the
+ * worker is STILL waiting, and the same offer is made again. The loop guard
+ * below could not help: it only decides whether an update is applied
+ * silently or with a prompt, never whether there is one.
+ *
+ * So the script's own `?v=` — the build time it was registered with — is
+ * compared against the build time of the code doing the asking. Same stamp,
+ * same build, nothing to offer.
+ */
+function isDifferentBuild(registration: ServiceWorkerRegistration): boolean {
+  const worker = registration.waiting ?? registration.installing;
+  return isNewBuild(worker?.scriptURL ?? null, __BUILD_TIME__);
 }
 
 function offer(registration: ServiceWorkerRegistration): void {

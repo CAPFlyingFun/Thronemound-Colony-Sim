@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decideUpdate, type UpdateState } from '../src/pwaPolicy';
+import { decideUpdate, isDifferentBuild, type UpdateState } from '../src/pwaPolicy';
 
 const state = (over: Partial<UpdateState> = {}): UpdateState => ({
   loading: false, interacted: false, looped: false, ...over,
@@ -41,5 +41,38 @@ describe('what a waiting update is allowed to do', () => {
   it('prefers asking over holding when it could never be automatic', () => {
     expect(decideUpdate(state({ loading: true, interacted: true }))).toBe('prompt');
     expect(decideUpdate(state({ loading: true, looped: true }))).toBe('prompt');
+  });
+});
+
+/*
+ * The restart loop, pinned. The game announced an update to the build it was
+ * already running, and did it again after every reload, because a WAITING
+ * worker was being read as proof of new code.
+ */
+describe('isDifferentBuild', () => {
+  const NOW = '08-13 11:48';
+
+  it('is not an update when the waiting worker is this very build', () => {
+    expect(isDifferentBuild(`/sw.js?v=${encodeURIComponent(NOW)}`, NOW)).toBe(false);
+  });
+
+  it('IS an update when the stamp differs', () => {
+    expect(isDifferentBuild('/sw.js?v=08-13%2012:02', NOW)).toBe(true);
+  });
+
+  /* A registration from before the scheme carries no stamp, and really is
+   * something else. */
+  it('treats an unstamped worker as an update', () => {
+    expect(isDifferentBuild('/sw.js', NOW)).toBe(true);
+  });
+
+  /* Nothing waiting is not an update, and must never be reported as one —
+   * that is the whole loop. */
+  it('is not an update when nothing is waiting', () => {
+    expect(isDifferentBuild(null, NOW)).toBe(false);
+  });
+
+  it('survives a URL it cannot parse rather than trapping the player', () => {
+    expect(isDifferentBuild('::::', NOW)).toBe(true);
   });
 });

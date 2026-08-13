@@ -54,3 +54,36 @@ export function decideUpdate(state: UpdateState): UpdateAction {
   if (state.loading) return 'hold';
   return 'auto';
 }
+
+/**
+ * IS A WAITING WORKER ACTUALLY A DIFFERENT BUILD?
+ *
+ * A worker sitting in `waiting` is not evidence of new code. Activation can
+ * still be pending, or another tab of the game can be holding the old one
+ * alive — and treating either as an update produces a restart loop:
+ * accepting posts SKIP_WAITING, the page reloads, the same worker is still
+ * waiting, and the same offer is made again. Reported from the device as
+ * the game announcing an update to the build it was already running.
+ *
+ * `decideUpdate` above cannot catch this. It only chooses HOW an update is
+ * applied, never whether there is one.
+ *
+ * The registration URL carries the build it was made for as `?v=`, so the
+ * honest test is whether that stamp differs from the build asking the
+ * question. Kept here, taking plain strings, because it is a decision and
+ * decisions in this file are testable without a browser.
+ */
+export function isDifferentBuild(scriptUrl: string | null, running: string): boolean {
+  if (!scriptUrl) return false;
+  let stamp: string | null;
+  try {
+    stamp = new URL(scriptUrl, 'https://x.invalid/').searchParams.get('v');
+  } catch {
+    /* An unparseable URL is not something to reason about; let it through
+     * rather than pin the player on a build they cannot leave. */
+    return true;
+  }
+  /* No stamp is a registration from before the scheme existed, which really
+   * is a different build. */
+  return stamp === null || stamp !== running;
+}
