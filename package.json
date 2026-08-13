@@ -1,7 +1,7 @@
 {
   "name": "thronemound-colony-sim",
   "private": true,
-  "version": "0.1.5",
+  "version": "0.1.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -42,7 +42,8 @@
     "probe:sides": "node scripts/probe-sides.mjs",
     "probe:lift": "node scripts/probe-lift.mjs",
     "probe:poseedit": "node scripts/probe-poseedit.mjs",
-    "shot:poseedit": "node scripts/shot-poseedit.mjs"
+    "shot:poseedit": "node scripts/shot-poseedit.mjs",
+    "probe:boot": "node scripts/probe-boot.mjs"
   },
   "dependencies": {
     "three": "^0.180.0"
