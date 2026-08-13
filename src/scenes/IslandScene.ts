@@ -312,6 +312,25 @@ const S_LENS_UP = new THREE.Vector3();
 const S_LENS_RIGHT = new THREE.Vector3();
 const S_LENS_CORNER = new THREE.Vector3();
 const S_LENS_STEP = new THREE.Vector3();
+/**
+ * The soil normal the lens guard escapes along — and it needs a scratch OF
+ * ITS OWN, which is the whole of a nasty bug.
+ *
+ * It used to borrow `S_TARGET`. That was safe while the guard only ever
+ * worked on `camera.position`, and stopped being safe the moment it learned
+ * to guard an arbitrary point (v0.0.82, "guard the target, smooth the
+ * lens") — because the point first person hands it IS `S_TARGET`, the eye
+ * target built a few lines earlier. So `S_TARGET.set(0, 1, 0)` inside the
+ * guard did not initialise a spare vector; it overwrote the caller's eye
+ * target with (0, 1, 0), and the lens was then eased toward the WORLD
+ * ORIGIN — 39.6 metres away, in open ocean, while she stood on the summit.
+ *
+ * That is the blue: sea in front, sky behind, from a camera at 0,0,0. And
+ * the shake is the same thing at frame rate, because the guard only trips
+ * when soil is in the picture, so the lens flipped between her eyes and the
+ * origin as she cut. Both symptoms, one aliased vector.
+ */
+const S_LENS_OUT = new THREE.Vector3();
 
 /** Head-clearance and bone-follow scratches — theirs alone, read across
  *  frames of the pose and never shared with the S_ pool. */
@@ -4794,7 +4813,8 @@ export class IslandScene {
      * gradient points out of whatever it is actually inside, so a roof, a
      * wall and a floor are one case.
      */
-    const out = S_TARGET.set(0, 1, 0);
+    /* Its OWN scratch, never the caller's — see `S_LENS_OUT`. */
+    const out = S_LENS_OUT.set(0, 1, 0);
     walker.normalAt(p, out);
     /*
      * A COARSE WALK, THEN A BISECTION — not forty-five fine steps.
