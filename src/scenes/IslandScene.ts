@@ -431,18 +431,13 @@ export class IslandScene {
      * it is the thing that made "we already have SPRINT, we don't need
      * CRAWL" wrong: a three-state latch has to be able to show three states.
      *
-     * WALK and RUN have their own art. CRAWL does not yet, so it falls back
-     * to the lettered blank plate rather than borrowing a picture that says
-     * the wrong word — the same stand-in DODGE is using, and it is never
-     * wrong, only plainer.
+     * All three have their own art now — CRAWL arrived on the third sheet
+     * and its lettered stand-in is retired.
      */
     const btn = this.sprintBtn;
     if (btn) {
-      const art = this.pace === 2 ? 'sprint' : this.pace === 1 ? 'walk' : null;
-      btn.className = art
-        ? `density-lab-button tm-art tm-art-${art}`
-        : 'density-lab-button tm-plate tm-plate-md';
-      btn.textContent = art ? '' : 'CRAWL';
+      const art = this.pace === 2 ? 'sprint' : this.pace === 1 ? 'walk' : 'crawl';
+      btn.className = `density-lab-button tm-art tm-art-${art}`;
       btn.setAttribute('aria-label', `Pace — ${PACE_NAMES[this.pace]}`);
       /* Lit on RUN still: it is the pace with a cost, and the one worth
        * seeing from the corner of an eye. */
@@ -4836,8 +4831,8 @@ export class IslandScene {
      * on the glass; only where it STARTED has to be the button.
      */
     const dodgeBtn = document.createElement('button');
-    dodgeBtn.className = 'density-lab-button tm-plate tm-plate-md tm-dodge';
-    dodgeBtn.textContent = 'DODGE';
+    dodgeBtn.className = 'density-lab-button tm-art tm-art-dodge tm-dodge';
+    dodgeBtn.setAttribute('aria-label', 'Dodge');
     dodgeBtn.title = 'Dodge — press, swipe the way you want to go, release.';
     const nudge = { x: 0, y: 0, id: -1 };
     dodgeBtn.addEventListener('pointerdown', (e) => {
@@ -5578,11 +5573,12 @@ export class IslandScene {
     const panel = document.createElement('div');
     panel.className = 'tm-vitals';
 
+    /* Her own medallion now, rather than a system-font ant sitting in a
+     * plate borrowed from the button set. */
     const portrait = document.createElement('div');
     portrait.className = 'tm-portrait';
-    // A glyph standing in for a face. The frame is real art and correctly
-    // sized; the queen's portrait is a drawing nobody has made yet.
-    portrait.textContent = '🐜';
+    portrait.setAttribute('role', 'img');
+    portrait.setAttribute('aria-label', 'The Queen');
     panel.appendChild(portrait);
 
     const bars = document.createElement('div');
@@ -5624,19 +5620,30 @@ export class IslandScene {
 
     const colony = document.createElement('div');
     colony.className = 'tm-colony';
-    const cell = (value: string, label: string, live: boolean): HTMLElement => {
+    const cell = (
+      glyph: string, value: string, label: string, live: boolean,
+    ): HTMLElement => {
       const c = document.createElement('div');
       c.className = `tm-colony-cell${live ? '' : ' is-soon'}`;
+      const icon = document.createElement('i');
+      icon.className = `tm-colony-icon tm-ci-${glyph}`;
+      const text = document.createElement('div');
+      text.className = 'tm-colony-text';
       const b = document.createElement('b');
       b.textContent = value;
       const s = document.createElement('span');
       s.textContent = label;
-      c.append(b, s);
+      text.append(b, s);
+      c.append(icon, text);
       return c;
     };
-    const workers = cell('0', 'WORKERS', true);
+    const workers = cell('worker', '0', 'WORKERS', true);
     this.workersOutEl = workers.querySelector('b');
-    colony.append(workers, cell('—', 'BROOD', false), cell('—', 'FOOD', false));
+    colony.append(
+      workers,
+      cell('brood', '—', 'BROOD', false),
+      cell('food', '—', 'FOOD', false),
+    );
     this.hud.appendChild(colony);
   }
 

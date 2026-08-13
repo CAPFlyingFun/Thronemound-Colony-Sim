@@ -2060,3 +2060,48 @@
   background-image: url('/ui/walk.webp');
   background-size: 50px 50px;
 }
+
+/*
+ * ============================================================
+ * SHEET 3 — the pieces of it that have a game behind them
+ * ============================================================
+ *
+ * Sixteen arrived; four are wired. The other twelve — INTERACT, ATTACK,
+ * EAT, DRINK, DANGER, POISON, INJURY, LOAD, NEST, SCENT, COLONY, BROOD —
+ * are in the repo and drawn by nothing, because the mechanics they name do
+ * not exist. Art is cheap to hold and a button that lies is not.
+ */
+.tm-art-crawl, .tm-art-dodge {
+  width: 62px;
+  height: 62px;
+  background-size: 50px 50px;
+}
+
+.tm-art-crawl { background-image: url('/ui/crawl.webp'); }
+.tm-art-dodge { background-image: url('/ui/dodge.webp'); }
+
+/* The queen, at last, instead of a system-font ant in a borrowed frame.
+ * The art is a framed medallion, so it replaces the plate AND the glyph. */
+.tm-portrait {
+  background-image: url('/ui/queen.webp');
+  font-size: 0;
+}
+
+/*
+ * The colony strip's three cells get their glyphs. WORKER is live data and
+ * lit; BROOD and the food store are dimmed with the cell they sit in, the
+ * same promise the vital bars make.
+ */
+.tm-colony-cell { flex-direction: row; align-items: center; gap: 7px; }
+.tm-colony-text { display: flex; flex-direction: column; gap: 3px; }
+
+.tm-colony-icon {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  background: center / contain no-repeat;
+}
+
+.tm-ci-worker { background-image: url('/ui/worker.webp'); }
+.tm-ci-brood { background-image: url('/ui/brood.webp'); }
+.tm-ci-food { background-image: url('/ui/icon-food.webp'); }
