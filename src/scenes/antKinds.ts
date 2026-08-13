@@ -57,12 +57,19 @@ export const ABILITIES: Record<AbilityId, Ability> = {
 /**
  * HOW FAST THE GAME'S CLOCK RUNS against the one on the wall.
  *
- * Fifteen, as asked. One minute of play is a quarter of an ant's hour, so
- * a full ant day is 96 minutes of play — which is a good length for a day
- * and a bad length for a hunger bar, and the note on `FIRE_ANT_VITALS`
- * says what was done about that.
+ * THIRTY. A full day of hers is 48 minutes of play, which is the number
+ * that makes a day something a session actually contains — morning, heat,
+ * evening and night can all happen while you are out — without it being a
+ * strobe you turn your back on and lose a week to.
+ *
+ * It started at fifteen, and fifteen was wrong for a reason worth keeping:
+ * a 96-minute day pushed every survival bar past the length of a session,
+ * which had thirst compressed twice over to compensate. At thirty the
+ * biology's own endurances land in the right place on their own — a day of
+ * water is 48 minutes and two days of energy is 96 — and nothing has to be
+ * fudged to make them felt.
  */
-export const GAME_MINUTES_PER_REAL_MINUTE = 15;
+export const GAME_MINUTES_PER_REAL_MINUTE = 30;
 
 /** Real seconds in one hour of hers. */
 export const REAL_SECONDS_PER_GAME_HOUR = (60 * 60) / GAME_MINUTES_PER_REAL_MINUTE;
@@ -73,63 +80,66 @@ export function drainPerGameHours(max: number, hours: number): number {
 }
 
 /**
- * THE FIRE ANT, from the literature — and where the literature had to give.
+ * THE FIRE ANT — and a correction to what this file said in v0.1.22.
  *
- * WATER BEFORE FOOD, and that is not a guess. Water balance, not energy,
- * is what limits how far a fire ant forager will go from the nest, and a
- * worker dies somewhere between 36% and 50% of its body water lost. Ants
- * generally last 3-7 days without water against 4-10 without food, so
- * thirst is the roughly-twice-as-urgent of the two and it is coupled to
- * EXERTION rather than to the clock — which is also why the nest is a
- * refuge in this game as it is in the ground: a fire ant nest is kept at
- * 60-80% humidity against 40-60% outside.
+ * WATER BEFORE ENERGY still stands, and it is the best-sourced thing here:
+ * at a long foraging distance many workers come back dehydrated and with
+ * no sugar load at all, and the authors concluded water balance rather
+ * than energy limits foraging RANGE under unsaturated humidity. That is
+ * why thirst is coupled to exertion and shelter rather than to a clock,
+ * and why the nest is a refuge — 60-80% humidity inside against 40-60%
+ * out. See `WATER_CURVE`.
  *
- * WHERE IT GAVE: four days of thirst at fifteen times real speed is six
- * and a half hours of play, and a bar that cannot move inside a session is
- * not a mechanic. So the biological RATIO is kept — water at about half
- * food's endurance, both weighted by effort — and the absolute is
- * compressed again, to roughly one of her days of ordinary surface work.
- * Stated plainly because it is a design decision wearing a research
- * finding's clothes, and the next person should know which is which.
+ * WHAT WAS WRONG: "3-7 days without water, 4-10 without food" came from
+ * pest-control pages, not from the literature, and it should never have
+ * been encoded as a constant. The controlled work is size-dependent and
+ * measured under severe stress — at about 23.5% relative humidity, small
+ * workers reach 50% mortality in roughly 14-16 hours and large ones in
+ * 43-47. That is not a thirst clock; it is a desiccation experiment, and
+ * a worker in humid nest air is in a different situation entirely. Which
+ * is precisely why the curve, not the number, is doing the work now.
  *
- * STAMINA is the one the biology mostly agreed with already. Colony time
- * budgets put workers at about two thirds inactive, and inactive workers
- * are the reserve that replaces active ones AS THEY TIRE — so resting has
- * to pay back faster than working spends, and a crawl has to count as
- * rest. Sustained walking is very nearly free, which the model already
- * had: an ant forages for tens of minutes at a stretch, and only the
- * bursts are expensive.
+ * ALSO WRONG: this file claimed workers are about two thirds inactive and
+ * that inactive ants relieve tiring ones. The two-thirds is from the
+ * general ant-inactivity literature, not from Solenopsis, and the relief
+ * mechanism was a SIMULATION result stated as an observation. Fire ants
+ * specifically sleep in micro-naps — on the order of 250 episodes a day
+ * averaging about a minute, some 4.8 hours in total — with most of the
+ * workforce doing something at any given moment. So stamina is NOT a
+ * fatigue-over-a-day meter and never was: it is short-term burst capacity,
+ * which is what the model already implemented and what the comment got
+ * wrong about why.
  */
 export const FIRE_ANT_VITALS: VitalsTuning = {
   ...DEFAULT_VITALS,
 
-  /* Seven seconds of running, and about the same again at a standstill to
-   * earn it back — a rest-to-work ratio near the two-thirds the field
-   * studies report, without making a burst feel like a punishment. */
-  runDrain: 14,
+  /*
+   * Eleven seconds of running, and about eight at a standstill to earn it
+   * back. Longer than the seven it shipped with: an ant sustains ordinary
+   * locomotion for a long time and only BURSTS are expensive, so the bar
+   * should punish sprinting rather than punish being an ant.
+   */
+  runDrain: 9,
   walkRecover: 8,
-  restRecover: 14,
+  restRecover: 13,
   dodgeCost: 10,
   secondWind: 25,
 
   /*
-   * ZERO, STILL, AND ON PURPOSE. The rates below them are the researched
-   * ones and they are what these fields become the day EAT and DRINK
-   * exist. Until then a thirst clock is a countdown to a state the player
-   * cannot leave, which is worse than an honest empty frame — see the rule
-   * at the top of `islandVitals.ts`.
+   * LIVE NOW, and gated by biology rather than by a missing mechanic:
+   * `Vitals.feeding` is false through the founding, because a claustral
+   * queen eats nothing until her first workers eclose. These rates are
+   * what she spends once they do.
+   *
+   * A day of hers for water, two for energy — the 2:1 the foraging work
+   * implies — measured at an ordinary walk and then bent by `WATER_CURVE`
+   * and `ENERGY_CURVE`. At 30x that is 48 real minutes of surface
+   * wandering for a full water bar, about 26 of hard digging, and better
+   * than three hours if she stays in the nest.
    */
-  foodDrain: 0,
-  waterDrain: 0,
-};
-
-/** What `foodDrain` and `waterDrain` become when there is a way to refill. */
-export const FIRE_ANT_APPETITE = {
-  /** One of her days of ordinary surface work. */
   waterDrain: drainPerGameHours(DEFAULT_VITALS.waterMax, 24),
-  /** Two of them — the literature's roughly 2:1 against thirst. */
-  foodDrain: drainPerGameHours(DEFAULT_VITALS.foodMax, 48),
-} as const;
+  energyDrain: drainPerGameHours(DEFAULT_VITALS.energyMax, 48),
+};
 
 export interface AntKind {
   id: string;

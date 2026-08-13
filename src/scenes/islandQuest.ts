@@ -15,10 +15,10 @@
 import * as THREE from 'three';
 import type { SurfaceWalker } from '../world/surfaceWalk';
 import { Colonist } from './Colonist';
-import type { Vitals } from './islandVitals';
+import { stageOf, type Vitals } from './islandVitals';
 
 /** The four, named once so a typo cannot invent a fifth. */
-export type VitalKind = 'health' | 'stamina' | 'food' | 'water';
+export type VitalKind = 'health' | 'stamina' | 'energy' | 'water';
 
 /** A bar the HUD keeps current, and the last percent it was told. */
 export interface VitalBar {
@@ -134,12 +134,23 @@ export function buildVitalsHud(host: QuestHost, ): void {
     return row;
   };
 
+  /*
+   * ALL FOUR ARE LIVE NOW. Energy and water were hatched because there was
+   * no way to refill them; a nestmate is that way, and until there is a
+   * nestmate they do not drain at all — see `Vitals.feeding`.
+   *
+   * FOOD became ENERGY on the same change, and the rename is the point:
+   * an adult fire ant runs on liquid carbohydrate she is handed, while
+   * solid prey belongs to the colony and is processed by larvae. Her bar
+   * and the colony's store are different economies, so they get different
+   * words.
+   */
   bars.appendChild(bar('health', 'Health', true));
   bars.appendChild(bar('stamina', 'Stamina', true));
   const pair = document.createElement('div');
   pair.className = 'tm-vitals-pair';
-  pair.appendChild(bar('food', 'Food', false));
-  pair.appendChild(bar('water', 'Water', false));
+  pair.appendChild(bar('energy', 'Energy', true));
+  pair.appendChild(bar('water', 'Water', true));
   bars.appendChild(pair);
 
   host.hud.appendChild(panel);
@@ -264,6 +275,14 @@ export function renderQuest(host: QuestHost): void {
     if (pct === b.shown) continue;
     b.shown = pct;
     b.fill.style.width = `${pct}%`;
+    /* The two that can kill her say so before they do. Health and stamina
+     * are read constantly and do not need to shout; a need she has stopped
+     * thinking about is exactly the one that catches her out. */
+    if (b.kind === 'energy' || b.kind === 'water') {
+      const stage = stageOf(pct / 100);
+      b.fill.parentElement?.classList.toggle('is-low', stage === 2);
+      b.fill.parentElement?.classList.toggle('is-dire', stage === 3);
+    }
   }
   /* Written only when it CHANGES. It is one number on a HUD that runs
    * every frame, and a textContent assignment per frame is a layout the

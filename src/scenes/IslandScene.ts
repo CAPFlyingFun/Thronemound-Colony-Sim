@@ -127,7 +127,7 @@ import {
   BODY_FIT_SCALE, QUEST_DEPTH_MM, QUEST_CHAMBER_SAMPLES, JAW_PAST_NOSE,
   BODY_HALF_TALL, BODY_FLOOR_MARGIN, AIM_LIMIT, CHAMBER_CAM_FAR,
   CHAMBER_CAM_NEAR, COLONIST_SPEED, COLONIST_TURN, COLONIST_ARRIVE,
-  COLONIST_ROAM,
+  COLONIST_ROAM, TROPHALLAXIS_REACH, TROPHALLAXIS_RATE,
 } from './islandTuning';
 import { Colonist } from './Colonist';
 import { SoilQuery } from './soilQuery';
@@ -426,6 +426,37 @@ export class IslandScene {
    * being possible: out of reach, or the thing she is holding has died and
    * become cargo rather than a fight.
    */
+  /**
+   * BEING FED, which for a fire ant means being fed BY SOMEBODY.
+   *
+   * Almost everything an adult takes in arrives mouth to mouth from a
+   * nestmate, and a founding queen takes nothing at all until her first
+   * workers eclose — so the arrival of a worker is both the moment hunger
+   * starts and the moment there is an answer to it. Stand near one and she
+   * is topped up.
+   *
+   * Deliberately not a button. Trophallaxis is something ants do to each
+   * other constantly and without deciding to, and a FEED key would be a
+   * chore bolted onto a behaviour that is meant to be ambient.
+   */
+  private trophallaxisTick(dt: number): void {
+    const fed = this.colony.some((c) => c.ready);
+    /* The switch is one-way: once the colony exists she is on the colony's
+     * economy, and losing every worker should be a crisis rather than a
+     * return to living off her flight muscles. */
+    if (fed) this.vitals.feeding = true;
+    if (!this.vitals.feeding) return;
+    for (const one of this.colony) {
+      if (!one.ready) continue;
+      const gap = Math.hypot(
+        one.at.x - this.at.x, one.at.y - this.at.y, one.at.z - this.at.z,
+      );
+      if (gap > TROPHALLAXIS_REACH) continue;
+      this.vitals.trophallaxis(TROPHALLAXIS_RATE * dt);
+      break;
+    }
+  }
+
   private combatTick(dt: number): void {
     const held = this.combat.held;
     for (const q of this.quarry) {

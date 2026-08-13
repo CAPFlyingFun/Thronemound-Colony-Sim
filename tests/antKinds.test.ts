@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  ABILITIES, ANT_KINDS, FIRE_ANT, FIRE_ANT_APPETITE, GAME_MINUTES_PER_REAL_MINUTE,
+  ABILITIES, ANT_KINDS, FIRE_ANT, GAME_MINUTES_PER_REAL_MINUTE,
   REAL_SECONDS_PER_GAME_HOUR, TWIG_ANT, drainPerGameHours,
 } from '../src/scenes/antKinds';
 import { DEFAULT_VITALS } from '../src/scenes/islandVitals';
@@ -54,35 +54,31 @@ describe('two ants differ in DATA, not in code', () => {
 });
 
 describe('the clock', () => {
-  it('makes one of her days 96 minutes of play', () => {
-    expect(GAME_MINUTES_PER_REAL_MINUTE).toBe(15);
+  it('makes one of her days 48 minutes of play', () => {
+    /* Thirty, not the fifteen it shipped with: a 96-minute day pushed
+     * every survival bar past the length of a session. */
+    expect(GAME_MINUTES_PER_REAL_MINUTE).toBe(30);
     const realMinutesPerDay = (24 * 60) / GAME_MINUTES_PER_REAL_MINUTE;
-    expect(realMinutesPerDay).toBe(96);
-    expect(REAL_SECONDS_PER_GAME_HOUR).toBe(240);
+    expect(realMinutesPerDay).toBe(48);
+    expect(REAL_SECONDS_PER_GAME_HOUR).toBe(120);
   });
 
   it('converts an endurance in her hours into a rate per real second', () => {
     const rate = drainPerGameHours(100, 24);
-    /* A full pool over one of her days: 24 * 240 real seconds. */
-    expect(100 / rate).toBeCloseTo(24 * 240, 6);
+    /* A full pool over one of her days, in real seconds. */
+    expect(100 / rate).toBeCloseTo(24 * REAL_SECONDS_PER_GAME_HOUR, 6);
   });
 });
 
-describe('thirst before hunger, as the literature has it', () => {
-  it('drains water about twice as fast as food', () => {
-    expect(FIRE_ANT_APPETITE.waterDrain / FIRE_ANT_APPETITE.foodDrain).toBeCloseTo(2, 6);
+describe('thirst before hunger, as the foraging work has it', () => {
+  it('drains water about twice as fast as energy', () => {
+    expect(FIRE_ANT.vitals.waterDrain / FIRE_ANT.vitals.energyDrain)
+      .toBeCloseTo(2, 6);
   });
 
-  /*
-   * AND NEITHER IS SWITCHED ON. The researched rates are ready; the fields
-   * that use them are zero until there is a way to eat and drink. Same rule
-   * as `islandVitals`, pinned here as well because this is the file where
-   * someone would be tempted to wire them straight through.
-   */
-  it('leaves the live tuning at zero until there is a way to refill', () => {
-    expect(FIRE_ANT.vitals.foodDrain).toBe(0);
-    expect(FIRE_ANT.vitals.waterDrain).toBe(0);
-    expect(FIRE_ANT_APPETITE.waterDrain).toBeGreaterThan(0);
+  it('empties a full water bar over about 48 minutes of ordinary walking', () => {
+    const minutes = (FIRE_ANT.vitals.waterMax / FIRE_ANT.vitals.waterDrain) / 60;
+    expect(minutes).toBeCloseTo(48, 0);
   });
 
   it('keeps the fire ant a harder worker than the default', () => {

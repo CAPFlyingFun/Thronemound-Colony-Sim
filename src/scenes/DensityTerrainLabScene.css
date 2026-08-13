@@ -1820,7 +1820,7 @@
 
 .tm-bar-health { width: 205px; height: 14px; }
 .tm-bar-stamina { width: 190px; height: 11px; }
-.tm-bar-food, .tm-bar-water { width: 90px; height: 8px; }
+.tm-bar-energy, .tm-bar-water { width: 90px; height: 8px; }
 
 .tm-bar-fill {
   position: absolute;
@@ -2033,7 +2033,7 @@
 
 .tm-vi-health { background-image: url('/ui/icon-health.webp'); }
 .tm-vi-stamina { background-image: url('/ui/icon-stamina.webp'); }
-.tm-vi-food { background-image: url('/ui/icon-food.webp'); }
+.tm-vi-energy { background-image: url('/ui/icon-food.webp'); }
 .tm-vi-water { background-image: url('/ui/icon-water.webp'); }
 
 /*
@@ -2167,8 +2167,31 @@
 }
 
 /* Full opacity for the icons that label a live bar — the dimming is
- * reserved for saying "no system", and two of these now have one. */
+ * reserved for saying "no system", and all four now have one. */
 .tm-vital-icon.is-live { opacity: 1; }
+
+/* Energy and water are thin bars, so they carry their own colours rather
+ * than borrowing stamina's gold and reading as more of it. */
+.tm-bar-energy .tm-bar-fill {
+  background: linear-gradient(180deg, #cf9a4a 0%, #8f6320 100%);
+}
+
+.tm-bar-water .tm-bar-fill {
+  background: linear-gradient(180deg, #6fb6d8 0%, #33718f 100%);
+}
+
+/*
+ * SHORT. The bar pulses once it is past halfway down, which is the whole
+ * job of a staged need: it has to change how she is played long before it
+ * can kill her, and it cannot do that silently.
+ */
+.tm-bar.is-low { animation: tm-need 1.6s ease-in-out infinite; }
+.tm-bar.is-dire { animation: tm-need 0.8s ease-in-out infinite; }
+
+@keyframes tm-need {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(216, 92, 60, 0); }
+  50% { box-shadow: 0 0 0 2px rgba(216, 92, 60, 0.55); }
+}
 
 /*
  * WINDED. The pace plate refuses a run she has not got, and a control that

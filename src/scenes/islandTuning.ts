@@ -434,6 +434,18 @@ export const UNDER_MM = 5;
  */
 export const ENCLOSED_MM = 16;
 
+/**
+ * HOW CLOSE A NESTMATE HAS TO BE to hand her a crop-load, in world units,
+ * and how fast it goes across.
+ *
+ * Generous on the reach — mouth-to-mouth in the game means "beside her",
+ * not a docking manoeuvre — and slow enough on the rate that a top-up is
+ * a pause rather than a tap: a full bar takes about twelve seconds
+ * standing with a worker, against the 48 minutes it took to empty.
+ */
+export const TROPHALLAXIS_REACH = 4 / MM;
+export const TROPHALLAXIS_RATE = 8;
+
 /*
  * WHEN THE SENSE COMES UP, and how fast.
  *

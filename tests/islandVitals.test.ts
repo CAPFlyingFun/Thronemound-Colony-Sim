@@ -6,17 +6,27 @@
  * are easy to get subtly wrong and easy to pin.
  */
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_VITALS, Vitals, type VitalsTuning } from '../src/scenes/islandVitals';
+import {
+  DEFAULT_VITALS, ENERGY_CURVE, Vitals, WATER_CURVE, effortRate, stageOf,
+  type Effort, type VitalsTuning,
+} from '../src/scenes/islandVitals';
 
-const run = (v: Vitals, seconds: number, running = true, moving = 1): void => {
-  for (let t = 0; t < seconds; t += 1 / 60) v.tick(1 / 60, { running, moving });
+/** An ordinary surface effort, unless a test says otherwise. */
+const effort = (over: Partial<Effort> = {}): Effort => ({
+  running: false, moving: 1, crawling: false, digging: false,
+  climbing: false, sheltered: false, ...over,
+});
+
+const run = (v: Vitals, seconds: number, over: Partial<Effort> = {}): void => {
+  const e = effort(over);
+  for (let t = 0; t < seconds; t += 1 / 60) v.tick(1 / 60, e);
 };
 
 describe('stamina', () => {
   it('starts full and drains at a run', () => {
     const v = new Vitals();
     expect(v.fractionOf('stamina')).toBe(1);
-    run(v, 2);
+    run(v, 2, { running: true });
     expect(v.stamina).toBeLessThan(DEFAULT_VITALS.staminaMax);
     expect(v.stamina).toBeGreaterThan(0);
   });
@@ -25,7 +35,7 @@ describe('stamina', () => {
     /* Holding the latch against a wall is not running, and a drain the
      * player cannot see the cause of is the worst kind. */
     const v = new Vitals();
-    run(v, 3, true, 0);
+    run(v, 3, { running: true, moving: 0 });
     expect(v.stamina).toBe(DEFAULT_VITALS.staminaMax);
   });
 
@@ -33,16 +43,16 @@ describe('stamina', () => {
     const walked = new Vitals();
     const rested = new Vitals();
     walked.spend(60); rested.spend(60);
-    run(walked, 2, false, 1);
-    run(rested, 2, false, 0);
+    run(walked, 2);
+    run(rested, 2, { moving: 0 });
     expect(rested.stamina).toBeGreaterThan(walked.stamina);
   });
 
   it('never goes below nought or above its maximum', () => {
     const v = new Vitals();
-    run(v, 60);
+    run(v, 60, { running: true });
     expect(v.stamina).toBe(0);
-    run(v, 600, false, 0);
+    run(v, 600, { moving: 0 });
     expect(v.stamina).toBe(DEFAULT_VITALS.staminaMax);
   });
 });
@@ -56,12 +66,12 @@ describe('being winded', () => {
    */
   it('refuses a run until the second wind is back', () => {
     const v = new Vitals();
-    run(v, 60);
+    run(v, 60, { running: true });
     expect(v.canRun).toBe(false);
-    run(v, 0.5, false, 0);
+    run(v, 0.5, { moving: 0 });
     expect(v.stamina).toBeGreaterThan(0);
     expect(v.canRun).toBe(false);
-    run(v, 3, false, 0);
+    run(v, 3, { moving: 0 });
     expect(v.stamina).toBeGreaterThanOrEqual(DEFAULT_VITALS.secondWind);
     expect(v.canRun).toBe(true);
   });
@@ -83,29 +93,106 @@ describe('spending a lump', () => {
   });
 });
 
-describe('the bars with nothing behind them', () => {
+const hungry: VitalsTuning = {
+  ...DEFAULT_VITALS, waterDrain: 10, energyDrain: 5,
+};
+
+describe('the founding, when she eats nothing at all', () => {
   /*
-   * Food and water are plumbed and must NOT move: there is nothing to eat
-   * and nothing to drink, so a hunger clock is a countdown to a state the
-   * player cannot leave. This is the assertion that stops someone turning
-   * them on before the way back exists.
+   * A claustral fire ant queen seals herself in and raises the first brood
+   * on her own flight muscles, taking nothing from outside until the
+   * nanitics eclose. So `feeding` false is the ANIMAL, not a stub — and it
+   * happens to keep the rule this file has always kept, that a bar may
+   * only move if there is a way to move it back.
    */
-  it('does not drain food or water while there is no way to refill them', () => {
-    const v = new Vitals();
-    run(v, 300, false, 1);
-    expect(v.food).toBe(DEFAULT_VITALS.foodMax);
-    expect(v.water).toBe(DEFAULT_VITALS.waterMax);
+  it('does not drain water or energy before the first worker', () => {
+    const v = new Vitals(hungry);
+    run(v, 300);
+    expect(v.water).toBe(hungry.waterMax);
+    expect(v.energy).toBe(hungry.energyMax);
   });
 
-  it('drains them the moment a rate is given, so the plumbing is real', () => {
-    const fed: VitalsTuning = { ...DEFAULT_VITALS, foodDrain: 10, waterDrain: 5 };
-    const v = new Vitals(fed);
-    run(v, 2, false, 0);
-    expect(v.food).toBeLessThan(fed.foodMax);
-    expect(v.water).toBeLessThan(fed.waterMax);
-    v.eat(1000); v.drink(1000);
-    expect(v.food).toBe(fed.foodMax);
-    expect(v.water).toBe(fed.waterMax);
+  it('starts the clock once the colony can feed her', () => {
+    const v = new Vitals(hungry);
+    v.feeding = true;
+    run(v, 2, { moving: 0 });
+    expect(v.water).toBeLessThan(hungry.waterMax);
+    expect(v.energy).toBeLessThan(hungry.energyMax);
+  });
+
+  it('is refilled mouth to mouth, both at once', () => {
+    /* Trophallaxis passes a FLUID carrying sugar — there is no separate
+     * drinking fountain in a nest, so one handover feeds and waters. */
+    const v = new Vitals(hungry);
+    v.feeding = true;
+    run(v, 30, { moving: 0 });
+    v.trophallaxis(1000);
+    expect(v.water).toBe(hungry.waterMax);
+    expect(v.energy).toBe(hungry.energyMax);
+  });
+});
+
+describe('thirst answers to where she is, not to the clock', () => {
+  it('costs far less in the nest than on the surface', () => {
+    const out = new Vitals(hungry); out.feeding = true;
+    const inside = new Vitals(hungry); inside.feeding = true;
+    run(out, 5);
+    run(inside, 5, { sheltered: true });
+    expect(hungry.waterMax - inside.water)
+      .toBeLessThan((hungry.waterMax - out.water) * 0.5);
+  });
+
+  it('ranks the efforts the way the curve says', () => {
+    const rate = (o: Partial<Effort>): number => effortRate(effort(o), WATER_CURVE);
+    expect(rate({ sheltered: true })).toBeLessThan(rate({ moving: 0 }));
+    expect(rate({ moving: 0 })).toBeLessThan(rate({ crawling: true }));
+    expect(rate({ crawling: true })).toBeLessThan(rate({}));
+    expect(rate({})).toBeLessThan(rate({ climbing: true }));
+    expect(rate({ climbing: true })).toBeLessThan(rate({ digging: true }));
+    expect(rate({ digging: true })).toBeLessThan(rate({ running: true }));
+  });
+
+  it('lets shelter beat effort outright rather than multiplying', () => {
+    /* She is in still humid air; what she is doing in it matters much less
+     * than the fact of being in it. */
+    expect(effortRate(effort({ sheltered: true, running: true, digging: true }),
+      WATER_CURVE)).toBe(WATER_CURVE.sheltered);
+  });
+
+  it('is harsher on water than on energy for the same work', () => {
+    expect(effortRate(effort({ running: true }), WATER_CURVE))
+      .toBeGreaterThan(effortRate(effort({ running: true }), ENERGY_CURVE));
+  });
+});
+
+describe('going short is a slope, not a cliff', () => {
+  it('bands the need rather than switching at zero', () => {
+    expect(stageOf(1)).toBe(0);
+    expect(stageOf(0.4)).toBe(1);
+    expect(stageOf(0.2)).toBe(2);
+    expect(stageOf(0.05)).toBe(3);
+  });
+
+  it('lowers her stamina ceiling and slows her recovery as she runs short', () => {
+    const v = new Vitals(hungry);
+    v.feeding = true;
+    expect(v.staminaCeiling).toBe(hungry.staminaMax);
+    v.water = hungry.waterMax * 0.05;
+    expect(v.strain).toBe(3);
+    expect(v.staminaCeiling).toBeLessThan(hungry.staminaMax);
+    /* And she can STILL walk home: parched is slower, never stopped. */
+    expect(v.staminaCeiling).toBeGreaterThan(0);
+  });
+
+  it('only takes health once a bar is actually empty', () => {
+    const v = new Vitals(hungry);
+    v.feeding = true;
+    v.water = 1;
+    run(v, 0.05, { moving: 0 });
+    expect(v.health).toBe(hungry.healthMax);
+    v.water = 0;
+    run(v, 2, { moving: 0 });
+    expect(v.health).toBeLessThan(hungry.healthMax);
   });
 });
 

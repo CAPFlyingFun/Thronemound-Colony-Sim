@@ -50,6 +50,7 @@ export interface BodyHost {
   readonly dodge: Dodge;
   readonly vitals: Vitals;
   combatTick(dt: number): void;
+  trophallaxisTick(dt: number): void;
   readonly groundForLegs: Ground;
 
   /* --- where she is --- */
@@ -230,6 +231,17 @@ export function simulate(host: BodyHost, dt: number): void {
   host.vitals.tick(dt, {
     running: host.input.sprint,
     moving: host.groundSpeed / WALK_SPEED,
+    crawling: host.input.crawl,
+    digging: host.input.dig,
+    /*
+     * Off the flat. Her up IS the surface normal she is standing on, so
+     * this is simply "the ground under her is steep" — which on a trunk is
+     * true and on a bank is true and needs no climbing system to ask.
+     */
+    climbing: host.up.y < 0.72,
+    /* The nest's own air. `enclosed` is the same flag the sensed view
+     * uses, which is the right one: it means roofed, not merely low. */
+    sheltered: host.enclosed,
   });
 
   /* ONE height sample, TWO thresholds — the camera's and the sense's.
@@ -249,6 +261,7 @@ export function simulate(host: BodyHost, dt: number): void {
   host.enclosed = host.senseWant >= 1;
 
   host.combatTick(dt);
+  host.trophallaxisTick(dt);
   host.questTick(dt);
   /* The small tiers follow her; the big ones were planted once. */
   host.regrowScrub();
