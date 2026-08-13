@@ -19,6 +19,7 @@ import type { BodyPosture } from './bodyPosture';
 import type { BoreRig } from './BoreControl';
 import { readFlick, readNudge, type Dodge } from './dodge';
 import type { Vitals } from './islandVitals';
+import { ABILITIES, type AntKind } from './antKinds';
 import type { NestDesigner } from '../nest/NestDesigner';
 import type { NestView } from '../nest/nestView';
 import type { IslandStream } from '../world/IslandStream';
@@ -61,6 +62,7 @@ export interface HudHost {
   readonly bore: BoreRig;
   readonly dodge: Dodge;
   readonly vitals: Vitals;
+  readonly antKind: AntKind;
   readonly at: THREE.Vector3;
   pace: 0 | 1 | 2;
   shiftHeld: boolean;
@@ -458,9 +460,22 @@ export function buildControls(host: HudHost, ): void {
     return b;
   };
 
-  plate('bite', 'Bite', null);
-  plate('carry', 'Carry', null);
-  plate('climb', 'Climb', null);
+  /*
+   * THE CLUSTER IS THE ANT'S, not the HUD's.
+   *
+   * These were three hardcoded `plate` calls, which is fine for one ant and
+   * becomes an `if` ladder the moment there are two. The list comes off
+   * `antKind` now, so a fire ant showing STING and a twig ant showing SCOUT
+   * is a data difference — see `antKinds.ts`.
+   *
+   * `built` decides whether a plate is live or dimmed, and it lives on the
+   * ABILITY rather than the kind: whether the game does a thing is a fact
+   * about the game, and whether this ant does it is a fact about the ant.
+   */
+  for (const id of host.antKind.abilities) {
+    const ability = ABILITIES[id];
+    plate(ability.art, ability.label, ability.built ? () => {} : null);
+  }
   /*
    * SPRINT is real: it is the pace latch the CRAWL/WALK/RUN chip drives,
    * wearing the plate the design asked for. Cycling rather than holding

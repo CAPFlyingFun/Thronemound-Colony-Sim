@@ -139,6 +139,7 @@ import {
   depthMm, questTick, type QuestHost, type VitalBar,
 } from './islandQuest';
 import { Vitals } from './islandVitals';
+import { FIRE_ANT, type AntKind } from './antKinds';
 import {
   bite, biteCentre, biteRay, boreAim, updateAimDebug, type DigHost,
 } from './islandDig';
@@ -908,8 +909,15 @@ export class IslandScene {
     x: 0, y: 0, lastX: 0, lastY: 0, at: 0, travel: 0,
   };
 
+  /**
+   * WHICH ANT SHE IS. The rail reads its own contents off this, and so
+   * does her stamina — see `antKinds.ts`. One field, so a second playable
+   * species is a swap rather than a branch.
+   */
+  readonly antKind: AntKind = FIRE_ANT;
+
   /** What keeps her going. See `islandVitals.ts`. */
-  readonly vitals = new Vitals();
+  readonly vitals = new Vitals(FIRE_ANT.vitals);
 
   /** The bars `renderQuest` keeps current. See `islandQuest.ts`. */
   private readonly vitalBars: VitalBar[] = [];
