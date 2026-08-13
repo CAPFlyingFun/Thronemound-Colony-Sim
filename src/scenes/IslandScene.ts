@@ -761,6 +761,11 @@ export class IslandScene {
 
   private cineEl: HTMLElement | null = null;
 
+  /** The live number in the colony strip — workers actually standing out. */
+  private workersOutEl: HTMLElement | null = null;
+
+  private workersOutShown = -1;
+
   private cineUntil = 0;
 
   /** The first worker — spawned when the chamber is made. */
@@ -911,7 +916,11 @@ export class IslandScene {
     this.scene.add(this.queen.root);
 
     this.hud = document.createElement('div');
-    this.hud.className = 'density-lab-hud';
+    /* `tm-vitals-on` is a promise about the top-left corner: the vitals
+     * panel is there, so the debug readouts that used to own it move down.
+     * A class on the host rather than a rule on the island's elements —
+     * the pieces being moved belong to other files. */
+    this.hud.className = 'density-lab-hud tm-vitals-on';
     host.appendChild(this.hud);
     this.statsPanel = new DebugStatsPanel(this.hud);
     this.buildControls();
@@ -3388,6 +3397,10 @@ export class IslandScene {
      * camera for the whole session and be blamed on the plan. */
     this.posture.reset();
     this.lookPointer = null;
+    /* The designer is exempt from the hide-all because it flies with a
+     * stick of its own wearing the same class, so the GAME's stick has to
+     * be put away by hand — and now that it parks instead of vanishing,
+     * put back by hand too, in `closeDesigner`. */
     this.stickEl.style.display = 'none';
     if (this.nestView) this.nestView.root.visible = false;
     /* A seeded mouth is an EDIT — DONE must carve it even untouched, or
@@ -3403,6 +3416,9 @@ export class IslandScene {
     this.designer.hide();
     this.designer.dispose();
     this.designer = null;
+    // Back to its corner. It used to reappear on the next touch; a parked
+    // stick that stays gone after a designer session is a control lost.
+    this.stickEl.style.display = '';
     if (this.nestView) this.nestView.root.visible = this.showPlan;
   }
 
@@ -5010,8 +5026,12 @@ export class IslandScene {
       applyKeys();
     });
 
-    this.stickEl.className = 'nest-stick';
-    this.stickEl.style.display = 'none';
+    /*
+     * Parked at its corner from the first frame rather than conjured under
+     * a thumb. `nest-stick` still carries the geometry and the designer's
+     * hide-list exemption; `tm-stick` carries the plate art and the home.
+     */
+    this.stickEl.className = 'nest-stick tm-stick is-home';
     this.stickKnob.className = 'nest-stick-knob';
     this.stickEl.appendChild(this.stickKnob);
     this.hud.appendChild(this.stickEl);
@@ -5032,7 +5052,8 @@ export class IslandScene {
         this.stickOrigin.y = e.clientY;
         this.stickEl.style.left = `${e.clientX}px`;
         this.stickEl.style.top = `${e.clientY}px`;
-        this.stickEl.style.display = '';
+        this.stickEl.classList.remove('is-home');
+        this.stickEl.classList.add('is-live');
       } else if (this.lookPointer === null) {
         this.lookPointer = e.pointerId;
         /* The stroke starts here. Whether it turns out to be a look or a
@@ -5137,7 +5158,13 @@ export class IslandScene {
        * mixer in `moveSurface`, which owns its own lifetime. */
       this.input.strafe = 0;
       this.stickKnob.style.transform = 'translate(0px, 0px)';
-      this.stickEl.style.display = 'none';
+      /* Home is a CSS position, and the inline `left`/`top` written while
+       * the thumb was down would win over it — so they are cleared, not
+       * overwritten with numbers this method would have to compute. */
+      this.stickEl.style.left = '';
+      this.stickEl.style.top = '';
+      this.stickEl.classList.remove('is-live');
+      this.stickEl.classList.add('is-home');
     };
     const release = (e: PointerEvent) => {
       if (this.designer?.isOpen) { this.designer.handlePointerUp(e); return; }
@@ -5352,7 +5379,79 @@ export class IslandScene {
     this.poseWorker(dt);
   }
 
+  /**
+   * THE TOP-LEFT CLUSTER — portrait, vitals, colony.
+   *
+   * Built to the design's measurements to the pixel: portrait 62, health
+   * 205 x 14, stamina 190 x 11, food and water 90 x 8, colony strip
+   * 260 x 42. The point of pinning those numbers now is that the layout
+   * gets judged at its real density rather than at a sketch of one.
+   *
+   * What it deliberately does NOT do is show a reading for a system that
+   * does not exist. Health, stamina, hunger and thirst have no game behind
+   * them — no field, no tick, nothing in `statsForTest` — so their frames
+   * are hatched and dimmed, exactly as BITE and CARRY are on the action
+   * cluster. Workers out is real, counted off the colony, and is the one
+   * thing in here lit at full.
+   */
+  private buildVitalsHud(): void {
+    const panel = document.createElement('div');
+    panel.className = 'tm-vitals';
+
+    const portrait = document.createElement('div');
+    portrait.className = 'tm-portrait';
+    // A glyph standing in for a face. The frame is real art and correctly
+    // sized; the queen's portrait is a drawing nobody has made yet.
+    portrait.textContent = '🐜';
+    panel.appendChild(portrait);
+
+    const bars = document.createElement('div');
+    bars.className = 'tm-vitals-bars';
+    panel.appendChild(bars);
+
+    const bar = (kind: string, label: string): HTMLElement => {
+      const el = document.createElement('div');
+      /* `is-soon` on every one of them, for now, and it is not a placeholder
+       * for a number — it is the statement that there is no number. */
+      el.className = `tm-bar tm-bar-${kind} is-soon`;
+      el.setAttribute('role', 'img');
+      el.setAttribute('aria-label', `${label} — not implemented yet`);
+      const fill = document.createElement('div');
+      fill.className = 'tm-bar-fill';
+      el.appendChild(fill);
+      return el;
+    };
+
+    bars.appendChild(bar('health', 'Health'));
+    bars.appendChild(bar('stamina', 'Stamina'));
+    const pair = document.createElement('div');
+    pair.className = 'tm-vitals-pair';
+    pair.appendChild(bar('food', 'Food'));
+    pair.appendChild(bar('water', 'Water'));
+    bars.appendChild(pair);
+
+    this.hud.appendChild(panel);
+
+    const colony = document.createElement('div');
+    colony.className = 'tm-colony';
+    const cell = (value: string, label: string, live: boolean): HTMLElement => {
+      const c = document.createElement('div');
+      c.className = `tm-colony-cell${live ? '' : ' is-soon'}`;
+      const b = document.createElement('b');
+      b.textContent = value;
+      const s = document.createElement('span');
+      s.textContent = label;
+      c.append(b, s);
+      return c;
+    };
+    const workers = cell('0', 'WORKERS', true);
+    this.workersOutEl = workers.querySelector('b');
+    colony.append(workers, cell('—', 'BROOD', false), cell('—', 'FOOD', false));
+    this.hud.appendChild(colony);
+  }
+
   private buildQuestHud(): void {
+    this.buildVitalsHud();
     this.questEl = document.createElement('div');
     this.questEl.className = 'density-lab-status rail-status';
     /* Up against the top edge. The shared status style sits 42px down to
@@ -5426,6 +5525,16 @@ export class IslandScene {
   }
 
   private renderQuest(): void {
+    /* Written only when it CHANGES. It is one number on a HUD that runs
+     * every frame, and a textContent assignment per frame is a layout the
+     * browser did not need to do. */
+    if (this.workersOutEl) {
+      const out = this.colony.reduce((n, c) => n + (c.ready ? 1 : 0), 0);
+      if (out !== this.workersOutShown) {
+        this.workersOutShown = out;
+        this.workersOutEl.textContent = String(out);
+      }
+    }
     if (!this.questEl) return;
     let text = '';
     if (this.questStage === 0) {

@@ -9,3 +9,4 @@ dist/
 # in the same breath while chasing a specific bug. Ignoring them keeps a
 # half-finished investigation from ever landing in a commit.
 scratch-*.mjs
+scratch-*.png

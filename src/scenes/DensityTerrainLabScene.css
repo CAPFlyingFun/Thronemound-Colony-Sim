@@ -221,6 +221,14 @@
  * makes it read as a button at all.
  */
 .tm-art {
+  /*
+   * A PLATE IS NEVER SQUASHED TO MAKE ROOM. The rails these sit on are flex
+   * containers, and flex's default is to take a full line's overflow out of
+   * its children — silently, and out of the biggest one first. These sizes
+   * are TOUCH TARGETS chosen by the design; a rail that is over may wrap or
+   * overflow, but it may not shave a thumb's landing area to fit.
+   */
+  flex: 0 0 auto;
   background-color: transparent;
   background-repeat: no-repeat;
   background-position: center;
@@ -910,7 +918,15 @@
    * that one; height is the dimension the hint actually runs out of.
    */
   .density-lab-hint { display: none; }
-  .density-lab-dig { width: 78px; height: 78px; }
+  /*
+   * NOT THE ART PLATE. This shrink predates the design and exists to keep a
+   * 94px CSS button from crowding a short screen — but the design's 86px is
+   * ALREADY the landscape-phone number (its canvas is 932 x 430), and this
+   * rule sits after `.tm-art-dig` at equal specificity, so it was quietly
+   * winning and DIG measured 78. The plate opts out; the scoop button, which
+   * wears this class without the art, still shrinks.
+   */
+  .density-lab-dig:not(.tm-art) { width: 78px; height: 78px; }
   .density-lab-mode { padding: 7px 12px; font-size: 11px; }
   .density-lab-walk { width: 62px; height: 62px; font-size: 11px; }
   .density-lab-gauge-dial { width: 44px; height: 44px; }
@@ -1617,6 +1633,14 @@
 
 .tm-cluster > * {
   pointer-events: auto;
+  /*
+   * NO SHRINKING. The plates are TOUCH TARGETS, and flex's default is to
+   * take the overflow out of them when a line is tight — which it silently
+   * did: DIG measured 78 px against the 86 the design specifies, because
+   * the row it shares was 8 px over. A wrap is the correct answer to a full
+   * line here; a thumb-sized button quietly getting smaller is not.
+   */
+  flex: 0 0 auto;
 }
 
 /*
@@ -1637,4 +1661,211 @@
 
 .tm-utility > * {
   pointer-events: auto;
+}
+
+/*
+ * ============================================================
+ * THE STICK, WEARING ITS PLATE
+ * ============================================================
+ *
+ * The design sizes a stick three ways and they are all different numbers:
+ * 132 px of ART, a 150 px CAPTURE circle, a 50 px thumb. Same rule as the
+ * action plates — what you see is not what you can hit — and the same
+ * reason: a control sized to its picture is either ugly or hard to press.
+ *
+ * Its own class rather than a restyle of `.nest-stick`, which the pose
+ * designer's fly stick also wears. Two sticks, two jobs, one of which is
+ * about to grow a parked home the other must not have.
+ */
+.tm-stick {
+  width: 150px;
+  height: 150px;
+  border: 0;
+  background: url('/ui/pad-move.webp') center / 132px 132px no-repeat;
+  /*
+   * PARKED, NOT ABSENT.
+   *
+   * The stick was drawn only under a thumb already on the glass, which is
+   * fine once you know it is there and tells a first-time player nothing at
+   * all. So it sits at its corner, faint, and jumps to the thumb on contact
+   * — the discoverability of a fixed pad with the ergonomics of a floating
+   * one. The design asks for exactly this in the only way a still image can:
+   * "Idle: ~35-45% opacity / Finger down: ~75-90%".
+   */
+  opacity: 0.4;
+  /* Opacity only. Transitioning the TRANSFORM as well would have the stick
+   * slide across the screen on the way to a thumb already pressing it — the
+   * one animation a stick must never have. */
+  transition: opacity 0.16s ease;
+}
+
+.tm-stick.is-live {
+  opacity: 0.88;
+}
+
+/* Home. `left`/`top` are written inline while the stick is under a thumb,
+ * so homing CLEARS them and this takes over — hence `bottom`, which no
+ * inline style ever sets, and no centring transform to undo. */
+.tm-stick.is-home {
+  left: max(16px, env(safe-area-inset-left));
+  top: auto;
+  bottom: max(16px, env(safe-area-inset-bottom));
+  transform: none;
+}
+
+.tm-stick .nest-stick-knob {
+  width: 50px;
+  height: 50px;
+  margin: -25px 0 0 -25px;
+  background: rgba(247, 226, 176, 0.82);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.45), inset 0 0 0 1px rgba(90, 62, 20, 0.35);
+}
+
+/*
+ * ============================================================
+ * THE VITALS, TOP LEFT
+ * ============================================================
+ *
+ * Portrait 62, health 205 x 14, stamina 190 x 11, food and water 90 x 8 —
+ * the design's numbers, laid out to its ~285 x 82 footprint.
+ *
+ * AND ALMOST NONE OF IT HAS A GAME BEHIND IT. There is no health on the
+ * island, no stamina budget, no hunger and no thirst; `statsForTest` does
+ * not report one of them because not one of them exists. A bar drawn full
+ * would be a number I invented, and the first thing it would cost is the
+ * player's trust in every other number on screen.
+ *
+ * So the frames are built at their real sizes — this is a layout that has
+ * to be judged at its real density — and the ones with nothing behind them
+ * are hatched rather than filled. An empty bar says DYING. A hatched bar
+ * says NO SIGNAL, which is the truth.
+ */
+.tm-vitals {
+  position: absolute;
+  z-index: 1;
+  top: max(12px, env(safe-area-inset-top));
+  left: max(12px, env(safe-area-inset-left));
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 9px;
+  padding: 8px;
+  border-radius: 12px;
+  background: rgba(20, 16, 11, 0.55);
+  backdrop-filter: blur(7px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+
+/* The round gold plate, doing a second job: it is a frame, and a portrait
+ * is a frame with a face in it. No queen art exists yet, so she is a glyph
+ * — placed, sized and lit correctly, waiting for a picture. */
+.tm-portrait {
+  position: relative;
+  flex: 0 0 auto;
+  width: 62px;
+  height: 62px;
+  background: url('/ui/plate-round.webp') center / 62px 62px no-repeat;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 26px/1 "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+}
+
+.tm-vitals-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.tm-vitals-pair {
+  display: flex;
+  flex-direction: row;
+  gap: 5px;
+}
+
+.tm-bar {
+  position: relative;
+  /* The design's numbers are the OUTSIDE of the bar. Content-box would put
+   * the 1 px rim outside 205 and make every bar two pixels wrong. */
+  box-sizing: border-box;
+  overflow: hidden;
+  border-radius: 999px;
+  border: 1px solid rgba(247, 226, 176, 0.28);
+  background: rgba(8, 6, 4, 0.55);
+}
+
+.tm-bar-health { width: 205px; height: 14px; }
+.tm-bar-stamina { width: 190px; height: 11px; }
+.tm-bar-food, .tm-bar-water { width: 90px; height: 8px; }
+
+.tm-bar-fill {
+  position: absolute;
+  inset: 0;
+  width: 0;
+  border-radius: 999px;
+  transition: width 0.2s ease;
+}
+
+/* NO SIGNAL. Diagonal hatch, dim, and no fill element at all — nothing
+ * here can be mistaken for a reading. Same promise the dimmed plates make
+ * on the action cluster: this is coming, and it is not ready. */
+.tm-bar.is-soon {
+  opacity: 0.5;
+  background-image: repeating-linear-gradient(
+    116deg,
+    rgba(247, 226, 176, 0.16) 0 3px,
+    rgba(247, 226, 176, 0) 3px 8px
+  );
+}
+
+.tm-bar.is-soon .tm-bar-fill { display: none; }
+
+/*
+ * THE COLONY STRIP — the one line up here that is real.
+ *
+ * Workers out is a count of colonists that actually exist and are actually
+ * standing on the island, so it gets a live number and full brightness.
+ * Brood does not exist, and is dimmed beside it rather than faked.
+ */
+.tm-colony {
+  position: absolute;
+  z-index: 1;
+  top: calc(max(12px, env(safe-area-inset-top)) + 88px);
+  left: max(12px, env(safe-area-inset-left));
+  box-sizing: border-box;
+  width: 260px;
+  height: 42px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 14px;
+  padding: 0 12px;
+  border-radius: 11px;
+  background: rgba(20, 16, 11, 0.5);
+  backdrop-filter: blur(7px);
+  color: #f3e2b0;
+  font: 600 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.tm-colony-cell { display: flex; flex-direction: column; gap: 3px; }
+.tm-colony-cell b { color: #fff3d2; font-size: 14px; font-weight: 700; }
+.tm-colony-cell span { opacity: 0.6; font-size: 9px; }
+.tm-colony-cell.is-soon { opacity: 0.42; filter: grayscale(0.5); }
+
+/*
+ * THE DEBUG READOUTS MOVE DOWN, because the corner they were parked in now
+ * belongs to the player. Scoped to the island — the density lab wears the
+ * same stylesheet and has no vitals to make room for — and specific enough
+ * to beat the stats panel's own injected rule, which lands after this file.
+ */
+.tm-vitals-on .tm-stats-chip {
+  top: calc(max(12px, env(safe-area-inset-top)) + 136px);
+}
+
+.tm-vitals-on .density-lab-status {
+  top: calc(max(12px, env(safe-area-inset-top)) + 164px);
 }
