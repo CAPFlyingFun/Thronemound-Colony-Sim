@@ -398,9 +398,7 @@ export class IslandScene {
 
   private aimDbgAt = 0;
 
-  private toolGhost: THREE.Mesh | null = null;
 
-  private smoothGhost: THREE.Mesh | null = null;
 
 
   private readonly keysDown = new Set<string>();
@@ -3318,74 +3316,6 @@ export class IslandScene {
     ].join('\n');
   }
 
-  /**
-   * THE GHOST: where the next press will act, shown before it acts.
-   *
-   * Both tools work at arm's length down a line you cannot see, which is
-   * a guess dressed as an aim. Drawn, the dig is the pair of scoops it
-   * actually removes and the smoothing is the ball it actually relaxes,
-   * so the slider has something to be a slider FOR.
-   */
-  private updateToolGhost(): void {
-    const show = this.digMode && this.ready;
-    if (!show) {
-      if (this.toolGhost) this.toolGhost.visible = false;
-      if (this.smoothGhost) this.smoothGhost.visible = false;
-      return;
-    }
-    const make = (colour: number, opacity: number): THREE.Mesh => {
-      const mesh = new THREE.Mesh(
-        new THREE.SphereGeometry(1, 20, 14),
-        new THREE.MeshBasicMaterial({
-          color: colour, wireframe: true, transparent: true, opacity,
-          depthTest: false,
-        }),
-      );
-      mesh.renderOrder = 9;
-      this.scene.add(mesh);
-      return mesh;
-    };
-    if (!this.toolGhost) this.toolGhost = make(0xe9c36f, 0.5);
-    if (!this.smoothGhost) this.smoothGhost = make(0x6fc8e9, 0.22);
-
-    const aim = this.boreAim();
-    /* The same spot the stroke uses, so the ghost cannot promise a hole
-     * somewhere the cut will not make one — including the scrape it falls
-     * back to when the aim itself meets nothing. */
-    const spot = S_SPOT;
-    const willBite = this.biteCentre(aim, NOSE_REACH + JAW_PAST_NOSE, spot);
-
-    /* The CUT, as the pair of scoops it actually removes — wide and low,
-     * her real mouthful shape, because a round marker would promise a
-     * hole of entirely the wrong proportions. */
-    const span = (SCOOP_DEEP_MM * 2) / MM;
-    S_FWD.copy(aim);
-    /* Across her, in HER frame. A right vector built out of world Y —
-     * `(aim.z, 0, -aim.x)` — is the ghost lying flat against the horizon
-     * while the wide scoop it stands for is lying flat against the wall
-     * she is on, and it degenerates outright on a plumb aim. */
-    S_RIGHT.crossVectors(S_FWD, this.up);
-    if (S_RIGHT.lengthSq() < 1e-8) S_RIGHT.set(S_FWD.z, S_FWD.x, S_FWD.y);
-    S_RIGHT.normalize();
-    S_UP.crossVectors(S_RIGHT, S_FWD).normalize();
-    const cut = this.toolGhost;
-    cut.visible = true;
-    cut.quaternion.setFromRotationMatrix(S_MAT.makeBasis(S_RIGHT, S_UP, S_FWD));
-    cut.scale.set(SCOOP_WIDE_MM / 2 / MM, SCOOP_TALL_MM / 2 / MM, span / 2);
-    cut.position.copy(spot);
-    /* A stroke that will remove nothing says so, rather than drawing a
-     * confident hole over open air. */
-    (cut.material as THREE.MeshBasicMaterial).opacity = willBite ? 0.5 : 0.16;
-
-    /* And the SHAVE around it, which is what the slider sizes. Fainter,
-     * because it only rounds off what the cut leaves — it is the halo of
-     * the stroke, not the stroke. */
-    const halo = this.smoothGhost;
-    halo.visible = true;
-    halo.quaternion.identity();
-    halo.scale.setScalar(this.brushMm / MM);
-    halo.position.copy(spot);
-  }
 
   /** Remesh every chunk a brush result touched — bite()'s own loop, shared. */
   private enqueueBounds(b: {

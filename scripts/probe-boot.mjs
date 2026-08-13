@@ -46,7 +46,12 @@ await p.waitForFunction(
   null, { timeout: 180000 },
 );
 console.log('START enabled : yes');
-await p.click('.main-menu__button[data-key="onStart"]', { noWaitAfter: true });
+/* Dispatched rather than clicked: the island meshes behind the menu, so on
+ * a software renderer the main thread is busy enough that Playwright's
+ * actionability wait can expire on a button that is perfectly fine. */
+await p.evaluate(() => document.querySelector(
+  '.main-menu__button[data-key="onStart"]',
+).click());
 
 /* 3. And into the game. */
 await p.waitForFunction(() => window.islandScene?.ready === true, null, { timeout: 180000 });
