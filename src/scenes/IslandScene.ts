@@ -130,7 +130,56 @@ import {
   COLONIST_ROAM,
 } from './islandTuning';
 import { Colonist } from './Colonist';
+import { SoilQuery } from './soilQuery';
 export class IslandScene {
+  /** Every 'is there soil here' in one place. See `soilQuery.ts`. */
+  private readonly ground = new SoilQuery();
+
+  /* ------------------------------------------------- the soil, asked once */
+
+  /* Thin delegates onto `SoilQuery`. Kept as methods rather than replaced at
+   * the call sites because there are hundreds of those, and a rename touching
+   * all of them would bury the one change that matters in the diff. */
+  private renderedOn(data: Int16Array, xMm: number, zMm: number): number {
+    return this.ground.renderedOn(data, xMm, zMm);
+  }
+
+  private sampleOf(data: Int16Array, col: number, row: number): number {
+    return this.ground.sampleOf(data, col, row);
+  }
+
+  private sample(col: number, row: number): number {
+    return this.ground.sample(col, row);
+  }
+
+  private renderedGroundAt(x: number, z: number): number {
+    return this.ground.renderedGroundAt(x, z);
+  }
+
+  private walkGroundAt(x: number, z: number): number {
+    return this.ground.walkGroundAt(x, z);
+  }
+
+  private floorBelow(x: number, z: number, fromY: number): number | null {
+    return this.ground.floorBelow(x, z, fromY);
+  }
+
+  private groundDensityAt(x: number, y: number, z: number): number {
+    return this.ground.groundDensityAt(x, y, z);
+  }
+
+  private groundSolidAt(x: number, y: number, z: number): boolean {
+    return this.ground.groundSolidAt(x, y, z);
+  }
+
+  private soilDensityAt(x: number, y: number, z: number): number {
+    return this.ground.densityAt(x, y, z);
+  }
+
+  private soilSolidAt(x: number, y: number, z: number): boolean {
+    return this.ground.solidAt(x, y, z);
+  }
+
   ready = false;
 
   private readonly host: HTMLElement;
@@ -969,6 +1018,7 @@ export class IslandScene {
     ]);
     this.loading.setStatus('Raising the island…');
     this.heights = new Int16Array(raw);
+    this.ground.heights = this.heights;
     this.heightsBase = this.heights.slice();
     this.textures = textures;
     /* BOTH surfaces band by the stride-1 data slope (aGroundNy): the
@@ -1023,6 +1073,7 @@ export class IslandScene {
       (xMm, zMm) => this.renderedOn(this.heightsBase!, xMm, zMm),
       this.at.x, this.at.z,
     );
+    this.ground.stream = this.stream;
     /*
      * The walker is built once the soil exists, because the only thing it
      * needs is a way to ask how solid a point is — and that answer is the
@@ -1193,6 +1244,7 @@ export class IslandScene {
       height: TREE_HEIGHT_MM / MM,
       seed,
     }, map, bark, { normalMap, roughnessMap });
+    this.ground.tree = this.tree;
 
     /*
      * SEVEN HUNDRED MILLIMETRES OUT — but WHICH WAY matters.
@@ -1461,20 +1513,12 @@ export class IslandScene {
       { xMm: cx, zMm: cz }, STAND_REACH_MM, MM, (x, z) => this.forestGround(x, z),
       (species) => this.standProfiles.get(species.name) ?? null,
     );
+    this.ground.stand = this.stand;
   }
 
   /* ------------------------------------------------------------ the land */
 
-  /** Height in mm (= real metres) at a data-grid index, clamped to edges. */
-  private sampleOf(data: Int16Array, col: number, row: number): number {
-    const c = Math.min(N - 1, Math.max(0, col));
-    const rw = Math.min(N - 1, Math.max(0, row));
-    return data[rw * N + c]! / 10;
-  }
 
-  private sample(col: number, row: number): number {
-    return this.sampleOf(this.heights!, col, row);
-  }
 
   /** Bilinear ground height in WORLD units at a world-unit position. */
   groundHeightAt(x: number, z: number): number {
@@ -1492,56 +1536,9 @@ export class IslandScene {
     return h / MM;
   }
 
-  /**
-   * The surface the GPU actually draws, in mm, over a chosen grid: locate
-   * the quad on the MESH grid, pick the triangle the way the index buffer
-   * splits it (a–c–b / b–c–d, diagonal along fx+fz=1), interpolate that
-   * plane. BE's terrainSampling rule; the walker sank without it.
-   */
-  private renderedOn(data: Int16Array, xMm: number, zMm: number): number {
-    const stride = (N - 1) / (MESH_N - 1);
-    const stepMm = STEP_MM * stride;
-    const gx = Math.min(MESH_N - 1.001, Math.max(0, xMm / stepMm));
-    const gz = Math.min(MESH_N - 1.001, Math.max(0, zMm / stepMm));
-    const i = Math.floor(gx);
-    const j = Math.floor(gz);
-    const fx = gx - i;
-    const fz = gz - j;
-    const ha = this.sampleOf(data, i * stride, j * stride);
-    const hb = this.sampleOf(data, (i + 1) * stride, j * stride);
-    const hc = this.sampleOf(data, i * stride, (j + 1) * stride);
-    const hd = this.sampleOf(data, (i + 1) * stride, (j + 1) * stride);
-    return fx + fz <= 1
-      ? ha + (hb - ha) * fx + (hc - ha) * fz
-      : hd + (hc - hd) * (1 - fx) + (hb - hd) * (1 - fz);
-  }
 
-  private renderedGroundAt(x: number, z: number): number {
-    if (!this.heights) return 0;
-    return this.renderedOn(this.heights, x * MM, z * MM) / MM;
-  }
 
-  /** Where the ant may stand: the drawn land, or wading depth at the shore. */
-  private walkGroundAt(x: number, z: number): number {
-    return Math.max(this.renderedGroundAt(x, z), 0.5 / MM);
-  }
 
-  /**
-   * The first floor BELOW a height at this column, or null when the soil
-   * has none to offer (out of window, or solid wall from there down). A
-   * column the depth band cannot reach — steep country where the surface
-   * climbs past the band's ceiling — caps flat at the ceiling, and standing
-   * there must mean the drawn island, not the cap.
-   */
-  private floorBelow(x: number, z: number, fromY: number): number | null {
-    const stream = this.stream;
-    if (!stream) return null;
-    const fine = stream.surfaceBelowY(x, z, fromY);
-    if (fine === null) return null;
-    const ceiling = stream.bandFloorWu + (CELLS_Y - CAP_PLANES - 1) * CELL_SIZE;
-    if (fine >= ceiling - CELL_SIZE) return Math.max(fine, this.walkGroundAt(x, z));
-    return fine;
-  }
 
   /** Underfoot at HER height: tunnel floors are real, roofs above are not. */
   private footingAt(x: number, z: number): number {
@@ -1565,68 +1562,9 @@ export class IslandScene {
     return this.floorBelow(x, z, y + 0.4) ?? this.walkGroundAt(x, z);
   }
 
-  /**
-   * HOW SOLID A WORLD POINT IS — positive in the soil, negative in the air,
-   * zero at the drawn surface. The one question the walker asks, and it must
-   * have an answer EVERYWHERE.
-   *
-   * Inside the streamed window that is the live field, dug tunnels and all.
-   * Outside it there is no field, and a walker that loses its footing at the
-   * window's edge drops her out of the world — so out there the island's own
-   * heightfield answers the identical question in the identical form. It is
-   * not an approximation: the window is FILLED from `surface(x, z) - y`, so
-   * the fallback is the same expression the field was built out of, and the
-   * two stitch together with no seam to fall through.
-   */
-  private groundDensityAt(x: number, y: number, z: number): number {
-    const fine = this.stream?.densityAtWu(x, y, z);
-    if (fine !== null && fine !== undefined) return fine;
-    return this.walkGroundAt(x, z) - y;
-  }
 
-  /**
-   * THE GROUND, AND THE WOOD STANDING IN IT.
-   *
-   * The walker takes exactly one question — how solid is this point — and
-   * turns the answer into standing, climbing, cornering and falling. So the
-   * tree does not need a collision system of its own; it needs to be part of
-   * this answer. Unioned in, she bumps into the trunk, walks round it and
-   * CLIMBS it, entirely through the code that already carries her up the
-   * wall of a shaft: her up comes off this field's gradient, and the
-   * gradient of a trunk points out of the trunk.
-   *
-   * A union is the larger of the two, because both are positive inside.
-   */
-  private soilDensityAt(x: number, y: number, z: number): number {
-    let best = this.groundDensityAt(x, y, z);
-    const landmark = this.tree?.solid?.densityAt(x, y, z);
-    if (landmark !== undefined && landmark > best) best = landmark;
-    const scrub = this.stand?.densityAt(x, y, z);
-    if (scrub !== undefined && scrub > best) best = scrub;
-    return best;
-  }
 
-  /**
-   * IS this point in soil — the same question, asked the cheap way.
-   *
-   * Nearly every probe in the frame wants a yes or no: the walker's casts,
-   * the leg solver's footing, the shovel's reach, the bone guard's escape.
-   * Interpolating eight lattice samples to answer one of those is seven
-   * reads of waste, and it is asked hundreds of times a frame — measured at
-   * 0.033 µs against 0.094 for the smooth read. Only the surface NORMAL
-   * genuinely needs what lies between the samples, and that is six probes.
-   */
-  private groundSolidAt(x: number, y: number, z: number): boolean {
-    const fine = this.stream?.solidAtWu(x, y, z);
-    if (fine !== null && fine !== undefined) return fine;
-    return this.walkGroundAt(x, z) - y > 0;
-  }
 
-  private soilSolidAt(x: number, y: number, z: number): boolean {
-    if (this.groundSolidAt(x, y, z)) return true;
-    if (this.tree?.solid?.solidAt(x, y, z) === true) return true;
-    return this.stand?.solidAt(x, y, z) === true;
-  }
 
 
   /**
