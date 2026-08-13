@@ -365,8 +365,18 @@ export class AntMechanicsSandbox {
 
     const hint = document.createElement('div');
     hint.className = 'tms-hint';
-    hint.textContent = 'left half: move · right half: aim her head'
-      + ' · CAM: orbit instead';
+    /*
+     * THE BUILD IS ON THE HINT, and it is not decoration.
+     *
+     * This room had no version anywhere, so "the controls are not there" and
+     * "the controls are there and I am looking at last week's bundle" were
+     * the same picture. The service worker only OFFERS an update — it never
+     * takes over on its own, by design — so running old code after a deploy
+     * is the normal case, not the exotic one. A stamp turns that question
+     * into a glance.
+     */
+    hint.textContent = `v${__APP_VERSION__} · left half: move · right half:`
+      + ' aim her head · CAM: orbit instead';
     hud.appendChild(hint);
 
     this.host.appendChild(hud);
