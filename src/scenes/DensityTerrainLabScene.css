@@ -1899,3 +1899,61 @@
 .tm-vitals-on .density-lab-status:not(.tm-quest) {
   top: calc(max(12px, env(safe-area-inset-top)) + 214px);
 }
+
+/*
+ * ============================================================
+ * THE BLANK PLATE, WITH A WORD ON IT
+ * ============================================================
+ *
+ * The set has ten finished plates and a dozen controls still wearing text
+ * pills and emoji. Waiting for the rest of the art means the HUD stays half
+ * one language and half another for as long as the drawing takes — so the
+ * two BLANK plates that came with the set get pressed into service and the
+ * label goes on in CSS. It is not the final article and it is not meant to
+ * be: it is the whole rail speaking one language today.
+ *
+ * The engraved labels on the finished plates sit at the bottom under the
+ * icon. These have no icon, so the word takes the middle — centring it is
+ * the honest layout for a plate that is only a word, rather than an
+ * imitation of one that is a picture too.
+ */
+.tm-plate {
+  /* Same two-number rule as the art plates: the box is the touch target,
+   * `background-size` is the plate you see. */
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: url('/ui/plate-round.webp') center / contain no-repeat;
+  background-color: transparent;
+  box-shadow: none;
+  color: #e6c169;
+  font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.06em;
+  /* The blank plate is dark but not evenly so, and a thin gold word over a
+   * lit patch of it loses its edges without this. */
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+}
+
+.tm-plate-sq { background-image: url('/ui/plate-square.webp'); }
+
+/* 62 target / 50 plate — the design's small round action. */
+.tm-plate-md { width: 62px; height: 62px; background-size: 50px 50px; }
+
+/* 66 / 54 — the medium, for the one that is held rather than tapped. */
+.tm-plate-lg { width: 66px; height: 66px; background-size: 54px 54px; font-size: 10.5px; }
+
+.tm-plate:active {
+  transform: scale(0.94);
+  filter: brightness(1.18);
+}
+
+/* Latched, matching the art plates exactly — same glow, same reasoning:
+ * an amber pill ring would fight the gold rim. */
+.tm-plate.is-grip {
+  background-color: transparent;
+  box-shadow: none;
+  color: #fff1c5;
+  filter: brightness(1.25) drop-shadow(0 0 10px rgba(240, 200, 110, 0.85));
+}

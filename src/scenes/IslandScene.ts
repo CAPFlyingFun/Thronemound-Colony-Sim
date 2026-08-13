@@ -4591,8 +4591,8 @@ export class IslandScene {
      * tunnels out of mis-taps, and a scoop this size deserves the intent.
      */
     const scoopBtn = document.createElement('button');
-    scoopBtn.className = 'density-lab-button density-lab-dig';
-    scoopBtn.textContent = '\u{1FA8F}';
+    scoopBtn.className = 'density-lab-button tm-plate tm-plate-lg';
+    scoopBtn.textContent = 'SCOOP';
     scoopBtn.style.display = 'none';
     this.scoopBtn = scoopBtn;
     scoopBtn.addEventListener('pointerdown', (e) => {
@@ -4710,7 +4710,7 @@ export class IslandScene {
     devPanel.appendChild(this.aimChip);
 
     const view = document.createElement('button');
-    view.className = 'density-lab-button density-lab-mode';
+    view.className = 'density-lab-button tm-plate tm-plate-md';
     view.textContent = 'VIEW';
     view.addEventListener('pointerdown', (e) => {
       e.preventDefault();
@@ -4899,7 +4899,7 @@ export class IslandScene {
       label: string, mode: 'ride' | 'tilt', title: string,
     ): HTMLButtonElement => {
       const btn = document.createElement('button');
-      btn.className = 'density-lab-button density-lab-mode tm-pose-btn';
+      btn.className = 'density-lab-button tm-plate tm-plate-md';
       btn.textContent = label;
       btn.title = title;
       let held: number | null = null;
@@ -4937,11 +4937,18 @@ export class IslandScene {
       poseRow.appendChild(btn);
       return btn;
     };
+    /*
+     * WORDS, NOT EMOJI, now that these sit on a plate. ↕ and 🚁 were a good
+     * shorthand on a bare pill and are the wrong thing on gold: they are
+     * full-colour glyphs the system font draws, and they fight the plate
+     * rather than sit on it. RIDE and TILT also say what they are without
+     * needing the hover title to explain the joke.
+     */
     this.rideChip = poseBtn(
-      '↕', 'ride', 'Body height — stick forward lowers, back raises. Hold to centre.',
+      'RIDE', 'ride', 'Body height — stick forward lowers, back raises. Hold to centre.',
     );
     this.tiltChip = poseBtn(
-      '\u{1F681}', 'tilt', 'Body attitude — stick tilts her like a rotor hub. Hold to centre.',
+      'TILT', 'tilt', 'Body attitude — stick tilts her like a rotor hub. Hold to centre.',
     );
 
     /*
