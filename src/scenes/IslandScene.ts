@@ -377,6 +377,9 @@ export class IslandScene {
     this.input.sprint = now === 2;
     this.input.crawl = now === 0;
     if (this.paceChip) this.paceChip.textContent = PACE_NAMES[this.pace];
+    /* The plate carries the state the chip used to spell out: lit while she
+     * is running, so the latch is readable without a second control. */
+    this.sprintBtn?.classList.toggle('is-grip', this.pace === 2);
   }
 
   /** Shift runs and C crawls, both held; the chip latches. The keys match
@@ -842,6 +845,9 @@ export class IslandScene {
   private rideChip: HTMLButtonElement | null = null;
 
   private tiltChip: HTMLButtonElement | null = null;
+
+  /** The pace plate — the SPRINT art driving the CRAWL/WALK/RUN latch. */
+  private sprintBtn: HTMLButtonElement | null = null;
 
   private poseReadout: HTMLElement | null = null;
 
@@ -4711,8 +4717,61 @@ export class IslandScene {
      * only reachable by feathering a thumbstick, which nobody does
      * deliberately.
      */
+    /*
+     * THE ACTION CLUSTER, at the sizes the design calls for.
+     *
+     * Ordered so the hierarchy reads without labels: DIG is 72 px because it
+     * is what this game is about, the frequent actions are 54, the modifiers
+     * 50. Each sits in a box larger than its plate — see the `.tm-art-*`
+     * rules — so the tight look costs nothing in reach.
+     *
+     * Three of these are real and four are not, and they are built the same
+     * way on purpose: the layout has to be judged at the density it will
+     * actually have, not at the density of the subset that happens to work
+     * today. The ones without systems behind them carry `is-soon`.
+     */
+    const cluster = document.createElement('div');
+    cluster.className = 'tm-cluster';
+    actions.appendChild(cluster);
+
+    const plate = (
+      name: string, label: string, onPress: (() => void) | null,
+    ): HTMLButtonElement => {
+      const b = document.createElement('button');
+      b.className = `density-lab-button tm-art tm-art-${name}${onPress ? '' : ' is-soon'}`;
+      b.setAttribute('aria-label', label);
+      if (!onPress) b.setAttribute('aria-disabled', 'true');
+      else {
+        b.addEventListener('pointerdown', (e) => { e.preventDefault(); onPress(); });
+      }
+      cluster.appendChild(b);
+      return b;
+    };
+
+    plate('bite', 'Bite', null);
+    plate('carry', 'Carry', null);
+    plate('climb', 'Climb', null);
+    /*
+     * SPRINT is real: it is the pace latch the CRAWL/WALK/RUN chip drives,
+     * wearing the plate the design asked for. Cycling rather than holding
+     * because that is what the latch already does, and because there is
+     * nowhere on a phone to hold a second finger down — the left half is the
+     * stick and the right half is the look.
+     */
+    this.sprintBtn = plate('sprint', 'Pace', () => {
+      this.pace = ((this.pace + 1) % 3) as 0 | 1 | 2;
+      this.applyPace();
+    });
+
+    /*
+     * The CRAWL/WALK/RUN chip is now the SPRINT plate's job, so the chip is
+     * built but not shown: `applyPace` still writes its label, several
+     * probes read it, and two visible controls for one latch is how a player
+     * learns that one of them does nothing.
+     */
     this.paceChip = document.createElement('button');
     this.paceChip.className = 'density-lab-button density-lab-mode';
+    this.paceChip.style.display = 'none';
     this.paceChip.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       this.pace = ((this.pace + 1) % 3) as 0 | 1 | 2;
@@ -5304,6 +5363,45 @@ export class IslandScene {
     this.questEl.style.right = 'auto';
     this.questEl.style.transform = 'translateX(-50%)';
     this.hud.appendChild(this.questEl);
+
+    /*
+     * SENSE AND MENU, top right, off on their own.
+     *
+     * MENU is not decoration and is the reason this pair goes in now:
+     * "Congratulations, you have entered Thronemound. There is no exit."
+     * Once START is pressed there has been no way back to the front door
+     * short of retyping the address, which is a real dead end rather than a
+     * missing nicety. It reloads to the menu route.
+     *
+     * SENSE is drawn beside it and dimmed. The ping — a radius sweep that
+     * lights up trails, prints and whatever else is close — does not exist,
+     * and is deliberately NOT wired to the underground view, which already
+     * switches itself on depth. A view mode and an ability are different
+     * things and merging them would make both worse.
+     */
+    const utility = document.createElement('div');
+    utility.className = 'tm-utility';
+    this.hud.appendChild(utility);
+
+    const util = (name: string, label: string, onPress: (() => void) | null): void => {
+      const b = document.createElement('button');
+      b.className = `density-lab-button tm-art tm-art-${name}${onPress ? '' : ' is-soon'}`;
+      b.setAttribute('aria-label', label);
+      if (onPress) {
+        b.addEventListener('pointerdown', (e) => { e.preventDefault(); onPress(); });
+      } else b.setAttribute('aria-disabled', 'true');
+      utility.appendChild(b);
+    };
+
+    util('sense', 'Sense', null);
+    util('menu', 'Menu', () => {
+      /* The menu route is the address with no scene on it. A full load
+       * rather than a scene swap, because the island holds a streamed
+       * window, a colony and a renderer, and unwinding all of that by hand
+       * to get back to a title screen is a great deal of machinery to
+       * maintain for something that happens once a session. */
+      window.location.href = import.meta.env.BASE_URL;
+    });
 
     /*
      * The founding cinematic, as the brief wrote it: a held black beat

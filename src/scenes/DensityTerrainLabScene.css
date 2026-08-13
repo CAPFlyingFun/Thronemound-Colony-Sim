@@ -238,8 +238,78 @@
   filter: brightness(1.18);
 }
 
+/*
+ * SIZE IS TWO NUMBERS, NOT ONE — the design's central rule.
+ *
+ * The box is the TOUCH TARGET and `background-size` is what you SEE, so a
+ * 72 px plate can sit in an 86 px button and the cluster looks tight while
+ * staying comfortable under a thumb. Growing the art to meet the target is
+ * the mistake this exists to avoid: it gives back the compactness the layout
+ * was designed around.
+ */
 .tm-art-dig {
+  width: 86px;
+  height: 86px;
   background-image: url('/ui/dig.webp');
+  background-size: 72px 72px;
+}
+
+.tm-art-sprint {
+  width: 62px;
+  height: 62px;
+  background-image: url('/ui/sprint.webp');
+  background-size: 50px 50px;
+}
+
+.tm-art-bite {
+  width: 66px;
+  height: 66px;
+  background-image: url('/ui/bite.webp');
+  background-size: 54px 54px;
+}
+
+.tm-art-carry {
+  width: 66px;
+  height: 66px;
+  background-image: url('/ui/carry.webp');
+  background-size: 54px 54px;
+}
+
+.tm-art-climb {
+  width: 62px;
+  height: 62px;
+  background-image: url('/ui/climb.webp');
+  background-size: 50px 50px;
+}
+
+.tm-art-sense {
+  width: 56px;
+  height: 56px;
+  background-image: url('/ui/sense.webp');
+  background-size: 48px 48px;
+}
+
+.tm-art-menu {
+  width: 56px;
+  height: 56px;
+  background-image: url('/ui/menu.webp');
+  background-size: 48px 48px;
+}
+
+/*
+ * SHOWN, NOT HIDDEN — the front door's rule, applied to the HUD.
+ *
+ * Several of these plates are for systems that do not exist yet: there is no
+ * combat, no carrying and no ping on the island. A button that does nothing
+ * is a lie, and a button that is absent teaches nothing, so they are drawn
+ * dimmed and refuse the touch. It says "this is coming and it is not ready",
+ * which is true, and it means the layout is being judged at its real density
+ * rather than at a temporary one.
+ */
+.tm-art.is-soon {
+  opacity: 0.38;
+  filter: grayscale(0.55);
+  pointer-events: none;
 }
 
 /* Armed. The amber ring the mode chips use would fight the gold plate, so
@@ -1523,5 +1593,48 @@
   width: 132px;
   accent-color: #6fc8e9;
   touch-action: none;
+  pointer-events: auto;
+}
+
+/*
+ * THE ACTION CLUSTER — packed, not stacked.
+ *
+ * The rail above it is a column of chips; this is a group of plates that
+ * wraps, right-aligned, so DIG anchors the corner and the smaller actions
+ * gather beside it. Air between them belongs to the camera drag, as
+ * everywhere else on this HUD.
+ */
+.tm-cluster {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap-reverse;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  max-width: min(46vw, 320px);
+  pointer-events: none;
+}
+
+.tm-cluster > * {
+  pointer-events: auto;
+}
+
+/*
+ * SENSE and MENU, anchored to the top-right corner in their own right
+ * rather than hung off the action rail — they are utilities, always
+ * reachable, and must not move when the rail grows in dig mode.
+ */
+.tm-utility {
+  position: absolute;
+  z-index: 2;
+  top: max(12px, env(safe-area-inset-top));
+  right: max(18px, env(safe-area-inset-right));
+  display: flex;
+  flex-direction: row;
+  gap: 9px;
+  pointer-events: none;
+}
+
+.tm-utility > * {
   pointer-events: auto;
 }
