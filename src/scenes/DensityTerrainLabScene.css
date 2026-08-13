@@ -2149,3 +2149,33 @@
   .tm-art-scoop { width: 58px; height: 58px; background-size: 48px 48px; }
   .tm-instruments .density-lab-aim-readout { font-size: 11px; padding: 4px 6px; }
 }
+
+/*
+ * A BAR WITH A SYSTEM BEHIND IT.
+ *
+ * The hatch says NO SIGNAL and stays on food and water. Health and stamina
+ * are live now, so they get a fill — and the fill is the only thing on this
+ * panel allowed to be a colour rather than gold, because a reading has to
+ * be readable at a glance from the corner of an eye while she is running.
+ */
+.tm-bar-health .tm-bar-fill {
+  background: linear-gradient(180deg, #d9573f 0%, #a8332a 100%);
+}
+
+.tm-bar-stamina .tm-bar-fill {
+  background: linear-gradient(180deg, #e8c168 0%, #b98a2c 100%);
+}
+
+/* Full opacity for the icons that label a live bar — the dimming is
+ * reserved for saying "no system", and two of these now have one. */
+.tm-vital-icon.is-live { opacity: 1; }
+
+/*
+ * WINDED. The pace plate refuses a run she has not got, and a control that
+ * refuses without saying so reads as broken — so the plate greys while she
+ * gets her breath back. It is the same language as `is-soon`, which is
+ * right: both mean "not available", one temporarily.
+ */
+.tm-art.is-spent {
+  filter: grayscale(0.7) brightness(0.72);
+}

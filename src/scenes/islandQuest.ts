@@ -15,6 +15,17 @@
 import * as THREE from 'three';
 import type { SurfaceWalker } from '../world/surfaceWalk';
 import { Colonist } from './Colonist';
+import type { Vitals } from './islandVitals';
+
+/** The four, named once so a typo cannot invent a fifth. */
+export type VitalKind = 'health' | 'stamina' | 'food' | 'water';
+
+/** A bar the HUD keeps current, and the last percent it was told. */
+export interface VitalBar {
+  kind: VitalKind;
+  fill: HTMLElement;
+  shown: number;
+}
 import { MM } from '../world/worldScape';
 import type { Ground } from '../anim/legDrive';
 import {
@@ -37,6 +48,8 @@ export interface QuestHost {
   workersOutEl: HTMLElement | null;
   workersOutShown: number;
   workerAnchor: THREE.Vector3;
+  readonly vitals: Vitals;
+  readonly vitalBars: VitalBar[];
   readonly groundForLegs: Ground;
   walkGroundAt(x: number, z: number): number;
 }
@@ -97,34 +110,36 @@ export function buildVitalsHud(host: QuestHost, ): void {
   panel.appendChild(bars);
 
   /*
-   * The icon LABELS the bar; it does not report it. Both are dimmed
-   * together, so a lit heart will mean a real reading the day one exists
-   * and never before.
+   * The icon LABELS the bar; it does not report it. A bar with a system
+   * behind it is lit and gets a fill; one without keeps the hatch, which
+   * says NO SIGNAL rather than empty. Health and stamina go live with
+   * `islandVitals`; food and water stay hatched because there is nothing
+   * to eat and nothing to drink, and a bar that can only fall is worse
+   * than an honest empty frame.
    */
-  const bar = (kind: string, label: string): HTMLElement => {
+  const bar = (kind: VitalKind, label: string, live: boolean): HTMLElement => {
     const row = document.createElement('div');
     row.className = 'tm-vital';
     const icon = document.createElement('i');
-    icon.className = `tm-vital-icon tm-vi-${kind}`;
+    icon.className = `tm-vital-icon tm-vi-${kind}${live ? ' is-live' : ''}`;
     const el = document.createElement('div');
-    /* `is-soon` on every one of them, for now, and it is not a placeholder
-     * for a number — it is the statement that there is no number. */
-    el.className = `tm-bar tm-bar-${kind} is-soon`;
+    el.className = `tm-bar tm-bar-${kind}${live ? '' : ' is-soon'}`;
     el.setAttribute('role', 'img');
-    el.setAttribute('aria-label', `${label} — not implemented yet`);
+    el.setAttribute('aria-label', live ? label : `${label} — not implemented yet`);
     const fill = document.createElement('div');
     fill.className = 'tm-bar-fill';
     el.appendChild(fill);
     row.append(icon, el);
+    if (live) host.vitalBars.push({ kind, fill, shown: -1 });
     return row;
   };
 
-  bars.appendChild(bar('health', 'Health'));
-  bars.appendChild(bar('stamina', 'Stamina'));
+  bars.appendChild(bar('health', 'Health', true));
+  bars.appendChild(bar('stamina', 'Stamina', true));
   const pair = document.createElement('div');
   pair.className = 'tm-vitals-pair';
-  pair.appendChild(bar('food', 'Food'));
-  pair.appendChild(bar('water', 'Water'));
+  pair.appendChild(bar('food', 'Food', false));
+  pair.appendChild(bar('water', 'Water', false));
   bars.appendChild(pair);
 
   host.hud.appendChild(panel);
@@ -238,7 +253,18 @@ export function buildQuestHud(host: QuestHost, ): void {
   host.hud.appendChild(host.cineEl);
 }
 
-export function renderQuest(host: QuestHost, ): void {
+export function renderQuest(host: QuestHost): void {
+  /*
+   * THE LIVE BARS, written only when they MOVE — and "move" means a whole
+   * percent, not a float. A width assignment is a layout, this runs every
+   * frame, and no eye can tell 61.4% of a 205px bar from 61.5%.
+   */
+  for (const b of host.vitalBars) {
+    const pct = Math.round(host.vitals.fractionOf(b.kind) * 100);
+    if (pct === b.shown) continue;
+    b.shown = pct;
+    b.fill.style.width = `${pct}%`;
+  }
   /* Written only when it CHANGES. It is one number on a HUD that runs
    * every frame, and a textContent assignment per frame is a layout the
    * browser did not need to do. */

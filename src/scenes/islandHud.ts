@@ -18,6 +18,7 @@ import * as THREE from 'three';
 import type { BodyPosture } from './bodyPosture';
 import type { BoreRig } from './BoreControl';
 import { readFlick, readNudge, type Dodge } from './dodge';
+import type { Vitals } from './islandVitals';
 import type { NestDesigner } from '../nest/NestDesigner';
 import type { NestView } from '../nest/nestView';
 import type { IslandStream } from '../world/IslandStream';
@@ -59,6 +60,7 @@ export interface HudHost {
   readonly posture: BodyPosture;
   readonly bore: BoreRig;
   readonly dodge: Dodge;
+  readonly vitals: Vitals;
   readonly at: THREE.Vector3;
   pace: 0 | 1 | 2;
   shiftHeld: boolean;
@@ -382,7 +384,13 @@ export function buildControls(host: HudHost, ): void {
     /* A tap is not a direction. Guessing one would send her somewhere
      * the player did not ask to go, which on a control whose whole job
      * is escaping something is the worst possible failure. */
-    if (dir) host.dodge.start(dir, MM);
+    /*
+     * A DODGE IS PAID FOR BEFORE IT HAPPENS. `spend` refuses rather than
+     * going into credit, and `start` refuses while one is already in
+     * flight — so the stamina only leaves when the burst actually does.
+     */
+    if (dir && host.vitals.stamina >= host.vitals.dodgeCost
+      && host.dodge.start(dir, MM)) host.vitals.spend(host.vitals.dodgeCost);
   };
   dodgeBtn.addEventListener('pointerup', endNudge);
   dodgeBtn.addEventListener('pointercancel', () => {
@@ -901,7 +909,13 @@ export function buildControls(host: HudHost, ): void {
           travelPx: host.stroke.travel,
           ms: performance.now() - host.stroke.at,
         });
-        if (dir) host.dodge.start(dir, MM);
+        /*
+     * A DODGE IS PAID FOR BEFORE IT HAPPENS. `spend` refuses rather than
+     * going into credit, and `start` refuses while one is already in
+     * flight — so the stamina only leaves when the burst actually does.
+     */
+    if (dir && host.vitals.stamina >= host.vitals.dodgeCost
+      && host.dodge.start(dir, MM)) host.vitals.spend(host.vitals.dodgeCost);
       }
       // Finger off: the eye starts sliding back to the tube's own line.
       }

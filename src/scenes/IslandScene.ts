@@ -135,7 +135,10 @@ import {
   aimCamera, clampedHeadPitch, lensClearance, type CameraHost,
 } from './islandCamera';
 import { buildControls, updateStatus, type HudHost } from './islandHud';
-import { depthMm, questTick, type QuestHost } from './islandQuest';
+import {
+  depthMm, questTick, type QuestHost, type VitalBar,
+} from './islandQuest';
+import { Vitals } from './islandVitals';
 import {
   bite, biteCentre, biteRay, boreAim, updateAimDebug, type DigHost,
 } from './islandDig';
@@ -328,7 +331,14 @@ export class IslandScene {
    * answer the chip would have given it.
    */
   private paceMul(): number {
-    if (this.input.sprint) return SPRINT;
+    /*
+     * STAMINA IS A VETO, not a second latch. The button stays where the
+     * player put it and she simply cannot deliver a run she has not got —
+     * so a spent sprint drops to a walk and picks itself back up the moment
+     * she has her second wind, without the chip flicking about under a
+     * thumb that is not touching it.
+     */
+    if (this.input.sprint && this.vitals.canRun) return SPRINT;
     return this.input.crawl ? CRAWL : 1;
   }
 
@@ -457,6 +467,9 @@ export class IslandScene {
       /* Lit on RUN still: it is the pace with a cost, and the one worth
        * seeing from the corner of an eye. */
       btn.classList.toggle('is-grip', this.pace === 2);
+      /* And greyed while that cost cannot be met — see `paceMul`, which
+       * vetoes the run rather than moving the latch. */
+      btn.classList.toggle('is-spent', this.pace === 2 && !this.vitals.canRun);
     }
   }
 
@@ -894,6 +907,15 @@ export class IslandScene {
   private stroke = {
     x: 0, y: 0, lastX: 0, lastY: 0, at: 0, travel: 0,
   };
+
+  /** What keeps her going. See `islandVitals.ts`. */
+  readonly vitals = new Vitals();
+
+  /** The bars `renderQuest` keeps current. See `islandQuest.ts`. */
+  private readonly vitalBars: VitalBar[] = [];
+
+  /** Last seen, so the pace plate is only redrawn when it has to be. */
+  private canRunWas = true;
 
   /** The evasive burst, and the numbers behind it. See `dodge.ts`. */
   private readonly dodge = new Dodge();
@@ -2241,6 +2263,17 @@ export class IslandScene {
     const dt = Math.min(0.05, (now - this.previous) / 1000);
     this.previous = now;
     if (!this.paused) this.simulate(dt);
+    /*
+     * The winded state is a per-FRAME fact and the pace plate is redrawn on
+     * a per-TAP one, so the two are reconciled on the edge rather than by
+     * repainting a button sixty times a second. `applyPace` is the only
+     * thing that knows what the plate should look like, so it stays the
+     * only thing that decides.
+     */
+    if (this.vitals.canRun !== this.canRunWas) {
+      this.canRunWas = this.vitals.canRun;
+      this.applyPace();
+    }
     if (this.designer?.isOpen) this.designer.update();
 
     this.stats.frames += 1;
@@ -2829,6 +2862,9 @@ export class IslandScene {
       /* The sense's own flag, reported beside the camera's so a probe can
        * tell the two apart — they are meant to disagree in an open pit. */
       enclosed: this.enclosed ? 1 : 0,
+      ...this.vitals.report(),
+      pace: this.pace,
+      canRun: this.vitals.canRun ? 1 : 0,
       firstPerson: this.firstPerson ? 1 : 0,
       aimDeg: (this.aimPitch * 180) / Math.PI,
       scoopWideMm: SCOOP_WIDE_MM,

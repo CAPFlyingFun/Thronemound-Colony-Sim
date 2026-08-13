@@ -25,6 +25,7 @@ import {
 import type { BodyPosture } from './bodyPosture';
 import { YAW_RATE, type BoreRig } from './BoreControl';
 import type { Dodge } from './dodge';
+import type { Vitals } from './islandVitals';
 import type { NestDesigner } from '../nest/NestDesigner';
 import type { IslandStream, IslandScrollReport } from '../world/IslandStream';
 import { SENSE_EASE, type SenseUniforms } from './undergroundSense';
@@ -47,6 +48,7 @@ export interface BodyHost {
   readonly bore: BoreRig;
   readonly posture: BodyPosture;
   readonly dodge: Dodge;
+  readonly vitals: Vitals;
   readonly groundForLegs: Ground;
 
   /* --- where she is --- */
@@ -215,6 +217,19 @@ export function simulate(host: BodyHost, dt: number): void {
   moved.addScaledVector(host.up, -moved.dot(host.up));
   const went = moved.length() / Math.max(dt, 1e-6);
   host.groundSpeed += (went - host.groundSpeed) * Math.min(1, dt * 12);
+
+  /*
+   * WHAT THE EFFORT COST HER.
+   *
+   * Fed the pace latch's REQUEST and her MEASURED speed, not the stick:
+   * holding sprint against a wall is not running, and a run that spends
+   * stamina while she stands still would be the kind of drain a player
+   * cannot see the cause of. See `islandVitals.ts`.
+   */
+  host.vitals.tick(dt, {
+    running: host.input.sprint,
+    moving: host.groundSpeed / WALK_SPEED,
+  });
 
   /* ONE height sample, TWO thresholds — the camera's and the sense's.
    * Sharing the sample is what keeps the second answer free; see
