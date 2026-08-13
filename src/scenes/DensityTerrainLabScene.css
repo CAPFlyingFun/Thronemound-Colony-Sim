@@ -2214,3 +2214,54 @@
 .tm-art-interact { background-image: url('/ui/interact.webp'); }
 .tm-art-eat { background-image: url('/ui/eat.webp'); }
 .tm-art-drink { background-image: url('/ui/drink.webp'); }
+
+/*
+ * THE TOAST — and the first of the art sheet's four frames to do a job.
+ *
+ * `border-image` rather than a stretched background, because these frames
+ * have CARVED ENDS: scaling the whole picture to the box smears them into
+ * nothing, which is the failure the frames were flagged for when they were
+ * extracted. Nine-slicing keeps the ends at their drawn size and stretches
+ * only the plain run between them, which is what the run is for.
+ *
+ * The slice numbers are pixels into the SOURCE (301 x 94): 30 off the top
+ * and bottom for the rim, 92 off each end for the ornament. `fill` keeps
+ * the middle of the image as the box's background instead of dropping it.
+ */
+.tm-toast {
+  position: absolute;
+  z-index: 5;
+  left: 50%;
+  /* Below the STATS chip, which owns the top-centre. */
+  top: calc(max(12px, env(safe-area-inset-top)) + 46px);
+  transform: translateX(-50%);
+  box-sizing: border-box;
+  min-width: 200px;
+  max-width: min(70vw, 300px);
+  padding: 0 4px;
+  /*
+   * THREE NUMBERS, AND THEY ARE NOT THE SAME NUMBER.
+   *
+   * `slice` is measured in the SOURCE (301 x 94): 30px of rim, 92px of
+   * carved end. `border-width` is what those become ON SCREEN. Left equal,
+   * the toast comes out 384 x 80 — the frame drawn at its full drawn size,
+   * with the design's 220 x 42 nowhere in sight. So the slices are scaled
+   * down to the box: a 14px rim and a 40px end.
+   */
+  border-style: solid;
+  border-width: 14px 40px;
+  border-image-source: url('/ui/frame-toast.webp');
+  border-image-slice: 30 92 fill;
+  border-image-width: 14px 40px;
+  border-image-repeat: stretch;
+  color: #f7e2b0;
+  font: 800 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.09em;
+  text-align: center;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.22s ease;
+}
+
+.tm-toast.is-live { opacity: 1; }

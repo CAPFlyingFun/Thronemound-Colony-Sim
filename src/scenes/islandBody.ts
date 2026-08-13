@@ -49,6 +49,7 @@ export interface BodyHost {
   readonly posture: BodyPosture;
   readonly dodge: Dodge;
   readonly vitals: Vitals;
+  combatTick(dt: number): void;
   readonly groundForLegs: Ground;
 
   /* --- where she is --- */
@@ -247,6 +248,7 @@ export function simulate(host: BodyHost, dt: number): void {
    * fading in. */
   host.enclosed = host.senseWant >= 1;
 
+  host.combatTick(dt);
   host.questTick(dt);
   /* The small tiers follow her; the big ones were planted once. */
   host.regrowScrub();

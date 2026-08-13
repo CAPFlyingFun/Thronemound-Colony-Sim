@@ -19,7 +19,7 @@ import type { BodyPosture } from './bodyPosture';
 import type { BoreRig } from './BoreControl';
 import { readFlick, readNudge, type Dodge } from './dodge';
 import type { Vitals } from './islandVitals';
-import { ABILITIES, type AntKind } from './antKinds';
+import { ABILITIES, type AbilityId, type AntKind } from './antKinds';
 import type { NestDesigner } from '../nest/NestDesigner';
 import type { NestView } from '../nest/nestView';
 import type { IslandStream } from '../world/IslandStream';
@@ -63,6 +63,9 @@ export interface HudHost {
   readonly dodge: Dodge;
   readonly vitals: Vitals;
   readonly antKind: AntKind;
+  biteBtn: HTMLButtonElement | null;
+  stingBtn: HTMLButtonElement | null;
+  useAbility(id: AbilityId): void;
   readonly at: THREE.Vector3;
   pace: 0 | 1 | 2;
   shiftHeld: boolean;
@@ -474,7 +477,12 @@ export function buildControls(host: HudHost, ): void {
    */
   for (const id of host.antKind.abilities) {
     const ability = ABILITIES[id];
-    plate(ability.art, ability.label, ability.built ? () => {} : null);
+    const b = plate(ability.art, ability.label,
+      ability.built ? () => host.useAbility(id) : null);
+    /* The two the fight drives keep a handle, so `refreshCombatChips` can
+     * light and dim them without going looking through the DOM. */
+    if (id === 'bite') host.biteBtn = b;
+    if (id === 'sting') host.stingBtn = b;
   }
   /*
    * SPRINT is real: it is the pace latch the CRAWL/WALK/RUN chip drives,

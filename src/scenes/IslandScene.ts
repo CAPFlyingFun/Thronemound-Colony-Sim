@@ -139,7 +139,9 @@ import {
   depthMm, questTick, type QuestHost, type VitalBar,
 } from './islandQuest';
 import { Vitals } from './islandVitals';
-import { FIRE_ANT, type AntKind } from './antKinds';
+import { FIRE_ANT, type AbilityId, type AntKind } from './antKinds';
+import { Combat, necrosis } from './islandCombat';
+import { Beetle } from './Beetle';
 import {
   bite, biteCentre, biteRay, boreAim, updateAimDebug, type DigHost,
 } from './islandDig';
@@ -331,6 +333,152 @@ export class IslandScene {
    * a probe or a script setting the flags by hand should get the same
    * answer the chip would have given it.
    */
+  /**
+   * A LINE THAT SAYS WHAT JUST HAPPENED, and then goes.
+   *
+   * The first use of one of the frames off the second art sheet: nine-
+   * sliced with `border-image`, so the carved ends keep their shape while
+   * the middle stretches to whatever the words need. Stretching the whole
+   * picture — the obvious thing — squashes those ends into smears, which
+   * is exactly the trap the frames were flagged for.
+   */
+  private toastCombat(text: string): void {
+    if (!this.toastEl) {
+      this.toastEl = document.createElement('div');
+      this.toastEl.className = 'tm-toast';
+      this.hud.appendChild(this.toastEl);
+    }
+    this.toastEl.textContent = text;
+    this.toastEl.classList.add('is-live');
+    window.clearTimeout(this.toastUntil);
+    this.toastUntil = window.setTimeout(() => {
+      this.toastEl?.classList.remove('is-live');
+    }, 2200);
+  }
+
+  /**
+   * SOMETHING TO FIGHT.
+   *
+   * One beetle, a walk from where she starts, on the same side as the
+   * landmark tree so the first thing a player does — head for the tree —
+   * takes them past it. Not hidden and not on top of her: a first
+   * encounter should be a thing you choose to have.
+   *
+   * It is a placeholder in the sense that a real bestiary will not be a
+   * `for` loop over one number, and it is NOT a placeholder in the sense
+   * that it has hit points, fights back, and can kill her.
+   */
+  private spawnQuarry(): void {
+    if (this.quarry.length > 0) return;
+    const away = 34 / MM;
+    const x = this.at.x + away;
+    const z = this.at.z + away * 0.4;
+    const beetle = new Beetle('beetle', x, this.walkGroundAt(x, z), z);
+    this.scene.add(beetle.root);
+    this.quarry.push(beetle);
+  }
+
+  /**
+   * A PLATE WAS PRESSED. One door in, so a species that gains an ability
+   * gains its button and its behaviour in the same place — see
+   * `antKinds.ts`.
+   */
+  private useAbility(id: AbilityId): void {
+    if (id === 'bite') {
+      /* One button for both halves: BITE takes hold, and BITE lets go.
+       * A separate release button is a second thing to find mid-fight, and
+       * the grip is already the thing the plate is lit for. */
+      if (this.combat.phase !== 'free') { this.combat.release(); return; }
+      const target = this.quarryInReach();
+      if (!target) { this.toastCombat('NOTHING IN REACH'); return; }
+      if (!this.combat.grip(target, (c) => this.vitals.spend(c))) {
+        this.toastCombat('TOO TIRED TO HOLD ON');
+        return;
+      }
+      this.toastCombat('GRIPPED');
+    } else if (id === 'sting') {
+      /* The animal's own rule, not a balance one: the sting needs the
+       * mandibles anchored before the gaster can reach round. */
+      if (this.combat.phase === 'free') { this.toastCombat('BITE FIRST'); return; }
+      if (!this.combat.sting()) this.toastCombat('OUT OF VENOM');
+    }
+    this.refreshCombatChips();
+  }
+
+  /** The two plates that change with the fight. */
+  private refreshCombatChips(): void {
+    const gripped = this.combat.phase !== 'free';
+    /* BITE is the grip AND the release, so it stays lit while she holds
+     * on — the same latch language DIG uses. */
+    this.biteBtn?.classList.toggle('is-grip', gripped);
+    /* STING is only a control while there is something to sting, and only
+     * while she has venom for it. Dimmed rather than hidden: a button that
+     * disappears mid-fight is a button the thumb misses. */
+    this.stingBtn?.classList.toggle('is-spent', !gripped || this.combat.dry);
+  }
+
+  /**
+   * ONE FRAME OF THE FIGHT.
+   *
+   * The quarry pot ters whether or not she is interested; the venom in it
+   * keeps working whether or not she is still holding it — which is the
+   * whole point of a load — and the grip is dropped the moment it stops
+   * being possible: out of reach, or the thing she is holding has died and
+   * become cargo rather than a fight.
+   */
+  private combatTick(dt: number): void {
+    const held = this.combat.held;
+    for (const q of this.quarry) {
+      q.tick(dt, (x, z) => this.walkGroundAt(x, z), q === held);
+      /* Necrosis runs on EVERYTHING, held or dropped or long since walked
+       * away from. Solenopsins do not care whether she stayed to watch. */
+      if (necrosis(q, dt)) this.toastCombat(`THE ${q.id.toUpperCase()} IS DOWN`);
+    }
+    this.combat.tick(
+      dt,
+      (cost) => this.vitals.spend(cost),
+      (amount) => this.vitals.damage(amount),
+      Math.random,
+    );
+    /* Reach is checked here rather than inside `Combat`, which has no
+     * geometry and should not grow any. */
+    const grip = this.combat.held;
+    if (grip) {
+      const gap = Math.hypot(
+        grip.at.x - this.at.x, grip.at.y - this.at.y, grip.at.z - this.at.z,
+      );
+      if (gap > this.combat.reach + grip.radius) this.combat.release();
+    }
+    for (const e of this.combat.drain()) {
+      if (e.kind === 'dry') this.toastCombat('OUT OF VENOM');
+      else if (e.kind === 'shaken') this.toastCombat('SHAKEN OFF');
+    }
+    this.refreshCombatChips();
+  }
+
+  /**
+   * The nearest thing within reach that is worth biting.
+   *
+   * Nearest rather than "the one she is looking at": her jaws are at her
+   * head and her head is where she is pointed, so anything inside that
+   * radius is in front of her by construction — and a cone test on a
+   * control the player is stabbing at with a thumb turns a miss into a
+   * mystery.
+   */
+  private quarryInReach(): Beetle | null {
+    let best: Beetle | null = null;
+    let bestGap = Infinity;
+    for (const q of this.quarry) {
+      const gap = Math.hypot(
+        q.at.x - this.at.x, q.at.y - this.at.y, q.at.z - this.at.z,
+      ) - q.radius;
+      if (gap > this.combat.reach || gap >= bestGap) continue;
+      best = q;
+      bestGap = gap;
+    }
+    return best;
+  }
+
   private paceMul(): number {
     /*
      * STAMINA IS A VETO, not a second latch. The button stays where the
@@ -919,6 +1067,20 @@ export class IslandScene {
   /** What keeps her going. See `islandVitals.ts`. */
   readonly vitals = new Vitals(FIRE_ANT.vitals);
 
+  /** The jaws and the sting. See `islandCombat.ts`. */
+  readonly combat = new Combat();
+
+  /** Everything on the island she could get her jaws into. */
+  readonly quarry: Beetle[] = [];
+
+  private toastEl: HTMLElement | null = null;
+
+  private toastUntil = 0;
+
+  biteBtn: HTMLButtonElement | null = null;
+
+  stingBtn: HTMLButtonElement | null = null;
+
   /** The bars `renderQuest` keeps current. See `islandQuest.ts`. */
   private readonly vitalBars: VitalBar[] = [];
 
@@ -1260,6 +1422,7 @@ export class IslandScene {
     }).finally(() => {
       this.queenSettled = true;
       this.playerReady = true;
+      this.spawnQuarry();
       void this.loading.finish();
       /* Whoever is holding the curtain — the menu, when there is one — is
        * told here rather than left to poll, and told AFTER the queen has
@@ -2855,6 +3018,9 @@ export class IslandScene {
     return this.renderedOn(this.heights, xMm, zMm);
   }
 
+  /** Fire a toast from a probe, so a shot can catch it lit. */
+  toastForTest(text: string): void { this.toastCombat(text); }
+
   statsForTest(): Record<string, number> {
     return {
       verts: this.terrainVerts,
@@ -2871,6 +3037,12 @@ export class IslandScene {
        * tell the two apart — they are meant to disagree in an open pit. */
       enclosed: this.enclosed ? 1 : 0,
       ...this.vitals.report(),
+      combatPhase: this.combat.phase === 'stinging' ? 2
+        : this.combat.phase === 'gripped' ? 1 : 0,
+      venom: +this.combat.venom.toFixed(3),
+      stingsLeft: this.combat.stingsLeft,
+      quarry: this.quarry.length,
+      quarryUp: this.quarry.filter((q) => q.alive).length,
       pace: this.pace,
       canRun: this.vitals.canRun ? 1 : 0,
       firstPerson: this.firstPerson ? 1 : 0,
@@ -2937,6 +3109,7 @@ export class IslandScene {
     this.nestView?.dispose();
     this.queen.dispose();
     for (const one of this.colony) one.dispose();
+    for (const q of this.quarry) q.dispose();
     this.renderer.dispose();
     this.host.replaceChildren();
   }

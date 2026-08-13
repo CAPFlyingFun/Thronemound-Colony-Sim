@@ -25,10 +25,14 @@ describe('every kind is buildable', () => {
     }
   });
 
-  it('has no ability claiming to be built while nothing is', () => {
-    /* This test is meant to FAIL the day a mechanic lands, as the reminder
-     * to flip the flag in the same commit. */
-    expect(Object.values(ABILITIES).every((a) => !a.built)).toBe(true);
+  /*
+   * This began life as "nothing is built", designed to fail the day a
+   * mechanic landed. It did, and the grip and the sting are the two that
+   * landed — so it becomes the list, which fails the same way next time.
+   */
+  it('marks exactly the abilities that have a mechanic behind them', () => {
+    const built = Object.values(ABILITIES).filter((a) => a.built).map((a) => a.id);
+    expect(built.sort()).toEqual(['bite', 'sting']);
   });
 });
 

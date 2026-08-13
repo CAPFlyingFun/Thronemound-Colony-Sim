@@ -28,16 +28,16 @@ export interface Ability {
   art: string;
   label: string;
   /**
-   * Has the GAME built this? Nothing here has a mechanic yet, so every one
-   * is false — and that is the honest state rather than a placeholder. A
-   * plate flips to true in the same commit as the thing it does.
+   * Has the GAME built this? A plate flips to true in the same commit as
+   * the thing it does — BITE and STING did, in v0.1.23. The rest are still
+   * honestly false.
    */
   built: boolean;
 }
 
 export const ABILITIES: Record<AbilityId, Ability> = {
-  bite: { id: 'bite', art: 'bite', label: 'Bite', built: false },
-  sting: { id: 'sting', art: 'sting', label: 'Sting', built: false },
+  bite: { id: 'bite', art: 'bite', label: 'Bite', built: true },
+  sting: { id: 'sting', art: 'sting', label: 'Sting', built: true },
   carry: { id: 'carry', art: 'carry', label: 'Carry', built: false },
   drop: { id: 'drop', art: 'drop', label: 'Drop', built: false },
   /* Climbing WORKS — she walks up a trunk without being asked. What does
