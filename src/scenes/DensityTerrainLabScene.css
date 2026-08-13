@@ -209,6 +209,48 @@
   background: #e9c36f;
 }
 
+/*
+ * A BUTTON THAT IS A PICTURE.
+ *
+ * The plate art carries its own frame, its own bevel and its own label, so
+ * everything the CSS button was drawing has to get out of the way: no fill,
+ * no shadow of our own (the plate has one baked in), no text.
+ *
+ * `contain` rather than `cover` — these are cut-outs with transparent
+ * corners, and cropping one to fill a square would shave the gold rim that
+ * makes it read as a button at all.
+ */
+.tm-art {
+  background-color: transparent;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+  box-shadow: none;
+  color: transparent;
+  font-size: 0;
+}
+
+/* Pressed: the plate dips and warms slightly. The artwork has no pressed
+ * state of its own, and a control that does not answer a thumb feels
+ * broken however good it looks. */
+.tm-art:active {
+  transform: scale(0.94);
+  filter: brightness(1.18);
+}
+
+.tm-art-dig {
+  background-image: url('/ui/dig.webp');
+}
+
+/* Armed. The amber ring the mode chips use would fight the gold plate, so
+ * the latched state is a glow around the art instead — which is what the
+ * discarded glow sheet was drawing, done where it can animate. */
+.tm-art.is-grip {
+  background-color: transparent;
+  box-shadow: none;
+  filter: brightness(1.25) drop-shadow(0 0 10px rgba(240, 200, 110, 0.85));
+}
+
 .density-lab-dig:active {
   transform: scale(0.96);
   background: #f0d88e;

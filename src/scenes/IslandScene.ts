@@ -4525,8 +4525,19 @@ export class IslandScene {
      * on screen is a palette that gets dug into by a mis-tap.
      */
     const dig = document.createElement('button');
-    dig.className = 'density-lab-button density-lab-dig';
-    dig.textContent = 'DIG';
+    /*
+     * THE FIRST BUTTON WEARING THE REAL ART, and it is deliberately only
+     * one of them.
+     *
+     * The ten HUD pieces are WebP, and WebP has to survive three things
+     * before a HUD is built on top of it: the bundler, the service worker's
+     * cache, and whatever Safari does on the device. Proving that with one
+     * button costs nothing; discovering it with ten, after the layout is
+     * built around them, costs the layout. `tm-art` carries the picture and
+     * drops the label, because the artwork already says DIG.
+     */
+    dig.className = 'density-lab-button density-lab-dig tm-art tm-art-dig';
+    dig.setAttribute('aria-label', 'Dig');
     dig.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       this.digMode = !this.digMode;
