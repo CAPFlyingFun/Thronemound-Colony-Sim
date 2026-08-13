@@ -199,7 +199,19 @@ export function buildVitalsHud(host: QuestHost, ): void {
   carry.className = 'tm-meter tm-meter-carry is-soon';
   carry.setAttribute('role', 'img');
   carry.setAttribute('aria-label', 'Carrying — not implemented yet');
-  carry.textContent = 'CARRY';
+  /* The readout is its own box inside the frame rather than the frame's
+   * padding box: `border-width` has to be whole pixels and the interior
+   * the artist drew is not on whole pixels, so the two can never be made
+   * to agree. The track is placed on the art; see the CSS. */
+  const track = document.createElement('div');
+  track.className = 'tm-meter-track';
+  const fill = document.createElement('div');
+  fill.className = 'tm-meter-fill';
+  const label = document.createElement('span');
+  label.className = 'tm-meter-label';
+  label.textContent = 'CARRY';
+  track.append(fill, label);
+  carry.appendChild(track);
   host.hud.appendChild(carry);
 }
 

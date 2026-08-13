@@ -1861,18 +1861,52 @@
   border-image-source: url('/ui/frame-bar.webp');
   border-image-slice: 11 37 16 37 fill;
   border-image-repeat: stretch;
-  /* `border-image-width` is left at its default of 1, which means exactly
-   * one times `border-width` — the two numbers the toast had to be told
-   * apart are the same number here, and saying it twice invites them to
-   * drift. */
 }
 
+/*
+ * AND THIS IS WHY THE CARD SAYS THREE NUMBERS AND NOT TWO.
+ *
+ * `slice * s` almost never lands on a whole pixel, and `border-width` is a
+ * LAYOUT property: the browser floors it. Asking for 2.96px of cap gets 2 —
+ * a third of it thrown away — and the art is then squeezed into a border
+ * box smaller than the arithmetic assumed. Measured, on the live page:
+ *
+ *     asked 0.88/2.96/1.28/2.96   got 1/2/1/2
+ *
+ * That is the whole failure. A squeezed cap is not a rounding error you can
+ * shrug at; it is the round end drawn as an oval.
+ *
+ * So the two are told apart, which is what `border-image-width` is FOR:
+ *
+ *   border-width        integers. Layout only — where the padding box, and
+ *                       so the fill, begins. Rounded UP, so the fill always
+ *                       lands inside the stone rather than under the rim.
+ *   border-image-width  the exact `slice * s`. Not a layout property, not
+ *                       floored, and the only number that decides how big
+ *                       the art is drawn.
+ *
+ * `fill` covers the sliver between them with the frame's own middle, so the
+ * disagreement is invisible rather than a seam.
+ */
+
 /* s = 0.14 */
-.tm-bar-health { width: 205px; height: 14px; border-width: 1.54px 5.18px 2.24px; }
+.tm-bar-health {
+  width: 205px; height: 14px;
+  border-width: 2px 6px 3px;
+  border-image-width: 1.54px 5.18px 2.24px;
+}
 /* s = 0.11 */
-.tm-bar-stamina { width: 190px; height: 11px; border-width: 1.21px 4.07px 1.76px; }
+.tm-bar-stamina {
+  width: 190px; height: 11px;
+  border-width: 2px 5px 2px;
+  border-image-width: 1.21px 4.07px 1.76px;
+}
 /* s = 0.08 */
-.tm-bar-energy, .tm-bar-water { width: 90px; height: 8px; border-width: 0.88px 2.96px 1.28px; }
+.tm-bar-energy, .tm-bar-water {
+  width: 90px; height: 8px;
+  border-width: 1px 3px 2px;
+  border-image-width: 0.88px 2.96px 1.28px;
+}
 
 .tm-bar-fill {
   position: absolute;
@@ -1972,13 +2006,15 @@
   box-sizing: border-box;
   width: 165px;
   height: 34px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   border-style: solid;
-  border-width: 7.17px 7.7px 6.9px 30.5px;
+  /* The medallion is the reason this one cannot be fudged. Floored, its
+   * 30.5px came out at 30 and the disc was drawn as an oval — a round thing
+   * going oval is visible at a glance in a way a thin rim is not. Integers
+   * for layout, exact for the art; see the note on `.tm-bar`. */
+  border-width: 8px 8px 7px 31px;
   border-image-source: url('/ui/frame-meter.webp');
   border-image-slice: 27 29 26 115 fill;
+  border-image-width: 7.17px 7.7px 6.91px 30.55px;
   border-image-repeat: stretch;
   color: #f3e2b0;
   font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -1986,26 +2022,84 @@
   pointer-events: none;
 }
 
-/* The same hatch the vital bars wear, and `fill` dropped for the same
- * reason: the frame's stone middle would otherwise paint over it. */
+/*
+ * THE TRACK — and it is a child rather than the padding box, for a reason.
+ *
+ * The first cut hatched the element's own background, and it came out too
+ * wide and square where the pill's end curves. Two things were wrong and
+ * only one of them was rounding:
+ *
+ *  1. The padding box is set by `border-width`, which has to be whole
+ *     pixels. The interior is not on whole pixels, so the two cannot be
+ *     made to agree — the readout has to be its own box.
+ *  2. THE CAP IS NOT A SEMICIRCLE. Measured row by row, the interior's
+ *     right edge runs 29px in at the pill's top row and 10 at its middle:
+ *     a rounded end about 19 source px deep, not a half-round of 37. A
+ *     full-height rectangle reaching the interior's widest point therefore
+ *     sits well outside the stone at the top and bottom of the cap, which
+ *     is the pattern reading as though it had leaked out of the frame.
+ *
+ * So the track is placed on the interior the art actually has: 27/26 of rim
+ * top and bottom, 125 of medallion on the left, 10 on the right, all times
+ * s = 0.2656. The insets are written as the interior's true offset MINUS
+ * the integer border it sits inside, because an absolutely positioned child
+ * is placed against the padding box rather than the border box, and hiding
+ * that subtraction would make five honest numbers look like five wrong ones.
+ */
+.tm-meter-track {
+  position: absolute;
+  top: calc(7.17px - 8px);
+  right: calc(7.7px - 8px);
+  bottom: calc(6.91px - 7px);
+  left: calc(30.55px - 31px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /*
+   * A SOFT END, NOT A CAP. The cap is not the track's to draw — it lives in
+   * the right BORDER tile and the art draws it, so a track that reaches it
+   * paints over the gold instead of filling the stone. Painted solid red to
+   * find that out: it covered the whole right cap and sat proud of the rim.
+   *
+   * So the track stops at the middle tile, and the radius is only enough to
+   * take the blunt corner off where it meets the drawn curve — elliptical,
+   * because the run is five times wider than it is tall and one number
+   * would round the wrong axis.
+   */
+  border-radius: 0 3px 3px 0 / 0 9px 9px 0;
+  overflow: hidden;
+}
+
+/* The level itself. Nothing sets it yet — CARRY is `built: false` — so it
+ * is here at zero width rather than absent, because the day it becomes real
+ * should be a line that assigns a number, not a new element. */
+.tm-meter-fill {
+  position: absolute;
+  inset: 0;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(180deg, #c9a35e 0%, #8a6522 100%);
+  transition: width 0.2s ease;
+}
+
+.tm-meter-label { position: relative; }
+
+/* The same hatch the vital bars wear, and `fill` dropped from the slice for
+ * the same reason: the frame's own stone middle would paint over it. */
 .tm-meter.is-soon {
   opacity: 0.5;
   border-image-slice: 27 29 26 115;
-  /* The padding box is a RECTANGLE and the frame's run ends in a ROUND CAP,
-   * so a square hatch fills the two corners the gold curves away from and
-   * reads as the pattern leaking out of the frame. Rounded on the right
-   * only: the left end of the run is not an end at all, it is where the
-   * medallion is, and a radius there would open a gap between them. */
-  border-radius: 0 999px 999px 0;
-  /* Same reason as the bars: without this the hatch is painted under the
-   * frame too, and the frame is transparent above and below its run. */
-  background-clip: padding-box;
+}
+
+.tm-meter.is-soon .tm-meter-track {
   background-image: repeating-linear-gradient(
     116deg,
     rgba(247, 226, 176, 0.16) 0 3px,
     rgba(247, 226, 176, 0) 3px 8px
   );
 }
+
+.tm-meter.is-soon .tm-meter-fill { display: none; }
 
 /*
  * THE QUEST PANEL — third in the left column.
@@ -2044,9 +2138,12 @@
    * run, which is the failure these frames were flagged for.
    */
   border-style: solid;
-  border-width: 17.5px 19.7px 21.9px 20.4px;
+  /* Integers for layout, the exact 0.73 scale for the art — see the note on
+   * `.tm-bar`. Floored, the leaves lose most of a pixel each way. */
+  border-width: 18px 20px 22px 21px;
   border-image-source: url('/ui/frame-panel.webp');
   border-image-slice: 24 27 30 28 fill;
+  border-image-width: 17.52px 19.71px 21.9px 20.44px;
   border-image-repeat: stretch;
   /* The frame brings its own stone and its own edge; the flat pill the
    * status box wears elsewhere would draw a second, squarer panel just
@@ -2331,7 +2428,8 @@
    */
   .tm-quest {
     top: calc(max(12px, env(safe-area-inset-top)) + 132px) !important;
-    border-width: 12px 13.5px 15px 14px;
+    border-width: 12px 14px 15px 14px;
+    border-image-width: 12px 13.5px 15px 14px;
     font-size: 11px;
   }
 }
