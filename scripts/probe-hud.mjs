@@ -41,6 +41,11 @@ const PARTS = {
   carry: '.tm-meter-carry',
   quest: '.tm-quest',
   stick: '.tm-stick',
+  /* The carry meter moved to the bottom centre in v0.1.35, into the strip
+   * between the stick and the action cluster — so the cluster has to be
+   * measured now too, and it never was. */
+  actions: '.density-lab-actions',
+  utility: '.tm-utility',
 };
 
 /*
@@ -50,32 +55,55 @@ const PARTS = {
  * grew down towards.
  */
 const FORBIDDEN = [
-  ['chip', 'vitals'], ['chip', 'colony'], ['chip', 'carry'], ['chip', 'quest'],
-  ['vitals', 'colony'], ['vitals', 'carry'], ['vitals', 'quest'],
-  ['colony', 'carry'], ['colony', 'quest'],
-  ['carry', 'quest'],
-  ['quest', 'stick'], ['colony', 'stick'],
+  ['chip', 'vitals'], ['chip', 'colony'], ['chip', 'quest'], ['chip', 'utility'],
+  ['vitals', 'colony'], ['vitals', 'quest'], ['vitals', 'utility'],
+  ['colony', 'quest'], ['colony', 'stick'],
+  ['quest', 'stick'], ['quest', 'utility'], ['quest', 'actions'],
+  /* THE METER'S NEW NEIGHBOURS. It sits bottom-centre and only while she is
+   * carrying, which puts it between the two controls a thumb is actually
+   * on. Overlapping either would be worse than its old fault of being
+   * permanently present at the top. */
+  ['carry', 'stick'], ['carry', 'actions'], ['carry', 'quest'],
 ];
 
 /*
- * KNOWN, AND RECORDED RATHER THAN DELETED.
+ * KNOWN, AND WHY THIS ONE IS ALLOWED TO STAND.
  *
- * The left column does not fit above the parked stick on a 320-tall screen:
- * the stick is bottom-anchored so it CLIMBS as the screen shortens (top at
- * 154 against 209 on a 375), and vitals + colony + quest already reach 207
- * with the frame at half scale. There is no arrangement of those three that
- * fits in the 142px left, so this is a layout decision and not a nudge.
+ * There was one entry here: the left column did not fit above the parked
+ * stick at 320 tall. The stick is bottom-anchored so it CLIMBS as the
+ * screen shortens (top at 154 against 209 on a 375), and vitals + colony +
+ * quest already reached 207 with the frame at half scale. No arrangement of
+ * THREE stacked panels fitted in the 142px left, which is why it was
+ * recorded as a layout decision rather than nudged.
  *
- * The half that WAS a bug is fixed: the quest panel is `pointer-events:
- * none`, so it no longer swallows the top of the stick — the overlap is now
- * ink rather than a dead control.
+ * v0.1.35 removed the third panel from that column rather than shrinking
+ * it: the quest hangs off the top-right corner now, under SENSE and MENU.
+ * That exemption is gone, and the left column clears the stick at every
+ * width.
+ *
+ * WHAT REPLACED IT is a different shortage, in the other corner, and it is
+ * a COUNT rather than a layout. The quest panel and the action cluster now
+ * share the right-hand edge, and the cluster holds ten thumb-sized controls
+ * — DIG, VIEW, DODGE, BITE, STING, CARRY, INTERACT, PACE, RIDE, TILT. At
+ * 380px wide they wrap to two rows and the rail stands ~178 tall, which
+ * clears the quest at 667, 844 and 932 with room to spare. At 568 the
+ * cluster can only be 307 wide, which is four per row, which is THREE rows,
+ * which is 250 of a 320-tall screen. There is no arrangement of ten
+ * thumb-sized plates that fits under a quest panel in 320px: 44px is the
+ * touch floor, three rows of it is 132 before gaps, and the quest ends at
+ * 133.
+ *
+ * So this is the same kind of entry as the last one — a real shortage,
+ * recorded rather than nudged — and the fix is the one the HUD blueprint
+ * already names: fewer controls on screen at once, shown by context. That
+ * is its own card, not a nudge to a margin.
  *
  * Listed here instead of dropping the 568 size, because dropping the size
  * is how a known failure becomes a forgotten one, and because any OTHER
  * collision at that width still fails loudly.
  */
 const KNOWN = [
-  { w: 568, pair: 'quest/stick', why: 'the column does not fit above a bottom-anchored stick at 320 tall' },
+  { w: 568, pair: 'quest/actions', why: 'ten thumb-sized controls wrap to three rows at 307px and there is no room under the quest in 320px of height — needs contextual demotion, not a margin' },
 ];
 
 const b = await chromium.launch({

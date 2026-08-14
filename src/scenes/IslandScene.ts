@@ -1320,6 +1320,9 @@ export class IslandScene {
 
   interactBtn: HTMLButtonElement | null = null;
 
+  /** Set by `buildControls`. The handle for it is on the PAUSE menu. */
+  toggleDevDrawer: (() => boolean) | null = null;
+
   stingBtn: HTMLButtonElement | null = null;
 
   /** The bars `renderQuest` keeps current. See `islandQuest.ts`. */
@@ -2965,6 +2968,17 @@ export class IslandScene {
   }
 
   get isPaused(): boolean { return this.paused; }
+
+  /**
+   * Open or close the DEV drawer, and say which it now is.
+   *
+   * The handle used to be a pill at the bottom of the action rail, where it
+   * was both the brightest thing on a tidied HUD and — being the last child
+   * of a bottom-anchored column — 38px of headroom taken off the game's own
+   * controls. It lives on the pause menu now. The drawer itself did not
+   * move.
+   */
+  toggleDev(): boolean { return this.toggleDevDrawer?.() ?? false; }
 
   /** The MENU plate was pressed. See `IslandBoot.onMenu`. */
   openMenu(): void {

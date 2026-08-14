@@ -25,6 +25,9 @@ export interface PauseMenuActions {
   onResume: () => void;
   onSave: () => boolean;
   onMainMenu: () => void;
+  /** Toggle the DEV drawer, returning whether it is now open. Optional: a
+   *  build without instrumentation simply does not draw the handle. */
+  onDev?: () => boolean;
 }
 
 const CSS = `
@@ -68,6 +71,10 @@ const CSS = `
   min-height: 44px;
 }
 .tm-pause button:hover { background: rgba(44, 34, 22, 0.92); }
+.tm-pause button.is-on {
+  border-color: rgba(247, 226, 176, 0.5);
+  color: #f3e2b0;
+}
 .tm-pause button.is-quiet {
   border-color: rgba(247, 226, 176, 0.16);
   background: rgba(18, 14, 10, 0.7);
@@ -86,6 +93,24 @@ const CSS = `
   font-size: 11px;
   letter-spacing: 0.08em;
   opacity: 0.78;
+}
+/*
+ * THE BUILD, WHERE IT CAN BE READ WITHOUT BEING IN THE WAY.
+ *
+ * It was on the STATS chip, across the top of the playing screen, at the
+ * weight of a vital. That is dev chrome in the best seat in the house. Here
+ * it costs nothing — the game is stopped and you are already looking — and
+ * it still does the one job it cannot fail at: a screenshot of a paused
+ * game dates itself, which is how "this is still broken" gets checked
+ * against a two-version-old build.
+ */
+.tm-pause .tm-pause-build {
+  position: absolute;
+  bottom: 10px;
+  right: 12px;
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  opacity: 0.42;
 }
 /* A short landscape phone is the case: four buttons at 44 plus a title is
  * 240 of a 320-tall screen, which fits, but only just. */
@@ -137,6 +162,29 @@ export class PauseMenu {
     settings.title = 'not yet';
 
     /*
+     * THE DEV DRAWER'S HANDLE, REHOMED.
+     *
+     * It was a pill at the foot of the action rail. Being the last child of
+     * a bottom-anchored column it sat UNDER the ten plates and pushed every
+     * one of them 38px up the screen — a debug handle costing the game's
+     * controls a row of headroom, which is what got it moved. Behind a
+     * deliberate stop it costs the playing screen nothing at all, and it is
+     * in the company it belongs in: the version readout came here for the
+     * same reason.
+     *
+     * Quiet, and second from last: it is not what anyone opened this menu
+     * for. The drawer itself never moved — see `islandHud.ts`.
+     */
+    if (this.actions.onDev) {
+      const dev = this.button('DEV TOOLS', () => {
+        const open = this.actions.onDev?.() ?? false;
+        dev.classList.toggle('is-on', open);
+        this.say.textContent = open
+          ? 'Drawer open on the island' : 'Drawer closed';
+      }, true);
+    }
+
+    /*
      * LEAVING IS SECONDARY, and it asks. It is the only button here that can
      * lose anything, and the thing it loses is the whole session — so it is
      * quiet, it is last, and it makes you press it twice. The second press
@@ -157,6 +205,11 @@ export class PauseMenu {
 
     this.root.appendChild(this.say);
     this.say.className = 'tm-pause-say';
+
+    const build = document.createElement('div');
+    build.className = 'tm-pause-build';
+    build.textContent = `v${__APP_VERSION__}`;
+    this.root.appendChild(build);
 
     host.appendChild(this.root);
     /* A frame before the class, or the transition has nothing to run from

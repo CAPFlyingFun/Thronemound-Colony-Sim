@@ -68,6 +68,9 @@ export interface HudHost {
   carryBtn: HTMLButtonElement | null;
   interactBtn: HTMLButtonElement | null;
   useAbility(id: AbilityId): void;
+  /** Opens and closes the DEV drawer. Set by `buildControls`; driven from
+   *  the PAUSE menu, which is where the handle lives now. */
+  toggleDevDrawer: (() => boolean) | null;
   readonly at: THREE.Vector3;
   pace: 0 | 1 | 2;
   shiftHeld: boolean;
@@ -346,6 +349,24 @@ export function buildControls(host: HudHost, ): void {
   const cluster = document.createElement('div');
   cluster.className = 'tm-cluster';
   actions.appendChild(cluster);
+
+  /*
+   * DIG JOINS THE CLUSTER INSTEAD OF SITTING ON TOP OF IT.
+   *
+   * It was built above as its own rail row, which put the biggest and most
+   * used control in the game at the TOP of a stack of nine smaller plates —
+   * furthest from the thumb, and 93px of rail height (86 plus a gap) spent
+   * on a single button. Measured, that rail ran 324px tall on the design
+   * canvas and hit its own max-height ceiling, which is what pushed its top
+   * edge up to y=90 and straight through the quest panel's corner.
+   *
+   * In the cluster it is one of the group, ordered to the corner nearest
+   * the thumb (see `order` in the stylesheet), and the rail loses a whole
+   * row. Re-parenting rather than rebuilding: `appendChild` MOVES a node,
+   * so every listener, every `railPart` registration and the `is-grip`
+   * toggle all come with it untouched.
+   */
+  cluster.appendChild(dig);
 
   cluster.appendChild(view);
   host.railPart(view, 'walk', 'dig', 'pose');
@@ -692,21 +713,32 @@ export function buildControls(host: HudHost, ): void {
 
   actions.appendChild(devPanel);
 
-  const devChip = document.createElement('button');
-  devChip.className = 'density-lab-button density-lab-mode';
-  devChip.textContent = 'DEV';
-  devChip.addEventListener('pointerdown', (e) => {
-    e.preventDefault();
+  /*
+   * THE DEV HANDLE IS NOT ON THE PLAYING SCREEN ANY MORE — it is on the
+   * PAUSE menu, and this is the seam that lets it be.
+   *
+   * It was a cream pill at the very bottom of the rail. Two things wrong
+   * with that, and the second is the one that got reported: with the
+   * cluster tidied it became the brightest object on the HUD, and being
+   * the LAST child of a bottom-anchored column it sat UNDER the plates and
+   * shoved all ten of them 38px further up the screen — a debug handle
+   * costing the game's controls a row of headroom.
+   *
+   * The DRAWER stays here, because this is where its instruments belong
+   * and it is closed by default, so it costs nothing until asked for. Only
+   * the way IN moved. `main.ts` hands this to `PauseMenu`, which is the
+   * right home for it: dev chrome behind a deliberate stop, exactly like
+   * the version readout that went the same way.
+   *
+   * Deliberately NOT a `railPart`. It has its own open/closed state, and a
+   * drawer that vanished when you armed the shovel would be useless
+   * precisely when it is most wanted.
+   */
+  host.toggleDevDrawer = (): boolean => {
     const open = devPanel.style.display === 'none';
     devPanel.style.display = open ? '' : 'none';
-    devChip.classList.toggle('is-grip', open);
-  });
-  actions.appendChild(devChip);
-
-  /* DEV and its drawer are deliberately NOT rail parts. They are
-   * instrumentation, they have their own open/closed state, and a drawer
-   * that vanished when you armed the shovel would be useless precisely
-   * when it is most wanted. */
+    return open;
+  };
 
   /* Hang the opening set. Every `railPart` above is invisible until this
    * runs, which is why it has to be the last thing the rail does. */

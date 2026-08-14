@@ -202,37 +202,59 @@ if (host) {
        * time, most of it is already gone: press it late and the curtain
        * never appears at all.
        */
-      const enter = (then?: () => void): void => {
+      /**
+       * Put the front door back, carrying one thing to say. Used when a
+       * press got as far as the curtain and then could not be honoured.
+       */
+      const reopen = (why: string): void => {
+        if (curtain) { void curtain.finish(); curtain = null; }
+        build();
+        /* AFTER `build`, which calls `setLoaded` and wipes the line. */
+        menu.setStatus(why);
+      };
+
+      /**
+       * Leave the menu for the island, with an optional thing to do the
+       * moment she is standing. `then` may return false to mean "that did
+       * not work" — the door goes back up with a reason rather than the
+       * curtain lifting on a world the player did not ask for.
+       */
+      const enter = (then?: () => boolean | void): void => {
         menu.dispose();
-        if (standing) { then?.(); return; }
+        const run = (): void => {
+          if (then?.() === false) reopen('That save could not be read');
+        };
+        if (standing) { run(); return; }
         curtain = new LoadingOverlay(host);
         curtain.setStatus(said);
-        waiting = then ?? (() => {});
+        waiting = run;
       };
 
       const build = (): void => {
         menu = new MainMenu(host, {
           onStart: () => enter(),
           /*
-           * RESUME WAITS FOR AN ISLAND, unlike START.
+           * RESUME GOES BEHIND THE CURTAIN NOW, like START.
            *
-           * START can be pressed into a curtain because there is nothing to
-           * do but wait. A resume has to restore INTO something: the soil
-           * stream it puts the nest back into does not exist until the boot
-           * is done, so deferring it behind the curtain means holding a
-           * promise across the one event that matters and hoping. It was
-           * built that way first and measured never firing — the menu closed,
-           * the curtain lifted, and the nest was not there. A button that
-           * waits for the thing it needs is worth more than one that is
-           * pressable a few seconds sooner and sometimes lies.
+           * It used to sit greyed until the island had finished, and the
+           * reason was real: a resume has to restore INTO something, and an
+           * earlier attempt that deferred it was measured never firing —
+           * the menu closed, the curtain lifted, and the nest was not
+           * there. So it was made to wait for what it needs.
+           *
+           * What changed is that there is now a place to wait that ISN'T
+           * the title screen. `onReady` runs whoever is waiting BEFORE it
+           * lifts the curtain, so the restore still happens against a
+           * finished island — it just happens behind a screen that says so
+           * instead of behind a dead button. That is the whole of the
+           * card's rule: preload in silence, and only show a loading state
+           * once someone has asked to go in.
+           *
+           * `hasSave` is a localStorage read and needs no island, so the
+           * button can be live from the first frame. And a save that will
+           * not parse now has somewhere to report it — see `reopen`.
            */
-          onResume: () => {
-            if (!island?.resumeFromStorage()) {
-              menu.setStatus('That save could not be read');
-              return;
-            }
-            menu.dispose();
-          },
+          onResume: () => enter(() => island?.resumeFromStorage() ?? false),
           onSave: () => {
             menu.setStatus(island?.saveToStorage()
               ? 'Saved' : 'Could not save — storage is full or blocked');
@@ -240,17 +262,34 @@ if (host) {
           onDev: () => { window.location.search = '?scene=poseedit'; },
         });
         /*
-         * START and RESUME need no island to be PRESSED, only to finish; the
-         * curtain covers the difference. SAVE genuinely cannot do anything
-         * until there is something to save, which is what "if applicable"
-         * means — a live button that silently does nothing is worse than a
-         * grey one.
+         * START and RESUME need no island to be PRESSED, only to finish;
+         * the curtain covers the difference, and RESUME only needs to know
+         * a save EXISTS, which is a localStorage read. SAVE genuinely
+         * cannot do anything until there is something to save, which is
+         * what "if applicable" means — a live button that silently does
+         * nothing is worse than a grey one.
          */
         menu.setEnabled('onStart', true);
-        menu.setEnabled('onResume', standing && IslandScene.hasSave());
+        menu.setEnabled('onResume', IslandScene.hasSave());
         menu.setEnabled('onSave', standing);
-        if (standing) menu.setLoaded();
-        else menu.setStatus(said);
+        /*
+         * THE PRELOAD IS SILENT, and this line is where that is decided.
+         *
+         * The menu used to narrate the boot at you — "Preparing the
+         * island…", "Waking the queen…" — while you sat on the title
+         * screen with nothing to do about it. That is a progress bar for a
+         * wait the player never asked to start, and it makes a front door
+         * look like a loading screen. The island still builds behind the
+         * menu exactly as before; it just does it QUIETLY, and the words
+         * only appear on the curtain, after START or RESUME, and only if
+         * there is anything left to wait for.
+         *
+         * `setLoaded` is still called, because it does more than clear a
+         * line — it is the signal the boot is done. A boot FAILURE is a
+         * different thing entirely and still shows here: that is not
+         * progress chatter, it is a state the player has to know about.
+         */
+        menu.setLoaded();
         (window as unknown as { mainMenu?: unknown }).mainMenu = menu;
       };
 
@@ -269,6 +308,7 @@ if (host) {
         pause = new PauseMenu(host, {
           onResume: () => { pause = null; island?.setPaused(false); },
           onSave: () => island?.saveToStorage() ?? false,
+          onDev: () => island?.toggleDev() ?? false,
           /*
            * LEAVING IS A SCENE SWAP NOW, not a reload. The island keeps
            * running underneath — unpaused, because the front menu's RESUME
@@ -289,10 +329,11 @@ if (host) {
         onMenu: openPause,
         curtain: new QuietCurtain(
           (text) => {
-            /* One status, wherever it needs to appear: on the menu while it
-             * is up, and on the curtain once someone is waiting behind it. */
+            /* REMEMBERED, NOT ANNOUNCED. `said` is the latest word from the
+             * boot and it goes on the curtain — which only exists once
+             * somebody has pressed START or RESUME. Nothing reaches the
+             * title screen: see the note on `setLoaded` in `build`. */
             said = text;
-            if (document.querySelector('.main-menu')) menu.setStatus(text);
             curtain?.setStatus(text);
           },
           (why) => {
@@ -302,13 +343,18 @@ if (host) {
         ),
         onReady: () => {
           standing = true;
+          /* WAS THE DOOR OPEN BEFORE we ran whoever is waiting? A failed
+           * resume puts the menu BACK, with something to say — and the
+           * refresh below would wipe that line the instant it appeared.
+           * The question has to be asked before `then`, not after. */
+          const menuWasUp = !!document.querySelector('.main-menu');
           /* Whoever is waiting gets what they asked for FIRST — a resume
            * must put the nest back before the curtain lifts on it. */
           const then = waiting;
           waiting = null;
           then?.();
           if (curtain) { void curtain.finish(); curtain = null; }
-          if (document.querySelector('.main-menu')) {
+          if (menuWasUp && document.querySelector('.main-menu')) {
             menu.setLoaded();
             menu.setEnabled('onSave', true);
             menu.setEnabled('onResume', IslandScene.hasSave());

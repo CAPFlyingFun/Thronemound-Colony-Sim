@@ -100,11 +100,17 @@
   top: 7px;
 }
 
+/* The action cluster's width, in one place — see `.tm-cluster` and the
+ * carry meter, which reserves it. */
+.density-lab-hud { --tm-cluster-w: min(54vw, 380px); }
+
 .density-lab-actions {
   position: absolute;
   z-index: 2;
-  right: max(16px, env(safe-area-inset-right));
-  bottom: max(22px, env(safe-area-inset-bottom));
+  /* One margin for the whole HUD: 18 in from the side, 16 up from the
+   * bottom, the same pair the stick and the vitals now use. */
+  right: max(18px, env(safe-area-inset-right));
+  bottom: max(16px, env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
   gap: 11px;
@@ -1643,16 +1649,56 @@
  * gather beside it. Air between them belongs to the camera drag, as
  * everywhere else on this HUD.
  */
+/*
+ * READ FROM THE CORNER OUTWARDS.
+ *
+ * `row-reverse` with `wrap-reverse` makes DOM order run from the
+ * bottom-right corner — the one place on a landscape phone a right thumb
+ * rests without moving — leftwards, then upwards. So "first in the box" and
+ * "easiest to press" are the same thing, and the hierarchy the blueprint
+ * asks for is expressible as `order` rather than as absolute positions that
+ * would have to be re-derived at every screen width.
+ *
+ * It was `row` + `flex-end`, which right-aligns the rows but fills them
+ * left-to-right: the item nearest the corner was whichever one happened to
+ * land last on the bottom line, which changed with the wrap.
+ */
 .tm-cluster {
   display: flex;
-  flex-direction: row;
+  flex-direction: row-reverse;
   flex-wrap: wrap-reverse;
-  justify-content: flex-end;
+  justify-content: flex-start;
   align-items: center;
   gap: 6px;
-  max-width: min(46vw, 320px);
+  /*
+   * WIDE ENOUGH FOR TWO ROWS, which is the number that matters.
+   *
+   * At 320 the ten controls wrapped to THREE rows and the rail stood 250px
+   * tall — high enough to reach the quest panel's corner on every screen
+   * tested. At 380 they wrap to two and the rail comes in around 175, which
+   * clears the quest at 844 and 932 with room to spare.
+   *
+   * Named, because the carry meter has to reserve exactly this much space
+   * and a second copy of the number is a second copy that goes stale.
+   */
+  max-width: var(--tm-cluster-w);
   pointer-events: none;
 }
+
+/* DIG is the hero and takes the corner. */
+.tm-cluster > .tm-art-dig { order: -1; }
+
+/*
+ * THE CAMERA AND THE MOUNT GO TO THE BACK. They are real controls and they
+ * stay on screen — but VIEW, TILT and RIDE are things you set, not things
+ * you do in a fight, and the blueprint is explicit that the cluster must
+ * not read as a field of equals. Ordered last, they fill the top of the
+ * group while BITE, CARRY, INTERACT and the pace latch keep the bottom row
+ * beside DIG.
+ */
+.tm-cluster > .tm-art-view,
+.tm-cluster > .tm-art-tilt,
+.tm-cluster > .tm-art-ride { order: 1; }
 
 .tm-cluster > * {
   pointer-events: auto;
@@ -1667,6 +1713,32 @@
 }
 
 /*
+ * HIERARCHY, AND THE ONE RULE IT IS NOT ALLOWED TO BREAK.
+ *
+ * The blueprint asks for a cluster you can read without labels — DIG the
+ * hero, the live actions next, the rest quieter — and says to "hide or
+ * demote" what is not relevant. DEMOTE is the branch taken, because the
+ * other one collides with the rule this whole HUD is built on: an unbuilt
+ * ability is drawn DIMMED, never hidden, since dimmed says "coming" and
+ * absent says nothing (CLAUDE.md). A screen of seven equally loud plates
+ * was the real complaint, and loudness is the thing being fixed.
+ *
+ * So `is-soon` now costs SIZE as well as opacity. The art shrinks by a
+ * fifth and the plate fades further back, which puts the built actions
+ * plainly in front without taking a promise off the screen.
+ *
+ * THE TOUCH BOX DOES NOT MOVE. Only `background-size` changes — the button
+ * keeps every pixel of its target, so the day one of these goes live it
+ * grows back into a hit area that was always there. Shrinking the box
+ * instead would make the layout jump on the commit that builds it.
+ */
+.tm-cluster > .tm-art.is-soon {
+  opacity: 0.34;
+  filter: grayscale(0.45);
+  background-size: 80% 80%;
+}
+
+/*
  * SENSE and MENU, anchored to the top-right corner in their own right
  * rather than hung off the action rail — they are utilities, always
  * reachable, and must not move when the rail grows in dig mode.
@@ -1678,7 +1750,9 @@
   right: max(18px, env(safe-area-inset-right));
   display: flex;
   flex-direction: row;
-  gap: 9px;
+  /* The blueprint's 8. Two 56px boxes carrying 48px of art, 8 apart, is the
+   * 120px the STATS chip's right offset is measured against. */
+  gap: 8px;
   pointer-events: none;
 }
 
@@ -1730,7 +1804,10 @@
  * so homing CLEARS them and this takes over — hence `bottom`, which no
  * inline style ever sets, and no centring transform to undo. */
 .tm-stick.is-home {
-  left: max(16px, env(safe-area-inset-left));
+  /* 18 and 16 — the HUD's one margin, shared with the vitals, the utility
+   * plates and the action cluster. The ring itself is already the size the
+   * blueprint asks for: 132 of art in a 150 box, thumb 50. */
+  left: max(18px, env(safe-area-inset-left));
   top: auto;
   bottom: max(16px, env(safe-area-inset-bottom));
   transform: none;
@@ -1763,16 +1840,30 @@
  * are hatched rather than filled. An empty bar says DYING. A hatched bar
  * says NO SIGNAL, which is the truth.
  */
+/*
+ * THE LEFT COLUMN IS TWO PANELS DEEP NOW — vitals, then the colony strip,
+ * and that is all. The quest has gone to the right-hand corner (see
+ * `.tm-quest`), which is what makes the blueprint's margins affordable.
+ *
+ * 18px in from the edge rather than 12, matching the utility plates on the
+ * other side, so the HUD has ONE side margin instead of two that differ by
+ * six pixels for no reason anybody remembers.
+ */
 .tm-vitals {
   position: absolute;
   z-index: 1;
   top: max(12px, env(safe-area-inset-top));
-  left: max(12px, env(safe-area-inset-left));
+  left: max(18px, env(safe-area-inset-left));
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 9px;
-  padding: 8px;
+  /* Was 9 and 8. The blueprint asks this block to come in around 300 x 78
+   * and it measured 316 wide; the bars themselves are NOT touched — their
+   * nine-slice arithmetic is exact and re-deriving it to save four pixels
+   * is how the medallion became an oval. The air around them is what
+   * gives. */
+  gap: 8px;
+  padding: 7px;
   border-radius: 12px;
   background: rgba(20, 16, 11, 0.55);
   backdrop-filter: blur(7px);
@@ -1952,19 +2043,25 @@
  * standing on the island, so it gets a live number and full brightness.
  * Brood does not exist, and is dimmed beside it rather than faked.
  */
+/*
+ * SLIMMER, and directly under the vitals. The blueprint asks for 250 x 38
+ * at y 92 — a strip rather than the second slab it had become. What comes
+ * off is ornament, not content: the three cells still say Workers, Brood
+ * and Food, at the same weight, in less furniture.
+ */
 .tm-colony {
   position: absolute;
   z-index: 1;
-  top: calc(max(12px, env(safe-area-inset-top)) + 88px);
-  left: max(12px, env(safe-area-inset-left));
+  top: calc(max(12px, env(safe-area-inset-top)) + 80px);
+  left: max(18px, env(safe-area-inset-left));
   box-sizing: border-box;
-  width: 260px;
-  height: 42px;
+  width: 250px;
+  height: 38px;
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 14px;
-  padding: 0 12px;
+  gap: 12px;
+  padding: 0 11px;
   border-radius: 11px;
   background: rgba(20, 16, 11, 0.5);
   backdrop-filter: blur(7px);
@@ -2018,11 +2115,46 @@
  * water bars made until v0.1.24 made them real: the hatch says NO SIGNAL,
  * and an empty frame is honest where a zero would be a lie.
  */
+/*
+ * THE CARRY METER SITS AT THE BOTTOM, IN THE MIDDLE, AND ONLY WHILE SHE IS
+ * CARRYING SOMETHING.
+ *
+ * It used to be pinned beside the colony strip at the top of the screen,
+ * permanently, reading CARRY and empty — a readout about her JAWS filed
+ * with the readouts about her COLONY, and on screen for the whole game to
+ * report the one state it spends most of the game in, which is nothing.
+ *
+ * Down here it belongs to the hands instead: it appears between the stick
+ * and the action cluster, next to the plate that put the thing there, at
+ * the moment there is something to say. See `.tm-meter-carry` below for
+ * the appearing, which is a fade rather than a `display` flip so it does
+ * not jump the layout.
+ */
 .tm-meter {
   position: absolute;
   z-index: 1;
-  top: calc(max(12px, env(safe-area-inset-top)) + 88px);
-  left: calc(max(12px, env(safe-area-inset-left)) + 272px);
+  top: auto;
+  bottom: max(18px, calc(env(safe-area-inset-bottom) + 6px));
+  /*
+   * CENTRED IN THE GAP, NOT ON THE GLASS.
+   *
+   * `left: 50%` is the obvious reading of "bottom centre" and it is the
+   * wrong one: the bottom edge is not empty, it is a 150px stick on the
+   * left and the action cluster on the right, and a meter centred on the
+   * SCREEN lands on the cluster at every width below the design canvas —
+   * measured, 78px into it at 568.
+   *
+   * So it is centred between them instead, which is also where the
+   * reference mockup actually draws it: left edge past the stick, right
+   * edge clear of the plates, and dead centre of what is left. `margin: 0
+   * auto` against an over-constrained left/right/width is what does the
+   * centring, so the box moves with the two things it has to miss rather
+   * than with the viewport.
+   */
+  left: calc(max(18px, env(safe-area-inset-left)) + 158px);
+  right: calc(max(18px, env(safe-area-inset-right)) + var(--tm-cluster-w) + 10px);
+  margin: 0 auto;
+  transform: none;
   box-sizing: border-box;
   width: 165px;
   height: 34px;
@@ -2322,9 +2454,61 @@
  * she is, and two things saying it at once is one of them lying sooner or
  * later.
  */
-.tm-meter { opacity: 0.82; transition: opacity 0.2s ease; }
-.tm-meter.is-loaded { opacity: 1; }
-.tm-meter.is-soon.is-loaded { opacity: 0.5; }
+/*
+ * PRESENT ONLY WHEN IT HAS SOMETHING TO SAY.
+ *
+ * `is-loaded` is set by `renderQuest` the moment her jaws hold anything, so
+ * the meter fades up with the lift and fades out with the drop. Opacity and
+ * `visibility` rather than `display`: a display flip cannot be transitioned,
+ * and this sits between the stick and the action cluster where a control
+ * that pops into existence reads as a mis-tap. `visibility` still takes it
+ * out of the accessibility tree once it is gone, which `opacity: 0` alone
+ * does not.
+ *
+ * The old rule faded it between 0.82 and 1 — a distinction nobody could
+ * see, on a thing that was never absent.
+ */
+.tm-meter {
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.22s ease, visibility 0s linear 0.22s;
+}
+
+.tm-meter.is-loaded {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 0.22s ease, visibility 0s;
+}
+
+/* An UNBUILT meter is a different statement and keeps the old one: drawn,
+ * dimmed, saying "coming". That is the rail's rule and it outranks the
+ * hiding above, which is about a built thing being IDLE. */
+.tm-meter.is-soon { opacity: 0.5; visibility: visible; }
+
+/*
+ * THE BOTTOM LINE RUNS OUT BEFORE THE SCREEN DOES.
+ *
+ * Centring the meter between the stick and the cluster works while there IS
+ * a gap. Below about 700 wide there is not: 150 of stick, 165 of meter and
+ * a cluster that needs 360 to wrap in two rows come to 675 before margins,
+ * and the meter ends up sitting on the plates — measured, 21px into them at
+ * 667 even after the cluster was widened.
+ *
+ * So on a narrow screen it stops trying to share that line and parks ABOVE
+ * the stick instead, left-aligned with it. Still down among the hands,
+ * still beside the control that put something in her jaws, and no longer
+ * competing for a strip of glass that does not exist. It only appears while
+ * she is carrying, so this corner is empty the rest of the time.
+ */
+@media (max-width: 700px) {
+  .tm-meter-carry {
+    left: max(18px, env(safe-area-inset-left));
+    right: auto;
+    margin: 0;
+    /* Clear of the stick: 16 of margin, 150 of ring, 10 of air. */
+    bottom: calc(max(16px, env(safe-area-inset-bottom)) + 160px);
+  }
+}
 
 .tm-meter.is-soon .tm-meter-track {
   background-image: repeating-linear-gradient(
@@ -2343,14 +2527,37 @@
  * density lab's own readout, and this element wears both classes to keep
  * that stylesheet's look while overriding where it sits.
  */
+/*
+ * THE QUEST PANEL LIVES ON THE RIGHT NOW, under SENSE and MENU.
+ *
+ * It used to be third in the left-hand column — vitals, colony, quest —
+ * and that column had run out of room. Bottom-anchored, the stick CLIMBS
+ * as the screen gets shorter (top at 154 on a 320-tall against 209 on a
+ * 375), while the column above it only ever grows downward; measured, the
+ * two met at 568x320 with 53px of overlap. There was no arrangement of
+ * three stacked panels that fitted, which is why the fix is a different
+ * corner rather than a smaller panel.
+ *
+ * The right edge is where it belongs anyway. Vitals and colony are what
+ * she IS; the quest is what to DO, and it now sits with the other two
+ * things you look at rather than drive — SENSE and MENU directly above it.
+ * The left column is two panels deep again and clears the stick at every
+ * width this HUD is tested at.
+ *
+ * `top: 70` is not a round number: the utility plates start at 12 and are
+ * 48 tall, so they end at 60, and 10 of air puts this at 70.
+ */
 .tm-quest {
-  top: calc(max(12px, env(safe-area-inset-top)) + 150px) !important;
-  left: max(12px, env(safe-area-inset-left)) !important;
-  right: auto !important;
+  top: calc(max(12px, env(safe-area-inset-top)) + 58px) !important;
+  left: auto !important;
+  right: max(18px, env(safe-area-inset-right)) !important;
   transform: none !important;
   box-sizing: border-box;
-  width: 225px;
-  max-width: calc(100vw - 24px);
+  width: 220px;
+  /* It shares a line with the vitals, which end at 331. Below ~590 wide
+   * there is not 220px left, so it gives rather than overlapping — caught
+   * by `probe:hud` at 568, where a flat 220 crossed the bars by a pixel. */
+  max-width: calc(100vw - 331px - max(18px, env(safe-area-inset-right)) - 8px);
   /*
    * frame-panel, and this one CANNOT be uniformly scaled the way the bars
    * are. A panel stretches in both directions — the text inside decides the
@@ -2464,20 +2671,63 @@
  * because it is how a screenshot gets dated. It leans onto the plates
  * instead, and stays legible.
  */
+/*
+ * DEV CHROME DOES NOT GET PRIME REAL ESTATE.
+ *
+ * The chip used to sit dead centre along the top, in blue, at the same
+ * weight as the vitals — the single most looked-at strip of a landscape
+ * phone, spent on a frame counter. It is a development instrument and the
+ * blueprint is right that it was competing with the game.
+ *
+ * NOT DELETED, for two reasons that are both real. The version on it is how
+ * a screenshot gets dated, which CLAUDE.md names as its job; and
+ * `probe-island` opens it to read the telemetry. So it is tucked instead:
+ * up onto the utility row, right-aligned into the gap between the vitals
+ * and the SENSE/MENU plates, at half weight. The prominent version now
+ * lives on the PAUSE menu, where a screenshot of a paused game still dates
+ * itself — see `src/ui/PauseMenu.ts`.
+ *
+ * THE CAP IS MEASURED, not chosen. The utility plates take 120px (two 56px
+ * boxes and an 8 gap) off the right inset, and the vitals now end at ~318.
+ * At the narrowest screen this HUD is tested at — 568 — the plates begin at
+ * 430, so a 96px chip sitting 8 clear of them starts at 326 and clears the
+ * bars by 8. Anything wider lands ON them, which is the bug `probe:hud`
+ * was written for in the first place — and which it will catch here.
+ */
 .tm-vitals-on .tm-stats-chip {
   /* Scoped to the island — the density lab wears the same stylesheet, has
    * no vitals to make room for, and must keep its corner. Two class names
    * deep so it beats the stats panel's own injected rule, which lands
    * after this file. */
-  left: calc(max(12px, env(safe-area-inset-left)) + 324px);
-  max-width: max(
-    84px,
-    calc(100vw - max(12px, env(safe-area-inset-left))
-      - max(18px, env(safe-area-inset-right)) - 453px)
-  );
+  left: auto;
+  right: calc(max(18px, env(safe-area-inset-right)) + 128px);
+  /*
+   * WHATEVER IS LEFT, UP TO 96. The first spelling of this was a flat 96px
+   * and it was 5px wrong at 568 — the vitals end at 331, not the 318 the
+   * arithmetic assumed, and the chip sat on the health bar. A fixed cap has
+   * to be re-derived every time anything to its left changes width, which
+   * is the failure `probe:hud` exists to catch and had just caught. So the
+   * cap is computed from the two things that actually bound it: the bars'
+   * right edge and the utility plates' left edge.
+   */
+  max-width: max(56px, min(96px, calc(100vw - 331px
+    - max(18px, env(safe-area-inset-right)) - 136px)));
+  padding: 3px 7px;
+  font-size: 8px;
+  line-height: 1.4;
+  opacity: 0.4;
+  border-color: rgba(120, 200, 255, 0.16);
   /* Was translateX(-50%) for the centring this rule no longer does. */
   transform: none;
-  line-height: 1.4;
+}
+
+/* Opened deliberately, it is being READ — so it comes back to full weight
+ * for as long as it is up. Quiet is for the chip nobody asked for. */
+.tm-vitals-on .tm-stats-chip--open {
+  opacity: 1;
+  max-width: none;
+  font-size: 10px;
+  padding: 6px 12px;
 }
 
 /* Its expanded body stays in the column, below the quest. It only exists
@@ -2716,19 +2966,22 @@
   /*
    * THE QUEST PANEL, ON THE SCREEN THAT HAS NO ROOM FOR IT.
    *
-   * A frame costs height, and this is where that bill comes due. The flat
-   * box was 47px tall and the column cleared the parked stick's top edge at
-   * 209 by a fifth of a pixel — measured, not designed, and the frame spent
-   * 30px it did not have. On a 667x375 landscape phone the panel ran to 239
-   * and drew across the top of the stick.
+   * A frame costs height, and this is where that bill came due. HALF of
+   * this rule is now historical and says so: the panel used to be third in
+   * the left-hand column, and on a 667x375 landscape phone it ran to 239
+   * and drew across the top of the parked stick. The answer then was to
+   * shove it upward into whatever air was left. The answer now is that it
+   * is not in that column at all — it hangs off the right-hand corner, with
+   * nothing below it, so it stays where it is put and the `top` override
+   * has gone.
    *
-   * Two economies rather than one, because neither is enough alone: the
-   * frame comes down to half scale (leaves at 14 x 12, still drawn rather
-   * than smeared), and the panel moves up into the 20px of air between it
-   * and the colony strip, which is doing nothing on a screen this short.
+   * What survives is the economy that was always about the ART rather than
+   * the arrangement: the frame comes down to half scale so a short screen
+   * spends less height on rim, and the leaves land at 14 x 12 — small, but
+   * still DRAWN rather than smeared, which is the whole point of slicing at
+   * the leaf.
    */
   .tm-quest {
-    top: calc(max(12px, env(safe-area-inset-top)) + 132px) !important;
     border-width: 12px 14px 15px 14px;
     border-image-width: 12px 13.5px 15px 14px;
     font-size: 11px;

@@ -84,17 +84,53 @@ const pressed = await p.evaluate(() => ({
   labels: [...document.querySelectorAll('.tm-pause button')].map((x) => x.textContent),
   settingsSoon: [...document.querySelectorAll('.tm-pause button')]
     .find((x) => x.textContent === 'SETTINGS')?.disabled === true,
+  build: document.querySelector('.tm-pause-build')?.textContent ?? '',
 }));
 ok('the page did not reload', pressed.sentinel === 'before-menu');
 ok('and it is the SAME island, not a rebuilt one', pressed.mark === 'before-menu');
 ok('the pause menu is up', pressed.up);
 ok('the sim is paused', pressed.paused);
 ok('the front menu is NOT what came up', pressed.frontMenu === false);
-ok('it offers resume, save, settings and a way out',
-  pressed.labels.join('|') === 'RESUME|SAVE GAME|SETTINGS|MAIN MENU');
+ok('it offers resume, save, settings, dev tools and a way out',
+  pressed.labels.join('|')
+    === 'RESUME|SAVE GAME|SETTINGS|DEV TOOLS|MAIN MENU');
 /* Drawn and dimmed rather than missing — there is no settings panel in the
  * repo yet and the front menu greys the same button. See PauseMenu.ts. */
 ok('SETTINGS is dimmed, not hidden', pressed.settingsSoon === true);
+/* The build, where a screenshot of a paused game still dates itself. It
+ * came off the STATS chip on the playing screen in v0.1.35. */
+ok(`the build is on it (${pressed.build})`, /^v\d+\.\d+\.\d+$/.test(pressed.build));
+
+/*
+ * --- 1b. DEV TOOLS, which is the reason it is here rather than on the HUD ---
+ *
+ * The handle was the last child of a bottom-anchored rail, so it sat UNDER
+ * the ten action plates and pushed every one of them 38px up the screen.
+ * Moving it has to keep it WORKING, or the drawer is simply gone.
+ */
+const dev = await p.evaluate(async () => {
+  const btn = [...document.querySelectorAll('.tm-pause button')]
+    .find((x) => x.textContent === 'DEV TOOLS');
+  const shown = () => {
+    const el = document.querySelector('.tm-dev-panel');
+    return !!el && el.style.display !== 'none';
+  };
+  const before = shown();
+  btn.click();
+  await new Promise((r) => setTimeout(r, 80));
+  const opened = shown();
+  btn.click();
+  await new Promise((r) => setTimeout(r, 80));
+  return { before, opened, closed: shown() };
+});
+ok('the drawer starts closed', dev.before === false);
+ok('DEV TOOLS opens it', dev.opened === true);
+ok('and closes it again', dev.closed === false);
+/* And it is NOT on the playing screen any more — the whole point. */
+ok('no DEV handle is left on the HUD', await p.evaluate(
+  () => ![...document.querySelectorAll('.density-lab-actions button')]
+    .some((b) => b.textContent === 'DEV'),
+));
 
 /*
  * --- 2. IS IT ACTUALLY FROZEN? ---

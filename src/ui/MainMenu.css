@@ -79,6 +79,32 @@
   cursor: not-allowed;
 }
 
+/*
+ * DEV DOES NOT COMPETE WITH START.
+ *
+ * They were identical — same fill, same border, same weight — so the front
+ * door offered a player two equally confident buttons, one of which is a
+ * pose editor behind a PIN. It is still there, still reachable, and now
+ * plainly secondary: no fill, a fainter rule, and set back to two-thirds.
+ * It comes fully back on hover and focus, because a control you have
+ * decided to press should not stay whispering at you.
+ */
+.main-menu__button[data-key="onDev"] {
+  background: transparent;
+  border-color: rgba(58, 71, 97, 0.55);
+  color: rgba(230, 236, 246, 0.6);
+  opacity: 0.66;
+  min-height: 38px;
+  font-size: 0.92em;
+}
+
+.main-menu__button[data-key="onDev"]:hover:not(:disabled),
+.main-menu__button[data-key="onDev"]:focus-visible {
+  background: #1b2432;
+  opacity: 1;
+  color: #e6ecf6;
+}
+
 .main-menu__status {
   min-height: 1.3em;
   max-width: 80vw;
