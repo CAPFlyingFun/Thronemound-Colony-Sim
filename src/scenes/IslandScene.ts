@@ -817,6 +817,39 @@ export class IslandScene {
       );
       part.el.classList.toggle('is-primary', rank === 'primary');
     }
+    this.fanCluster();
+  }
+
+  /**
+   * THE ARC — the reference draws the plates on a curve, not in a row.
+   *
+   * DIG sits in the corner a thumb rests on and the rest sweep away from it,
+   * each one a little higher than the last. It reads as a fan under a hand
+   * rather than a strip of buttons, and it is the arrangement the blueprint
+   * shows.
+   *
+   * IT HAS TO BE COMPUTED, and that is the only reason this is script
+   * rather than a stylesheet: the visual order is not the DOM order. The
+   * cluster is `row-reverse` and three plates carry a CSS `order`, so
+   * `nth-child` counts a sequence nobody sees. So the visible plates are
+   * sorted the way the browser will lay them out — by `order`, then by
+   * document position — and each is told its distance from the corner.
+   *
+   * Runs only inside `applyHudMode`, which is already behind a signature
+   * check, so the sort happens on a mode change and not on a frame.
+   */
+  private fanCluster(): void {
+    const cluster = this.hud.querySelector('.tm-cluster');
+    if (!cluster) return;
+    const up = [...cluster.children]
+      .filter((el) => (el as HTMLElement).style.display !== 'none')
+      .map((el, i) => ({
+        el: el as HTMLElement,
+        order: Number(getComputedStyle(el).order) || 0,
+        i,
+      }))
+      .sort((a, b) => a.order - b.order || a.i - b.i);
+    up.forEach((p, n) => p.el.style.setProperty('--tm-arc', String(n)));
   }
 
   /**
@@ -1306,6 +1339,15 @@ export class IslandScene {
   private deepCarved = 0;
 
   private questEl: HTMLElement | null = null;
+
+  /* The objective card's live pieces, and the last thing written to them. */
+  private questTitleEl: HTMLElement | null = null;
+
+  private questBlurbEl: HTMLElement | null = null;
+
+  private questStepsEl: HTMLElement | null = null;
+
+  private questShown = '';
 
   private cineEl: HTMLElement | null = null;
 

@@ -44,6 +44,11 @@ export interface QuestHost {
   questStage: number;
   deepCarved: number;
   questEl: HTMLElement | null;
+  /* The card's three live pieces, and the last thing written to them. */
+  questTitleEl: HTMLElement | null;
+  questBlurbEl: HTMLElement | null;
+  questStepsEl: HTMLElement | null;
+  questShown: string;
   cineEl: HTMLElement | null;
   cineUntil: number;
   workersOutEl: HTMLElement | null;
@@ -277,7 +282,32 @@ export function buildQuestHud(host: QuestHost, ): void {
    * So it joins the column it belongs to. The design asks for a quest
    * PANEL at 210-235 wide, which is what this now is.
    */
-  host.questEl.className = 'density-lab-status rail-status tm-quest';
+  /*
+   * THE OBJECTIVE CARD, to the blueprint's shape.
+   *
+   * It was one line of text inside an ornate gold frame — "QUEST · dig the
+   * entrance · 0/25 mm down" — which said the right thing in the wrong
+   * form. The reference draws a CARD: a badge, a title, a sentence of
+   * guidance, and then the objective broken into steps with their own
+   * progress and a tick when one is done. That is a different amount of
+   * information, not a restyling of the same amount, which is why this is
+   * markup rather than a stylesheet change.
+   *
+   * The frame goes with it. A carved gold border is the right dressing for
+   * a plate you press; on a readout this size it spends thirty pixels of a
+   * short screen on rim and crowds the thing it is framing.
+   */
+  host.questEl.className = 'tm-quest';
+  host.questEl.innerHTML = '<div class="tm-quest-head">'
+    + '<span class="tm-quest-badge">!</span>'
+    + '<div class="tm-quest-lede">'
+    + '<div class="tm-quest-title"></div>'
+    + '<div class="tm-quest-blurb"></div>'
+    + '</div></div>'
+    + '<div class="tm-quest-steps"></div>';
+  host.questTitleEl = host.questEl.querySelector('.tm-quest-title');
+  host.questBlurbEl = host.questEl.querySelector('.tm-quest-blurb');
+  host.questStepsEl = host.questEl.querySelector('.tm-quest-steps');
   host.hud.appendChild(host.questEl);
 
   /*
@@ -397,20 +427,65 @@ export function renderQuest(host: QuestHost): void {
       host.carryEl.classList.toggle('is-loaded', pct > 0);
     }
   }
-  if (!host.questEl) return;
-  let text = '';
-  if (host.questStage === 0) {
-    text = `⛏ QUEST · dig the entrance · ${depthMm(host).toFixed(0)}/${QUEST_DEPTH_MM} mm down`;
-  } else if (host.questStage === 1) {
-    const pct = Math.min(
-      100, Math.round((host.deepCarved / QUEST_CHAMBER_SAMPLES) * 100),
-    );
-    text = `⛏ QUEST · hollow the queen's chamber · ${pct}%`;
-  } else if (host.questStage === 3) {
-    text = '🐜 the first worker is here · the colony begins';
-  }
-  if (host.questEl.textContent !== text) host.questEl.textContent = text;
-  host.questEl.style.display = text ? '' : 'none';
+  renderQuestCard(host);
+}
+
+/**
+ * THE OBJECTIVE, AS A CARD.
+ *
+ * Two steps because the founding genuinely has two — dig in, then hollow
+ * the chamber — and they are the same two the quest has always tracked.
+ * What is new is that both are on screen at once with their own progress,
+ * so "how much of this is left" is a thing you can read rather than infer
+ * from which sentence is showing.
+ *
+ * NOTHING HERE IS INVENTED. The reference card also carries a feed of
+ * colony events beneath it — a worker idle, a water source found, brood
+ * ready — and this does not, because none of those events exist yet. A
+ * list of plausible-looking notifications would be the one thing on this
+ * HUD that was not true. It is on the board instead.
+ *
+ * Written only when it CHANGES, like every other readout here: this runs
+ * every frame and `innerHTML` is a parse.
+ */
+function renderQuestCard(host: QuestHost): void {
+  if (!host.questEl || !host.questStepsEl) return;
+
+  const deep = depthMm(host);
+  const chamber = Math.min(
+    100, Math.round((host.deepCarved / QUEST_CHAMBER_SAMPLES) * 100),
+  );
+  const done = host.questStage >= 3;
+
+  const title = done ? 'THE COLONY BEGINS' : 'THE FOUNDING';
+  const blurb = done
+    ? 'The first worker is out. She is the proof the colony is real.'
+    : 'Dig in, then hollow a chamber for the queen.';
+  const steps = done ? [] : [
+    {
+      what: 'Dig the entrance',
+      now: `${deep.toFixed(0)} / ${QUEST_DEPTH_MM} mm`,
+      ok: host.questStage >= 1,
+    },
+    {
+      what: "Hollow the queen's chamber",
+      now: `${chamber}%`,
+      ok: host.questStage >= 2,
+    },
+  ];
+
+  const sig = `${title}|${steps.map((x) => `${x.what}${x.now}${x.ok}`).join('|')}`;
+  if (sig === host.questShown) return;
+  host.questShown = sig;
+
+  if (host.questTitleEl) host.questTitleEl.textContent = title;
+  if (host.questBlurbEl) host.questBlurbEl.textContent = blurb;
+  host.questStepsEl.innerHTML = steps.map((x) => '<div class="tm-quest-step'
+    + `${x.ok ? ' is-done' : ''}">`
+    + '<span class="tm-quest-box"></span>'
+    + `<span class="tm-quest-what">${x.what}</span>`
+    + `<span class="tm-quest-num">${x.now}</span>`
+    + '</div>').join('');
 }
 
 /**

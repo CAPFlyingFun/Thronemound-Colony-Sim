@@ -102,7 +102,14 @@
 
 /* The action cluster's width, in one place — see `.tm-cluster` and the
  * carry meter, which reserves it. */
-.density-lab-hud { --tm-cluster-w: min(54vw, 380px); }
+/*
+ * 62vw, and the number is arithmetic rather than taste: a five-plate
+ * explore set is one 76px hero plus four at 68, which is 348 before gaps.
+ * At 54vw the narrowest screen gave it 307 and it wrapped to two rows —
+ * measured, that put the rail 30px through the quest card. 62vw is 352 at
+ * 568 and clips to 380 everywhere wider.
+ */
+.density-lab-hud { --tm-cluster-w: min(62vw, 380px); }
 
 .density-lab-actions {
   position: absolute;
@@ -275,11 +282,20 @@
  * the mistake this exists to avoid: it gives back the compactness the layout
  * was designed around.
  */
+/*
+ * DIG IS THE HERO AND IS DRAWN LIKE ONE.
+ *
+ * The reference makes it about half again the width of everything else,
+ * and at 86 against 62 it was not reading that way — it looked like the
+ * big one in a set rather than the thing the game is about. 100 against 62
+ * is the reference's ratio, and the cluster still holds a full explore set
+ * on one line at the design canvas: 100 + four at 68 is 372 of 380.
+ */
 .tm-art-dig {
-  width: 86px;
-  height: 86px;
+  width: 100px;
+  height: 100px;
   background-image: url('/ui/dig.webp');
-  background-size: 72px 72px;
+  background-size: 84px 84px;
 }
 
 .tm-art-sprint {
@@ -1732,6 +1748,28 @@
 .tm-cluster > * {
   pointer-events: auto;
   /*
+   * THE CURVE. `--tm-arc` is the plate's distance from the corner, counted
+   * in VISUAL order by `fanCluster` — see `IslandScene`, and see there for
+   * why it cannot be `nth-child`. Each step out lifts the plate a little,
+   * so the row becomes a fan sweeping up and away from the thumb.
+   *
+   * Margin rather than a transform: `.tm-art:active` already owns
+   * `transform` for the press, and a plate that forgot its place in the arc
+   * for the duration of a tap would jump under the finger.
+   */
+  /*
+   * QUADRATIC, because a thumb does not sweep in a straight line. Pivoting
+   * at the base of the hand, the far end of the reach rises much faster
+   * than the near end — so the first step out is a few pixels and the
+   * fourth is most of a plate. Linear at 9px a step was measured on screen
+   * and read as a row that had been nudged rather than a fan.
+   *
+   * 0, 9, 24, 46, 74 for a five-plate mode.
+   */
+  margin-bottom: calc(
+    var(--tm-arc, 0) * 5.5px + var(--tm-arc, 0) * var(--tm-arc, 0) * 3.5px
+  );
+  /*
    * NO SHRINKING. The plates are TOUCH TARGETS, and flex's default is to
    * take the overflow out of them when a line is tight — which it silently
    * did: DIG measured 78 px against the 86 the design specifies, because
@@ -2577,71 +2615,129 @@
  * 48 tall, so they end at 60, and 10 of air puts this at 70.
  */
 .tm-quest {
-  top: calc(max(12px, env(safe-area-inset-top)) + 58px) !important;
-  left: auto !important;
-  right: max(18px, env(safe-area-inset-right)) !important;
-  transform: none !important;
+  position: absolute;
+  z-index: 1;
+  top: calc(max(12px, env(safe-area-inset-top)) + 58px);
+  right: max(18px, env(safe-area-inset-right));
   box-sizing: border-box;
   width: 220px;
-  /* It shares a line with the vitals, which end at 331. Below ~590 wide
-   * there is not 220px left, so it gives rather than overlapping — caught
-   * by `probe:hud` at 568, where a flat 220 crossed the bars by a pixel. */
   max-width: calc(100vw - 331px - max(18px, env(safe-area-inset-right)) - 8px);
-  /*
-   * frame-panel, and this one CANNOT be uniformly scaled the way the bars
-   * are. A panel stretches in both directions — the text inside decides the
-   * height — so there is no single scale that fits the box. Nine-slicing
-   * handles exactly that: pick ONE scale for the border so the corner
-   * leaves stay in proportion to each other, and let the middle stretch in
-   * both directions, because the middle is plain stone and stretching plain
-   * stone costs nothing.
-   *
-   *     frame-panel  309 x 169    rim 10-14, corner leaves reach 28 x 30
-   *
-   * Scale is 0.73, matched to the width the panel actually gets (225 / 309),
-   * so the rim is the thickness the artist drew it at for a box this wide.
-   * The leaves land at 20 x 22 and are never squashed, because both borders
-   * use that same 0.73.
-   *
-   * Slicing at the LEAF (28/30) rather than the rim (12): a leaf that pokes
-   * past the slice line gets stretched with the middle and smears into the
-   * run, which is the failure these frames were flagged for.
-   */
-  border-style: solid;
-  /* Integers for layout, the exact 0.73 scale for the art — see the note on
-   * `.tm-bar`. Floored, the leaves lose most of a pixel each way. */
-  border-width: 18px 20px 22px 21px;
-  border-image-source: url('/ui/frame-panel.webp');
-  border-image-slice: 24 27 30 28 fill;
-  border-image-width: 17.52px 19.71px 21.9px 20.44px;
-  border-image-repeat: stretch;
-  /* The frame brings its own stone and its own edge; the flat pill the
-   * status box wears elsewhere would draw a second, squarer panel just
-   * inside this one. */
-  background: none !important;
-  backdrop-filter: none !important;
-  border-radius: 0 !important;
-  box-shadow: none !important;
-  /*
-   * A READOUT MAY NOT EAT A TOUCH. It inherits `.density-lab-status`, which
-   * is interactive in the density lab, and here it is a line of text that
-   * reports the founding — nothing on it can be pressed.
-   *
-   * That was not free: on a 568x320 landscape phone the parked stick's top
-   * edge is at 154 (the stick is bottom-anchored, so it climbs as the
-   * screen shortens) while this panel runs to 207, and the panel was
-   * swallowing the top 53px of the stick. Found by `npm run probe:hud`.
-   * The VISUAL overlap at that size is still there and is recorded on the
-   * board; this is the half that was wrong at every size.
-   */
+  padding: 9px 10px 8px;
+  border-radius: 10px;
+  /* A hairline rather than a carved rim. The gold in this card is the
+   * badge and the title; a frame around it as well is two things asking
+   * to be looked at. */
+  border: 1px solid rgba(247, 226, 176, 0.14);
+  background: rgba(16, 13, 10, 0.82);
+  backdrop-filter: blur(7px);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.35);
+  color: #d9cdb4;
+  font: 500 11px/1.35 ui-magnolia, ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.01em;
+  /* A readout may not eat a touch — the camera drag runs over this corner
+   * and a panel that swallowed it would take the look with it. */
   pointer-events: none;
-  /* The status box's own 8/11 padding held the text off a drawn edge that
-   * did not exist yet. The frame is that edge now, and 20px of gold plus
-   * 8px of air is a margin twice over — which cost 12px of a column that
-   * has to clear the parked stick at 209 on a 375-tall landscape screen.
-   * Enough to keep the text off the stone, no more. */
-  padding: 2px 5px !important;
 }
+
+.tm-quest-head {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+/* The struck hexagon from the reference, drawn rather than imported: a
+ * rotated square with its corners clipped reads as the same mark at this
+ * size and costs no asset. */
+.tm-quest-badge {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 11px/1 ui-monospace, monospace;
+  color: #f0c261;
+  border: 1.5px solid #c9a04a;
+  clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%);
+  background: rgba(201, 160, 74, 0.14);
+}
+
+.tm-quest-lede { min-width: 0; }
+
+.tm-quest-title {
+  color: #f0c261;
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+}
+
+.tm-quest-blurb {
+  margin-top: 2px;
+  color: rgba(217, 205, 180, 0.82);
+  font-size: 10.5px;
+  line-height: 1.32;
+}
+
+.tm-quest-steps {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.tm-quest-step {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The unticked box. It fills with a tick when the step is done, which is
+ * the whole reason the steps are drawn as a checklist rather than a
+ * sentence: progress you can see at a glance without reading. */
+.tm-quest-box {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid rgba(247, 226, 176, 0.3);
+}
+
+.tm-quest-what {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: rgba(217, 205, 180, 0.9);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tm-quest-num {
+  flex: 0 0 auto;
+  color: rgba(217, 205, 180, 0.62);
+}
+
+.tm-quest-step.is-done .tm-quest-box {
+  border-color: #7fb069;
+  background: #7fb069;
+}
+
+.tm-quest-step.is-done .tm-quest-box::after {
+  content: '✓';
+  display: block;
+  margin-top: -2px;
+  text-align: center;
+  font: 700 10px/1.2 ui-monospace, monospace;
+  color: #14110d;
+}
+
+.tm-quest-step.is-done .tm-quest-what { color: rgba(217, 205, 180, 0.55); }
+.tm-quest-step.is-done .tm-quest-num { color: #8cc47a; }
 
 /*
  * THE STATS CHIP TAKES THE STRIP THE VITALS AND THE UTILITY PLATES LEAVE.
@@ -2993,28 +3089,35 @@
   .tm-instruments .density-lab-aim-readout { font-size: 11px; padding: 4px 6px; }
 
   /*
-   * THE QUEST PANEL, ON THE SCREEN THAT HAS NO ROOM FOR IT.
+   * THE QUEST CARD, ON THE SCREEN THAT HAS NO ROOM FOR IT.
    *
-   * A frame costs height, and this is where that bill came due. HALF of
-   * this rule is now historical and says so: the panel used to be third in
-   * the left-hand column, and on a 667x375 landscape phone it ran to 239
-   * and drew across the top of the parked stick. The answer then was to
-   * shove it upward into whatever air was left. The answer now is that it
-   * is not in that column at all — it hangs off the right-hand corner, with
-   * nothing below it, so it stays where it is put and the `top` override
-   * has gone.
+   * The whole of this rule used to be about a carved frame: half scale so a
+   * short screen spent less height on rim, plus a `top` shove because the
+   * panel was third in the left-hand column and ran into the parked stick.
+   * Both are gone — the card has no frame to shrink and hangs off the
+   * right-hand corner with nothing below it.
    *
-   * What survives is the economy that was always about the ART rather than
-   * the arrangement: the frame comes down to half scale so a short screen
-   * spends less height on rim, and the leaves land at 14 x 12 — small, but
-   * still DRAWN rather than smeared, which is the whole point of slicing at
-   * the leaf.
+   * What a short screen still cannot afford is the sentence of guidance.
+   * The title and the checklist are the load-bearing half; the blurb is the
+   * one that can be read once and never again.
    */
-  .tm-quest {
-    border-width: 12px 14px 15px 14px;
-    border-image-width: 12px 13.5px 15px 14px;
-    font-size: 11px;
+  /*
+   * THE ARC FLATTENS. It is a real ergonomic curve and it costs real
+   * height: five plates sweep 74px up at full strength, which on a 320-tall
+   * screen puts the far end of the fan through the quest card — measured,
+   * 55px of overlap. Halved, the sweep is 36 and the shape survives; the
+   * alternative is losing the fan entirely on the phone that needs the
+   * thumb-reach most.
+   */
+  .tm-cluster > * {
+    margin-bottom: calc(
+      var(--tm-arc, 0) * 3px + var(--tm-arc, 0) * var(--tm-arc, 0) * 1.5px
+    );
   }
+
+  .tm-quest { padding: 7px 9px 6px; font-size: 10px; }
+  .tm-quest-blurb { display: none; }
+  .tm-quest-steps { margin-top: 6px; }
 }
 
 /*
