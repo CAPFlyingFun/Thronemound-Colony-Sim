@@ -80,6 +80,9 @@ export interface IslandBoot {
    */
   onMenu?: () => void;
 }
+import {
+  pickMode, rankOf, type HudMode, type HudPart,
+} from './hudModes';
 import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
 import { SurfaceWalker } from '../world/surfaceWalk';
@@ -135,6 +138,7 @@ import {
   BODY_HALF_TALL, BODY_FLOOR_MARGIN, AIM_LIMIT, CHAMBER_CAM_FAR,
   CHAMBER_CAM_NEAR, COLONIST_SPEED, COLONIST_TURN, COLONIST_ARRIVE,
   COLONIST_ROAM, TROPHALLAXIS_REACH, TROPHALLAXIS_RATE, CARRY_DELIVER_REACH,
+  FIGHT_NOTICE,
 } from './islandTuning';
 import { Colonist } from './Colonist';
 import { SoilQuery } from './soilQuery';
@@ -169,7 +173,9 @@ import {
  * driving the shovel, or setting her body. Everything on the rail belongs to
  * one or more of them — see `applyHudMode`.
  */
-export type HudMode = 'walk' | 'dig' | 'pose';
+/* Re-exported so the scene stays the one import a probe needs. The table
+ * itself lives in `hudModes.ts`, which knows nothing about the DOM. */
+export type { HudMode } from './hudModes';
 
 export class IslandScene {
   /** Every 'is there soil here' in one place. See `soilQuery.ts`. */
@@ -570,6 +576,12 @@ export class IslandScene {
     }
     this.carryTick(dt);
     this.refreshCombatChips();
+    /* THE DRESS FOLLOWS THE FACTS. A beetle closing, a load lifted, a seed
+     * coming into reach — none of those are button presses, so the mode
+     * cannot be recomputed only when something is pressed. It is guarded by
+     * a signature check and writes nothing on a frame where nothing
+     * changed. */
+    this.applyHudMode();
   }
 
   /**
@@ -756,17 +768,86 @@ export class IslandScene {
    * depending on mode, and a rail that changes with it is the clearest
    * possible statement of which job is live.
    */
+  /**
+   * DRESS THE HUD FOR WHAT SHE IS DOING.
+   *
+   * Every visibility decision on the rail comes through here and every one
+   * of them is read out of `HUD_LAYOUTS`. There is no second place that
+   * hides a control: this is a loop over a table, which is what makes a
+   * mode something you can read in one file instead of reconstructing from
+   * a dozen call sites.
+   *
+   * `contextual` is the rank that does the interesting work. The table says
+   * a mode ALLOWS a control; `contextLive` says whether it is true right
+   * now — something in reach, something in her jaws. A part that is allowed
+   * but not true is dimmed rather than removed, because a plate that blinks
+   * in and out at the edge of a reach radius is worse than either state.
+   */
   private applyHudMode(): void {
-    const mode: HudMode = this.digMode ? 'dig'
-      : this.posture.armed ? 'pose' : 'walk';
+    const mode = pickMode({
+      digging: this.digMode,
+      posed: this.posture.armed,
+      fighting: this.inAFight(),
+      carrying: this.carry.carrying,
+    });
+    /*
+     * WRITTEN ONLY WHEN IT CHANGES.
+     *
+     * This runs every frame now — the mode depends on live facts (a beetle
+     * closing, a load lifted, something coming into reach) rather than on a
+     * button press. Sixteen `style.display` assignments sixty times a
+     * second is sixteen layout invalidations for a HUD that changes a
+     * handful of times a minute, so the whole answer is reduced to one
+     * short string and compared. The reads are cheap; the WRITES are what
+     * had to be earned.
+     */
+    const sig = `${mode}|${this.contextLive('carry') ? 1 : 0}`
+      + `${this.contextLive('interact') ? 1 : 0}`;
+    if (sig === this.hudSig) return;
+    this.hudSig = sig;
+    this.hudMode = mode;
     for (const part of this.railParts) {
-      part.el.style.display = part.modes.includes(mode) ? '' : 'none';
+      const rank = rankOf(mode, part.part);
+      part.el.style.display = rank === 'hidden' ? 'none' : '';
+      /* Dimming is only ever about a contextual part being untrue. A
+       * secondary control is quieter by SIZE, in the stylesheet, not by
+       * opacity — see `.tm-cluster`. */
+      part.el.classList.toggle(
+        'is-idle', rank === 'contextual' && !this.contextLive(part.part),
+      );
+      part.el.classList.toggle('is-primary', rank === 'primary');
     }
   }
 
-  /** Register a rail control against the modes it belongs in. */
-  private railPart(el: HTMLElement, ...modes: HudMode[]): void {
-    this.railParts.push({ el, modes });
+  /**
+   * Is there a fight on?
+   *
+   * Generous on purpose, and wider than the jaws can reach: the HUD has to
+   * put BITE up BEFORE she is close enough to use it, or the plate arrives
+   * at the same moment the beetle does and the player is reading a new
+   * control while being bitten. Living quarry only — a corpse is cargo, and
+   * cargo is CARRY's business.
+   */
+  private inAFight(): boolean {
+    for (const q of this.quarry) {
+      if (!q.alive) continue;
+      if (this.at.distanceTo(q.at) <= FIGHT_NOTICE) return true;
+    }
+    return false;
+  }
+
+  /** Whether a contextual control has anything to act on this instant. */
+  private contextLive(part: HudPart): boolean {
+    if (part === 'carry') return this.carry.carrying || this.cargoInReach() !== null;
+    if (part === 'interact') {
+      return this.props.some((p) => p === this.carry.held) || this.propInReach() !== null;
+    }
+    return true;
+  }
+
+  /** Register a rail control under its name in the mode table. */
+  private railPart(el: HTMLElement, part: HudPart): void {
+    this.railParts.push({ el, part });
   }
 
   private refreshPoseChips(): void {
@@ -864,7 +945,13 @@ export class IslandScene {
   private digMode = false;
 
   /** Rail controls and the modes each one is relevant in. See `applyHudMode`. */
-  private readonly railParts: { el: HTMLElement; modes: HudMode[] }[] = [];
+  private readonly railParts: { el: HTMLElement; part: HudPart }[] = [];
+
+  /** The dress the HUD is currently wearing. Read by probes. */
+  hudMode: HudMode = 'explore';
+
+  /** The last answer `applyHudMode` wrote, so it can skip writing it again. */
+  private hudSig = '';
 
   /** The shovel, revealed once DIG is armed. */
   private scoopBtn: HTMLButtonElement | null = null;

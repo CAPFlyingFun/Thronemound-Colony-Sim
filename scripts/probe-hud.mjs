@@ -67,44 +67,29 @@ const FORBIDDEN = [
 ];
 
 /*
- * KNOWN, AND WHY THIS ONE IS ALLOWED TO STAND.
+ * KNOWN, AND EMPTY — which is the point of keeping the list.
  *
- * There was one entry here: the left column did not fit above the parked
- * stick at 320 tall. The stick is bottom-anchored so it CLIMBS as the
- * screen shortens (top at 154 against 209 on a 375), and vitals + colony +
- * quest already reached 207 with the frame at half scale. No arrangement of
- * THREE stacked panels fitted in the 142px left, which is why it was
- * recorded as a layout decision rather than nudged.
+ * There have been two entries here and both are gone, for the same kind of
+ * reason: the shortage was real, and the fix was structural rather than a
+ * nudged margin.
  *
- * v0.1.35 removed the third panel from that column rather than shrinking
- * it: the quest hangs off the top-right corner now, under SENSE and MENU.
- * That exemption is gone, and the left column clears the stick at every
- * width.
+ * The first was the left column not fitting above the parked stick at 320
+ * tall — the stick is bottom-anchored so it CLIMBS as the screen shortens,
+ * and vitals + colony + quest met it. v0.1.35 moved the quest to the
+ * top-right corner and the column became two panels deep.
  *
- * WHAT REPLACED IT is a different shortage, in the other corner, and it is
- * a COUNT rather than a layout. The quest panel and the action cluster now
- * share the right-hand edge, and the cluster holds ten thumb-sized controls
- * — DIG, VIEW, DODGE, BITE, STING, CARRY, INTERACT, PACE, RIDE, TILT. At
- * 380px wide they wrap to two rows and the rail stands ~178 tall, which
- * clears the quest at 667, 844 and 932 with room to spare. At 568 the
- * cluster can only be 307 wide, which is four per row, which is THREE rows,
- * which is 250 of a 320-tall screen. There is no arrangement of ten
- * thumb-sized plates that fits under a quest panel in 320px: 44px is the
- * touch floor, three rows of it is 132 before gaps, and the quest ends at
- * 133.
+ * The second was the action cluster reaching the quest at 568: ten
+ * thumb-sized plates wrapped to three rows at 307px wide, which is 250 of a
+ * 320-tall screen. v0.1.36 made the HUD mode-driven — `hudModes.ts` — so no
+ * situation shows more than five or six, the cluster wraps to one or two
+ * rows, and the rail comes in short enough to clear everything at every
+ * width tested.
  *
- * So this is the same kind of entry as the last one — a real shortage,
- * recorded rather than nudged — and the fix is the one the HUD blueprint
- * already names: fewer controls on screen at once, shown by context. That
- * is its own card, not a nudge to a margin.
- *
- * Listed here instead of dropping the 568 size, because dropping the size
- * is how a known failure becomes a forgotten one, and because any OTHER
- * collision at that width still fails loudly.
+ * Kept, empty, because the next collision somebody decides to live with
+ * belongs here with its arithmetic rather than in a quietly deleted screen
+ * size.
  */
-const KNOWN = [
-  { w: 568, pair: 'quest/actions', why: 'ten thumb-sized controls wrap to three rows at 307px and there is no room under the quest in 320px of height — needs contextual demotion, not a margin' },
-];
+const KNOWN = [];
 
 const b = await chromium.launch({
   executablePath: process.env.CHROME_PATH ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',

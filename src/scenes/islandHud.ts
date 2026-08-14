@@ -26,7 +26,7 @@ import type { IslandStream } from '../world/IslandStream';
 import type { BuiltTree } from '../world/tree';
 import type { TelemetryRecorder } from './IslandTelemetry';
 import type { DebugStatsPanel } from './DebugStatsPanel';
-import type { HudMode } from './IslandScene';
+import type { HudPart } from './hudModes';
 import { MM, WINDOW_BYTES, WINDOW_MM } from '../world/worldScape';
 import {
   AIM_LIMIT, PACE_NAMES, SCOOP_DEEP_MM, SCOOP_TALL_MM, SCOOP_WIDE_MM,
@@ -116,7 +116,9 @@ export interface HudHost {
   /* --- and the scene's own behaviour, called rather than copied --- */
   applyHudMode(): void;
   applyPace(): void;
-  railPart(el: HTMLElement, ...modes: HudMode[]): void;
+  /** Register a control under its name in the mode table. See
+   *  `hudModes.ts` — the TABLE decides where it appears, not the caller. */
+  railPart(el: HTMLElement, part: HudPart): void;
   refreshPoseChips(): void;
   routeStick(): void;
   openDesigner(): void;
@@ -178,7 +180,7 @@ export function buildControls(host: HudHost, ): void {
     host.camera.updateProjectionMatrix();
   });
   actions.appendChild(dig);
-  host.railPart(dig, 'walk', 'dig', 'pose');
+  host.railPart(dig, 'dig');
 
   /*
    * THE SHOVEL: hold it and she strokes, each stroke one mouthful along
@@ -200,7 +202,7 @@ export function buildControls(host: HudHost, ): void {
   scoopBtn.addEventListener('pointercancel', stopDig);
   scoopBtn.addEventListener('lostpointercapture', stopDig);
   actions.appendChild(scoopBtn);
-  host.railPart(scoopBtn, 'dig');
+  host.railPart(scoopBtn, 'scoop');
 
 
   /*
@@ -238,7 +240,7 @@ export function buildControls(host: HudHost, ): void {
   actions.appendChild(instruments);
   /* The row goes when its contents do, or walking leaves an empty flex
    * item and the gap either side of it. */
-  host.railPart(instruments, 'dig', 'pose');
+  host.railPart(instruments, 'instruments');
 
   host.aimReadout = document.createElement('div');
   host.aimReadout.className = 'density-lab-aim-readout';
@@ -247,7 +249,7 @@ export function buildControls(host: HudHost, ): void {
    * her lean — which is a thing the posture readout says better, in the
    * mode where it matters — and 29px of rail is the difference between
    * DIG clearing the MENU plate and climbing into it. */
-  host.railPart(host.aimReadout, 'dig', 'pose');
+  host.railPart(host.aimReadout, 'aim');
 
   /*
    * THE OTHER TWO INSTRUMENTS, while the shovel is out.
@@ -261,12 +263,12 @@ export function buildControls(host: HudHost, ): void {
   host.headingReadout = document.createElement('div');
   host.headingReadout.className = 'density-lab-aim-readout';
   instruments.appendChild(host.headingReadout);
-  host.railPart(host.headingReadout, 'dig');
+  host.railPart(host.headingReadout, 'heading');
 
   host.depthReadout = document.createElement('div');
   host.depthReadout.className = 'density-lab-aim-readout';
   instruments.appendChild(host.depthReadout);
-  host.railPart(host.depthReadout, 'dig');
+  host.railPart(host.depthReadout, 'depth');
 
 
   /* The PLAN button is gone: the shovel is how tunnels get made now.
@@ -369,7 +371,7 @@ export function buildControls(host: HudHost, ): void {
   cluster.appendChild(dig);
 
   cluster.appendChild(view);
-  host.railPart(view, 'walk', 'dig', 'pose');
+  host.railPart(view, 'view');
 
   /*
    * DODGE — A BUTTON YOU SWIPE, not a button you press.
@@ -434,7 +436,7 @@ export function buildControls(host: HudHost, ): void {
    * purpose. Available walking and while setting her body, which is
    * where the swipe cannot reach.
    */
-  host.railPart(dodgeBtn, 'walk', 'pose');
+  host.railPart(dodgeBtn, 'dodge');
 
   /*
    * CRAWL / WALK / RUN — and on a touch screen it is the ONLY pace there is.
@@ -470,6 +472,9 @@ export function buildControls(host: HudHost, ): void {
 
   const plate = (
     name: string, label: string, onPress: (() => void) | null,
+    /* The table's name for it, when that differs from the ART's name. It
+     * does exactly once: the pace latch wears the SPRINT plate. */
+    part: HudPart = name as HudPart,
   ): HTMLButtonElement => {
     const b = document.createElement('button');
     b.className = `density-lab-button tm-art tm-art-${name}${onPress ? '' : ' is-soon'}`;
@@ -479,10 +484,10 @@ export function buildControls(host: HudHost, ): void {
       b.addEventListener('pointerdown', (e) => { e.preventDefault(); onPress(); });
     }
     cluster.appendChild(b);
-    /* Per PLATE, not per row: these four are about her legs and jaws out
-     * in the world, so they leave when the shovel comes out or the stick
-     * starts driving her body — while VIEW, sharing the same box, stays. */
-    host.railPart(b, 'walk');
+    /* Registered under its own art name, which IS its name in the mode
+     * table — so `bite` appears where the table says `bite` appears and
+     * nowhere else. Nothing here decides visibility any more. */
+    host.railPart(b, part);
     return b;
   };
 
@@ -522,7 +527,7 @@ export function buildControls(host: HudHost, ): void {
   host.sprintBtn = plate('sprint', 'Pace', () => {
     host.pace = ((host.pace + 1) % 3) as 0 | 1 | 2;
     host.applyPace();
-  });
+  }, 'pace');
 
   /*
    * The CRAWL/WALK/RUN chip is now the SPRINT plate's job, so the chip is
@@ -633,7 +638,7 @@ export function buildControls(host: HudHost, ): void {
   /* The row survives only to carry the live pose numbers now that its
    * two chips have moved into the cluster. */
   actions.appendChild(poseRow);
-  host.railPart(poseRow, 'pose');
+  host.railPart(poseRow, 'poseRow');
 
   /*
    * Arming is a TAP; centring is a LONG PRESS.
@@ -682,8 +687,27 @@ export function buildControls(host: HudHost, ): void {
       if (held !== null) { window.clearTimeout(held); held = null; }
       e.preventDefault();
     });
-    cluster.appendChild(btn);
-    host.railPart(btn, 'walk', 'pose');
+    /*
+     * INTO THE DRAWER, and this is a change of mind that is worth stating
+     * because the note above used to say the opposite.
+     *
+     * "These are not debug chips and do not go in the drawer" was written
+     * when the cluster had room and the argument was about what they MEAN —
+     * a postural override is gameplay, not instrumentation, and that is
+     * still true. What changed is the HUD blueprint, which lists the
+     * player's actions as DIG / BITE / CARRY / INTERACT / CLIMB / SPRINT
+     * and does not include these, and a device report naming TILT and RIDE
+     * among ten plates that were eating the camera drag.
+     *
+     * So they move, and the reason is reach rather than status: the drawer
+     * is the only place that is not the playing screen and is still
+     * reachable. Arming one still puts the HUD into `pose` — the mode is
+     * real and the readout still appears on the rail. When the postural
+     * controller can choose height and attitude from what her feet report,
+     * these want a proper home; that is a design decision and it is on the
+     * board rather than settled here.
+     */
+    devPanel.appendChild(btn);
     return btn;
   };
   /*

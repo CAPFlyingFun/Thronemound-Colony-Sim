@@ -717,6 +717,22 @@ export const RISE_RATE = 9;
 export const NOSE_REACH = 4.5 / MM;
 
 /**
+ * HOW CLOSE A LIVING BEETLE HAS TO BE before the HUD calls it a fight and
+ * puts the weapons up.
+ *
+ * Deliberately WIDER than her jaws — about four body lengths — because the
+ * plates have to be there BEFORE she is in range, not at the same instant.
+ * A control that appears on the frame the beetle reaches her is a control
+ * being read while she is being bitten.
+ *
+ * GAME TUNING, not biology. Real Solenopsis recruit by trail and alarm
+ * pheromone at ranges this model has no representation of; this is a
+ * legibility number for a HUD, chosen against `NOSE_REACH` so the weapons
+ * arrive roughly a second of walking before they are usable.
+ */
+export const FIGHT_NOTICE = 20 / MM;
+
+/**
  * Her half-WIDTH in a bore. The measured oval's 4.4 mm half-width is her
  * LEG SPAN — wider than the whole 6 mm tube — but an ant in a tunnel walks
  * with her feet ON the wall, legs flexed to its curve, not sticking out to

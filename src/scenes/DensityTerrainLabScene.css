@@ -1689,6 +1689,35 @@
 .tm-cluster > .tm-art-dig { order: -1; }
 
 /*
+ * THE RANKS, DRAWN. `hudModes.ts` decides them; these three rules are what
+ * they LOOK like, and they are deliberately the only place that knows.
+ *
+ * PRIMARY is the mode's hero. A ring of light rather than a size change:
+ * the plates are touch targets and DIG is already the largest box in the
+ * cluster, so growing the current hero on every mode switch would move
+ * every other plate under the thumb each time the mode changed.
+ *
+ * IDLE is a CONTEXTUAL control with nothing to act on — INTERACT with
+ * nothing in reach, CARRY with empty jaws and no corpse nearby. Dimmed and
+ * left in place rather than removed, because the alternative is a plate
+ * that blinks in and out as she walks past the edge of a reach radius, and
+ * a control that appears under a thumb already moving toward something else
+ * is worse than one that was simply quiet.
+ *
+ * The touch box never changes in any of this. A plate that is dim is still
+ * pressable, and pressing it says NOTHING IN REACH — which is a true answer
+ * and a better one than a button that was not there.
+ */
+.tm-cluster > .tm-art.is-primary {
+  filter: drop-shadow(0 0 7px rgba(247, 206, 122, 0.5));
+}
+
+.tm-cluster > .tm-art.is-idle {
+  opacity: 0.38;
+  filter: grayscale(0.5);
+}
+
+/*
  * THE CAMERA AND THE MOUNT GO TO THE BACK. They are real controls and they
  * stay on screen — but VIEW, TILT and RIDE are things you set, not things
  * you do in a fight, and the blueprint is explicit that the cluster must
