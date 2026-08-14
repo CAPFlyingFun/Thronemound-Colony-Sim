@@ -219,20 +219,58 @@ export interface CarryVerdict {
   speedFactor: number;
 }
 
-/** What a caste can lift outright, and what it can only drag, in mg. */
+/**
+ * WHAT EACH ANT CAN LIFT OUTRIGHT, AND WHAT IT CAN ONLY DRAG, in mg.
+ *
+ * THE QUEEN IS THE STRONGEST AND THE WEAKEST, which is the whole point of
+ * having three rows. In ABSOLUTE terms she out-hauls both — she is a
+ * fourteen-milligram animal against a worker's one — so nothing a worker
+ * can shift is a problem to her. RELATIVE to her own mass she is the feeblest
+ * of the three: 1.4 times her body weight against a worker's six and a
+ * major's nine. She is a reproductive with a gaster full of eggs, not a
+ * forager, and she is doing this at all only because the game has her out
+ * on the island fighting beetles.
+ *
+ * That inversion is what makes the handoff mean something. The first
+ * nanitic is not a smaller queen — she is a different set of limits, and a
+ * rock the queen shrugged aside becomes something the worker cannot move
+ * until a major exists to move it.
+ *
+ * GAME TUNING, and saying so. The absolute ordering and the relative
+ * inversion are both real; these particular milligrams are chosen so the
+ * props already in the sandbox span all three verdicts for every row:
+ *
+ *              seed 3  leaf 4  crumb 5  twig ~8  rock 22  beetle 45  rock 55  rock 120
+ *   worker      carry   carry    carry     drag     drag   immobile  immobile  immobile
+ *   major       carry   carry    carry    carry     drag       drag      drag  immobile
+ *   queen       carry   carry    carry    carry     drag       drag      drag  immobile
+ *
+ * The queen and the major read the same today because the queen's numbers
+ * were set against the beetle she already hauls. They diverge the moment
+ * anything heavier than 60mg exists.
+ */
 export const STRENGTH = {
   worker: { carryMg: 6, dragMg: 25 },
   major: { carryMg: 18, dragMg: 70 },
+  queen: { carryMg: 20, dragMg: 60 },
 } as const;
 
-export type SandboxCaste = keyof typeof STRENGTH;
+/** Any row of the table above. */
+export type AntStrength = keyof typeof STRENGTH;
+
+/*
+ * The sandbox bench has two ants and its own record keyed by this, so it
+ * stays NARROW deliberately — widening it to every row of STRENGTH would
+ * demand a queen model that room does not have.
+ */
+export type SandboxCaste = 'worker' | 'major';
 
 /**
  * Carry, drag, or stay put — and how much it slows you. Carrying tapers
  * from full stride with a crumb to a laden trudge at the limit; dragging
  * is slower still and bottoms out just before the load wins entirely.
  */
-export function carryVerdict(weightMg: number, caste: SandboxCaste): CarryVerdict {
+export function carryVerdict(weightMg: number, caste: AntStrength): CarryVerdict {
   const s = STRENGTH[caste];
   if (weightMg <= s.carryMg) {
     return { mode: 'carry', speedFactor: 1 - 0.5 * (weightMg / s.carryMg) };

@@ -7,6 +7,7 @@ import {
   ABILITIES, ANT_KINDS, FIRE_ANT, GAME_MINUTES_PER_REAL_MINUTE,
   REAL_SECONDS_PER_GAME_HOUR, TWIG_ANT, drainPerGameHours,
 } from '../src/scenes/antKinds';
+import { STRENGTH } from '../src/scenes/mandibleReach';
 import { DEFAULT_VITALS } from '../src/scenes/islandVitals';
 
 describe('every kind is buildable', () => {
@@ -32,11 +33,21 @@ describe('every kind is buildable', () => {
    */
   it('marks exactly the abilities that have a mechanic behind them', () => {
     const built = Object.values(ABILITIES).filter((a) => a.built).map((a) => a.id);
-    expect(built.sort()).toEqual(['bite', 'carry', 'drop', 'sting']);
+    expect(built.sort()).toEqual(['bite', 'carry', 'drop', 'interact', 'sting']);
   });
 });
 
 describe('two ants differ in DATA, not in code', () => {
+  it('gives every kind a strength row to lift by', () => {
+    /* The queen-to-worker-to-major handoff is a table lookup or it is a
+     * pile of branches. This is the assertion that keeps it the former. */
+    for (const kind of Object.values(ANT_KINDS)) {
+      expect(STRENGTH[kind.strength]).toBeDefined();
+    }
+    /* And the two that exist differ, or the table is decoration. */
+    expect(FIRE_ANT.strength).not.toBe(TWIG_ANT.strength);
+  });
+
   it('gives the fire ant a sting and the twig ant a scout', () => {
     expect(FIRE_ANT.abilities).toContain('sting');
     expect(FIRE_ANT.abilities).not.toContain('scout');

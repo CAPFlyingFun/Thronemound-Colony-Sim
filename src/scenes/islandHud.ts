@@ -66,6 +66,7 @@ export interface HudHost {
   biteBtn: HTMLButtonElement | null;
   stingBtn: HTMLButtonElement | null;
   carryBtn: HTMLButtonElement | null;
+  interactBtn: HTMLButtonElement | null;
   useAbility(id: AbilityId): void;
   readonly at: THREE.Vector3;
   pace: 0 | 1 | 2;
@@ -488,6 +489,7 @@ export function buildControls(host: HudHost, ): void {
      * `refreshCombatChips` swaps by class rather than by rebuilding the
      * plate — see IslandScene. */
     if (id === 'carry') host.carryBtn = b;
+    if (id === 'interact') host.interactBtn = b;
   }
   /*
    * SPRINT is real: it is the pace latch the CRAWL/WALK/RUN chip drives,

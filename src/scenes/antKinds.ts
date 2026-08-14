@@ -17,6 +17,7 @@
  * twig ant's lack of one are a data difference and not a code one.
  */
 import { DEFAULT_VITALS, type VitalsTuning } from './islandVitals';
+import type { AntStrength } from './mandibleReach';
 
 export type AbilityId =
   | 'bite' | 'sting' | 'carry' | 'drop' | 'climb' | 'scout'
@@ -48,13 +49,15 @@ export const ABILITIES: Record<AbilityId, Ability> = {
   drop: { id: 'drop', art: 'drop', label: 'Drop', built: true },
   /* Climbing WORKS — she walks up a trunk without being asked. What does
    * not exist is a control for it, which is a different thing, and the
-   * reason this is false rather than true. */
+   * reason this is false rather than true. It is also why it gave up its
+   * rail slot to INTERACT: a dimmed plate for a thing that needs no button
+   * is worth less than a lit one for a thing that does. */
   climb: { id: 'climb', art: 'climb', label: 'Climb', built: false },
   /* Wears the SENSE plate until it has one of its own — same picture, its
    * own class, because the utility corner draws SENSE at 56 and the action
    * cluster draws at 62. Two sizes, one image. */
   scout: { id: 'scout', art: 'scout', label: 'Scout', built: false },
-  interact: { id: 'interact', art: 'interact', label: 'Interact', built: false },
+  interact: { id: 'interact', art: 'interact', label: 'Interact', built: true },
   eat: { id: 'eat', art: 'eat', label: 'Eat', built: false },
   drink: { id: 'drink', art: 'drink', label: 'Drink', built: false },
   attack: { id: 'attack', art: 'attack', label: 'Attack', built: false },
@@ -153,13 +156,32 @@ export interface AntKind {
   /** In the order they should sit on the rail, biggest job first. */
   abilities: AbilityId[];
   vitals: VitalsTuning;
+  /*
+   * WHICH ROW OF `STRENGTH` THIS ANT LIFTS BY. Data, exactly like `vitals`
+   * — so a major out-hauling a worker is a table entry rather than a branch,
+   * which is the same promise the ability list makes.
+   *
+   * It sits on the KIND today because the island has one playable ant. It
+   * belongs to the CASTE, and should move there the moment the roster does:
+   * the queen, her first nanitic and a major are three sets of limits on
+   * one species, not three species.
+   */
+  strength: AntStrength;
 }
 
 export const FIRE_ANT: AntKind = {
   id: 'fire',
   name: 'Fire ant',
-  abilities: ['bite', 'sting', 'carry', 'climb'],
+  /*
+   * INTERACT TAKES CLIMB'S SLOT. The rail fits four and the test below pins
+   * it, so a fifth plate is not a decision anybody gets to make — and of
+   * the two, CLIMB is the one that already happens without being asked
+   * while INTERACT is a verb the player has no other way to reach.
+   */
+  abilities: ['bite', 'sting', 'carry', 'interact'],
   vitals: FIRE_ANT_VITALS,
+  /* The one being played is her, and she is a queen. */
+  strength: 'queen',
 };
 
 /**
@@ -175,6 +197,7 @@ export const TWIG_ANT: AntKind = {
   name: 'Graceful twig ant',
   abilities: ['bite', 'scout', 'carry', 'climb'],
   vitals: DEFAULT_VITALS,
+  strength: 'worker',
 };
 
 export const ANT_KINDS: Record<string, AntKind> = {

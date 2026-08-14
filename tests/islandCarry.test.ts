@@ -9,9 +9,9 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  Carry, FIRE_ANT_CARRY, QUEEN_BODY_MG, emptyStores, withinNest,
-  type Portable,
+  Carry, FIRE_ANT_CARRY, emptyStores, withinNest, type Portable,
 } from '../src/scenes/islandCarry';
+import { STRENGTH } from '../src/scenes/mandibleReach';
 
 const prey = (over: Partial<Portable> = {}): Portable => ({
   id: 'beetle',
@@ -30,9 +30,44 @@ describe('picking it up', () => {
     const c = new Carry();
     expect(c.lift(prey(), rich)).toBeNull();
     expect(c.carrying).toBe(true);
-    /* 45 of a 70mg capacity. The beetle is most of a load and not all of
-     * it, which is the whole reason the capacity is five body masses. */
-    expect(c.load).toBeCloseTo(45 / (QUEEN_BODY_MG * 5), 3);
+    /* Measured against the DRAG limit, which is the heaviest thing she can
+     * move at all — so a beetle reads as most of what she can shift rather
+     * than pegging the bar the moment she stops carrying and starts
+     * hauling. */
+    expect(c.load).toBeCloseTo(45 / STRENGTH.queen.dragMg, 3);
+  });
+
+  it('drags a beetle rather than carrying it', () => {
+    /* 45mg against a queen's 20mg carry limit and 60mg drag limit. The
+     * beetle is the reason the queen's numbers are what they are. */
+    const c = new Carry();
+    c.lift(prey(), rich);
+    expect(c.mode).toBe('drag');
+  });
+
+  it('carries a crumb outright, and quickly', () => {
+    const c = new Carry();
+    c.lift(prey({ id: 'crumb', massMg: 5 }), rich);
+    expect(c.mode).toBe('carry');
+    expect(c.speedFactor).toBeGreaterThan(0.8);
+  });
+
+  it('gives a worker different answers to the same objects', () => {
+    /* THE POINT OF THE TABLE. Nothing here is a branch on caste — the same
+     * two calls, a different row, and the nanitic's world is heavier. */
+    const worker = new Carry('worker');
+    worker.lift(prey({ id: 'twig', massMg: 8 }), rich);
+    expect(worker.mode).toBe('drag');
+
+    const queen = new Carry('queen');
+    queen.lift(prey({ id: 'twig', massMg: 8 }), rich);
+    expect(queen.mode).toBe('carry');
+  });
+
+  it('refuses a worker the beetle a queen can drag', () => {
+    const worker = new Carry('worker');
+    expect(worker.lift(prey(), rich)).toBe('too-heavy');
+    expect(new Carry('queen').lift(prey(), rich)).toBeNull();
   });
 
   it('refuses a beetle that is still fighting', () => {
@@ -48,9 +83,9 @@ describe('picking it up', () => {
     expect(c.held?.id).toBe('beetle');
   });
 
-  it('refuses what it cannot lift at all', () => {
+  it('refuses what it cannot shift at all', () => {
     const c = new Carry();
-    expect(c.lift(prey({ massMg: FIRE_ANT_CARRY.capacityMg + 1 }), rich))
+    expect(c.lift(prey({ massMg: STRENGTH.queen.dragMg + 1 }), rich))
       .toBe('too-heavy');
   });
 
@@ -65,18 +100,28 @@ describe('picking it up', () => {
     expect(spent).toBe(FIRE_ANT_CARRY.liftCost);
   });
 
-  it('caps the load at 1 even for something at the very limit', () => {
+  it('caps the load at 1 at the very limit of what she can shift', () => {
     const c = new Carry();
-    c.lift(prey({ massMg: FIRE_ANT_CARRY.capacityMg }), rich);
+    c.lift(prey({ massMg: STRENGTH.queen.dragMg }), rich);
     expect(c.load).toBe(1);
   });
 });
 
 describe('the load changes how she is played', () => {
-  it('leaves her able to run when lightly loaded', () => {
+  it('leaves her able to run with something she can simply carry', () => {
     const c = new Carry();
     c.lift(prey({ massMg: 10 }), rich);
+    expect(c.mode).toBe('carry');
     expect(c.tooLadenToRun).toBe(false);
+  });
+
+  it('slows her continuously rather than in one step', () => {
+    /* A crumb should not cost what a beetle costs. The taper is
+     * `carryVerdict`'s and this is the island agreeing to use it. */
+    const light = new Carry(); light.lift(prey({ massMg: 3 }), rich);
+    const heavy = new Carry(); heavy.lift(prey({ massMg: 18 }), rich);
+    expect(light.speedFactor).toBeGreaterThan(heavy.speedFactor);
+    expect(new Carry().speedFactor).toBe(1);
   });
 
   it('takes the run away under a beetle', () => {

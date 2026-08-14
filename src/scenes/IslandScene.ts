@@ -143,6 +143,7 @@ import { FIRE_ANT, type AbilityId, type AntKind } from './antKinds';
 import { Combat, necrosis } from './islandCombat';
 import { Beetle } from './Beetle';
 import { Carry, emptyStores, withinNest } from './islandCarry';
+import { PROP_SCATTER, PROP_SPECS, Prop } from './islandProps';
 import {
   bite, biteCentre, biteRay, boreAim, updateAimDebug, type DigHost,
 } from './islandDig';
@@ -377,6 +378,28 @@ export class IslandScene {
     const beetle = new Beetle('beetle', x, this.walkGroundAt(x, z), z);
     this.scene.add(beetle.root);
     this.quarry.push(beetle);
+    this.spawnProps();
+  }
+
+  /**
+   * THE LOOSE THINGS, scattered where walking finds them.
+   *
+   * Seeded off her founding spot rather than at fixed world coordinates,
+   * because where she starts is where the island decided to put her and a
+   * hardcoded pebble would end up inside a tree.
+   */
+  private spawnProps(): void {
+    if (this.props.length > 0) return;
+    for (const { key, dxMm, dzMm } of PROP_SCATTER) {
+      const spec = PROP_SPECS[key];
+      if (!spec) continue;
+      const px = this.at.x + dxMm / MM;
+      const pz = this.at.z + dzMm / MM;
+      const prop = new Prop(key, spec, px, this.walkGroundAt(px, pz), pz);
+      prop.tick((gx, gz) => this.walkGroundAt(gx, gz));
+      this.scene.add(prop.root);
+      this.props.push(prop);
+    }
   }
 
   /**
@@ -422,6 +445,24 @@ export class IslandScene {
         else if (no === 'already-carrying') this.toastCombat('JAWS FULL');
         else this.toastCombat('CARRYING');
       }
+    } else if (id === 'interact') {
+      /*
+       * THE SAME JAWS, A DIFFERENT SUBJECT. CARRY reaches for prey and
+       * feeds the colony; INTERACT reaches for the loose things, which are
+       * worth nothing to eat. They share one `Carry` because she has one
+       * pair of mandibles and cannot hold a beetle and a pebble at once —
+       * which is the physical truth rather than a restriction.
+       */
+      if (this.carry.carrying) { this.carry.drop(); this.toastCombat('PUT DOWN'); }
+      else {
+        const prop = this.propInReach();
+        if (!prop) { this.toastCombat('NOTHING IN REACH'); return; }
+        const no = this.carry.lift(prop, (c) => this.vitals.spend(c));
+        if (no === 'too-heavy') this.toastCombat('TOO HEAVY TO SHIFT');
+        else if (no === 'too-tired') this.toastCombat('TOO TIRED TO LIFT');
+        else if (no) this.toastCombat('JAWS FULL');
+        else this.toastCombat(this.carry.mode === 'drag' ? 'DRAGGING' : 'CARRYING');
+      }
     }
     this.refreshCombatChips();
   }
@@ -447,6 +488,10 @@ export class IslandScene {
     this.carryBtn?.classList.toggle('tm-art-drop', loaded);
     this.carryBtn?.classList.toggle('is-grip', loaded);
     this.carryBtn?.setAttribute('aria-label', loaded ? 'Drop' : 'Carry');
+    /* INTERACT lights while what she is holding is one of ITS things, so
+     * the two plates never both claim the same load. */
+    const holdingProp = this.props.some((p) => p === this.carry.held);
+    this.interactBtn?.classList.toggle('is-grip', holdingProp);
   }
 
   /**
@@ -530,17 +575,19 @@ export class IslandScene {
   private carryTick(dt: number): void {
     this.carry.tick(dt, (cost) => this.vitals.spend(cost));
 
-    const load = this.carry.held as Beetle | null;
+    const load = this.carry.held;
     for (const q of this.quarry) q.carried = q === load;
+    for (const p of this.props) {
+      p.carried = p === load;
+      p.tick((x, z) => this.walkGroundAt(x, z));
+    }
     if (load) {
       /* At her jaws, which are at her nose. Not parented to her rig — the
        * body is rebuilt by the walker every frame and a child of it would
        * inherit the leg solve's twitch. */
-      load.at.set(
-        this.at.x + this.fwd.x * JAW_PAST_NOSE,
-        this.at.y,
-        this.at.z + this.fwd.z * JAW_PAST_NOSE,
-      );
+      load.at.x = this.at.x + this.fwd.x * JAW_PAST_NOSE;
+      load.at.y = this.at.y;
+      load.at.z = this.at.z + this.fwd.z * JAW_PAST_NOSE;
     }
 
     /*
@@ -550,6 +597,10 @@ export class IslandScene {
      * not a stub: a claustral queen has no colony economy to feed.
      */
     if (!this.carry.carrying || this.colony.length === 0) return;
+    /* A LEAF IS NOT FOOD. Only things worth something to the larvae are
+     * handed over — otherwise walking home with a pebble would silently
+     * eat it, and the player would learn not to carry anything indoors. */
+    if ((this.carry.held?.proteinMg ?? 0) <= 0) return;
     if (!withinNest(this.at, this.workerAnchor, CARRY_DELIVER_REACH)) return;
     const gained = this.carry.deliver(this.stores);
     if (gained > 0) this.toastCombat(`FOOD +${Math.round(gained)}`);
@@ -565,6 +616,27 @@ export class IslandScene {
    * IT FIRST — a reach test that silently skipped them would report
    * NOTHING TO CARRY while a beetle stood on her foot.
    */
+  /**
+   * The nearest loose thing. Like `cargoInReach` it offers up what she
+   * cannot lift, so `Carry` can refuse it and the HUD can say TOO HEAVY TO
+   * SHIFT — the stone exists precisely to be refused, and a reach test that
+   * skipped it would report an empty patch of ground.
+   */
+  private propInReach(): Prop | null {
+    let best: Prop | null = null;
+    let bestGap = Infinity;
+    for (const p of this.props) {
+      if (this.carry.held === p) continue;
+      const gap = Math.hypot(
+        p.at.x - this.at.x, p.at.y - this.at.y, p.at.z - this.at.z,
+      ) - p.radius;
+      if (gap > this.carry.reach || gap >= bestGap) continue;
+      best = p;
+      bestGap = gap;
+    }
+    return best;
+  }
+
   private cargoInReach(): Beetle | null {
     let best: Beetle | null = null;
     let bestGap = Infinity;
@@ -612,14 +684,19 @@ export class IslandScene {
      * thumb that is not touching it.
      */
     /*
-     * A LOAD TAKES THE RUN, and it is a veto for the same reason stamina
-     * is: the latch stays where the player put it and comes back the
-     * moment she puts the beetle down.
+     * A LOAD TAKES THE RUN AND THEN SOME. The sprint is vetoed outright
+     * while she is DRAGGING — there is no gait in which hauling something
+     * along the ground is a sprint — and on top of that every pace is
+     * scaled by `carryVerdict`'s taper, so a crumb costs her almost nothing
+     * and a beetle costs her most of her stride. Continuous rather than a
+     * step, because a load that only mattered at one threshold would be a
+     * number on the HUD rather than something felt.
      */
+    const laden = this.carry.speedFactor;
     if (this.input.sprint && this.vitals.canRun && !this.carry.tooLadenToRun) {
-      return SPRINT;
+      return SPRINT * laden;
     }
-    return this.input.crawl ? CRAWL : 1;
+    return (this.input.crawl ? CRAWL : 1) * laden;
   }
 
   /*
@@ -1209,8 +1286,12 @@ export class IslandScene {
   /** The jaws and the sting. See `islandCombat.ts`. */
   readonly combat = new Combat();
 
-  /** What is in her jaws on the way home. See `islandCarry.ts`. */
-  readonly carry = new Carry();
+  /** What is in her jaws. Off the KIND's strength row — see `antKinds.ts`
+   * and `STRENGTH` in `mandibleReach.ts`. */
+  readonly carry = new Carry(FIRE_ANT.strength);
+
+  /** The loose things INTERACT is for. See `islandProps.ts`. */
+  readonly props: Prop[] = [];
 
   /**
    * THE COLONY'S LARDER, and the first thing on this island that is the
@@ -1229,6 +1310,8 @@ export class IslandScene {
   biteBtn: HTMLButtonElement | null = null;
 
   carryBtn: HTMLButtonElement | null = null;
+
+  interactBtn: HTMLButtonElement | null = null;
 
   stingBtn: HTMLButtonElement | null = null;
 

@@ -27,6 +27,7 @@
  * PURE LOGIC, no THREE. The scene measures distances and moves meshes; this
  * file knows what is held, what it weighs, and what it is worth.
  */
+import { STRENGTH, carryVerdict, type AntStrength } from './mandibleReach';
 
 /** Anything she can pick up and take home. */
 export interface Portable {
@@ -49,47 +50,41 @@ export interface Portable {
 }
 
 export interface CarryTuning {
-  /** The most she can have in her jaws at once, milligrams. */
-  capacityMg: number;
   /** Stamina to take a load up off the ground. */
   liftCost: number;
   /** Stamina a second at FULL load; less costs proportionally less. */
   ladenDrain: number;
   /** How far her jaws reach for something on the ground, world units. */
   reach: number;
-  /** Past this share of capacity she is too laden to run. */
-  sprintCeiling: number;
 }
 
 /**
- * THE NUMBERS, and which of them are measured.
+ * HOW MUCH SHE CAN SHIFT IS NOT HERE. It is `STRENGTH` in `mandibleReach`,
+ * which the sandbox has used since before this file existed — three rows,
+ * a carry limit and a drag limit each, and `carryVerdict` to say which of
+ * carry / drag / immobile a given weight falls into and what it costs in
+ * pace.
  *
- * MEASURED: a newly-mated Solenopsis invicta queen is on the order of ten
- * to fifteen milligrams, and she burns a third of that during claustral
- * founding. Fourteen is a value chosen inside that range, not a figure
- * read off a paper.
+ * THIS FILE USED TO HAVE ITS OWN. A single `capacityMg` on the queen, a
+ * binary lift-or-refuse and a sprint veto — a second model of the same idea,
+ * poorer than the one already in the repo, and queen-shaped in a game whose
+ * next step is playing a worker and then a major. Deferring to `STRENGTH`
+ * is what makes that handoff a table row instead of a rewrite.
  *
- * DESIGNED, AND SAYING SO: `capacityMg` is five times her body mass. Ants
- * carrying several times their own weight in their mandibles is a real and
- * general observation, but the multiples quoted for it vary wildly by
- * species and by whether the load is carried or dragged, and I could not
- * find a figure for Solenopsis I would be willing to encode. So five is
- * GAME TUNING wearing a research finding's clothes, and it is tuned to one
- * thing: a beetle should be most of a load but not all of it, so the meter
- * has somewhere to go and a second item is a real decision.
+ * What stays here is what is genuinely the island's: what a lift costs her
+ * in stamina, what holding on costs per second, and how far her jaws reach.
  *
- * `sprintCeiling` at 0.55 makes a beetle heavy enough to cost her the run.
- * That is the point of a load — it should change how she is played, not
- * just add a number to the corner of the screen.
+ * MEASURED, and kept because the strength table's comment reasons from it:
+ * a newly-mated Solenopsis invicta queen is on the order of ten to fifteen
+ * milligrams and burns a third of it founding. Fourteen is chosen inside
+ * that range, not read off a paper.
  */
 export const QUEEN_BODY_MG = 14;
 
 export const FIRE_ANT_CARRY: CarryTuning = {
-  capacityMg: QUEEN_BODY_MG * 5,
   liftCost: 6,
   ladenDrain: 2.2,
   reach: 2.4,
-  sprintCeiling: 0.55,
 };
 
 /** What the colony has in store. Grows when she brings something home. */
@@ -119,27 +114,53 @@ export class Carry {
 
   private readonly events: CarryEvent[] = [];
 
-  constructor(private tuning: CarryTuning = FIRE_ANT_CARRY) {}
+  constructor(
+    /** Which row of `STRENGTH` she lifts by — off her kind. */
+    public strength: AntStrength = 'queen',
+    private tuning: CarryTuning = FIRE_ANT_CARRY,
+  ) {}
 
   retune(tuning: CarryTuning): void { this.tuning = tuning; }
 
   get reach(): number { return this.tuning.reach; }
 
-  /** 0 empty, 1 at capacity. What the carry meter draws. */
+  /**
+   * 0 empty, 1 at the heaviest thing she could move at all. Measured
+   * against the DRAG limit rather than the carry one, so the meter has a
+   * top: a bar that pegged the moment she stopped carrying and started
+   * dragging would report the same thing for a pebble and for a beetle.
+   */
   get load(): number {
     if (!this.held) return 0;
-    return Math.min(1, this.held.massMg / this.tuning.capacityMg);
+    return Math.min(1, this.held.massMg / STRENGTH[this.strength].dragMg);
+  }
+
+  /** Carrying it, dragging it, or empty-jawed. */
+  get mode(): 'carry' | 'drag' | null {
+    if (!this.held) return null;
+    const v = carryVerdict(this.held.massMg, this.strength);
+    return v.mode === 'immobile' ? null : v.mode;
+  }
+
+  /**
+   * What the load does to her pace, 1 when her jaws are empty. Continuous
+   * rather than a veto: `carryVerdict` tapers a carry from full stride with
+   * a crumb down to a trudge at the limit, and a drag is slower still.
+   */
+  get speedFactor(): number {
+    if (!this.held) return 1;
+    return carryVerdict(this.held.massMg, this.strength).speedFactor;
   }
 
   get carrying(): boolean { return this.held !== null; }
 
   /**
-   * Too laden to run. The run is VETOED rather than the latch moved —
-   * the same language `islandVitals` uses for winded, and for the same
-   * reason: a latch that moves under the player reads as a control that
-   * fought them, where a refusal reads as a load that is heavy.
+   * A DRAG IS NOT A RUN. She has it on the ground and is hauling; there is
+   * no gait in which that is a sprint. Still a veto rather than moving the
+   * latch, the language `islandVitals` uses for winded: a latch that moves
+   * under the player reads as a control that fought them.
    */
-  get tooLadenToRun(): boolean { return this.load > this.tuning.sprintCeiling; }
+  get tooLadenToRun(): boolean { return this.mode === 'drag'; }
 
   drain(): CarryEvent[] { return this.events.splice(0, this.events.length); }
 
@@ -150,7 +171,10 @@ export class Carry {
   lift(item: Portable, spend: (cost: number) => boolean): CarryRefusal {
     if (this.held) return 'already-carrying';
     if (item.alive) return 'still-alive';
-    if (item.massMg > this.tuning.capacityMg) return 'too-heavy';
+    /* Not "heavier than a number" — heavier than she can shift AT ALL,
+     * which is the third verdict and the one that will start mattering the
+     * day a nanitic is the one asking. */
+    if (carryVerdict(item.massMg, this.strength).mode === 'immobile') return 'too-heavy';
     if (!spend(this.tuning.liftCost)) return 'too-tired';
     this.held = item;
     this.events.push({ kind: 'lifted', item: item.id });
@@ -193,11 +217,16 @@ export class Carry {
     if (!spend(this.tuning.ladenDrain * this.load * dt)) this.drop('fumbled');
   }
 
-  report(): { carrying: string; load: number; laden: boolean } {
+  report(): {
+    carrying: string; load: number; laden: boolean;
+    mode: string; pace: number;
+  } {
     return {
       carrying: this.held?.id ?? '',
       load: +this.load.toFixed(3),
       laden: this.tooLadenToRun,
+      mode: this.mode ?? '',
+      pace: +this.speedFactor.toFixed(3),
     };
   }
 }
