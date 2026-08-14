@@ -116,21 +116,48 @@ export class Beetle implements Quarry, Portable {
 
   /**
    * How far the rendered root must rise so none of its geometry crosses a
-   * flat y=0 plane at the supplied z-rotations. This is constructor-only;
-   * no Box3 work happens in the frame loop.
+   * flat y=0 plane at the supplied z-rotations. Constructor-only; no bounds
+   * work happens in the frame loop.
+   *
+   * VERTICES, NOT `Box3.setFromObject`. That was the first spelling of this
+   * and it is wrong in a way that only shows up once something is TILTED:
+   * it expands by each geometry's axis-aligned box CORNERS, so a rotated
+   * sphere is measured as a rotated CUBE. Standing, where nothing is
+   * turned, the two agree exactly. Fallen at 153° they do not — measured,
+   * the box says 4.238 mm where the beetle's lowest actual vertex is at
+   * 3.425 mm, and the difference is not rounding: it is 0.81 mm of lift on
+   * a beetle 2.6 mm tall, which trades a carcass sunk in the dirt for one
+   * hovering over it. The struggle pose over-lifts by 0.224 mm for the same
+   * reason.
+   *
+   * Reading the position attribute costs a few hundred points once per
+   * beetle per pose, which is nothing, and it is exact.
    */
   private liftFor(zAngles: readonly number[]): number {
     const savedPosition = this.root.position.clone();
     const savedRotation = this.root.rotation.clone();
-    const bounds = new THREE.Box3();
+    const v = new THREE.Vector3();
     let lift = 0;
 
     this.root.position.set(0, 0, 0);
     for (const z of zAngles) {
+      /* Z ONLY, and `heading` is deliberately absent: the walk sets
+       * `rotation.set(0, heading, wobble)`, and a turn about the vertical
+       * axis cannot change any vertex's height. Euler order is XYZ, so the
+       * z-tilt is applied first and the heading after it — which is why
+       * this holds rather than merely being nearly true. */
       this.root.rotation.set(0, 0, z);
       this.root.updateMatrixWorld(true);
-      bounds.setFromObject(this.root);
-      lift = Math.max(lift, -bounds.min.y);
+      this.root.traverse((n) => {
+        const mesh = n as THREE.Mesh;
+        const pos = mesh.geometry?.attributes?.position;
+        if (!pos) return;
+        for (let i = 0; i < pos.count; i += 1) {
+          v.fromBufferAttribute(pos as THREE.BufferAttribute, i)
+            .applyMatrix4(mesh.matrixWorld);
+          if (-v.y > lift) lift = -v.y;
+        }
+      });
     }
 
     this.root.position.copy(savedPosition);

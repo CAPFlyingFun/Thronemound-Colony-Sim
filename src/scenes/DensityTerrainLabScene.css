@@ -2277,7 +2277,28 @@
  * label would be a bar you cannot read at exactly the moment it is full. */
 .tm-meter-label {
   position: absolute;
-  inset: 0;
+  /*
+   * CENTRED ON THE CHANNEL, NOT ON THE BOX — and that difference is the
+   * whole of the "the fill looks offset" report.
+   *
+   * `inset: 0` centres in the 165px METER, whose left 30.5px is the
+   * medallion. Measured, that put CARRY's midpoint at 82.5 where the
+   * channel's is 96.25: 13.75px left of where it belongs, with 35.3px of
+   * dark to its left and 62.8px to its right. Nearly twice the room on one
+   * side reads as the whole readout sitting wrong, which is what a phone
+   * sees — and it is why chasing the FILL's anchor found nothing. That
+   * anchor is exact: measured at ten levels from 1% to 100%, the concave
+   * left edge does not move a single pixel off 31.0 and only the round cap
+   * advances. The label was the thing that was off.
+   *
+   * These are the same two numbers `.tm-meter-level` uses — the channel's
+   * left edge and its width — so the label and the bar are now centred on
+   * the same span by construction.
+   */
+  top: 0;
+  bottom: 0;
+  left: 30.5px;
+  width: 131.5px;
   display: flex;
   align-items: center;
   justify-content: center;
