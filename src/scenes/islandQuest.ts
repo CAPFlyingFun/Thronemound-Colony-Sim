@@ -56,6 +56,10 @@ export interface QuestHost {
   workerAnchor: THREE.Vector3;
   readonly vitals: Vitals;
   readonly vitalBars: VitalBar[];
+  /** The numbers printed over the live bars, and the last text written. */
+  readonly vitalNums: { kind: VitalKind; el: HTMLElement; shown: string }[];
+  headCountEl: HTMLElement | null;
+  headCountShown: number;
   /** What is in her jaws, for the carry meter. See `islandCarry.ts`. */
   readonly carry: Carry;
   /** The colony's larder, for the FOOD cell. */
@@ -119,6 +123,21 @@ export function buildVitalsHud(host: QuestHost, ): void {
   portrait.className = 'tm-portrait';
   portrait.setAttribute('role', 'img');
   portrait.setAttribute('aria-label', 'The Queen');
+  /*
+   * THE BADGE, and what it is allowed to say.
+   *
+   * The reference draws a gold disc on the portrait carrying a level. There
+   * is no XP and no levelling in this game, so a level would be a number I
+   * made up sitting on the most-looked-at object on screen. What IS true
+   * and worth watching is the colony's HEAD COUNT — the queen, plus every
+   * worker that has eclosed. It starts at 1 and it is the whole point of
+   * the founding.
+   */
+  const badge = document.createElement('span');
+  badge.className = 'tm-portrait-badge';
+  badge.title = 'Colony — the queen and every worker out';
+  portrait.appendChild(badge);
+  host.headCountEl = badge;
   panel.appendChild(portrait);
 
   const bars = document.createElement('div');
@@ -145,6 +164,18 @@ export function buildVitalsHud(host: QuestHost, ): void {
     const fill = document.createElement('div');
     fill.className = 'tm-bar-fill';
     el.appendChild(fill);
+    /*
+     * THE NUMBERS, over the bar, as the reference draws them. A bar says
+     * "about two thirds"; a player deciding whether to start a fight wants
+     * "862 / 1,050". Only on a bar with a system behind it — a readout on a
+     * hatched frame would be a number nobody could act on.
+     */
+    if (live) {
+      const num = document.createElement('span');
+      num.className = 'tm-bar-num';
+      el.appendChild(num);
+      host.vitalNums.push({ kind, el: num, shown: '' });
+    }
     row.append(icon, el);
     if (live) host.vitalBars.push({ kind, fill, shown: -1 });
     return row;
@@ -391,6 +422,27 @@ export function renderQuest(host: QuestHost): void {
       b.fill.parentElement?.classList.toggle('is-dire', stage === 3);
     }
   }
+  /* The readouts over the bars. Same rule as the widths — written only when
+   * the ROUNDED value moves, because this runs every frame and a
+   * `textContent` assignment is a layout. */
+  for (const n of host.vitalNums) {
+    const { now, max } = host.vitals.absOf(n.kind);
+    const text = n.kind === 'health' || n.kind === 'stamina'
+      ? `${now} / ${max}` : String(now);
+    if (text === n.shown) continue;
+    n.shown = text;
+    n.el.textContent = text;
+  }
+
+  /* The colony's head count on the queen's badge — her, plus everyone out. */
+  if (host.headCountEl) {
+    const heads = 1 + host.colony.reduce((k, c) => k + (c.ready ? 1 : 0), 0);
+    if (heads !== host.headCountShown) {
+      host.headCountShown = heads;
+      host.headCountEl.textContent = String(heads);
+    }
+  }
+
   /* Written only when it CHANGES. It is one number on a HUD that runs
    * every frame, and a textContent assignment per frame is a layout the
    * browser did not need to do. */

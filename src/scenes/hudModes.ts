@@ -81,7 +81,11 @@ export const HUD_LAYOUTS: Record<HudMode, HudLayout> = {
   },
   combat: {
     primary: 'bite',
-    secondary: ['sting', 'dodge', 'view', 'pace'],
+    /* NO VIEW. Nobody switches camera mode mid-fight, and it was the sixth
+     * plate — measured, six wrapped the cluster to a second row and the far
+     * end of the arc landed on the quest text. A control that is never used
+     * here was costing the one thing this HUD is short of. */
+    secondary: ['sting', 'dodge', 'pace'],
     contextual: ['carry'],
   },
   carry: {

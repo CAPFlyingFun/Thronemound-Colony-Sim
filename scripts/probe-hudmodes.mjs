@@ -90,6 +90,24 @@ for (const size of SIZES) {
 
     const out = {};
 
+    /*
+     * DOES THE CLUSTER FIT, IN THIS MODE?
+     *
+     * `probe:hud` measures the corners — but it only ever measures the mode
+     * the island happens to boot into, which is EXPLORE. A mode with one
+     * more plate wraps to a second row, and the far end of the arc lands on
+     * the quest card. That is exactly what happened to COMBAT, with six
+     * plates, and neither probe saw it: the layout one checks was never in
+     * the mode that broke.
+     */
+    const clash = () => {
+      const c = document.querySelector('.tm-cluster')?.getBoundingClientRect();
+      const q = document.querySelector('.tm-quest')?.getBoundingClientRect();
+      if (!c || !q) return 0;
+      const x = Math.min(c.right, q.right) - Math.max(c.left, q.left);
+      const y = Math.min(c.bottom, q.bottom) - Math.max(c.top, q.top);
+      return x > 0.5 && y > 0.5 ? Math.round(y) : 0;
+    };
     /* EXPLORE — nothing armed, empty jaws, and the beetle walked away. */
     const parked = s.quarry.map((q) => q.at.clone());
     for (const q of s.quarry) q.at.set(9e3, 0, 9e3);
@@ -97,6 +115,7 @@ for (const size of SIZES) {
     if (s.carry.carrying) s.carry.drop();
     settle();
     out.explore = up();
+    out.exploreFit = { clash: clash() };
 
     /* CARRY — put something in her jaws through the real verb. */
     const seed = s.props.find((q) => q.id === 'seed');
@@ -106,6 +125,7 @@ for (const size of SIZES) {
     settle();
     out.carrying = s.carry.carrying;
     out.carry = up();
+    out.carryFit = { clash: clash() };
     s.useAbility('interact');
     settle();
 
@@ -117,6 +137,7 @@ for (const size of SIZES) {
     }
     settle();
     out.combat = up();
+    out.combatFit = { clash: clash() };
     out.combatMode = s.hudMode;
 
     /* DIG — and send the beetle away again so the fight does not win. */
@@ -126,6 +147,7 @@ for (const size of SIZES) {
       .dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
     settle();
     out.dig = up();
+    out.digFit = { clash: clash() };
     out.digMode = s.hudMode;
     document.querySelector('.tm-art-dig')
       .dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
@@ -180,6 +202,18 @@ for (const size of SIZES) {
   say(!seen.explore.includes('sting') && !seen.explore.includes('bite'),
     'exploring does not offer a sting');
   say(!seen.dig.includes('bite'), 'digging does not offer a bite');
+  /* THE ONE probe:hud STRUCTURALLY CANNOT SEE — it measures whichever mode
+   * the island booted into, and that is always EXPLORE. */
+  for (const mode of ['explore', 'carry', 'combat', 'dig']) {
+    const fit = seen[`${mode}Fit`];
+    /* The overlap alone. A first version also reported a row count, which
+     * was wrong by construction: the arc gives every plate a different
+     * bottom edge, so bucketing by it counted five plates as four rows. A
+     * misleading number beside a true one is worse than no number. */
+    say(fit.clash === 0,
+      `${mode}'s plates clear the objective card`
+      + (fit.clash ? ` — OVERLAP ${fit.clash}px` : ''));
+  }
   say(seen.tiltInDrawer === true, 'the posture rigs are reachable in the DEV drawer');
   say(seen.posed === 'pose', `arming TILT poses her (got ${seen.posed})`);
   say(seen.unposed === 'explore', `and TILT disarms it again (got ${seen.unposed})`);

@@ -147,7 +147,7 @@ import {
 } from './islandCamera';
 import { buildControls, updateStatus, type HudHost } from './islandHud';
 import {
-  depthMm, questTick, type QuestHost, type VitalBar,
+  depthMm, questTick, type QuestHost, type VitalBar, type VitalKind,
 } from './islandQuest';
 import { Vitals } from './islandVitals';
 import { FIRE_ANT, type AbilityId, type AntKind } from './antKinds';
@@ -1478,6 +1478,14 @@ export class IslandScene {
 
   /** The bars `renderQuest` keeps current. See `islandQuest.ts`. */
   private readonly vitalBars: VitalBar[] = [];
+
+  /** The numbers printed over those bars. */
+  private readonly vitalNums: { kind: VitalKind; el: HTMLElement; shown: string }[] = [];
+
+  /** The colony head-count badge on the queen's portrait. */
+  private headCountEl: HTMLElement | null = null;
+
+  private headCountShown = -1;
 
   /** Last seen, so the pace plate is only redrawn when it has to be. */
   private canRunWas = true;

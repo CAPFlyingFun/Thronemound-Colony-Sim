@@ -244,6 +244,21 @@ export class Vitals {
     return max <= 0 ? 0 : Math.max(0, Math.min(1, this[what] / max));
   }
 
+  /**
+   * The absolute pair — what she has and what she can hold.
+   *
+   * `fractionOf` is what a BAR needs; a readout needs the numbers. The
+   * approved HUD reference prints them over the bar, and printing a
+   * percentage instead would be inventing a unit the game does not use.
+   */
+  absOf(what: 'health' | 'stamina' | 'energy' | 'water'): { now: number; max: number } {
+    const t = this.tuning;
+    const max = what === 'health' ? t.healthMax
+      : what === 'stamina' ? t.staminaMax
+        : what === 'energy' ? t.energyMax : t.waterMax;
+    return { now: Math.round(this[what]), max: Math.round(max) };
+  }
+
   get thirst(): NeedStage { return stageOf(this.fractionOf('water')); }
 
   get hunger(): NeedStage { return stageOf(this.fractionOf('energy')); }

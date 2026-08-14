@@ -3258,3 +3258,121 @@
 }
 
 .tm-toast.is-live { opacity: 1; }
+
+/*
+ * THE FLAT-GLYPH PASS LIVED HERE AND IS GONE, on the call that the gold
+ * plate art looks better — which it does. Recorded rather than silently
+ * dropped, because the reasoning behind it still stands and the next person
+ * to look at a Path of Titans screenshot will have the same idea:
+ *
+ * Their controls are one hairline, a translucent ground and a thin
+ * monochrome glyph, which is why eight of them disappear where five of ours
+ * dominated. Trading the medallions for masked SVG glyphs made the HUD much
+ * quieter and cost the game its face — the gold ant-art IS the identity, and
+ * a generic line-icon set is not an upgrade over art somebody drew.
+ *
+ * WHAT WAS WORTH KEEPING came with the arrangement instead: the cards are
+ * gone from behind the readouts, the objective is bare text on the world,
+ * and the controls moved to the edge. Weight came off the LAYOUT rather than
+ * off the art.
+ */
+
+/*
+ * ============================================================
+ * THE EDGE DOCK — the arrangement, not just the paint
+ * ============================================================
+ *
+ * The weight pass changed what the controls are MADE of and left them where
+ * they were: a row along the bottom. Reported, correctly, as "same old
+ * layout". This is the other half.
+ *
+ * SHORT COLUMNS HUGGING THE RIGHT EDGE, which is what the reference
+ * screenshots actually do — Path of Titans runs two stubby columns up the
+ * right side rather than a row across the bottom. It buys the thing this HUD
+ * is always short of: the whole lower-centre, where a right thumb naturally
+ * drags, stops being furniture.
+ *
+ * `column-reverse` puts the first item at the BOTTOM, and `wrap-reverse`
+ * sends new columns LEFT — so the hero lands in the corner a thumb rests on
+ * and everything else stacks up and inboard from it. The same `order` values
+ * that drove the fan drive this, unchanged.
+ *
+ * THE ARC GOES. It was a thumb-sweep for a horizontal row; in a column it is
+ * just a stagger, and a column that zigzags reads as broken rather than
+ * ergonomic.
+ */
+.tm-cluster {
+  flex-direction: column-reverse;
+  flex-wrap: wrap-reverse;
+  align-items: flex-end;
+  justify-content: flex-start;
+  gap: 10px;
+  max-width: none;
+  /*
+   * THE CEILING IS WHAT FORCES THE SECOND COLUMN, and it is measured against
+   * the objective text above it rather than chosen: 170 is the quest's
+   * bottom plus air at every size tested. At 430 tall that gives 224 — a
+   * hero and two more — and at 320 it gives 150, which is a hero and one.
+   */
+  max-height: min(224px, calc(100vh - 170px));
+}
+
+.tm-cluster > * { margin-bottom: 0; }
+
+/* The hero comes down from 100: a column has less room than a row, and 84
+ * against 56 is still half again the size of anything beside it. */
+.tm-art-dig { width: 84px; height: 84px; }
+.tm-cluster > .tm-art { width: 56px; height: 56px; }
+.tm-cluster > .tm-art-dig { width: 84px; height: 84px; }
+
+/*
+ * THE NUMBERS OVER THE BARS. The reference prints them; a bar alone says
+ * "about two thirds", and a player deciding whether to start a fight wants
+ * the figure. Right-aligned inside the bar, tabular so they do not jitter as
+ * they count.
+ */
+.tm-bar { position: relative; }
+
+.tm-bar-num {
+  position: absolute;
+  /* Clear of the frame's round right cap, which is 6px of gold and was
+   * eating the last digit. */
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: rgba(255, 250, 238, 0.92);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+}
+
+.tm-bar-health .tm-bar-num, .tm-bar-stamina .tm-bar-num { font-size: 9.5px; }
+.tm-bar-energy .tm-bar-num, .tm-bar-water .tm-bar-num { font-size: 8.5px; }
+
+/*
+ * THE BADGE ON THE PORTRAIT. The reference draws a gold disc carrying a
+ * level; there is no levelling in this game, so it carries the colony's head
+ * count instead — the queen plus every worker out. See `islandQuest.ts` for
+ * why that number and not an invented one.
+ */
+.tm-portrait { position: relative; }
+
+.tm-portrait-badge {
+  position: absolute;
+  left: 50%;
+  bottom: -5px;
+  transform: translateX(-50%);
+  min-width: 19px;
+  height: 19px;
+  padding: 0 4px;
+  border-radius: 10px;
+  background: #14100a;
+  border: 1.5px solid #e8b44a;
+  color: #f2dCA5;
+  font: 700 10px/16px ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
+}
