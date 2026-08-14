@@ -2362,22 +2362,76 @@
 }
 
 /*
- * THE STATS CHIP TAKES THE TOP-CENTRE the quest just left.
+ * THE STATS CHIP TAKES THE STRIP THE VITALS AND THE UTILITY PLATES LEAVE.
  *
- * Stacking it under the quest instead was the obvious move and it does not
- * survive a short phone: vitals + colony + quest + chip is 233px of column,
- * and the parked stick's top edge on a 375px-tall landscape screen is 209.
- * The column would have run into it. Top-centre is empty now, the chip is
- * 137 wide, and it clears the vitals at 304 and the utility plates at 793
- * on any screen wide enough to be in landscape at all.
+ * It took the top-CENTRE when the quest vacated it, and half of that
+ * reasoning still stands: stacking the chip under the quest was the obvious
+ * move and it does not survive a short phone — vitals + colony + quest +
+ * chip is 233px of column, and the parked stick's top edge on a 375px-tall
+ * landscape screen is 209, so the column would have run into the stick.
+ *
+ * What did NOT stand was the clearance. "Clears the vitals at 304 and the
+ * utility plates at 793 on any screen wide enough to be in landscape at
+ * all" is arithmetic against the 932 DESIGN CANVAS, and a centred box walks
+ * left as the screen narrows while the vitals — a fixed 316px panel — stay
+ * exactly where they are. MEASURED at v0.1.28, chip x against vitals x:
+ *
+ *     932 x 430   chip 397..535   vitals 12..328   clear
+ *     667 x 375   chip 265..402   vitals 12..328   64px INTO THE VITALS
+ *     568 x 320   chip 215..353   vitals 12..328   113px INTO THE VITALS
+ *
+ * — the same failure the quest was moved out of top-centre to escape,
+ * inherited by the thing that took its place. Top-centre is not a place on
+ * this HUD; it is a coincidence of one canvas width.
+ *
+ * So the chip is anchored to the STRIP its two neighbours leave, which is a
+ * thing that exists at every width, rather than to the middle of a screen
+ * whose width the rule cannot see:
+ *
+ *     left    the vitals' right edge, + 8 of air. The panel is 62 portrait
+ *             + 9 gap + 229 bars + 16 padding = 316 wide, off the same left
+ *             inset the chip uses — hence 324. It is hardcoded because CSS
+ *             cannot ask another element how wide it is; if the bars are
+ *             ever resized, this number is re-derived from that sum.
+ *     width   capped at whatever is left before the utility plates: two
+ *             56px plates and a 9px gap is 121, + 8 of air = 129, off the
+ *             plates' own right inset — which is max(18px, …) and not the
+ *             chip's max(12px, …). Measured before this was written: with
+ *             12 in there the chip came to 427 and the plates begin at 429,
+ *             so the "8px of air" was 2.
+ *
+ * No breakpoint. A media query would have to name a width at which the chip
+ * jumps somewhere else, and there is nowhere else to jump to on a 568-wide
+ * screen — the corners are the vitals, the plates, the parked stick and the
+ * action cluster, all four measured. The cap degrades continuously instead
+ * — the strip runs vitals-right 328 to plates-left, so it is 465px at 932
+ * and 200px at 667 and the chip keeps its whole 137 on one line and does
+ * not move at all between those two; at 568 the strip is 101px, the cap
+ * takes 85 of it, and the chip wraps to two lines rather than sliding over
+ * the health bars. That wrap is why the line-height comes down to 1.4 —
+ * two lines at the injected 1.6 reach 58px and touch the toast's row,
+ * which starts at +46. At 1.4 the wrapped chip ends at 54.
+ *
+ * The floor on the cap is deliberate: under ~567px wide the strip stops
+ * holding even "v0.1.28", and a chip squeezed to a sliver is a version
+ * number nobody can read — which is the one job this chip cannot fail at,
+ * because it is how a screenshot gets dated. It leans onto the plates
+ * instead, and stays legible.
  */
 .tm-vitals-on .tm-stats-chip {
   /* Scoped to the island — the density lab wears the same stylesheet, has
    * no vitals to make room for, and must keep its corner. Two class names
    * deep so it beats the stats panel's own injected rule, which lands
    * after this file. */
-  left: 50%;
-  transform: translateX(-50%);
+  left: calc(max(12px, env(safe-area-inset-left)) + 324px);
+  max-width: max(
+    84px,
+    calc(100vw - max(12px, env(safe-area-inset-left))
+      - max(18px, env(safe-area-inset-right)) - 453px)
+  );
+  /* Was translateX(-50%) for the centring this rule no longer does. */
+  transform: none;
+  line-height: 1.4;
 }
 
 /* Its expanded body stays in the column, below the quest. It only exists
