@@ -156,15 +156,24 @@ if (host) {
       import('./ui/MainMenu'),
       import('./scenes/IslandScene'),
       import('./scenes/LoadingOverlay'),
-    ]).then(([{ MainMenu }, { IslandScene }, { LoadingOverlay, QuietCurtain }]) => {
+      import('./ui/PauseMenu'),
+    ]).then(([
+      { MainMenu }, { IslandScene }, { LoadingOverlay, QuietCurtain }, { PauseMenu },
+    ]) => {
       /*
-       * THE MENU IS ALSO THE PAUSE MENU, which is what makes SAVE worth
-       * having on it. Escape brings it back over the running island, and
-       * because the island is never torn down, going in and out of it costs
-       * nothing at all.
+       * TWO MENUS, ONE ISLAND. The front menu answers "what would you like
+       * to do?"; the pause menu answers "you are in the middle of
+       * something, what now?" — and the front menu's START is a loaded gun
+       * in the second question, which is why they are separate components
+       * rather than two faces of one. What they SHARE is the save, and both
+       * of them drive it through the same `IslandScene` methods.
+       *
+       * Because the island is never torn down, going in and out of either
+       * costs nothing at all.
        */
       let menu: InstanceType<typeof MainMenu>;
       let island: InstanceType<typeof IslandScene> | null = null;
+      let pause: InstanceType<typeof PauseMenu> | null = null;
       let curtain: InstanceType<typeof LoadingOverlay> | null = null;
       let said = 'Preparing the island…';
       /*
@@ -245,8 +254,39 @@ if (host) {
         (window as unknown as { mainMenu?: unknown }).mainMenu = menu;
       };
 
+      /*
+       * PAUSING, which is the only thing here that touches the sim.
+       *
+       * It refuses when the island is not standing or the front menu is
+       * already up — pausing a world that has not finished arriving would
+       * freeze the boot, and pausing behind the title screen would leave
+       * START handing the player a stopped island.
+       */
+      const openPause = (): void => {
+        if (pause?.isUp || !standing) return;
+        if (document.querySelector('.main-menu')) return;
+        island?.setPaused(true);
+        pause = new PauseMenu(host, {
+          onResume: () => { pause = null; island?.setPaused(false); },
+          onSave: () => island?.saveToStorage() ?? false,
+          /*
+           * LEAVING IS A SCENE SWAP NOW, not a reload. The island keeps
+           * running underneath — unpaused, because the front menu's RESUME
+           * and START both hand back a live world and neither of them
+           * should have to remember to start the clock again.
+           */
+          onMainMenu: () => {
+            pause?.dispose();
+            pause = null;
+            island?.setPaused(false);
+            build();
+          },
+        });
+      };
+
       build();
       island = new IslandScene(host, {
+        onMenu: openPause,
         curtain: new QuietCurtain(
           (text) => {
             /* One status, wherever it needs to appear: on the menu while it
@@ -276,10 +316,16 @@ if (host) {
         },
       });
 
+      /*
+       * ESCAPE PAUSES. It used to rebuild the FRONT menu over the running
+       * island, which put START and RESUME in front of a player who only
+       * wanted to stop for a second — the same category error the MENU
+       * plate made, one step less destructive. The pause menu closes itself
+       * on Escape, so this only ever has to open it.
+       */
       window.addEventListener('keydown', (e) => {
-        if (e.key !== 'Escape') return;
-        if (document.querySelector('.main-menu') || !standing) return;
-        build();
+        if (e.key !== 'Escape' || pause?.isUp) return;
+        openPause();
       });
     });
   }

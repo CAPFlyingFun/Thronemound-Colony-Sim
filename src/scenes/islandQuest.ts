@@ -61,6 +61,8 @@ export interface QuestHost {
   carryShown: number;
   readonly groundForLegs: Ground;
   walkGroundAt(x: number, z: number): number;
+  /** The MENU plate was pressed. The scene decides what that costs. */
+  openMenu(): void;
 }
 
 /** How far below the ORIGINAL ground she is, in mm. Never negative. */
@@ -285,7 +287,14 @@ export function buildQuestHud(host: QuestHost, ): void {
    * "Congratulations, you have entered Thronemound. There is no exit."
    * Once START is pressed there has been no way back to the front door
    * short of retyping the address, which is a real dead end rather than a
-   * missing nicety. It reloads to the menu route.
+   * missing nicety.
+   *
+   * WHAT IT DOES IS NOT DECIDED HERE, and that is the fix. This plate used
+   * to run `window.location.href = BASE_URL` itself — a full page reload,
+   * so the one control offering a way out was the one that threw the
+   * session away, with no confirmation and nowhere to save first. Now it
+   * asks the scene, and the scene asks whoever owns the page. See
+   * `IslandBoot.onMenu` and `src/ui/PauseMenu.ts`.
    *
    * SENSE is drawn beside it and dimmed. The ping — a radius sweep that
    * lights up trails, prints and whatever else is close — does not exist,
@@ -308,14 +317,7 @@ export function buildQuestHud(host: QuestHost, ): void {
   };
 
   util('sense', 'Sense', null);
-  util('menu', 'Menu', () => {
-    /* The menu route is the address with no scene on it. A full load
-     * rather than a scene swap, because the island holds a streamed
-     * window, a colony and a renderer, and unwinding all of that by hand
-     * to get back to a title screen is a great deal of machinery to
-     * maintain for something that happens once a session. */
-    window.location.href = import.meta.env.BASE_URL;
-  });
+  util('menu', 'Menu', () => host.openMenu());
 
   /*
    * The founding cinematic, as the brief wrote it: a held black beat

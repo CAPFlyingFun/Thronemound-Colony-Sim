@@ -72,6 +72,13 @@ export interface IslandBoot {
   curtain?: Curtain;
   /** Called once the queen has settled and the island is playable. */
   onReady?: () => void;
+  /**
+   * What the MENU plate does. Whoever OWNS the page decides — the island
+   * knows it was asked, not what asking should cost. Left out, the plate
+   * falls back to reloading to the front door, which is what `?scene=island`
+   * wants: that route has no menu behind it to return to.
+   */
+  onMenu?: () => void;
 }
 import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
@@ -2938,7 +2945,34 @@ export class IslandScene {
     };
   }
 
-  setPausedForTest(on: boolean): void { this.paused = on; }
+  /**
+   * STOP THE WORLD, KEEP DRAWING IT.
+   *
+   * `simulate` is skipped; the render is not. A pause that blanked the
+   * screen would be a scene change, and the thing a pause menu has to prove
+   * — that nothing was lost — is proved by the island still being there
+   * behind it, mid-stride.
+   *
+   * The clock is not stopped, only ignored: `animate` recomputes `previous`
+   * every frame whether it simulates or not, so a resume after five minutes
+   * costs one frame of `dt`, not five minutes of it.
+   */
+  setPaused(on: boolean): void {
+    this.paused = on;
+    /* Her feet are still on the stick from before the menu went up. Let go
+     * for her, or she walks off the moment it comes down. */
+    if (on) { this.input.walk = 0; this.input.yaw = 0; this.input.strafe = 0; }
+  }
+
+  get isPaused(): boolean { return this.paused; }
+
+  /** The MENU plate was pressed. See `IslandBoot.onMenu`. */
+  openMenu(): void {
+    if (this.boot.onMenu) { this.boot.onMenu(); return; }
+    window.location.href = import.meta.env.BASE_URL;
+  }
+
+  setPausedForTest(on: boolean): void { this.setPaused(on); }
 
   /** Where the next stroke would land, and what it is aimed at — the numbers
    *  behind "it says it dug and nothing happened". */
