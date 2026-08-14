@@ -2365,6 +2365,19 @@
   backdrop-filter: none !important;
   border-radius: 0 !important;
   box-shadow: none !important;
+  /*
+   * A READOUT MAY NOT EAT A TOUCH. It inherits `.density-lab-status`, which
+   * is interactive in the density lab, and here it is a line of text that
+   * reports the founding — nothing on it can be pressed.
+   *
+   * That was not free: on a 568x320 landscape phone the parked stick's top
+   * edge is at 154 (the stick is bottom-anchored, so it climbs as the
+   * screen shortens) while this panel runs to 207, and the panel was
+   * swallowing the top 53px of the stick. Found by `npm run probe:hud`.
+   * The VISUAL overlap at that size is still there and is recorded on the
+   * board; this is the half that was wrong at every size.
+   */
+  pointer-events: none;
   /* The status box's own 8/11 padding held the text off a drawn edge that
    * did not exist yet. The frame is that edge now, and 20px of gold plus
    * 8px of air is a margin twice over — which cost 12px of a column that
