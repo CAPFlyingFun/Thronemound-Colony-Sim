@@ -82,7 +82,14 @@
  * the face for the whole transfer, in `cornerTurn.ts`, not letting go later
  * in `legDrive.ts`.
  *
- *   npm run probe:corner        # needs `vite preview` already running
+ *   npx vite --port 5173                                  # then, in another shell
+ *   SMOKE_URL=http://127.0.0.1:5173/ npm run probe:corner
+ *
+ * NOT `vite preview`, which the old instruction named and which cannot work
+ * here: the build's base is `/Thronemound-Colony-Sim/` and preview resolves
+ * `command` as `serve`, so it serves at `/` and every asset misses. That is
+ * the same trap `scripts/serveDist.mjs` was written to avoid — serveDist on
+ * 4700 works too, at `http://127.0.0.1:4700/Thronemound-Colony-Sim/`.
  */
 import { chromium } from 'playwright';
 
