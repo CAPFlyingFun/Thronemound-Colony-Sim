@@ -132,6 +132,56 @@
 }
 
 /*
+ * THE BONE LABELS — one absolutely-positioned tag per joint, over the canvas.
+ *
+ * `pointer-events: none` on the layer AND on every tag, because a label that
+ * eats the tap meant for the joint it names is worse than no label. The tags
+ * are placed by `transform` rather than by `left`/`top` so moving fifty-three
+ * of them every frame stays on the compositor instead of relaunching layout.
+ *
+ * The tag is nudged up and to the RIGHT of its joint by a margin rather than
+ * by a transform, because the script owns `transform` outright — a translate
+ * written here would be overwritten every frame. Off to the side, so the tag
+ * never covers the dot it is naming and the dot stays pressable.
+ */
+.pose-labels {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.pose-tag {
+  position: absolute;
+  top: 0;
+  left: 0;
+  margin: -7px 0 0 9px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgb(14 18 26 / 62%);
+  color: #93a4c0;
+  font: 9px/1.45 ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* The selected joint and its handle's chain, matching the dot colours in
+ * `syncMarkers` so the overlay reads as one thing. */
+.pose-tag.is-group {
+  color: #8cc7ff;
+  background: rgb(14 18 26 / 78%);
+}
+
+.pose-tag.is-picked {
+  z-index: 1;
+  background: rgb(20 28 42 / 92%);
+  color: #fff;
+  font-weight: 700;
+  outline: 1px solid #7fb4ff;
+}
+
+/*
  * Landscape on a phone is SHORT AND WIDE, and the two are opposite problems.
  * Stacked, the panel came to 47% of a 430-pixel screen — measured — which
  * leaves the subject of the tool peering out from behind its controls. There
@@ -144,6 +194,8 @@
   .pose-button, .pose-text { min-height: 22px; padding: 2px 6px; }
   .pose-slider input[type="range"] { height: 15px; }
   .pose-readout { padding: 4px 6px; font-size: 10px; line-height: 1.25; }
+  /* Smaller again on the short screen: fifty-three tags is a lot of ink. */
+  .pose-tag { margin: -6px 0 0 7px; font-size: 8px; }
   .pose-scrub { height: 15px; }
   .pose-sliders { flex-direction: row; gap: 8px; }
   .pose-slider { flex: 1 1 0; min-width: 0; }

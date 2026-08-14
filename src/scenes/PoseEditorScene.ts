@@ -97,10 +97,45 @@ export class PoseEditorScene {
   /** Whether the handle row is showing parts or individual bones. */
   private boneMode = false;
 
+  /** Bone name to the label a person reads. See `boneLabels`. */
+  private boneNames = new Map<string, string>();
+
   /** Pressable dots at every joint, and what each one is. */
   private markers: THREE.Points | null = null;
 
   private markerBones: string[] = [];
+
+  /**
+   * THE BONES BETWEEN THE JOINTS — the skeleton drawn as a skeleton.
+   *
+   * Asked for in these words: "can we overlay the actual bone skeleton with
+   * name/numbers? Would make it great to see the bones to edit or move and
+   * have more precise control." Dots alone say where the joints are and
+   * nothing about what connects to what, so a leg and an antenna crossing on
+   * screen are two clouds of identical dots. The segments make it a hand.
+   *
+   * One `LineSegments` for the same reason the dots are one `Points`: fifty
+   * links is one draw call and one thing to dispose of.
+   */
+  private links: THREE.LineSegments | null = null;
+
+  /** Parent-then-child, two entries per link, indexing `markerBones`. */
+  private linkIndex: number[] = [];
+
+  /**
+   * HOW MUCH LABELLING IS ON — off, numbers, or numbers and names.
+   *
+   * Three states rather than a checkbox because fifty-three names at once on
+   * a 932-wide phone is a wall of text with an ant somewhere behind it, and
+   * no names at all is what made the numbers necessary in the first place.
+   * Numbers are the default: short enough to sit on every joint at once, and
+   * the readout and the handle row both spell out what the selected one is.
+   */
+  private labelMode: 0 | 1 | 2 = 1;
+
+  private labelLayer: HTMLDivElement | null = null;
+
+  private labelTags: HTMLDivElement[] = [];
 
   private picked: PoseGroup | null = null;
 
@@ -136,8 +171,16 @@ export class PoseEditorScene {
 
   private tilt = 0.15;
 
-  /** A multiple of HER OWN length, not a distance in world units. */
-  private zoom = 4;
+  /**
+   * A multiple of HER OWN length, not a distance in world units.
+   *
+   * Was 4, which framed her at about an eighth of the canvas width — fine
+   * for looking at a silhouette, useless once fifty-three numbered joints
+   * are drawn on her, because the labels land on top of each other before
+   * you can read one. The tool's job is precise per-bone work, so it opens
+   * at a working distance and the pinch still goes out to 14.
+   */
+  private zoom = 2;
 
   /** How much of the frame the control panel eats, 0..1 — see `frame`. */
   private panelShare = 0;
@@ -197,6 +240,9 @@ export class PoseEditorScene {
       /* Every bone the groups cover, as its own named handle. Built off the
        * same filtered list so a bone the GLB does not carry cannot appear. */
       const names = boneLabels(this.queen.rig);
+      /* Kept, because the label overlay needs the same names the handle row
+       * uses — two tables of names would drift the first time one changed. */
+      this.boneNames = names;
       this.solo = this.groups.flatMap((g) => g.bones).map((bone) => ({
         key: `bone:${bone}`,
         label: names.get(bone) ?? bone,
@@ -393,7 +439,85 @@ export class PoseEditorScene {
       geometry.dispose();
       material.dispose();
     });
+    this.buildLinks();
+    this.buildLabels();
     this.syncMarkers();
+  }
+
+  /**
+   * The segments between the joints, from the GLB's own parent chain.
+   *
+   * Indices into `markerBones` are resolved ONCE here; the per-frame sync
+   * then only copies positions the dots have already been given, so drawing
+   * the skeleton costs no extra bone lookups at all.
+   */
+  private buildLinks(): void {
+    const slot = new Map(this.markerBones.map((b, i) => [b, i]));
+    this.linkIndex = [];
+    for (const [parent, child] of this.queen.boneLinks(this.markerBones)) {
+      const a = slot.get(parent);
+      const b = slot.get(child);
+      if (a === undefined || b === undefined) continue;
+      this.linkIndex.push(a, b);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(
+      new Float32Array(this.linkIndex.length * 3), 3,
+    ));
+    geometry.setAttribute('color', new THREE.BufferAttribute(
+      new Float32Array(this.linkIndex.length * 3), 3,
+    ));
+    const material = new THREE.LineBasicMaterial({
+      vertexColors: true,
+      /* Over her, like the dots and for the same reason — a bone buried in
+       * the mesh is a bone you cannot follow. */
+      depthTest: false,
+      transparent: true,
+      opacity: 0.85,
+    });
+    const lines = new THREE.LineSegments(geometry, material);
+    /* UNDER the dots, so a joint always reads on top of the bones meeting
+     * at it and stays the thing you press. */
+    lines.renderOrder = 9;
+    lines.frustumCulled = false;
+    this.links = lines;
+    this.scene.add(lines);
+    this.cleanups.push(() => {
+      this.scene.remove(lines);
+      geometry.dispose();
+      material.dispose();
+    });
+  }
+
+  /**
+   * ONE DIV PER JOINT, POOLED — labels as HTML rather than as sprites.
+   *
+   * Text in the 3D scene means either a canvas texture per label (fifty-three
+   * textures to build, upload and dispose) or an SDF font this project does
+   * not carry. Absolutely-positioned divs over the canvas are crisp at any
+   * zoom for free, cost one `project` each, and inherit the panel's own
+   * styling — and the editor is already a DOM-heavy scene, so this adds no
+   * new kind of thing to reason about.
+   *
+   * Pointer events are off on the whole layer: a label must never eat the tap
+   * meant for the joint it is naming.
+   */
+  private buildLabels(): void {
+    const layer = document.createElement('div');
+    layer.className = 'pose-labels';
+    this.host.appendChild(layer);
+    this.labelLayer = layer;
+    this.labelTags = this.markerBones.map(() => {
+      const tag = document.createElement('div');
+      tag.className = 'pose-tag';
+      layer.appendChild(tag);
+      return tag;
+    });
+    this.cleanups.push(() => {
+      layer.remove();
+      this.labelLayer = null;
+      this.labelTags = [];
+    });
   }
 
   /** Move the dots onto the bones, and colour the selected one. */
@@ -420,6 +544,115 @@ export class PoseEditorScene {
     });
     pos.needsUpdate = true;
     col.needsUpdate = true;
+    this.syncLinks(pos, inGroup);
+  }
+
+  /**
+   * Lay the bones between the dots, reading the positions the dots just got.
+   *
+   * A link is lit when BOTH ends belong to the selected handle, which is what
+   * makes "this is the leg you are turning" legible: a whole limb comes up
+   * together rather than a scatter of endpoints.
+   */
+  private syncLinks(pos: THREE.BufferAttribute, inGroup: Set<string>): void {
+    const lines = this.links;
+    if (!lines) return;
+    lines.visible = this.boneMode;
+    if (!this.boneMode) return;
+    const lp = lines.geometry.getAttribute('position') as THREE.BufferAttribute;
+    const lc = lines.geometry.getAttribute('color') as THREE.BufferAttribute;
+    this.linkIndex.forEach((from, i) => {
+      lp.setXYZ(i, pos.getX(from), pos.getY(from), pos.getZ(from));
+      const lit = inGroup.has(this.markerBones[from]!)
+        && inGroup.has(this.markerBones[this.linkIndex[i % 2 === 0 ? i + 1 : i - 1]!]!);
+      if (lit) lc.setXYZ(i, 0.55, 0.78, 1);
+      else lc.setXYZ(i, 0.24, 0.3, 0.42);
+    });
+    lp.needsUpdate = true;
+    lc.needsUpdate = true;
+  }
+
+  /**
+   * Put each label on its joint, in screen pixels.
+   *
+   * Projected per frame rather than cached, because the whole value of this
+   * is that a label follows the joint while she is being posed and orbited.
+   * Hidden BEHIND the camera as well as off the sides: `project` mirrors a
+   * point behind the lens onto the front of the screen, so without the depth
+   * test the far-side legs' names pile up over the near ones.
+   *
+   * CALLED AFTER THE CAMERA IS PLACED, not with the dots — `syncMarkers` runs
+   * before `frame` positions the lens, so projecting there would put every
+   * label where the joint was one frame ago and the whole overlay would trail
+   * an orbit drag. The dots do not care, because they are projected by the
+   * renderer using the same camera as the mesh; only the DOM has to be told.
+   */
+  private syncLabels(): void {
+    const layer = this.labelLayer;
+    const points = this.markers;
+    if (!layer || !points) return;
+    const on = this.boneMode && this.labelMode > 0;
+    layer.style.display = on ? '' : 'none';
+    if (!on) return;
+    const pos = points.geometry.getAttribute('position') as THREE.BufferAttribute;
+    const chosen = this.picked?.bones.length === 1 ? this.picked.bones[0]! : null;
+    const inGroup = new Set(this.picked?.bones ?? []);
+    /* Nearest the lens first, so the declutter below keeps the labels on the
+     * side of her you are actually looking at. */
+    const order = this.markerBones.map((_, i) => i).sort((a, b) => {
+      MARK.set(pos.getX(a), pos.getY(a), pos.getZ(a)).project(this.camera);
+      const za = MARK.z;
+      MARK.set(pos.getX(b), pos.getY(b), pos.getZ(b)).project(this.camera);
+      return za - MARK.z;
+    });
+    const taken: { x: number; y: number; half: number }[] = [];
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const host = this.host.getBoundingClientRect();
+    for (const i of order) {
+      const tag = this.labelTags[i]!;
+      const bone = this.markerBones[i]!;
+      /* NAMES ONLY WHERE THEY EARN THEIR SPACE. In numbers mode the selected
+       * handle still spells itself out, so pressing a joint tells you what it
+       * is without a trip to the readout — which is the question a person is
+       * actually asking when they press one. */
+      const named = this.labelMode === 2 || bone === chosen
+        || (this.labelMode === 1 && inGroup.has(bone) && inGroup.size <= 8);
+      MARK.set(pos.getX(i), pos.getY(i), pos.getZ(i)).project(this.camera);
+      if (MARK.z > 1) { tag.style.display = 'none'; continue; }
+      const x = rect.left - host.left + ((MARK.x + 1) / 2) * rect.width;
+      const y = rect.top - host.top + ((1 - MARK.y) / 2) * rect.height;
+      /*
+       * DECLUTTERED, nearest-first — otherwise this is unreadable.
+       *
+       * An ant is a compact animal seen from any angle, and thirty of her
+       * joints project into a few hundred pixels. Every label drawn is a
+       * label sitting on another one, and a pile of overlapping numbers is
+       * strictly worse than no numbers: it hides the model AND says nothing.
+       *
+       * So a tag claims a small box and any later tag whose box overlaps a
+       * claimed one is dropped. Sorted NEAREST FIRST above, so the joint
+       * facing you keeps its label and the one behind her body loses it,
+       * which is the same joint your finger would have hit. The selected
+       * handle is exempt — it is the one you are working on and it must
+       * never be the one that vanishes.
+       */
+      /* The box is the TEXT's box. "Antenna R root" is three times the width
+       * of "13", and one threshold for both either lets names overlap or
+       * throws away numbers that would have fitted. The font is monospace,
+       * so its width really is a character count. */
+      const text = named ? `${i + 1} ${this.boneNames.get(bone) ?? bone}` : `${i + 1}`;
+      const half = 6 + text.length * 2.9;
+      const keep = bone === chosen || inGroup.has(bone)
+        || !taken.some((t) => Math.abs(t.x - x) < half + t.half
+          && Math.abs(t.y - y) < 11);
+      if (!keep) { tag.style.display = 'none'; continue; }
+      taken.push({ x, y, half });
+      tag.style.display = '';
+      tag.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`;
+      tag.textContent = text;
+      tag.classList.toggle('is-picked', bone === chosen);
+      tag.classList.toggle('is-group', bone !== chosen && inGroup.has(bone));
+    }
   }
 
   /**
@@ -668,6 +901,24 @@ export class PoseEditorScene {
       this.pick((this.boneMode ? this.solo : this.groups)[0] ?? null);
     });
     row.appendChild(swap);
+    /*
+     * HOW MUCH THE OVERLAY SAYS — only offered in BONES mode, because in
+     * PARTS mode there is no overlay to label. Three states on one button
+     * rather than three buttons: the row is the scarcest strip on the screen
+     * and this is a preference, not a mode.
+     */
+    if (this.boneMode) {
+      const tags = document.createElement('button');
+      tags.className = 'pose-button';
+      tags.id = 'pose-tags';
+      if (this.labelMode > 0) tags.classList.add('is-on');
+      tags.textContent = ['🏷 OFF', '🏷 NUM', '🏷 NAMES'][this.labelMode]!;
+      tags.addEventListener('click', () => {
+        this.labelMode = ((this.labelMode + 1) % 3) as 0 | 1 | 2;
+        this.buildGroupRow();
+      });
+      row.appendChild(tags);
+    }
     for (const group of this.boneMode ? this.solo : this.groups) {
       const b = document.createElement('button');
       b.className = 'pose-button';
@@ -942,6 +1193,9 @@ export class PoseEditorScene {
       Math.cos(this.orbit) * Math.cos(this.tilt) * reach,
     );
     this.camera.lookAt(0, centre - lift, 0);
+    /* With the lens where it will actually draw from — see `syncLabels`. */
+    this.camera.updateMatrixWorld(true);
+    this.syncLabels();
     this.renderer.render(this.scene, this.camera);
   };
 

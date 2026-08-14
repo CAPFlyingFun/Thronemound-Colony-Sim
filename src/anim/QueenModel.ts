@@ -1171,6 +1171,38 @@ export class QueenModel {
     }
   }
 
+  /**
+   * WHICH JOINT HANGS OFF WHICH — the skeleton's real shape, for drawing it.
+   *
+   * Taken from the GLB's own parent chain rather than from the rig table,
+   * because the table is a set of unordered groups and says nothing at all
+   * about parenting: it cannot tell you that the head chain hangs off the
+   * body hub, or that all six legs hang off the same joint. Only the file
+   * knows, and it is the thing being edited.
+   *
+   * Walks UP from each bone until it meets another bone the caller asked
+   * about, so intermediate joints the rig table skips do not break a chain
+   * into disconnected pieces — the link is drawn to the nearest named
+   * ancestor instead. A bone with no named ancestor is a root and gets no
+   * link, which is correct rather than missing.
+   */
+  boneLinks(names: Iterable<string>): [string, string][] {
+    const want = new Set<string>();
+    for (const name of names) if (this.bones.has(name)) want.add(name);
+    const out: [string, string][] = [];
+    for (const name of want) {
+      const bone = this.bones.get(name);
+      if (!bone) continue;
+      for (let p = bone.parent; p; p = p.parent) {
+        if (p.name && p.name !== name && want.has(p.name)) {
+          out.push([p.name, name]);
+          break;
+        }
+      }
+    }
+    return out;
+  }
+
   /** World position of a named bone, for callers that need to aim at one. */
   boneWorldPosition(name: string, into: THREE.Vector3): boolean {
     const bone = this.bones.get(name);
