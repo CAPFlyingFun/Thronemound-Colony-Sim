@@ -19,6 +19,9 @@ import type { Portable } from './islandCarry';
 import { MM } from '../world/worldScape';
 
 const S_STEP = new THREE.Vector3();
+const FALL_Z = Math.PI * 0.85;
+const WALK_WOBBLE_Z = 0.03;
+const HELD_WOBBLE_Z = 0.12;
 
 export class Beetle implements Quarry, Portable {
   readonly id: string;
@@ -55,6 +58,23 @@ export class Beetle implements Quarry, Portable {
 
   private wobble = 0;
 
+  /**
+   * `at.y` is the terrain CONTACT height, because combat and carry reach
+   * read `at`. The primitive art, however, is not authored with its lowest
+   * vertex at local y=0: even standing, the shell reaches below the root,
+   * and the fallen pose used to rotate the whole beetle around that ground
+   * plane and bury most of it.
+   *
+   * These are visual-only lifts measured once from the actual rendered
+   * bounds. Keeping them off `at` preserves every gameplay distance while
+   * putting the pixels where the terrain says the ground is.
+   */
+  private readonly standingLift: number;
+
+  private readonly heldLift: number;
+
+  private readonly fallenLift: number;
+
   constructor(id: string, atX: number, atY: number, atZ: number) {
     this.id = id;
     this.at.set(atX, atY, atZ);
@@ -82,6 +102,47 @@ export class Beetle implements Quarry, Portable {
       leg.rotation.z = side;
       this.root.add(leg);
     }
+
+    /* Measure the poses the model actually uses instead of duplicating its
+     * geometry as a clearance constant. The small walking and struggle
+     * wobbles have different envelopes; the fallen pose is fixed. */
+    this.standingLift = this.liftFor([-WALK_WOBBLE_Z, 0, WALK_WOBBLE_Z]);
+    this.heldLift = this.liftFor([-HELD_WOBBLE_Z, 0, HELD_WOBBLE_Z]);
+    this.fallenLift = this.liftFor([FALL_Z]);
+    this.root.position.copy(this.at);
+    this.root.position.y += this.standingLift;
+    this.root.rotation.set(0, 0, 0);
+  }
+
+  /**
+   * How far the rendered root must rise so none of its geometry crosses a
+   * flat y=0 plane at the supplied z-rotations. This is constructor-only;
+   * no Box3 work happens in the frame loop.
+   */
+  private liftFor(zAngles: readonly number[]): number {
+    const savedPosition = this.root.position.clone();
+    const savedRotation = this.root.rotation.clone();
+    const bounds = new THREE.Box3();
+    let lift = 0;
+
+    this.root.position.set(0, 0, 0);
+    for (const z of zAngles) {
+      this.root.rotation.set(0, 0, z);
+      this.root.updateMatrixWorld(true);
+      bounds.setFromObject(this.root);
+      lift = Math.max(lift, -bounds.min.y);
+    }
+
+    this.root.position.copy(savedPosition);
+    this.root.rotation.copy(savedRotation);
+    this.root.updateMatrixWorld(true);
+    return Math.max(0, lift);
+  }
+
+  /** Put the rendered model on `at.y` without changing the gameplay anchor. */
+  private placeGrounded(lift: number): void {
+    this.root.position.copy(this.at);
+    this.root.position.y += lift;
   }
 
   /** How close her jaws have to be, measured from its centre. */
@@ -124,23 +185,27 @@ export class Beetle implements Quarry, Portable {
       /* Cargo. The scene has put it at her jaws and the ground has no say
        * — dropping the terrain clamp here is the whole reason this branch
        * exists, because otherwise a carried beetle snaps back down to the
-       * dirt every frame while she walks off with it. */
+       * dirt every frame while she walks off with it. No ground lift here:
+       * `at` is now a jaw anchor rather than a terrain contact. */
       this.root.position.copy(this.at);
-      this.root.rotation.z = Math.PI * 0.85;
+      this.root.rotation.z = FALL_Z;
       return;
     }
     if (!this.alive) {
-      /* Down. It stays where it fell — and it is now something she can
-       * pick up, which is what `Portable` above is for. */
-      this.root.rotation.z = Math.PI * 0.85;
+      /* Down. `at` stays exactly on the terrain because reach tests read it;
+       * the rendered root alone rises enough for the rotated shell to lie on
+       * the surface instead of pivoting through it. */
       this.at.y = groundAt(this.at.x, this.at.z);
-      this.root.position.copy(this.at);
+      this.root.rotation.z = FALL_Z;
+      this.placeGrounded(this.fallenLift);
       return;
     }
     if (held) {
-      /* Struggling: it shakes but does not travel. */
+      /* Struggling: it shakes but does not travel. The wider wobble needs a
+       * slightly larger visual clearance than ordinary walking. */
       this.wobble += dt * 26;
-      this.root.rotation.z = Math.sin(this.wobble) * 0.12;
+      this.root.rotation.z = Math.sin(this.wobble) * HELD_WOBBLE_Z;
+      this.placeGrounded(this.heldLift);
       return;
     }
 
@@ -160,8 +225,8 @@ export class Beetle implements Quarry, Portable {
     this.at.x += Math.sin(this.heading) * speed * dt;
     this.at.z += Math.cos(this.heading) * speed * dt;
     this.at.y = groundAt(this.at.x, this.at.z);
-    this.root.position.copy(this.at);
-    this.root.rotation.set(0, this.heading, Math.sin(this.wobble) * 0.03);
+    this.root.rotation.set(0, this.heading, Math.sin(this.wobble) * WALK_WOBBLE_Z);
+    this.placeGrounded(this.standingLift);
   }
 
   dispose(): void {
