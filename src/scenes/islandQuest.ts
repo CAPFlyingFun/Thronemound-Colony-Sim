@@ -212,23 +212,27 @@ export function buildVitalsHud(host: QuestHost, ): void {
    * the art has always carried, the upper pass brings only the rim. A child
    * always paints above its parent's border, so neither can be the
    * container's own border-image; both are siblings. See the CSS.
+   *
+   * THE LEVEL IS NOT AN ELEMENT. It is the track's own background, set by
+   * `--tm-level` (0 to 1), because a CSS mask clips the element's background
+   * but NOT a child — which is why the fill kept coming out square-ended
+   * across a channel whose ends are curved.
    */
   const stone = document.createElement('div');
   stone.className = 'tm-meter-stone';
+  /* The level, between the two passes of the frame: above the stone the
+   * lower pass draws, below the rim the upper one does. Drawn art rather
+   * than a CSS shape — see the CSS. */
+  const level = document.createElement('div');
+  level.className = 'tm-meter-level';
   const track = document.createElement('div');
   track.className = 'tm-meter-track';
-  const channel = document.createElement('div');
-  channel.className = 'tm-meter-channel';
-  const fill = document.createElement('div');
-  fill.className = 'tm-meter-fill';
-  channel.appendChild(fill);
   const label = document.createElement('span');
   label.className = 'tm-meter-label';
   label.textContent = 'CARRY';
-  track.append(channel, label);
   const frame = document.createElement('div');
   frame.className = 'tm-meter-frame';
-  carry.append(stone, track, frame);
+  carry.append(stone, track, frame, level, label);
   host.hud.appendChild(carry);
 }
 

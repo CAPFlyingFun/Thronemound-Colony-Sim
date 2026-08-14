@@ -2103,32 +2103,132 @@
    * Re-run the generator if the meter's size or the frame art changes.
    */
   inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   -webkit-mask-image: url('/ui/mask-meter.png');
   mask-image: url('/ui/mask-meter.png');
   -webkit-mask-size: 100% 100%;
   mask-size: 100% 100%;
   -webkit-mask-repeat: no-repeat;
   mask-repeat: no-repeat;
+  /*
+   * THE LEVEL IS THIS ELEMENT'S OWN BACKGROUND, not a child, and that is
+   * the fix rather than a preference. A CSS mask clips the element it is on
+   * — INCLUDING its background — but it does NOT clip a child. Photographed
+   * to settle it: the hatch, which is background, took the channel's curves;
+   * the fill, which was a child, stayed a square-ended rectangle straight
+   * across them. That is the "long rectangle with no curves".
+   *
+   * So the level is a hard-stopped gradient, and it inherits the traced
+   * shape for nothing — concave where it meets the medallion, round at the
+   * cap, and correct at every step in between.
+   *
+   * The stop runs between the channel's real ends (17.9% to 99.2% of the
+   * meter, reported by `npm run gen:meter-mask`) rather than 0 to 100. A
+   * stop at 0 would sit under the medallion where nothing shows, so a bar
+   * with a little in it would read as empty.
+   */
 }
+
+
+
 
 /*
- * The run the level is measured along: from the medallion's tile to the far
- * end. It exists so a percentage means what it says — the fill is a
- * percentage of the CHANNEL, not of the whole meter, which would put an
- * empty bar at 20% and a full one somewhere inside the cap. The mask trims
- * whatever hangs off the end, so this only has to be roughly right.
+ * THE LEVEL — DRAWN ART, placed, not derived.
+ *
+ * Five goes at describing this shape in CSS were each off somewhere: insets,
+ * elliptical radii, a traced mask. The channel is what is left over when a
+ * nine-sliced photograph of a gold frame is drawn at 165 x 34 — CONCAVE at
+ * the left, where the stone runs up against the medallion, and round at the
+ * cap. Joshua drew the bar against the sheet instead, and that ends it: the
+ * shape is now a thing to position rather than a thing to reconstruct.
+ * `npm run gen:meter-fill` cuts it out of the sheet.
+ *
+ * NINE-SLICED HORIZONTALLY so it can move. Scaling the whole picture would
+ * pull the round end into an oval as the bar filled; clipping it would cut
+ * the end off entirely at anything under full. Slicing holds both ends at
+ * their drawn size and stretches only the flat middle — which is what the
+ * middle is.
+ *
+ * And the two numbers are told apart again, for the reason written on
+ * `.tm-bar`: `border-width` is layout and the browser floors it, so it gets
+ * integers, while `border-image-width` carries the exact size the caps are
+ * drawn at.
+ *
+ * It sits ABOVE the frame rather than between its two passes. The rim pass
+ * draws whole border TILES, and the tile at the cap carries the stone inside
+ * the curve as well as the gold around it — so a bar underneath had its
+ * round end painted out and came back square, which is the "long rectangle
+ * with no curves" all over again. On top is safe precisely because the bar
+ * is drawn to the channel: its edges ARE the channel's edges.
  */
-.tm-meter-channel {
+.tm-meter-level {
   position: absolute;
-  left: 34px;
-  right: 0;
-  top: 0;
-  bottom: 0;
+  /*
+   * The channel, from `npm run gen:meter-mask` — 17.9% to 99.2% across the
+   * meter, top rim to bottom rim — LESS a pixel all round.
+   *
+   * The pixel matters twice over. The traced numbers come off a mask that
+   * was deliberately dilated to tuck under the gold, so they run a pixel
+   * wide of the true channel; and the drawn bar's cap is very nearly a
+   * half-round, where the channel's own is shallower, so at equal height its
+   * corners reach further than the stone does. Sitting a pixel inside costs
+   * nothing visible and keeps the bar off the gold at every level.
+   */
+  top: 7.4px;
+  left: 30.5px;
+  height: 17.2px;
+  width: calc(var(--tm-level, 0) * 131.5px);
+  box-sizing: border-box;
+  /*
+   * THE SHAPE COMES FROM THE ART, THE COLOUR FROM HERE.
+   *
+   * `mask-border` is `border-image` for masks: it nine-slices the drawn bar
+   * the same way, so the concave left and the round cap keep their size
+   * while the flat middle stretches — and then paints whatever this element's
+   * background is through the result. The sheet's flat yellow becomes an
+   * alpha channel rather than a colour, which means recolouring the bar is a
+   * line of CSS instead of a new export, and it can carry a gradient the
+   * flat art never could.
+   *
+   * `-webkit-` first because that is the spelling Safari on the phone knows,
+   * and the phone is the target.
+   */
+  -webkit-mask-box-image: url('/ui/fill-meter.png') 0 106 0 39 / 0 7.33px 0 2.7px stretch;
+  mask-border: url('/ui/fill-meter.png') 0 106 0 39 / 0 7.33px 0 2.7px stretch;
+  /*
+   * THE RAMP IS ANCHORED TO THE CHANNEL, NOT TO THE BAR.
+   *
+   * `background-size` is the whole point of this rule. A gradient on an
+   * element that changes width rescales with it, so a bar with a red-to-
+   * green ramp would show the FULL ramp at every level — green at the tip
+   * when nearly empty, which is exactly backwards. Painting it at the
+   * channel's full width instead pins each colour to a POSITION, so the
+   * leading edge reports where it has got to and the colours never lie.
+   */
+  background-image: var(--tm-level-paint);
+  background-size: 131.5px 100%;
+  background-repeat: no-repeat;
+  transition: width 0.2s ease;
+  pointer-events: none;
 }
 
+/* Set by whatever owns the meter — a fraction from 0 to 1, and the only
+ * thing that ever changes. Nothing sets it yet: CARRY is `built: false`, so
+ * the bar reads empty, which is the truth. */
+.tm-meter {
+  --tm-level: 0;
+  /* Light load to full, which for a thing she is CARRYING is the honest way
+   * round: green while she can still take more, red when her mandibles are
+   * full. The stops sit off the ends rather than at them so neither pure
+   * colour occupies a single pixel nobody can read. */
+  --tm-level-paint: linear-gradient(
+    90deg,
+    #5f9e33 0%,
+    #8fbb3a 22%,
+    #e0b93c 55%,
+    #d2782c 80%,
+    #b8402c 100%
+  );
+}
 
 /*
  * THE FRAME IS DRAWN TWICE, and the readout goes between the two passes.
@@ -2172,20 +2272,17 @@
 /* The level itself. Nothing sets it yet — CARRY is `built: false` — so it
  * is here at zero width rather than absent, because the day it becomes real
  * should be a line that assigns a number, not a new element. */
-/* The level itself, and the ONLY thing that ever moves. Nothing sets it yet
- * — CARRY is `built: false` — so it sits at zero width rather than being
- * absent, because the day it becomes real should be a line that assigns a
- * number, not a new element. No radius: the mask on the track is what gives
- * it a shape, at both ends and along both rims. */
-.tm-meter-fill {
+
+/* Above everything, including the bar — a level that swallowed its own
+ * label would be a bar you cannot read at exactly the moment it is full. */
+.tm-meter-label {
   position: absolute;
   inset: 0;
-  width: 0;
-  background: linear-gradient(180deg, #c9a35e 0%, #8a6522 100%);
-  transition: width 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
 }
-
-.tm-meter-label { position: relative; }
 
 /* The same hatch the vital bars wear, and `fill` dropped from the slice for
  * the same reason: the frame's own stone middle would paint over it. */
@@ -2204,7 +2301,6 @@
   );
 }
 
-.tm-meter.is-soon .tm-meter-fill { display: none; }
 
 /*
  * THE QUEST PANEL — third in the left column.

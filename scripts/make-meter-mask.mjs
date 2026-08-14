@@ -40,8 +40,10 @@ const H = 34;
 const BORDER = { top: 8, right: 8, bottom: 10, left: 34 };
 const ART = { top: 7.44, right: 7.7, bottom: 9.56, left: 34 };
 const SLICE = '28 29 36 128';
-/* 4x, matching how the rest of public/ui is encoded. */
-const SCALE = 4;
+/* Traced at 8x and written out at 4x, which is how the rest of public/ui
+ * is encoded. Tracing above the output size is the point: the extra detail
+ * becomes a soft alpha edge on the way down instead of a stair-step. */
+const SCALE = 8;
 /* How far the mask reaches under the gold, in CSS px. */
 const TUCK = 1;
 
@@ -86,54 +88,115 @@ const png = await p.evaluate(async ([cfg, shotB64]) => {
   const w = im.width; const h = im.height;
 
   /*
-   * THE CHANNEL. Inside the rim band vertically, right of the medallion's
-   * tile horizontally, opaque, and dark — the stone. The gold fails the
-   * darkness test, which is what makes the mask stop exactly where the rim
-   * begins instead of at a number somebody typed.
+   * THE CHANNEL, FOUND BY FLOODING IT — not by thresholding a rectangle.
+   *
+   * The first version took every dark pixel right of the medallion's tile,
+   * which squared off the left end: the channel does NOT begin with a
+   * straight edge, it curves where the stone runs up against the disc. A
+   * hard cut at the tile boundary threw that curve away. Flooding from a
+   * seed in the middle of the run finds the channel's real outline instead,
+   * and the medallion's own dark centre is a SEPARATE island — the ring of
+   * gold around the disc keeps the two from touching — so it is excluded by
+   * not being connected rather than by a number.
+   *
+   * The vertical bound stays as a backstop. Every frame in this set has a
+   * dark lower lip outside its bottom rim, and if anti-aliasing ever opens
+   * a one-pixel path through the rim the flood would escape into it — which
+   * is the exact bug that hid the bottom rim for two releases.
    */
   const top = Math.round(ART.top * SCALE);
   const bot = Math.round((H - ART.bottom) * SCALE);
-  const left = Math.round(BORDER.left * SCALE);
+  const isStone = (x, y) => {
+    const i = (y * w + x) * 4;
+    if (im.data[i + 3] < 200) return false;
+    return 0.2126 * im.data[i] + 0.7152 * im.data[i + 1] + 0.0722 * im.data[i + 2] < 100;
+  };
   const raw = new Uint8Array(w * h);
-  for (let y = top; y < bot; y++) {
-    for (let x = left; x < w; x++) {
-      const i = (y * w + x) * 4;
-      if (im.data[i + 3] < 200) continue;
-      const lum = 0.2126 * im.data[i] + 0.7152 * im.data[i + 1] + 0.0722 * im.data[i + 2];
-      if (lum < 92) raw[y * w + x] = 1;
+  const seed = [Math.round(w * 0.62), Math.round((top + bot) / 2)];
+  if (!isStone(seed[0], seed[1])) throw new Error('seed is not on stone — has the meter changed size?');
+  const stack = [seed];
+  raw[seed[1] * w + seed[0]] = 1;
+  while (stack.length) {
+    const [x, y] = stack.pop();
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx; const ny = y + dy;
+      if (nx < 0 || nx >= w || ny < top || ny >= bot) continue;
+      const k = ny * w + nx;
+      if (raw[k] || !isStone(nx, ny)) continue;
+      raw[k] = 1; stack.push([nx, ny]);
     }
   }
 
-  /* TUCK IT UNDER THE GOLD. Dilate by a pixel so the readout never stops
-   * short at an anti-aliased edge; the rim is painted on top and hides it. */
+  /*
+   * TUCK IT UNDER THE GOLD — with a ROUND brush.
+   *
+   * The first version dilated with a square one, and a square brush is how
+   * a traced curve turns back into the "long rectangle with no curves" this
+   * was reported as: it pushes the corners out diagonally and flattens every
+   * arc it touches. A disc of the same radius grows the outline evenly and
+   * leaves the shape the shape it was.
+   */
   const r = Math.round(TUCK * SCALE);
-  const out = new Uint8ClampedArray(w * h * 4);
+  const disc = [];
+  for (let dy = -r; dy <= r; dy++) {
+    for (let dx = -r; dx <= r; dx++) if (dx * dx + dy * dy <= r * r) disc.push([dx, dy]);
+  }
+  const grown = new Uint8Array(w * h);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
-      let on = 0;
-      for (let dy = -r; dy <= r && !on; dy++) {
-        const yy = y + dy;
-        if (yy < 0 || yy >= h) continue;
-        for (let dx = -r; dx <= r; dx++) {
-          const xx = x + dx;
-          if (xx < 0 || xx >= w) continue;
-          if (raw[yy * w + xx]) { on = 1; break; }
-        }
+      if (!raw[y * w + x]) continue;
+      for (const [dx, dy] of disc) {
+        const xx = x + dx; const yy = y + dy;
+        if (xx < 0 || xx >= w || yy < 0 || yy >= h) continue;
+        grown[yy * w + xx] = 1;
       }
-      const k = (y * w + x) * 4;
-      out[k] = 255; out[k + 1] = 255; out[k + 2] = 255; out[k + 3] = on ? 255 : 0;
     }
+  }
+
+  const out = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    out[i * 4] = 255; out[i * 4 + 1] = 255; out[i * 4 + 2] = 255;
+    out[i * 4 + 3] = grown[i] ? 255 : 0;
   }
   const oc = document.createElement('canvas');
   oc.width = w; oc.height = h;
   oc.getContext('2d').putImageData(new ImageData(out, w, h), 0, 0);
-  let filled = 0;
-  for (let i = 0; i < w * h; i++) if (out[i * 4 + 3]) filled++;
-  return { data: oc.toDataURL('image/png'), w, h, filled };
+
+  /* Down to the 4x the rest of public/ui is encoded at. The downscale is
+   * doing a second job: it turns the traced outline's stair-steps into a
+   * soft alpha edge, so the readout's curve is smooth rather than jagged. */
+  const fc = document.createElement('canvas');
+  fc.width = Math.round(w / 2); fc.height = Math.round(h / 2);
+  const fg = fc.getContext('2d');
+  fg.imageSmoothingEnabled = true;
+  fg.imageSmoothingQuality = 'high';
+  fg.drawImage(oc, 0, 0, fc.width, fc.height);
+
+  /* Where the channel starts and ends across the meter, as a fraction of
+   * its width. The level is a gradient stop on the track's background, and
+   * it has to run between these two — a stop at 0 would be under the
+   * medallion, where nothing shows, so an almost-empty bar would read as
+   * empty and the last stretch of a full one would have nowhere to go. */
+  let filled = 0; let minX = w; let maxX = -1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!grown[y * w + x]) continue;
+      filled++;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+    }
+  }
+  return {
+    data: fc.toDataURL('image/png'), w: fc.width, h: fc.height,
+    filled: filled / (w * h),
+    startPct: (100 * minX / w), endPct: (100 * (maxX + 1) / w),
+  };
 }, [{ W, H, BORDER, ART, SLICE, SCALE, TUCK }, shot.toString('base64')]);
 
 writeFileSync(OUT, Buffer.from(png.data.split(',')[1], 'base64'));
-console.log(`mask-meter.png  ${png.w} x ${png.h}  (${SCALE}x of ${W} x ${H})`);
-console.log(`channel covers  ${(100 * png.filled / (png.w * png.h)).toFixed(1)}% of the box`);
+console.log(`mask-meter.png  ${png.w} x ${png.h}  (${png.w / W}x of ${W} x ${H})`);
+console.log(`channel covers  ${(100 * png.filled).toFixed(1)}% of the box`);
+console.log(`channel runs   ${png.startPct.toFixed(1)}% to ${png.endPct.toFixed(1)}% across the meter`);
+console.log(`  -> .tm-meter-track's gradient stop must run between those two`);
 console.log(OUT);
 await b.close();
