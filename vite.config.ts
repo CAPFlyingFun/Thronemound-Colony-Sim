@@ -24,4 +24,25 @@ export default defineConfig(({ command }) => ({
   build: {
     sourcemap: true,
   },
+  /*
+   * THIRTY SECONDS, because five is not a timeout here — it is a coin toss.
+   *
+   * Vitest defaults to 5 s, and this project's tests are not unit tests in
+   * the millisecond sense: they build a real voxel island, dig spheres out
+   * of it and compare whole float fields. `islandSave`'s round-trip takes
+   * 3,996 ms on this machine, which is a one-second margin, and a loaded
+   * GitHub runner ate it — the v0.1.42 deploy failed with 966 tests passing
+   * and that one timing out, on a commit that touched the pose editor and
+   * nothing else. A test that fails on how busy the runner is tells you
+   * about the runner.
+   *
+   * Raised rather than tuned per-file: several of these sit in the same
+   * seconds-long band and picking them off one at a time just moves the
+   * coin toss to whichever is next-slowest. A genuinely hung test still
+   * fails, thirty seconds later.
+   */
+  test: {
+    testTimeout: 30000,
+    hookTimeout: 30000,
+  },
 }));
