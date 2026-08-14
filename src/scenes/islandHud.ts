@@ -201,7 +201,6 @@ export function buildControls(host: HudHost, ): void {
   scoopBtn.addEventListener('pointerup', stopDig);
   scoopBtn.addEventListener('pointercancel', stopDig);
   scoopBtn.addEventListener('lostpointercapture', stopDig);
-  actions.appendChild(scoopBtn);
   host.railPart(scoopBtn, 'scoop');
 
 
@@ -369,6 +368,18 @@ export function buildControls(host: HudHost, ): void {
    * toggle all come with it untouched.
    */
   cluster.appendChild(dig);
+  /*
+   * AND SCOOP WITH IT — the fix for "in dig mode the scoop is in the wrong
+   * place". DIG was re-parented into the cluster in v0.1.36 and SCOOP was
+   * not, so it stayed a direct child of the rail: in the old bottom ROW that
+   * put it in a line above the plates and nobody noticed, and in the edge
+   * DOCK it put it at the top of the column, across the objective card.
+   *
+   * It is the dig mode's PRIMARY, so once it is in the cluster the mode
+   * table sends it to the corner where the thumb is — which is where DIG
+   * sits in every other mode, and where a held stroke belongs.
+   */
+  cluster.appendChild(scoopBtn);
 
   cluster.appendChild(view);
   host.railPart(view, 'view');

@@ -809,3 +809,30 @@ export const COLONIST_ARRIVE = 1.2;
 export const COLONIST_ROAM = 12;
 
 
+
+/**
+ * HER FACE'S REACH — how far ahead of her neck the head clamp asks whether
+ * there is soil. Roughly a head-and-neck length on the queen, which is the
+ * thing being kept out of the dirt.
+ */
+export const HEAD_PROBE_REACH = 0.5;
+
+/**
+ * How finely the head clamp resolves the steepest pitch she can hold.
+ *
+ * Eight halvings of a look is a fraction of a degree. The number that
+ * matters is that it is a BISECTION: the four fixed halvings it replaced
+ * gave her neck four legal angles, so a hair of terrain movement swung her
+ * head by tens of degrees, which the first-person lens rides.
+ */
+export const HEAD_PROBE_BISECTIONS = 8;
+
+/**
+ * How fast her neck may turn, in radians per second — the damper on the
+ * head clamp. About 170 degrees a second, so a full look-down arrives in
+ * under half a second and reads as a head turning, while a sudden change
+ * in what the soil allows can no longer land in one frame.
+ *
+ * GAME TUNING for how a neck should read on screen, not measured biology.
+ */
+export const HEAD_PITCH_RATE = 3;

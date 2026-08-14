@@ -34,6 +34,7 @@ import {
   EYE_FOLLOW_MS, EYE_FOLLOW_RATE, EYE_ROLL_RATE, EYE_MARCH_STEPS,
   EYE_BISECTIONS, FPV_LIFT_RAD, FPV_LIFT_SOFT_MM, FPV_LIFT_HARD_MM,
   FPV_LIFT_RATE, HEAD_PROBE_AT, HEAD_PROBE_DIR, HEAD_PROBE_RIGHT,
+  HEAD_PROBE_REACH, HEAD_PROBE_BISECTIONS, HEAD_PITCH_RATE,
   FAN_SWING, FAN_RISE, CHASE_MIN, LOOK_HOLD_S, LOOK_RETURN_RATE,
   CHASE_PITCH, CHASE_PITCH_MIN, CHASE_PITCH_MAX, CHASE_GROUND_CLEAR,
   CHASE_REACH, RIDE, BONE_FWD, CHAMBER_CAM_FAR, CHAMBER_CAM_NEAR,
@@ -81,6 +82,8 @@ export interface CameraHost {
   lookPitch: number;
   lookIdle: number;
   fpvLift: number;
+  /** Her neck's eased angle — the damper on the head clamp. */
+  headPitchNow: number;
   headClearMm: number;
   lensWorstMm: number;
 
@@ -556,15 +559,48 @@ export function aimCamera(host: CameraHost, dt: number): void {
     /* The eye's own retreat clears the FRUSTUM too — see `lensClearance`.
      * EYE_SKIN alone let the lens stop half a millimetre off a wall the
      * near plane was already a millimetre inside of. */
-    const skin = Math.max(EYE_SKIN, lensClearance(host));
-    const clearAt = (t: number): boolean => {
-      const px = base.x + dir.x * EYE_FORWARD * t;
-      const py = base.y + dir.y * EYE_FORWARD * t;
-      const pz = base.z + dir.z * EYE_FORWARD * t;
-      return host.soilDensityAt(px, py, pz) <= -skin
-        && host.soilDensityAt(px + dir.x * skin, py + dir.y * skin,
-          pz + dir.z * skin) <= 0;
-    };
+    /*
+     * THE MARCH ASKS "IS THIS A WALL", NOT "IS THIS ROOMY" — and that
+     * distinction is the shake.
+     *
+     * This test used to defend `max(EYE_SKIN, lensClearance(host))`, about
+     * 1.0 mm, on the reasoning that the lens should not stop half a
+     * millimetre off a wall the near plane is already inside of. True aim,
+     * wrong place. A bore is barely wider than the clearance by
+     * construction, so demanding a full millimetre of air EVERYWHERE along
+     * a 1.3 mm line puts the predicate permanently on a tangency: the
+     * density along the ray humps up to graze the threshold near her head
+     * and falls away again further out.
+     *
+     * A grazing threshold has no continuous answer. `first crossing` jumps
+     * from "just past her head" to "the whole line is fine" the instant the
+     * hump moves by a micron — and her idle re-seat moves the head anchor
+     * by microns every frame. Measured, standing perfectly still, aimed 70
+     * degrees down in a dig: the solver alternated between `firstBlocked =
+     * 0.25` and `firstBlocked = -1` on strictly alternating frames, a
+     * 1.08 mm swing in the eye target, forever, which the filter turned
+     * into a 0.17 mm two-frame buzz. That is the "camera shakes when
+     * pointing down, worse while digging" report, and it is why the
+     * previous fix — making the retreat continuous by bisecting — did not
+     * hold: the bisection was sharpening a boundary that was itself
+     * appearing and vanishing.
+     *
+     * So the march defends EYE_SKIN, which is a WALL test and has better
+     * than a millimetre of margin here, and the clearance the near plane
+     * wants is left to `liftCameraClear` below — which owns exactly that
+     * question, measures the whole frustum rather than one ray, and runs on
+     * this same point a few lines down. One concern, one owner.
+     *
+     * The second read this used to AND in — taken a whole skin FURTHER
+     * along a line only 1.3 mm long — goes with it. It vouched for a point
+     * 77% of the line beyond the one being tested, so the predicate was not
+     * even monotonic in `t`.
+     */
+    const skin = EYE_SKIN;
+    const clearAt = (t: number): boolean => host.soilDensityAt(
+      base.x + dir.x * EYE_FORWARD * t,
+      base.y + dir.y * EYE_FORWARD * t,
+      base.z + dir.z * EYE_FORWARD * t) <= -skin;
     /*
      * MARCHED, NOT JUST TESTED AT THE END — the lens must stay in HER air.
      *
@@ -898,23 +934,78 @@ export function settleChase(host: CameraHost, want: THREE.Vector3, dt: number): 
  * the pitch off by halves until that point is air.
  */
 export function clampedHeadPitch(host: CameraHost): number {
-  let pitch = host.lookPitch;
-  if (!host.queenReady || !host.queen.eyeWorldPosition(HEAD_PROBE_AT)) {
-    return pitch;
-  }
+  const want = host.lookPitch;
+  /*
+   * THE PROBE STARTS AT HER NECK, NOT AT HER POSED FACE — and that is the
+   * shake, not a detail of where to measure from.
+   *
+   * This used to probe from `eyeWorldPosition`, which is the head joint
+   * AFTER the pose this function decides. So the answer moved the head,
+   * and the moved head changed the answer: a closed loop, sampled once a
+   * frame, with no damping anywhere in it. Measured standing perfectly
+   * still, aimed 70 degrees down in a dig, her head pitch alternated
+   * -35 / -70 / -35 / -70 degrees on strictly alternating frames — a
+   * 35-degree head flip at 60 Hz — and in first person the lens is
+   * mounted on that head. That is the "camera shakes when pointing down,
+   * worse while digging" report.
+   *
+   * Her neck is the PIVOT of the rotation being clamped, so it barely
+   * moves when the head pitches, and probing from it makes this a pure
+   * question about her body and her aim. The loop is gone rather than
+   * damped: nothing this returns can change what it reads next frame.
+   *
+   * It is the same anchor the eye code falls back to before her model has
+   * loaded, for the same reason — it is the one point on her that the
+   * head pose provably does not move.
+   */
+  HEAD_PROBE_AT.copy(host.at).addScaledVector(host.up, EYE_RISE);
   HEAD_PROBE_RIGHT.crossVectors(host.fwd, host.up);
-  if (HEAD_PROBE_RIGHT.lengthSq() < 1e-8) return pitch;
+  if (HEAD_PROBE_RIGHT.lengthSq() < 1e-8) return want;
   HEAD_PROBE_RIGHT.normalize();
-  for (let i = 0; i < 4 && Math.abs(pitch) > 0.04; i += 1) {
+  const buried = (pitch: number): boolean => {
     HEAD_PROBE_DIR.copy(host.fwd).applyAxisAngle(HEAD_PROBE_RIGHT, pitch);
-    if (host.soilDensityAt(
-      HEAD_PROBE_AT.x + HEAD_PROBE_DIR.x * 0.5,
-      HEAD_PROBE_AT.y + HEAD_PROBE_DIR.y * 0.5,
-      HEAD_PROBE_AT.z + HEAD_PROBE_DIR.z * 0.5,
-    ) <= 0) break;
-    pitch *= 0.5;
+    return host.soilDensityAt(
+      HEAD_PROBE_AT.x + HEAD_PROBE_DIR.x * HEAD_PROBE_REACH,
+      HEAD_PROBE_AT.y + HEAD_PROBE_DIR.y * HEAD_PROBE_REACH,
+      HEAD_PROBE_AT.z + HEAD_PROBE_DIR.z * HEAD_PROBE_REACH,
+    ) > 0;
+  };
+  if (!buried(want)) return want;
+  /*
+   * BISECTED, NOT HALVED. Backing off `pitch *= 0.5` gave this four legal
+   * answers and nothing in between, so a hair of terrain movement moved
+   * her head by tens of degrees. Level is always safe — she cannot bury
+   * her face by looking where she is standing — so the furthest pitch
+   * that keeps her face in air is bracketed between 0 and the ask, and
+   * that boundary is a continuous function of both.
+   */
+  let lo = 0;
+  let hi = want;
+  for (let i = 0; i < HEAD_PROBE_BISECTIONS; i += 1) {
+    const mid = (lo + hi) / 2;
+    if (buried(mid)) hi = mid; else lo = mid;
   }
-  return pitch;
+  return lo;
+}
+
+/**
+ * Ease her head onto what the soil allows.
+ *
+ * The clamp above is now loop-free and continuous, so it no longer
+ * oscillates on its own — but it is still a geometric answer that can
+ * change fast when she crests a lip or breaks through a face, and a neck
+ * that snaps tens of degrees in one frame reads as a flinch whether or
+ * not it is correct. This is the damper: her head TURNS to the allowed
+ * pitch rather than being teleported to it.
+ *
+ * Rate-limited rather than exponential, so the neck has an honest angular
+ * speed instead of a long asymptotic tail that never quite arrives.
+ */
+export function settleHeadPitch(host: CameraHost, want: number, dt: number): number {
+  const swing = HEAD_PITCH_RATE * dt;
+  const gap = want - host.headPitchNow;
+  host.headPitchNow += Math.max(-swing, Math.min(swing, gap));
+  return host.headPitchNow;
 }
 
 export function clearRun(host: CameraHost, dir: THREE.Vector3, max: number): number {

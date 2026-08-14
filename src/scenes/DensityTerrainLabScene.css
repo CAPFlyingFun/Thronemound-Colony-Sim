@@ -1701,8 +1701,18 @@
   pointer-events: none;
 }
 
-/* DIG is the hero and takes the corner. */
-.tm-cluster > .tm-art-dig { order: -1; }
+/*
+ * THE MODE'S HERO TAKES THE CORNER — whichever control that is.
+ *
+ * This was pinned to DIG, which is right in three modes out of five and
+ * wrong in the two that matter most: in DIG mode the hero is SCOOP, and in
+ * CARRY it is DROP. Pinned to the plate rather than to the RANK, the hero
+ * of the mode ended up wherever the wrap put it while DIG kept the corner.
+ *
+ * `is-primary` is already written by `applyHudMode` off the mode table, so
+ * the corner follows the table now and no plate is named here at all.
+ */
+.tm-cluster > .tm-art.is-primary { order: -1; }
 
 /*
  * THE RANKS, DRAWN. `hudModes.ts` decides them; these three rules are what

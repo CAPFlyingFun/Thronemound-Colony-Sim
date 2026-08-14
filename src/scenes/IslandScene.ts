@@ -143,7 +143,8 @@ import {
 import { Colonist } from './Colonist';
 import { SoilQuery } from './soilQuery';
 import {
-  aimCamera, clampedHeadPitch, lensClearance, type CameraHost,
+  aimCamera, clampedHeadPitch, lensClearance, settleHeadPitch,
+  type CameraHost,
 } from './islandCamera';
 import { buildControls, updateStatus, type HudHost } from './islandHud';
 import {
@@ -1172,6 +1173,9 @@ export class IslandScene {
 
   /** The eased camera-only up-tilt, in radians. See `FPV_LIFT_RAD`. */
   private fpvLift = 0;
+
+  /** Her neck's eased angle — the damper on the head clamp. */
+  private headPitchNow = 0;
   /**
    * The direction the first-person lens actually looks, in world space.
    *
@@ -1314,6 +1318,19 @@ export class IslandScene {
   private readonly pixelCap = Math.min(window.devicePixelRatio, 3);
 
   private pixelRatioNow = Math.min(window.devicePixelRatio, 2);
+
+  /**
+   * The highest rung not yet PROVED too expensive. Starts at the cap and
+   * only ever comes down — see the scaler in `animate` for why a ceiling
+   * that never learns is a ceiling the scaler hunts against.
+   */
+  private pixelCeiling = Math.min(window.devicePixelRatio, 3);
+
+  /** When the render scale last moved, so it is not judged mid-settle. */
+  private pixelChangedAt = 0;
+
+  /** Consecutive seconds comfortably above the target frame rate. */
+  private goodSeconds = 0;
 
   /** The last position whose centre provably sampled AIR — the anchor the
    *  anti-embed safety net snaps back to. */
@@ -2718,7 +2735,10 @@ export class IslandScene {
       /* Left and right were backwards — reported, and the sign lives here
        * and nowhere else. Her pitch was already right, so only this flips. */
       headYaw: this.firstPerson ? 0 : this.lookYaw,
-      headPitch: this.clampedHeadPitch(),
+      /* EASED, not snapped — see `settleHeadPitch`. The clamp is a
+       * geometric answer and can change fast; her neck is not allowed to. */
+      headPitch: settleHeadPitch(
+        this.cameraHost, clampedHeadPitch(this.cameraHost), dt),
       /* The ground's own posture, kept entirely separate from the aim above
        * — see `readSpine`. */
       spine: readSpine(this.bodyHost, dt),
@@ -2806,7 +2826,6 @@ export class IslandScene {
 
   private lensClearance(): number { return lensClearance(this.cameraHost); }
 
-  private clampedHeadPitch(): number { return clampedHeadPitch(this.cameraHost); }
 
   /* ---------------------------------------------------------------- HUD */
 
@@ -2855,18 +2874,61 @@ export class IslandScene {
       this.stats.fps = Math.round(this.stats.frames * 1000 / (now - this.stats.fpsAt));
       this.stats.frames = 0;
       this.stats.fpsAt = now;
-      /* Resolution breathes with the frame rate: a phone that cannot hold
-       * ~30 fps at retina scale drops a notch (never below 1x) and earns
-       * it back above 55 — the single biggest lever on a fillrate-bound
-       * iPhone, and invisible on a desktop that never dips. */
-      if (this.stats.fps < 28 && this.pixelRatioNow > 1) {
-        this.pixelRatioNow = Math.max(1, this.pixelRatioNow - 0.25);
+      /*
+       * RESOLUTION BREATHES WITH THE FRAME RATE — and it must not HUNT.
+       *
+       * A phone that cannot hold ~30fps drops a notch and earns it back
+       * above 55: the single biggest lever on a fill-rate-bound iPhone. The
+       * danger is the loop. Drop a notch, frame rate recovers past 55, climb
+       * back, frame rate collapses again — and every one of those steps
+       * calls `resize()`, which reallocates the drawing buffer. A scaler
+       * oscillating once a second is a visible pulse, and it looks exactly
+       * like the camera shaking.
+       *
+       * That was survivable while the ceiling was 2, because there were four
+       * steps to hunt over. v0.1.38 raised it to 3 for the sake of a native
+       * 3x screen and gave the loop twice the room — and pointing at nearby
+       * ground, which is the most fill-rate-hungry thing in the game, is
+       * exactly where a phone sits on the threshold.
+       *
+       * THREE GUARDS, and each one is doing a different job:
+       *
+       * A COOLDOWN, so a change is never followed by another for four
+       * seconds. Whatever the last change did to the frame rate has to be
+       * given time to show up before it is judged.
+       *
+       * A CLIMB THAT COSTS MORE THAN A DROP. Falling behind is urgent —
+       * that is a stutter the player feels now. Getting sharper is not, so
+       * it wants THREE consecutive good seconds, not one lucky one.
+       *
+       * A HIGH-WATER MARK. Once a resolution has been proved too expensive,
+       * it stops being a destination: the ceiling comes down to just below
+       * it and the scaler settles instead of retrying the thing it already
+       * knows does not work.
+       */
+      const fps = this.stats.fps;
+      const cooling = now - this.pixelChangedAt < 4000;
+      if (fps < 28 && this.pixelRatioNow > 1 && !cooling) {
+        /* This rung is too expensive. Remember that, and stop aiming at it. */
+        this.pixelCeiling = Math.max(1, this.pixelRatioNow - 0.25);
+        this.pixelRatioNow = this.pixelCeiling;
         this.renderer.setPixelRatio(this.pixelRatioNow);
+        this.pixelChangedAt = now;
+        this.goodSeconds = 0;
         this.resize();
-      } else if (this.stats.fps > 55 && this.pixelRatioNow < this.pixelCap) {
-        this.pixelRatioNow = Math.min(this.pixelCap, this.pixelRatioNow + 0.25);
-        this.renderer.setPixelRatio(this.pixelRatioNow);
-        this.resize();
+      } else if (fps > 55) {
+        this.goodSeconds += 1;
+        const roof = Math.min(this.pixelCap, this.pixelCeiling);
+        if (this.goodSeconds >= 3 && this.pixelRatioNow < roof && !cooling) {
+          this.pixelRatioNow = Math.min(roof, this.pixelRatioNow + 0.25);
+          this.renderer.setPixelRatio(this.pixelRatioNow);
+          this.pixelChangedAt = now;
+          this.goodSeconds = 0;
+          this.resize();
+        }
+      } else {
+        /* Anywhere between the two is not a run of good seconds. */
+        this.goodSeconds = 0;
       }
       this.updateStatus();
     }
@@ -3173,6 +3235,15 @@ export class IslandScene {
     this.lookPitch = radians;
     this.aimPitch = radians;
     this.lookIdle = 0;
+  }
+
+  /** What the soil let her head have this frame. See `clampedHeadPitch`. */
+  headPitchForTest(): { want: number; allowed: number; neck: number } {
+    return {
+      want: this.lookPitch,
+      allowed: clampedHeadPitch(this.cameraHost),
+      neck: this.headPitchNow,
+    };
   }
 
   /**
