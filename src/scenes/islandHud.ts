@@ -1040,7 +1040,26 @@ export function updateStatus(host: HudHost, ): void {
     (${host.stats.rebases} rebases) · last ${host.stats.lastScrollMs.toFixed(0)} ms<br>
     at (${(host.at.x * MM / 1000).toFixed(1)}, ${(host.at.z * MM / 1000).toFixed(1)}) m ·
     ${memory ? `heap ${(memory.usedJSHeapSize / 1048576).toFixed(0)} MB · ` : ''}fps ${host.stats.fps}
-    @ ${host.pixelRatioNow.toFixed(2)}x
+    @ ${host.pixelRatioNow.toFixed(2)}x<br>
+    ${(() => {
+    /*
+     * WHAT THE DEVICE ACTUALLY GIVES US, which nothing on screen used to
+     * say. The render scale alone is half an answer: "2.00x" is native on
+     * a laptop and 44% of the pixels on the phone this game is played on.
+     * CSS size, DPR, and the real backing store make the difference
+     * legible — and make it obvious the moment the adaptive scaler has
+     * quietly given resolution away to hold the frame rate.
+     */
+    const c = host.renderer.domElement;
+    const dpr = window.devicePixelRatio;
+    const cssW = Math.round(c.clientWidth);
+    const cssH = Math.round(c.clientHeight);
+    const native = `${Math.round(cssW * dpr)}x${Math.round(cssH * dpr)}`;
+    const buf = `${c.width}x${c.height}`;
+    const share = (c.width * c.height) / (cssW * dpr * cssH * dpr);
+    return `css ${cssW}x${cssH} · dpr ${dpr} · buffer ${buf}`
+      + ` of ${native} (${(share * 100).toFixed(0)}%)`;
+  })()}
   `);
 }
 

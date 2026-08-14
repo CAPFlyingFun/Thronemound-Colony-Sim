@@ -1287,11 +1287,33 @@ export class IslandScene {
    *  plan into its working box and back. */
   private readonly designOriginMm = new THREE.Vector3();
 
-  /** Render scale breathes with the frame rate (phones): capped at retina,
-   *  never below 1x. */
-  private readonly pixelCap = Math.min(window.devicePixelRatio, 2);
+  /**
+   * HOW SHARP THE WORLD IS ALLOWED TO GET, and where it starts.
+   *
+   * These were one number, `min(dpr, 2)`, used as both. On the phone this
+   * game is actually played on that was a hard ceiling at 44% of the
+   * screen's pixels: an iPhone 15 Plus is 1290 x 2796 at devicePixelRatio
+   * 3, so a cap of 2 renders 1864 x 860 into a 2796 x 1290 panel and lets
+   * the GPU upscale the difference. The layout was never wrong — 932 x 430
+   * LOGICAL is exactly that device — but the 3D world was soft for a reason
+   * nothing on screen could tell you.
+   *
+   * TWO NUMBERS NOW, and the split is the whole fix:
+   *
+   * `pixelCap` is the CEILING it may reach — full native, up to 3.
+   * `pixelRatioNow` STARTS at the old cautious 2 and climbs.
+   *
+   * Starting at 3 would be the obvious change and the wrong one: a device
+   * that cannot hold it would open the game at 12 fps and take four seconds
+   * of quarter-steps to claw back, which is the worst possible first
+   * impression. Starting low and earning it costs a few seconds of softness
+   * on a phone that will then keep the sharpness, and costs a weak phone
+   * nothing at all. The climb and the drop are both already there — see
+   * `animate`, fps < 28 down, fps > 55 up.
+   */
+  private readonly pixelCap = Math.min(window.devicePixelRatio, 3);
 
-  private pixelRatioNow = this.pixelCap;
+  private pixelRatioNow = Math.min(window.devicePixelRatio, 2);
 
   /** The last position whose centre provably sampled AIR — the anchor the
    *  anti-embed safety net snaps back to. */
@@ -1522,7 +1544,7 @@ export class IslandScene {
       host.addEventListener(name, this.refuseGesture, { passive: false });
     }
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(this.pixelRatioNow);
     host.appendChild(this.renderer.domElement);
     this.watchContext();
 
