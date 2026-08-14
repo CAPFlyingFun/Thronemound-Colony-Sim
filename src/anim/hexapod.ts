@@ -188,26 +188,80 @@ export const RIGS: Record<RigMap['caste'], RigMap> = {
 };
 
 /**
- * HER HEAD JOINT — the last bone of the thorax chain, and not the mouth.
+ * WHAT THE RIG TABLE'S NAMES ACTUALLY POINT AT — the whole skeleton is
+ * shifted one segment forward of what it is called, and every accessor below
+ * exists to stop that costing anyone another afternoon.
  *
- * The chain called `thorax` runs from her waist up to and INCLUDING the head,
- * which is why `QueenModel` has always taken the head off its end and why the
- * gait writes the head dip there. `mouth` is what hangs off the front of that
- * — the face and jaw region, ahead of the antenna sockets.
+ * The auto-rigger's groups were taken at face value and they are wrong by a
+ * segment. Two independent measurements in this repo say so, and a third
+ * came off the device:
  *
- * Both facts were only written down inside `QueenModel`, so the pose editor
- * built a handle called "Head" over the mouth chain and one called "Thorax"
- * that quietly contained the real head joint. Reported from the device: "it
- * says head, but it's from the antenna bone out to the jaw and not actually
- * at the head joint." Stated here so there is one answer rather than three.
+ *   - `thorax[LAST]` sits 0.64 mm from her antenna sockets, i.e. inside her
+ *     face — measured while fixing the head-turn pivot in `QueenModel`.
+ *   - `thorax[0]` is 2.26 mm behind the jaw and 2.10 mm from the sockets:
+ *     the rearmost joint the table still calls thorax, with her body root
+ *     beyond it. That is her NECK, and it is what `QueenModel` turns to turn
+ *     her head.
+ *   - Reported from the animator: "the head is at the antenna bone, and
+ *     what's labeled as Thorax is actually the Head."
+ *
+ * And the parent chain, dumped with `scripts/shot-skeleton.mjs` rather than
+ * assumed:
+ *
+ *   root -> body[0] -> body[1] ------> thorax[0] -> [1] -> [2] -> mouth
+ *                          |     `---> gaster[0] -> gaster[1]
+ *                          `---------> all six legs
+ *
+ * `body[LAST]` is the hub: pitching it pitches her whole upper body AND her
+ * legs, which is what a thorax does and what nothing called `thorax` in this
+ * table does. So the honest reading is:
+ *
+ *   rig.body[0..LAST-1]  her body root
+ *   rig.body[LAST]       her THORAX — the segment the legs hang off
+ *   rig.thorax           her HEAD, neck base out to the antenna sockets
+ *   rig.mouth            her face and jaw, ahead of the sockets
+ *
+ * The table itself is left alone deliberately. Renaming its keys would mean
+ * re-checking every bone list against three GLBs for no gain; naming the
+ * ACCESSORS correctly gets the same result and leaves one obvious place to
+ * look. Nothing outside this block should be reading `rig.thorax` directly.
  */
-export function headBone(rig: RigMap): string | undefined {
+
+/** Her whole head, neck base first — the chain the table calls `thorax`. */
+export function headChain(rig: RigMap): string[] {
+  return rig.thorax;
+}
+
+/**
+ * The joint her head TURNS on. `QueenModel` poses this one, and the camera's
+ * head clamp probes from it, because it is the pivot rather than a point
+ * carried by the pivot.
+ */
+export function neckBone(rig: RigMap): string | undefined {
+  return rig.thorax[0];
+}
+
+/**
+ * The FRONT of her head — the joint at the antenna sockets.
+ *
+ * Named for where it is rather than what the table calls it. This is the
+ * right anchor for anything that wants her FACE (her eyes ride it) and the
+ * wrong one for anything that wants to turn her head, which is `neckBone`.
+ * It was called `headBone`, and that name is most of why a handle labelled
+ * "Head" showed up on her antennae.
+ */
+export function headFrontBone(rig: RigMap): string | undefined {
   return rig.thorax[rig.thorax.length - 1];
 }
 
-/** The thorax PROPER — the chain without the head joint on the end of it. */
-export function thoraxBones(rig: RigMap): string[] {
-  return rig.thorax.slice(0, -1);
+/** Her THORAX — the hub the legs and the head both hang off. */
+export function thoraxBone(rig: RigMap): string | undefined {
+  return rig.body[rig.body.length - 1];
+}
+
+/** Her body root, without the thorax hub on the end of it. */
+export function bodyBones(rig: RigMap): string[] {
+  return rig.body.slice(0, -1);
 }
 
 /** Every bone a rig map names, for validation and for resting untouched bones. */

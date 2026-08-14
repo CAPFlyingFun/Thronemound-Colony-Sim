@@ -28,7 +28,9 @@
  * it. See `blendInto`.
  */
 
-import { headBone, thoraxBones, type RigMap } from './hexapod';
+import {
+  bodyBones, headChain, neckBone, thoraxBone, type RigMap,
+} from './hexapod';
 
 /** A quaternion as it is stored: x, y, z, w. */
 export type PoseQuat = readonly [number, number, number, number];
@@ -67,13 +69,22 @@ const LEG_LABELS: Record<string, string> = {
  * — and a hard-coded list would silently produce empty handles for her and
  * miss the workers' jaws. A group with no bones is not offered at all.
  *
- * HEAD IS THE HEAD JOINT. It used to be the mouth chain, which is the face
- * and jaw hanging off the front of the head — reported from the device as
- * "it says head, but it's from the antenna bone out to the jaw and not
- * actually at the head joint", and correct. The head joint lives on the end
- * of the thorax chain (see `headBone`), so it was inside the THORAX handle
- * at the same time: turning what was labelled Thorax turned her head too.
- * Both handles now say what they turn.
+ * THE HANDLES ARE NAMED FOR WHERE THEY ARE, not for what the rig table
+ * calls the bones — the table is a segment out, and this is where that
+ * showed on a person's screen. See the block above `headChain` for the
+ * measurements.
+ *
+ * Reported from the animator, and both halves were true at once: "the head
+ * is at the antenna bone, and what's labeled as Thorax is actually the
+ * Head." HEAD was one joint, `thorax[LAST]`, which sits 0.64 mm from her
+ * antenna sockets; THORAX was the rest of the same chain, which is her neck
+ * and the back of her head. There was no handle anywhere on her actual
+ * thorax, because that is `body[LAST]` and it was buried inside BODY.
+ *
+ * A round before that, HEAD was the mouth chain — the face and jaw ahead of
+ * the sockets — reported in the same words from the device. Twice wrong in
+ * the same place is what the accessors in `hexapod` are for: the anatomy is
+ * stated once, and this reads it rather than re-deriving it.
  */
 export function poseGroups(rig: RigMap): PoseGroup[] {
   const out: PoseGroup[] = [];
@@ -81,9 +92,11 @@ export function poseGroups(rig: RigMap): PoseGroup[] {
     const named = (bones ?? []).filter((b): b is string => !!b);
     if (named.length) out.push({ key, label, bones: named });
   };
-  add('body', 'Body', rig.body);
-  add('thorax', 'Thorax', thoraxBones(rig));
-  add('head', 'Head', [headBone(rig)]);
+  add('body', 'Body', bodyBones(rig));
+  add('thorax', 'Thorax', [thoraxBone(rig)]);
+  /* Her whole head as one handle, neck base first — so its ROOT is the joint
+   * that turns her head and its TIP is up at her antenna sockets. */
+  add('head', 'Head', headChain(rig));
   add('mouth', 'Mouth', rig.mouth);
   add('mandibleLeft', 'Jaw L', rig.mandibleLeft);
   add('mandibleRight', 'Jaw R', rig.mandibleRight);
@@ -125,6 +138,16 @@ export function boneLabels(rig: RigMap): Map<string, string> {
     });
   };
   for (const group of poseGroups(rig)) chain(group.label, group.bones);
+  /*
+   * ONE ANATOMICAL EXCEPTION, because this joint is worth finding by name.
+   *
+   * "Head root" is accurate and useless: it is her NECK, it is the joint the
+   * whole head turns on, and it is the one `QueenModel` poses for the look
+   * and the camera probes from. An animator reaching for "turn her head"
+   * wants this bone and should not have to work out that root means neck.
+   */
+  const neck = neckBone(rig);
+  if (neck && out.has(neck)) out.set(neck, 'Neck');
   return out;
 }
 

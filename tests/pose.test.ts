@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  MAJOR_RIG, QUEEN_RIG, WORKER_RIG, headBone, thoraxBones,
+  MAJOR_RIG, QUEEN_RIG, WORKER_RIG, bodyBones, headChain, headFrontBone,
+  neckBone, thoraxBone,
 } from '../src/anim/hexapod';
 import {
   blendInto, boneLabels, emptyPose, IDENTITY, parsePose, poseBones, poseGroups,
@@ -11,22 +12,36 @@ import {
 const ALL_RIGS = [QUEEN_RIG, WORKER_RIG, MAJOR_RIG];
 
 describe('what the handles are called', () => {
-  it('puts HEAD on the head joint and not on the mouth', () => {
+  it('puts every handle where that part of her actually is', () => {
     /*
-     * Reported from the device: "it says head, but it's from the antenna bone
-     * out to the jaw and not actually at the head joint." It was the mouth
-     * chain, and the real head joint was hiding inside the THORAX handle at
-     * the same time, so turning what was labelled Thorax turned her head.
+     * Reported from the animator, both halves true at once: "the head is at
+     * the antenna bone, and what's labeled as Thorax is actually the Head."
+     * The rig table's groups are a segment forward of the anatomy — see the
+     * measurements above `headChain` — so HEAD was the single joint at her
+     * antenna sockets, THORAX was her neck and the back of her head, and
+     * nothing at all was on her actual thorax.
+     *
+     * A round before that, HEAD was the mouth chain and was reported in the
+     * same words. Twice wrong in one place is why this test names the parts
+     * rather than the table.
      */
     for (const rig of ALL_RIGS) {
       const by = new Map(poseGroups(rig).map((g) => [g.key, g]));
-      expect(by.get('head')?.bones).toEqual([headBone(rig)]);
-      expect(by.get('mouth')?.bones).toEqual([...rig.mouth]);
+      /* HEAD is her whole head, neck base first — not one joint at her face. */
+      expect(by.get('head')?.bones).toEqual([...headChain(rig)]);
+      expect(by.get('head')?.bones[0]).toBe(neckBone(rig));
       expect(by.get('head')?.label).toBe('Head');
+      /* THORAX is the hub her legs and head hang off, and nothing else. */
+      expect(by.get('thorax')?.bones).toEqual([thoraxBone(rig)]);
+      expect(by.get('body')?.bones).toEqual([...bodyBones(rig)]);
+      expect(by.get('mouth')?.bones).toEqual([...rig.mouth]);
       expect(by.get('mouth')?.label).toBe('Mouth');
-      /* And the thorax no longer secretly contains it. */
-      expect(by.get('thorax')?.bones).not.toContain(headBone(rig));
-      expect(by.get('thorax')?.bones).toEqual(thoraxBones(rig));
+      /* The two faults that were reported, stated as the test that fails. */
+      expect(by.get('head')?.bones).toContain(headFrontBone(rig));
+      expect(by.get('thorax')?.bones).not.toContain(neckBone(rig));
+      /* Every bone still belongs to exactly one handle. */
+      const all = poseGroups(rig).flatMap((g) => g.bones);
+      expect(new Set(all).size).toBe(all.length);
     }
   });
 
@@ -42,7 +57,11 @@ describe('what the handles are called', () => {
       expect(names.get(leg.bones[0]!)).toMatch(/root$/);
       expect(names.get(leg.bones[leg.bones.length - 1]!)).toMatch(/tip$/);
       /* A one-bone group is just its own name, with nothing appended. */
-      expect(names.get(headBone(rig)!)).toBe('Head');
+      expect(names.get(thoraxBone(rig)!)).toBe('Thorax');
+      /* Her neck is named, not called "Head root" — it is the joint an
+       * animator reaches for to turn her head. */
+      expect(names.get(neckBone(rig)!)).toBe('Neck');
+      expect(names.get(headFrontBone(rig)!)).toBe('Head tip');
     }
   });
 

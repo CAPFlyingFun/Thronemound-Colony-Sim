@@ -10,7 +10,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import {
-  GASTER_COUNTER, QUEEN_RIG, RIGS, cadenceFor, gaitPose, gaitSpeed, headBone,
+  GASTER_COUNTER, QUEEN_RIG, RIGS, cadenceFor, gaitPose, gaitSpeed, headFrontBone,
   rigBones, rigLengthVoxels, rigScale,
   type GaitInput, type GaitPose, type RigMap,
 } from './hexapod';
@@ -1444,7 +1444,7 @@ export class QueenModel {
    * few lines apart and the array gives no clue which is which.
    */
   private headBoneName(): string | undefined {
-    return headBone(this.rig);
+    return headFrontBone(this.rig);
   }
 
   /**
