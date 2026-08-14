@@ -10,3 +10,8 @@ dist/
 # half-finished investigation from ever landing in a commit.
 scratch-*.mjs
 scratch-*.png
+
+# Agent worktrees. They live inside the repo, so without this they get
+# committed as gitlinks AND collected by vitest — three copies of every
+# test file, and CPU contention that turns 900ms tests into 5s timeouts.
+.claude/worktrees/
