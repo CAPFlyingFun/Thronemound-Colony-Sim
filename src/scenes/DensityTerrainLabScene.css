@@ -2293,6 +2293,18 @@
   opacity: 0.5;
 }
 
+/*
+ * CARRYING SOMETHING. The frame sits back a little while her jaws are
+ * empty — an empty meter is a true reading rather than a thing to look at,
+ * and the one moment it should catch an eye is the moment it stops being
+ * empty. Not a colour change: the ramp inside is already saying how full
+ * she is, and two things saying it at once is one of them lying sooner or
+ * later.
+ */
+.tm-meter { opacity: 0.82; transition: opacity 0.2s ease; }
+.tm-meter.is-loaded { opacity: 1; }
+.tm-meter.is-soon.is-loaded { opacity: 0.5; }
+
 .tm-meter.is-soon .tm-meter-track {
   background-image: repeating-linear-gradient(
     116deg,

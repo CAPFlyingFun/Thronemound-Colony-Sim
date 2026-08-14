@@ -127,7 +127,7 @@ import {
   BODY_FIT_SCALE, QUEST_DEPTH_MM, QUEST_CHAMBER_SAMPLES, JAW_PAST_NOSE,
   BODY_HALF_TALL, BODY_FLOOR_MARGIN, AIM_LIMIT, CHAMBER_CAM_FAR,
   CHAMBER_CAM_NEAR, COLONIST_SPEED, COLONIST_TURN, COLONIST_ARRIVE,
-  COLONIST_ROAM, TROPHALLAXIS_REACH, TROPHALLAXIS_RATE,
+  COLONIST_ROAM, TROPHALLAXIS_REACH, TROPHALLAXIS_RATE, CARRY_DELIVER_REACH,
 } from './islandTuning';
 import { Colonist } from './Colonist';
 import { SoilQuery } from './soilQuery';
@@ -142,6 +142,7 @@ import { Vitals } from './islandVitals';
 import { FIRE_ANT, type AbilityId, type AntKind } from './antKinds';
 import { Combat, necrosis } from './islandCombat';
 import { Beetle } from './Beetle';
+import { Carry, emptyStores, withinNest } from './islandCarry';
 import {
   bite, biteCentre, biteRay, boreAim, updateAimDebug, type DigHost,
 } from './islandDig';
@@ -401,6 +402,26 @@ export class IslandScene {
        * mandibles anchored before the gaster can reach round. */
       if (this.combat.phase === 'free') { this.toastCombat('BITE FIRST'); return; }
       if (!this.combat.sting()) this.toastCombat('OUT OF VENOM');
+    } else if (id === 'carry') {
+      /*
+       * ONE PLATE, TWO HALVES — the same shape BITE already has, and it is
+       * not a saving of space so much as an obligation: the rail fits four
+       * action plates and `tests/antKinds.test.ts` pins that, so DROP
+       * cannot have one of its own without pushing CLIMB off the ant. It
+       * wears the DROP art while she is loaded, so the plate says which
+       * half it is about to do.
+       */
+      if (this.carry.carrying) { this.carry.drop(); this.toastCombat('DROPPED'); }
+      else {
+        const item = this.cargoInReach();
+        if (!item) { this.toastCombat('NOTHING TO CARRY'); return; }
+        const no = this.carry.lift(item, (c) => this.vitals.spend(c));
+        if (no === 'still-alive') this.toastCombat('KILL IT FIRST');
+        else if (no === 'too-heavy') this.toastCombat('TOO HEAVY');
+        else if (no === 'too-tired') this.toastCombat('TOO TIRED TO LIFT');
+        else if (no === 'already-carrying') this.toastCombat('JAWS FULL');
+        else this.toastCombat('CARRYING');
+      }
     }
     this.refreshCombatChips();
   }
@@ -415,6 +436,17 @@ export class IslandScene {
      * while she has venom for it. Dimmed rather than hidden: a button that
      * disappears mid-fight is a button the thumb misses. */
     this.stingBtn?.classList.toggle('is-spent', !gripped || this.combat.dry);
+    /*
+     * CARRY wears DROP's face while she is loaded. Swapping the art class
+     * rather than the element keeps the plate in the same place under the
+     * same thumb — a control that MOVES when its job changes is a control
+     * the thumb has to go looking for mid-carry.
+     */
+    const loaded = this.carry.carrying;
+    this.carryBtn?.classList.toggle('tm-art-carry', !loaded);
+    this.carryBtn?.classList.toggle('tm-art-drop', loaded);
+    this.carryBtn?.classList.toggle('is-grip', loaded);
+    this.carryBtn?.setAttribute('aria-label', loaded ? 'Drop' : 'Carry');
   }
 
   /**
@@ -484,7 +516,68 @@ export class IslandScene {
       if (e.kind === 'dry') this.toastCombat('OUT OF VENOM');
       else if (e.kind === 'shaken') this.toastCombat('SHAKEN OFF');
     }
+    this.carryTick(dt);
     this.refreshCombatChips();
+  }
+
+  /**
+   * ONE FRAME OF THE TRIP HOME.
+   *
+   * Carrying is work, the load rides at her jaws, and arriving at the nest
+   * hands it over. The order matters: the drain can FUMBLE the load, and a
+   * beetle put down this frame must not also be delivered this frame.
+   */
+  private carryTick(dt: number): void {
+    this.carry.tick(dt, (cost) => this.vitals.spend(cost));
+
+    const load = this.carry.held as Beetle | null;
+    for (const q of this.quarry) q.carried = q === load;
+    if (load) {
+      /* At her jaws, which are at her nose. Not parented to her rig — the
+       * body is rebuilt by the walker every frame and a child of it would
+       * inherit the leg solve's twitch. */
+      load.at.set(
+        this.at.x + this.fwd.x * JAW_PAST_NOSE,
+        this.at.y,
+        this.at.z + this.fwd.z * JAW_PAST_NOSE,
+      );
+    }
+
+    /*
+     * HOME, AND ONLY ONCE THERE IS ONE. Before the first worker there is
+     * nobody to hand a beetle to and no larva to digest it, so delivery is
+     * gated on the colony existing rather than on a radius alone. That is
+     * not a stub: a claustral queen has no colony economy to feed.
+     */
+    if (!this.carry.carrying || this.colony.length === 0) return;
+    if (!withinNest(this.at, this.workerAnchor, CARRY_DELIVER_REACH)) return;
+    const gained = this.carry.deliver(this.stores);
+    if (gained > 0) this.toastCombat(`FOOD +${Math.round(gained)}`);
+  }
+
+  /**
+   * The nearest thing on the ground worth taking home.
+   *
+   * Separate from `quarryInReach` because they are different questions
+   * asked at different moments: that one wants something to fight and
+   * happily returns a live beetle, this one wants cargo. It still offers
+   * live ones up, so `Carry.lift` can refuse them and the HUD can say KILL
+   * IT FIRST — a reach test that silently skipped them would report
+   * NOTHING TO CARRY while a beetle stood on her foot.
+   */
+  private cargoInReach(): Beetle | null {
+    let best: Beetle | null = null;
+    let bestGap = Infinity;
+    for (const q of this.quarry) {
+      if (this.carry.held === q) continue;
+      const gap = Math.hypot(
+        q.at.x - this.at.x, q.at.y - this.at.y, q.at.z - this.at.z,
+      ) - q.radius;
+      if (gap > this.carry.reach || gap >= bestGap) continue;
+      best = q;
+      bestGap = gap;
+    }
+    return best;
   }
 
   /**
@@ -518,7 +611,14 @@ export class IslandScene {
      * she has her second wind, without the chip flicking about under a
      * thumb that is not touching it.
      */
-    if (this.input.sprint && this.vitals.canRun) return SPRINT;
+    /*
+     * A LOAD TAKES THE RUN, and it is a veto for the same reason stamina
+     * is: the latch stays where the player put it and comes back the
+     * moment she puts the beetle down.
+     */
+    if (this.input.sprint && this.vitals.canRun && !this.carry.tooLadenToRun) {
+      return SPRINT;
+    }
     return this.input.crawl ? CRAWL : 1;
   }
 
@@ -1053,6 +1153,14 @@ export class IslandScene {
 
   private readonly workerAnchor = new THREE.Vector3();
 
+  foodEl: HTMLElement | null = null;
+
+  foodShown = -1;
+
+  carryEl: HTMLElement | null = null;
+
+  carryShown = -1;
+
 
 
   private showPlan = true;
@@ -1101,6 +1209,16 @@ export class IslandScene {
   /** The jaws and the sting. See `islandCombat.ts`. */
   readonly combat = new Combat();
 
+  /** What is in her jaws on the way home. See `islandCarry.ts`. */
+  readonly carry = new Carry();
+
+  /**
+   * THE COLONY'S LARDER, and the first thing on this island that is the
+   * colony's rather than hers. Protein in milligrams, waiting on larvae
+   * that do not exist yet — the store is real, the digestion is not.
+   */
+  readonly stores = emptyStores();
+
   /** Everything on the island she could get her jaws into. */
   readonly quarry: Beetle[] = [];
 
@@ -1109,6 +1227,8 @@ export class IslandScene {
   private toastUntil = 0;
 
   biteBtn: HTMLButtonElement | null = null;
+
+  carryBtn: HTMLButtonElement | null = null;
 
   stingBtn: HTMLButtonElement | null = null;
 

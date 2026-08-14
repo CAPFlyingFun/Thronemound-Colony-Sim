@@ -447,6 +447,21 @@ export const TROPHALLAXIS_REACH = 4 / MM;
 export const TROPHALLAXIS_RATE = 8;
 
 /*
+ * HOW CLOSE TO HOME IS HOME, for something carried back.
+ *
+ * Wider than the trophallaxis reach on purpose. That one is a mouth
+ * meeting a mouth; this is arriving at the nest with a beetle, and an
+ * arrival that has to be aimed at a point is an arrival the player misses
+ * and walks past while wondering why nothing happened.
+ *
+ * Handing it over is AMBIENT rather than a button, for the same reason
+ * being fed is: an ant coming home with prey does not decide to give it
+ * up, and a DELIVER key would be a chore bolted onto the end of a trip
+ * the player has already made.
+ */
+export const CARRY_DELIVER_REACH = 9 / MM;
+
+/*
  * WHEN THE SENSE COMES UP, and how fast.
  *
  * 16 mm was chosen as a stand-in for "there is a roof over her", and as a

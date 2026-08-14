@@ -65,6 +65,7 @@ export interface HudHost {
   readonly antKind: AntKind;
   biteBtn: HTMLButtonElement | null;
   stingBtn: HTMLButtonElement | null;
+  carryBtn: HTMLButtonElement | null;
   useAbility(id: AbilityId): void;
   readonly at: THREE.Vector3;
   pace: 0 | 1 | 2;
@@ -483,6 +484,10 @@ export function buildControls(host: HudHost, ): void {
      * light and dim them without going looking through the DOM. */
     if (id === 'bite') host.biteBtn = b;
     if (id === 'sting') host.stingBtn = b;
+    /* CARRY keeps one too: it wears DROP's face while she is loaded, which
+     * `refreshCombatChips` swaps by class rather than by rebuilding the
+     * plate — see IslandScene. */
+    if (id === 'carry') host.carryBtn = b;
   }
   /*
    * SPRINT is real: it is the pace latch the CRAWL/WALK/RUN chip drives,

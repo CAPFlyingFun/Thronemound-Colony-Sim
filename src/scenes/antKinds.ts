@@ -38,8 +38,14 @@ export interface Ability {
 export const ABILITIES: Record<AbilityId, Ability> = {
   bite: { id: 'bite', art: 'bite', label: 'Bite', built: true },
   sting: { id: 'sting', art: 'sting', label: 'Sting', built: true },
-  carry: { id: 'carry', art: 'carry', label: 'Carry', built: false },
-  drop: { id: 'drop', art: 'drop', label: 'Drop', built: false },
+  /*
+   * BOTH TRUE, and DROP is true without a plate of its own. `built` asks
+   * whether the GAME does the thing, not whether some ant has a button for
+   * it — and the game drops: CARRY wears DROP's art while she is loaded,
+   * because the rail fits four action plates and the test below pins that.
+   */
+  carry: { id: 'carry', art: 'carry', label: 'Carry', built: true },
+  drop: { id: 'drop', art: 'drop', label: 'Drop', built: true },
   /* Climbing WORKS — she walks up a trunk without being asked. What does
    * not exist is a control for it, which is a different thing, and the
    * reason this is false rather than true. */

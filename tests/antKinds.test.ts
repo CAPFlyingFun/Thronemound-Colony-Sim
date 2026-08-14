@@ -32,7 +32,7 @@ describe('every kind is buildable', () => {
    */
   it('marks exactly the abilities that have a mechanic behind them', () => {
     const built = Object.values(ABILITIES).filter((a) => a.built).map((a) => a.id);
-    expect(built.sort()).toEqual(['bite', 'sting']);
+    expect(built.sort()).toEqual(['bite', 'carry', 'drop', 'sting']);
   });
 });
 

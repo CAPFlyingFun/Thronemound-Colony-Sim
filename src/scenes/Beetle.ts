@@ -15,11 +15,12 @@
  */
 import * as THREE from 'three';
 import type { Quarry } from './islandCombat';
+import type { Portable } from './islandCarry';
 import { MM } from '../world/worldScape';
 
 const S_STEP = new THREE.Vector3();
 
-export class Beetle implements Quarry {
+export class Beetle implements Quarry, Portable {
   readonly id: string;
 
   readonly root = new THREE.Group();
@@ -87,17 +88,53 @@ export class Beetle implements Quarry {
   get radius(): number { return 3.4 / MM; }
 
   /**
+   * WHAT IT WEIGHS, and what the colony gets for it.
+   *
+   * Forty-five milligrams is a small ground beetle and it is DESIGNED
+   * rather than measured — beetles run from under a milligram to several
+   * grams and the drawn one is a stylised primitive, so there is nothing
+   * to look up. It is chosen against her carrying capacity (five times a
+   * fourteen-milligram queen, see `islandCarry`): a beetle is most of a
+   * load and not all of it, so the meter has somewhere left to go.
+   *
+   * The protein is 60% of the wet mass. Also designed, and on the generous
+   * side of what an insect actually yields after chitin — the larvae are
+   * not modelled yet, so this number stands in for a digestion that has no
+   * code behind it. It should come down when they arrive.
+   */
+  readonly massMg = 45;
+
+  readonly proteinMg = 27;
+
+  /**
+   * In her jaws. Distinct from `held` in the combat sense, which means
+   * gripped and fighting: the scene drives `at` while this is true, and the
+   * beetle must not argue with it by settling itself onto the ground.
+   */
+  carried = false;
+
+  /**
    * One frame of pottering. `groundAt` keeps it on the terrain, which is
    * the only thing it shares with her movement code — it has no walker, no
    * legs and no surface following, because a beetle that could climb a
    * tree would need all three and there is nothing up there for it.
    */
   tick(dt: number, groundAt: (x: number, z: number) => number, held: boolean): void {
-    if (!this.alive) {
-      /* Down. It stays where it fell and becomes scenery — food, once
-       * there is eating. */
+    if (this.carried) {
+      /* Cargo. The scene has put it at her jaws and the ground has no say
+       * — dropping the terrain clamp here is the whole reason this branch
+       * exists, because otherwise a carried beetle snaps back down to the
+       * dirt every frame while she walks off with it. */
+      this.root.position.copy(this.at);
       this.root.rotation.z = Math.PI * 0.85;
-      this.root.position.y = groundAt(this.at.x, this.at.z);
+      return;
+    }
+    if (!this.alive) {
+      /* Down. It stays where it fell — and it is now something she can
+       * pick up, which is what `Portable` above is for. */
+      this.root.rotation.z = Math.PI * 0.85;
+      this.at.y = groundAt(this.at.x, this.at.z);
+      this.root.position.copy(this.at);
       return;
     }
     if (held) {

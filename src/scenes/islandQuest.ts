@@ -16,6 +16,7 @@ import * as THREE from 'three';
 import type { SurfaceWalker } from '../world/surfaceWalk';
 import { Colonist } from './Colonist';
 import { stageOf, type Vitals } from './islandVitals';
+import type { Carry, ColonyStores } from './islandCarry';
 
 /** The four, named once so a typo cannot invent a fifth. */
 export type VitalKind = 'health' | 'stamina' | 'energy' | 'water';
@@ -50,6 +51,14 @@ export interface QuestHost {
   workerAnchor: THREE.Vector3;
   readonly vitals: Vitals;
   readonly vitalBars: VitalBar[];
+  /** What is in her jaws, for the carry meter. See `islandCarry.ts`. */
+  readonly carry: Carry;
+  /** The colony's larder, for the FOOD cell. */
+  readonly stores: ColonyStores;
+  foodEl: HTMLElement | null;
+  foodShown: number;
+  carryEl: HTMLElement | null;
+  carryShown: number;
   readonly groundForLegs: Ground;
   walkGroundAt(x: number, z: number): number;
 }
@@ -176,10 +185,18 @@ export function buildVitalsHud(host: QuestHost, ): void {
   };
   const workers = cell('worker', '0', 'WORKERS', true);
   host.workersOutEl = workers.querySelector('b');
+  /*
+   * FOOD IS REAL NOW, and it is the colony's rather than hers — milligrams
+   * of protein she has carried home. BROOD stays dimmed because there are
+   * still no larvae, which is also what makes the store honest: it is a
+   * pile waiting on a digestion nothing has written yet.
+   */
+  const food = cell('food', '0', 'FOOD', true);
+  host.foodEl = food.querySelector('b');
   colony.append(
     workers,
     cell('brood', '—', 'BROOD', false),
-    cell('food', '—', 'FOOD', false),
+    food,
   );
   host.hud.appendChild(colony);
 
@@ -196,9 +213,14 @@ export function buildVitalsHud(host: QuestHost, ): void {
    * medallion with a run beside it, which is a picture of a thing held.
    */
   const carry = document.createElement('div');
-  carry.className = 'tm-meter tm-meter-carry is-soon';
+  /*
+   * NO LONGER `is-soon`. CARRY is built, so the hatch comes off and the
+   * bar reports a real load — the promise the dimmed plate was making
+   * since v0.1.25, kept in the same commit as the mechanic.
+   */
+  carry.className = 'tm-meter tm-meter-carry';
   carry.setAttribute('role', 'img');
-  carry.setAttribute('aria-label', 'Carrying — not implemented yet');
+  carry.setAttribute('aria-label', 'Carrying');
   /*
    * STONE, THEN READOUT, THEN RIM — and the order is the whole point.
    *
@@ -233,6 +255,7 @@ export function buildVitalsHud(host: QuestHost, ): void {
   const frame = document.createElement('div');
   frame.className = 'tm-meter-frame';
   carry.append(stone, track, frame, level, label);
+  host.carryEl = carry;
   host.hud.appendChild(carry);
 }
 
@@ -344,6 +367,32 @@ export function renderQuest(host: QuestHost): void {
     if (out !== host.workersOutShown) {
       host.workersOutShown = out;
       host.workersOutEl.textContent = String(out);
+    }
+  }
+  /*
+   * THE LARDER. Written only when it changes, same as the worker count —
+   * this runs every frame and a `textContent` assignment is a layout.
+   */
+  if (host.foodEl) {
+    const mg = Math.round(host.stores.proteinMg);
+    if (mg !== host.foodShown) {
+      host.foodShown = mg;
+      host.foodEl.textContent = String(mg);
+    }
+  }
+  /*
+   * THE LOAD, to the whole percent — the same reason the vital bars round:
+   * no eye reads 63.4% of a 128px run differently from 63.5%, and the
+   * assignment is a repaint either way.
+   */
+  if (host.carryEl) {
+    const pct = Math.round(host.carry.load * 100);
+    if (pct !== host.carryShown) {
+      host.carryShown = pct;
+      host.carryEl.style.setProperty('--tm-level', String(pct / 100));
+      /* Lit while she is actually holding something, so an empty meter is
+       * quiet rather than a bar that is merely at zero. */
+      host.carryEl.classList.toggle('is-loaded', pct > 0);
     }
   }
   if (!host.questEl) return;
