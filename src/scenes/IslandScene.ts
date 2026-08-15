@@ -130,6 +130,7 @@ import {
   SMOOTH_PASSES, SMOOTH_RADIUS_MM, SMOOTH_MAX_SHIFT, SMOOTH_GROW,
   EYE_SKIN, BONE_CLEARANCE, CAMERA_SKIN, EYE_FORWARD,
   EYE_RISE, EYE_FOLLOW_MS, EYE_AIM_MS, EYE_FOLLOW_RATE, S_JAW,
+  PROP_FLOOR_REACH, PROP_FLOOR_STEPS, PROP_FLOOR_BISECT,
   EYE_ROLL_RATE, EYE_SNAP, EYE_BISECTIONS, EYE_MARCH_STEPS,
   LOOK_HOLD_S, LOOK_RETURN_RATE, CHASE_PITCH, CHASE_PITCH_MIN,
   CHASE_PITCH_MAX, CHASE_GROUND_CLEAR, CHASE_REACH, SHELL_REACH,
@@ -224,6 +225,47 @@ export class IslandScene {
 
   private soilDensityAt(x: number, y: number, z: number): number {
     return this.ground.densityAt(x, y, z);
+  }
+
+  /**
+   * THE FIRST SOIL UNDER A POINT — what a loose thing rests on.
+   *
+   * Implements `PropGround`. It asks the SOIL rather than the surface
+   * heightfield, which is the whole point: `walkGroundAt` reports the
+   * ORIGINAL terrain and has no idea anything has been dug, so a prop
+   * pinned to it is pinned to a floor that may no longer exist. Reported
+   * twice, the second time as "after I released the twig 11mm underground,
+   * it still popped up at the surface".
+   *
+   * MARCHED DOWN, then bisected — the same shape as the camera's retreat,
+   * for the same reason. A coarse step alone would let a prop rest a
+   * visible fraction of a step above a chamber floor, and a fine march
+   * everywhere would be a field read per centimetre for every prop on the
+   * island. Eight strides find the boundary; six halvings put it within a
+   * tenth of a millimetre.
+   *
+   * If it is already INSIDE soil — dropped into a wall — the search starts
+   * from where it is and finds nothing below, so it is left where it is
+   * rather than fired to the centre of the earth. A prop in a wall is a
+   * cosmetic problem; a prop at y = -infinity is a lost object.
+   */
+  floorUnder(x: number, y: number, z: number): number {
+    if (this.soilSolidAt(x, y, z)) return y;
+    let lo = y;
+    let hi = y;
+    for (let i = 1; i <= PROP_FLOOR_STEPS; i += 1) {
+      const probe = y - (PROP_FLOOR_REACH * i) / PROP_FLOOR_STEPS;
+      if (this.soilSolidAt(x, probe, z)) { lo = probe; hi = probe + PROP_FLOOR_REACH / PROP_FLOOR_STEPS; break; }
+      lo = probe;
+    }
+    /* Nothing solid within reach — it is over a void, so let it keep
+     * falling and ask again next frame rather than inventing a floor. */
+    if (!this.soilSolidAt(x, lo, z)) return -Infinity;
+    for (let i = 0; i < PROP_FLOOR_BISECT; i += 1) {
+      const mid = (lo + hi) / 2;
+      if (this.soilSolidAt(x, mid, z)) lo = mid; else hi = mid;
+    }
+    return hi;
   }
 
   private soilSolidAt(x: number, y: number, z: number): boolean {
@@ -413,7 +455,7 @@ export class IslandScene {
       const px = this.at.x + dxMm / MM;
       const pz = this.at.z + dzMm / MM;
       const prop = new Prop(key, spec, px, this.walkGroundAt(px, pz), pz);
-      prop.tick((gx, gz) => this.walkGroundAt(gx, gz));
+      prop.tick(this);
       this.scene.add(prop.root);
       this.props.push(prop);
     }
@@ -475,6 +517,10 @@ export class IslandScene {
         const prop = this.propInReach();
         if (!prop) { this.toastCombat('NOTHING IN REACH'); return; }
         const no = this.carry.lift(prop, (c) => this.vitals.spend(c));
+        /* The angle it was taken at, remembered in HER frame — so a twig
+         * picked up sideways is carried sideways instead of swinging
+         * through her as she turns. See `Prop.grip`. */
+        if (!no) prop.takeGrip(this.queen.root.quaternion);
         if (no === 'too-heavy') this.toastCombat('TOO HEAVY TO SHIFT');
         else if (no === 'too-tired') this.toastCombat('TOO TIRED TO LIFT');
         else if (no) this.toastCombat('JAWS FULL');
@@ -617,7 +663,9 @@ export class IslandScene {
     for (const q of this.quarry) q.carried = q === load;
     for (const p of this.props) {
       p.carried = p === load;
-      p.tick((x, z) => this.walkGroundAt(x, z));
+      /* Her rotation, so a carried thing keeps the grip it was taken with
+       * instead of a fixed world angle — see `Prop.grip`. */
+      p.tick(this, dt, this.queen.root.quaternion);
     }
     if (load) {
       /*
@@ -3217,6 +3265,16 @@ export class IslandScene {
   }
 
   /** What the guard left in frame, and what it was defending. */
+  /** For probes: carve a hollow, so a test can dig without a shovel. */
+  carveForTest(x: number, y: number, z: number, radius: number): void {
+    this.stream?.subtractSphere({ x, y, z }, radius);
+  }
+
+  /** For probes: what a loose thing would rest on here. See `floorUnder`. */
+  floorUnderForTest(x: number, y: number, z: number): number {
+    return this.floorUnder(x, y, z);
+  }
+
   lensReportForTest(): {
     worstMm: number; clearanceMm: number; fovDeg: number; nearMm: number;
     camMm: [number, number, number]; queuedChunks: number;

@@ -889,3 +889,15 @@ export const HEAD_PROBE_BISECTIONS = 8;
  * GAME TUNING for how a neck should read on screen, not measured biology.
  */
 export const HEAD_PITCH_RATE = 3;
+
+/**
+ * HOW FAR DOWN A LOOSE THING LOOKS FOR ITS FLOOR, and how finely.
+ *
+ * 12 mm of reach: enough to find the bottom of a chamber she has hollowed
+ * out under a pebble, and short enough that a prop over a genuine void is
+ * told so in one frame rather than probing the whole island. See
+ * `IslandScene.floorUnder`.
+ */
+export const PROP_FLOOR_REACH = 12 / MM;
+export const PROP_FLOOR_STEPS = 8;
+export const PROP_FLOOR_BISECT = 6;

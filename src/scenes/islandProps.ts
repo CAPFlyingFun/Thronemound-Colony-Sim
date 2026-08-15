@@ -28,6 +28,27 @@
  */
 import * as THREE from 'three';
 import type { Portable } from './islandCarry';
+
+/**
+ * WHAT A LOOSE THING NEEDS TO KNOW ABOUT THE GROUND — and it is one
+ * question, deliberately.
+ *
+ * Not a heightfield lookup. The whole fault this replaces was asking the
+ * ORIGINAL surface how high the floor is, in a game whose entire verb is
+ * changing where the floor is. This asks for the first soil UNDER a point,
+ * so a chamber floor, a tunnel roof's far side and the open surface are one
+ * answer rather than three cases.
+ */
+export interface PropGround {
+  /** The y a thing resting at (x, y, z) should sit at, searching down. */
+  floorUnder(x: number, y: number, z: number): number;
+}
+
+/** World units a second squared. Tuned so a prop dropped in a shaft lands
+ *  in a beat rather than drifting — see `Prop.tick`. */
+const PROP_GRAVITY = 9;
+/** And capped, so nothing tunnels a thin floor between two frames. */
+const PROP_FALL_MAX = 6;
 import { MM } from '../world/worldScape';
 
 /** The kinds the island seeds, and what each weighs in milligrams. */
@@ -73,6 +94,30 @@ export class Prop implements Portable {
 
   carried = false;
 
+  /**
+   * HOW IT IS TURNED IN HER FRAME, captured the moment she picks it up.
+   *
+   * Reported: "we need to store the object angle on collision (carry) with
+   * the ant so whatever angle you carry it at first and grab, is stays that
+   * way and follows relative to the ant so the twig doesn't stay a fix
+   * angle in world space... as it looks weird with it rotating through the
+   * ant and all around."
+   *
+   * Exactly the bug: `tick` wrote POSITION and nothing else, so a carried
+   * twig kept the world rotation it was scattered with. Walk her in a
+   * circle and the twig swings through her head, because the twig is not
+   * turning at all — she is turning under it.
+   *
+   * Stored as her rotation INVERTED times its own, which is its pose
+   * expressed in her frame. Multiplying that back by her current rotation
+   * each frame reproduces the grip she took rather than one chosen for her:
+   * pick a twig up sideways and she carries it sideways.
+   */
+  readonly grip = new THREE.Quaternion();
+
+  /** Falling speed while it is unsupported, in world units a second. */
+  private fall = 0;
+
   constructor(
     readonly id: string,
     readonly spec: PropSpec,
@@ -110,14 +155,60 @@ export class Prop implements Portable {
   get radius(): number { return this.spec.halfMm / MM; }
 
   /**
+   * Remember how it sat in her jaws, at the moment she closed them.
+   *
+   * Called by the scene on a successful lift. Her rotation inverted times
+   * its own is its pose in HER frame; see `grip`.
+   */
+  takeGrip(holder: THREE.Quaternion): void {
+    this.grip.copy(holder).invert().multiply(this.root.quaternion);
+  }
+
+  /**
    * One frame. It either rides at her jaws — the scene writes `at` — or it
    * sits on the ground. The same split the beetle makes, and for the same
    * reason: a carried thing must not be dragged back down to the terrain
    * every frame while she walks off with it.
    */
-  tick(groundAt: (x: number, z: number) => number): void {
-    if (this.carried) { this.root.position.copy(this.at); return; }
-    this.at.y = groundAt(this.at.x, this.at.z) + this.rest;
+  tick(rest: PropGround, dt = 0, holder?: THREE.Quaternion): void {
+    if (this.carried) {
+      this.root.position.copy(this.at);
+      /* Her rotation, times the grip it was taken with — see `grip`. */
+      if (holder) this.root.quaternion.copy(holder).multiply(this.grip);
+      this.fall = 0;
+      return;
+    }
+    /*
+     * IT RESTS ON THE SOIL THAT IS THERE NOW, and falls if there is none.
+     *
+     * This used to be `at.y = groundAt(x, z) + rest`, where `groundAt` is
+     * the ORIGINAL surface heightfield — which knows nothing about carving.
+     * So an uncarried prop was re-pinned to the un-dug surface every single
+     * frame. It was never falling through the world; it was being
+     * teleported back up to where the ground used to be. Reported twice,
+     * the second time exactly: "after I released the twig 11mm
+     * underground, it still popped up at the surface".
+     *
+     * `floorUnder` asks the SOIL — the same field the walker stands on and
+     * the same one the digging carves — so a chamber floor is a floor.
+     */
+    const floor = rest.floorUnder(this.at.x, this.at.y, this.at.z) + this.rest;
+    if (this.at.y <= floor + 1e-6) {
+      /* Landed, or was already resting. Sitting it exactly on the floor
+       * rather than easing means a prop the player dug out from under
+       * cannot hover a hair above the new one. */
+      this.at.y = floor;
+      this.fall = 0;
+    } else {
+      /*
+       * FALLING, rather than snapping down. A prop whose support is dug
+       * away should drop, and a teleport reads as a glitch where a fall
+       * reads as the world working. Terminal speed is capped so nothing
+       * can tunnel through a thin floor between two frames.
+       */
+      this.fall = Math.min(PROP_FALL_MAX, this.fall + PROP_GRAVITY * dt);
+      this.at.y = Math.max(floor, this.at.y - this.fall * dt);
+    }
     this.root.position.copy(this.at);
   }
 
