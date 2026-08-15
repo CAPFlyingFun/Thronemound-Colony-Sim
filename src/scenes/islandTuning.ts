@@ -880,6 +880,15 @@ export const COLONIST_ROAM = 12;
  * game tuning; the two step sizes are close to the beetle's, which were
  * chosen against the same terrain.
  */
+/**
+ * HOW FAR THE ZIGZAG STEPS ACROSS, in CSS pixels.
+ *
+ * A whole plate (56) plus the cluster's own air (6), so a plate never
+ * touches the one below it whichever side it is on. A first cut used 52 and
+ * the cluster read as a heap rather than a diagonal — see `fanCluster`.
+ */
+export const CLUSTER_STEP = 62;
+
 export const COLONIST_STEP_UP = 1.1 / MM;
 export const COLONIST_STEP_DOWN = 1.4 / MM;
 export const COLONIST_FALL = 9;

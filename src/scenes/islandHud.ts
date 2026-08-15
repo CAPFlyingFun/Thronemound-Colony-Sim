@@ -493,6 +493,9 @@ export function buildControls(host: HudHost, ): void {
     /* The table's name for it, when that differs from the ART's name. It
      * does exactly once: the pace latch wears the SPRINT plate. */
     part: HudPart = name as HudPart,
+    /* Where it goes. The cluster unless it belongs to the other thumb —
+     * see the pace latch. */
+    into: HTMLElement = cluster,
   ): HTMLButtonElement => {
     const b = document.createElement('button');
     b.className = `density-lab-button tm-art tm-art-${name}${onPress ? '' : ' is-soon'}`;
@@ -501,7 +504,7 @@ export function buildControls(host: HudHost, ): void {
     else {
       b.addEventListener('pointerdown', (e) => { e.preventDefault(); onPress(); });
     }
-    cluster.appendChild(b);
+    into.appendChild(b);
     /* Registered under its own art name, which IS its name in the mode
      * table — so `bite` appears where the table says `bite` appears and
      * nowhere else. Nothing here decides visibility any more. */
@@ -559,10 +562,28 @@ export function buildControls(host: HudHost, ): void {
    * nowhere on a phone to hold a second finger down — the left half is the
    * stick and the right half is the look.
    */
+  /*
+   * THE PACE LATCH SITS BY THE STICK, not in the action cluster.
+   *
+   * Joshua's layout, and it is the better home on its own terms: pace is
+   * not an ACTION, it is how the thing you are already doing is done, and
+   * the thing you are already doing is driven by the left thumb. Putting it
+   * beside the stick puts it under the hand that owns it, and gives the
+   * right-hand cluster its seat back — which is what let STING in without
+   * anything else leaving.
+   *
+   * Its own box rather than a member of the cluster, because the cluster is
+   * a zigzag with a rhythm of its own and a plate that belongs to the other
+   * thumb should not be part of it. Still registered under `pace`, so the
+   * mode table decides when it is there exactly as before.
+   */
+  const gait = document.createElement('div');
+  gait.className = 'tm-gait';
+  host.hud.appendChild(gait);
   host.sprintBtn = plate('sprint', 'Pace', () => {
     host.pace = ((host.pace + 1) % 3) as 0 | 1 | 2;
     host.applyPace();
-  }, 'pace');
+  }, 'pace', gait);
 
   /*
    * The CRAWL/WALK/RUN chip is now the SPRINT plate's job, so the chip is

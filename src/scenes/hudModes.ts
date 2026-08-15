@@ -82,6 +82,24 @@ export const HUD_LAYOUTS: Record<HudMode, HudLayout> = {
   combat: {
     primary: 'bite',
     /*
+     * AND STING IS BACK, because a stinging caste is playable now.
+     *
+     * The note below said this in as many words — "if a stinging caste
+     * becomes playable, six needs re-measuring rather than re-arguing" —
+     * and the founding handing the player a worker is that. The cluster
+     * holds FIVE, measured, so the sixth could not simply be added and
+     * DODGE is the plate that left.
+     *
+     * AND NOTHING LEFT TO MAKE ROOM. Dropping dodge was the first answer
+     * and it was withdrawn on measurement: combat was dodge's ONLY mode, so
+     * taking its seat did not move it elsewhere, it removed dodging from
+     * the HUD altogether. On a phone that is the mechanic gone, whatever
+     * the table says about the mechanic.
+     *
+     * So this is six, and six was re-measured rather than re-argued — see
+     * `probe:hudmodes` and the cap in the test. The plates are smaller than
+     * they were when five was found, which is why the answer changed.
+     *
      * VIEW IS BACK, and the seat it needed came from STING leaving.
      *
      * It was pulled as the sixth plate: six wrapped the cluster to a second
@@ -94,13 +112,13 @@ export const HUD_LAYOUTS: Record<HudMode, HudLayout> = {
      * you can be dropped INTO by a beetle wandering up must not silently
      * take away a camera you had a moment ago.
      *
-     * It fits now because the queen has no sting — see `FIRE_ANT` — so this
-     * is five plates where it was six, and the plate that left is the one
-     * she could not use anyway. The `partsIn` count test below is what holds
-     * that; if a stinging caste becomes playable, six needs re-measuring
-     * rather than re-arguing.
+     * It fit at first because the queen had no sting — see `FIRE_ANT` — so
+     * that was five plates where it had been six, and the plate that left
+     * was the one she could not use anyway. That is no longer why it fits;
+     * see the note above. The `partsIn` count test below is what holds the
+     * five either way.
      */
-    secondary: ['view', 'dodge', 'pace'],
+    secondary: ['sting', 'view', 'dodge', 'pace'],
     contextual: ['carry'],
   },
   carry: {

@@ -15,3 +15,4 @@ scratch-*.png
 # committed as gitlinks AND collected by vitest — three copies of every
 # test file, and CPU contention that turns 900ms tests into 5s timeouts.
 .claude/worktrees/
+shots/

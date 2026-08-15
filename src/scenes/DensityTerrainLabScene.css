@@ -3312,23 +3312,122 @@
  * just a stagger, and a column that zigzags reads as broken rather than
  * ergonomic.
  */
+/*
+ * THE ZIGZAG — Joshua's layout, and it overrules the note above it.
+ *
+ * That note says an arc "reads as broken rather than ergonomic" in a
+ * column, and it was written about a WRAPPED column: two straight stacks
+ * side by side, where a stagger is noise on top of a grid. This is not
+ * that. There is one run of plates and each steps to the alternate side as
+ * it climbs, so the whole cluster is a diagonal under the thumb's natural
+ * sweep rather than two columns with a wobble.
+ *
+ * It also buys the seat that let STING in with nothing dropped. Five plates
+ * as a wrapped grid needed two full columns; five as a zigzag overlaps its
+ * own rows, so it stands SHORTER than the grid did while spanning about the
+ * same width.
+ *
+ * NO WRAPPING, ever. A zigzag that wraps is four columns and reads as a
+ * mistake, so the run is capped by the mode table rather than by the box —
+ * `hudModes` holds the count, and the unit test holds the count's ceiling.
+ */
 .tm-cluster {
   flex-direction: column-reverse;
-  flex-wrap: wrap-reverse;
+  flex-wrap: nowrap;
   align-items: flex-end;
   justify-content: flex-start;
-  gap: 10px;
-  max-width: none;
   /*
-   * THE CEILING IS WHAT FORCES THE SECOND COLUMN, and it is measured against
-   * the objective text above it rather than chosen: 170 is the quest's
-   * bottom plus air at every size tested. At 430 tall that gives 224 — a
-   * hero and two more — and at 320 it gives 150, which is a hero and one.
+   * ZERO HERE AND NEGATIVE ON THE CHILDREN, because `gap` refuses to go
+   * below zero — a first cut asked it to and got a 304-tall stack that sat
+   * across the objective card at every size. The overlap is the whole point
+   * of the stagger: consecutive plates are on opposite sides, so they may
+   * pass each other vertically without touching, and that is what makes the
+   * diagonal shorter than the stack it replaces.
    */
-  max-height: min(224px, calc(100vh - 170px));
+  gap: 0;
+  max-width: none;
+  max-height: none;
+}
+
+/*
+ * EVERY OTHER PLATE STEPS LEFT. Counted from the BOTTOM, because the
+ * cluster is `column-reverse` — so the first child is the one nearest the
+ * thumb and the alternation starts where the hand does.
+ */
+/*
+ * THE STEP ACROSS IS SET IN JS, and it has to be.
+ *
+ * It belongs here in spirit and cannot live here: `order` puts the hero at
+ * the bottom and VIEW at the top, so the DOM sequence and the VISUAL
+ * sequence differ — and `nth-child` counts the DOM. Keying the stagger off
+ * it produced two overlapping PAIRS rather than a diagonal, which is worse
+ * than no stagger at all. `fanCluster` already sorts the visible plates
+ * into the order the eye sees them, so the margin is written there, from
+ * `CLUSTER_STEP`.
+ */
+
+/*
+ * And the rows overlap only slightly. The whole saving of a diagonal is
+ * that it may, but a big overlap puts a plate's label under the plate
+ * above it — the layout draws about a third of a plate, so 18 of 56.
+ */
+.tm-cluster > * { margin-top: -18px; }
+.tm-cluster > *:first-child { margin-top: 0; }
+
+/*
+ * A SHORT SCREEN CLOSES THE DIAGONAL UP rather than wrapping it.
+ *
+ * The wrapped grid this replaced had a `max-height` that forced a second
+ * column when the screen got short. A zigzag may not do that — a zigzag in
+ * two columns is four columns and reads as a mistake — so the thing that
+ * gives is the OVERLAP, which is the one dimension a diagonal has spare.
+ *
+ * Measured: at 667 x 375 the explore cluster stood 216 tall and reached the
+ * objective card. At thirty of overlap it comes in at 162 and clears it,
+ * and the plates still never touch — the step across is a whole plate wide
+ * whatever the rows do.
+ */
+@media (height <= 400px) {
+  .tm-cluster > * { margin-top: -30px; }
+  .tm-cluster > *:first-child { margin-top: 0; }
+}
+
+/*
+ * And tighter again at the shortest screen there is.
+ *
+ * 568 x 320 is an iPhone SE, and it is where the left column has never
+ * fitted — the objective card, the vitals and the colony strip already
+ * spend the whole height above the stick. Thirty of overlap left the
+ * explore cluster 3px into the card's bottom edge, measured by
+ * `probe:hudmodes` and by `probe:hud` independently. Thirty-eight clears
+ * it, and the plates still cannot touch: the step across is a whole plate
+ * whatever the rows do, which is exactly why a diagonal has this to give
+ * and the grid it replaced did not.
+ */
+@media (height <= 340px) {
+  .tm-cluster > * { margin-top: -38px; }
+  .tm-cluster > *:first-child { margin-top: 0; }
 }
 
 .tm-cluster > * { margin-bottom: 0; }
+
+/*
+ * THE PACE LATCH, BY THE STICK — see the note in `islandHud`.
+ *
+ * Up and to the right of the pad, which is the one direction a left thumb
+ * can reach without leaving the stick's own arc and without covering it.
+ * The stick is 150 in a box whose corner is the HUD's 18/16 margin, so this
+ * clears its top-right by a plate's width.
+ */
+.tm-gait {
+  position: absolute;
+  z-index: 2;
+  left: calc(max(18px, env(safe-area-inset-left)) + 150px);
+  bottom: calc(max(16px, env(safe-area-inset-bottom)) + 92px);
+  pointer-events: none;
+}
+
+.tm-gait > .tm-art { width: 56px; height: 56px; }
 
 /* The hero comes down from 100: a column has less room than a row, and 84
  * against 56 is still half again the size of anything beside it. */

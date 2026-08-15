@@ -57,12 +57,22 @@ describe('what each mode shows', () => {
   });
 
   /*
-   * FIVE PLATES IS WHAT THE CLUSTER HOLDS — measured, not guessed.
+   * SIX PLATES IS WHAT THE CLUSTER HOLDS — measured, not guessed, and it
+   * used to be five.
    *
-   * Six wrapped it to a second row and the far end of the fanned arc landed
-   * on the quest card's text. That was found by `probe:hudmodes`, which is a
-   * browser, a boot and a minute; this is the same fact as arithmetic, so a
-   * sixth plate fails in the unit run instead of surviving to the device.
+   * The five was honest when it was taken: six wrapped the cluster to a
+   * second row and the far end of the FANNED ARC landed on the quest card's
+   * text. What has changed is the cluster. It is a two-column grid in the
+   * corner now, not an arc, and the plates are smaller — so the old number
+   * was measuring a layout that no longer exists.
+   *
+   * Re-measured by `shot:hudmodes` when the worker caste made six real: as
+   * the stinging worker, at 932x430 and at two smaller landscapes, combat
+   * draws six in a 122 x 188 box, clear of the quest card and on the glass
+   * at every size. The pictures are in `shots/`.
+   *
+   * This stays as arithmetic in the unit run so a SEVENTH fails here rather
+   * than surviving to a device — which is what the five was for.
    *
    * The plates a mode shows are not all "actions": `dig` mode's readouts
    * (instruments, aim, heading, depth) are text, not tappable art, and do
@@ -74,7 +84,7 @@ describe('what each mode shows', () => {
     for (const mode of Object.keys(HUD_LAYOUTS) as (keyof typeof HUD_LAYOUTS)[]) {
       const plates = partsIn(mode).filter((p) => !READOUTS.has(p));
       /* Named in the assertion so a failure says WHICH mode overflowed. */
-      expect({ mode, over: plates.length > 5 }).toEqual({ mode, over: false });
+      expect({ mode, over: plates.length > 6 }).toEqual({ mode, over: false });
     }
   });
 
@@ -170,5 +180,45 @@ describe('the dig instruments belong to the dig', () => {
     for (const part of ['instruments', 'aim', 'heading', 'depth'] as HudPart[]) {
       expect(rankOf('explore', part)).toBe('hidden');
     }
+  });
+});
+
+describe('a stinging caste in a fight', () => {
+  /*
+   * The founding hands the player a worker, and a worker stings. This file
+   * had already written down what that would cost: "if a stinging caste
+   * becomes playable, six needs re-measuring rather than re-arguing."
+   *
+   * It was re-measured and the answer was that five still holds, so DODGE
+   * left the combat cluster. The mechanic is untouched — only the plate is
+   * gone, and only in a fight.
+   */
+  it('offers the sting, which is what a worker is for', () => {
+    expect(partsIn('combat')).toContain('sting');
+  });
+
+  it('keeps dodge, because combat is the only place it has', () => {
+    /*
+     * Dropping dodge was the first answer and it was withdrawn on
+     * measurement: combat is the ONLY mode that shows it, so taking its
+     * seat would not have moved it, it would have removed dodging from the
+     * HUD altogether. On a phone that is the mechanic gone.
+     */
+    expect(partsIn('combat')).toContain('dodge');
+    const elsewhere = MODES.filter((m) => m !== 'combat')
+      .some((m) => partsIn(m).includes('dodge'));
+    expect(elsewhere).toBe(false);
+  });
+
+  it('is six, which was RE-measured rather than re-argued', () => {
+    const READOUT = new Set<HudPart>(['instruments', 'aim', 'heading', 'depth']);
+    expect(partsIn('combat').filter((p) => !READOUT.has(p)).length).toBe(6);
+  });
+
+  it('keeps the camera, which was asked for by name', () => {
+    /* "realized VIEW wasn't available when I was attacking the beetle, but
+     * should allow both 1st and 3rd person." Whatever else moves, this
+     * stays. */
+    expect(partsIn('combat')).toContain('view');
   });
 });

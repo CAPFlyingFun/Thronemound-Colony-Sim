@@ -136,7 +136,7 @@ import {
   LOOK_HOLD_S, LOOK_RETURN_RATE, CHASE_PITCH, CHASE_PITCH_MIN,
   CHASE_PITCH_MAX, CHASE_GROUND_CLEAR, CHASE_REACH, SHELL_REACH,
   SHELL_SHARE, RISE_RATE, NOSE_REACH, BORE_HUG_WIDE,
-  BODY_FIT_SCALE, QUEST_DEPTH_MM, QUEST_CHAMBER_SAMPLES, JAW_PAST_NOSE,
+  BODY_FIT_SCALE, CLUSTER_STEP, QUEST_DEPTH_MM, QUEST_CHAMBER_SAMPLES, JAW_PAST_NOSE,
   BODY_HALF_TALL, BODY_FLOOR_MARGIN, AIM_LIMIT, CHAMBER_CAM_FAR,
   CHAMBER_CAM_NEAR, COLONIST_SPEED, COLONIST_TURN, COLONIST_ARRIVE,
   COLONIST_ROAM, TROPHALLAXIS_REACH, TROPHALLAXIS_RATE, CARRY_DELIVER_REACH,
@@ -1009,7 +1009,23 @@ export class IslandScene {
         i,
       }))
       .sort((a, b) => a.order - b.order || a.i - b.i);
-    up.forEach((p, n) => p.el.style.setProperty('--tm-arc', String(n)));
+    up.forEach((p, n) => {
+      p.el.style.setProperty('--tm-arc', String(n));
+      /*
+       * THE ZIGZAG IS SET HERE, not in CSS, because CSS cannot count in
+       * VISUAL order. `order` moves the hero to the bottom and VIEW to the
+       * top, so `nth-child` — which counts the DOM — staggered the wrong
+       * plates and produced two overlapping pairs instead of a diagonal.
+       * This loop has already sorted by (order, position), which is the
+       * sequence the eye actually sees, so `n` is the only honest index.
+       *
+       * Every other one steps in from the right edge by a whole plate plus
+       * air, so no plate ever touches the one below it. Written as a style
+       * rather than a class because it is a POSITION in a sequence, and a
+       * class would need one per seat.
+       */
+      p.el.style.marginRight = n % 2 === 0 ? `${CLUSTER_STEP}px` : '';
+    });
   }
 
   /**
