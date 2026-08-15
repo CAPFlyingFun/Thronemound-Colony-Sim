@@ -153,7 +153,9 @@ import {
   depthMm, questTick, spawnWorker, type QuestHost, type VitalBar, type VitalKind,
 } from './islandQuest';
 import { Vitals } from './islandVitals';
-import { FIRE_ANT, type AbilityId, type AntKind } from './antKinds';
+import {
+  FIRE_ANT, FIRE_ANT_WORKER, PLAYABLE_ABILITIES, type AbilityId, type AntKind,
+} from './antKinds';
 import { CASTE_MASS_MG } from './mandibleReach';
 import { Combat, necrosis } from './islandCombat';
 import { Beetle } from './Beetle';
@@ -316,7 +318,13 @@ export class IslandScene {
 
   private readonly camera: THREE.PerspectiveCamera;
 
-  private readonly queen = new QueenModel('queen');
+  /* NOT READONLY: the founding hands the player a worker, and the rig she
+   * is drawn with changes with her. See `becomeWorker`. */
+  private queen = new QueenModel('queen');
+
+  /* The queen, once she has stopped being the player — parked where the
+   * founding finished and no longer driven by anything. */
+  private queenNpc: QueenModel | null = null;
 
   /** Stamped grid (mound included) — what the island mesh and walker use. */
   private heights: Int16Array | null = null;
@@ -940,14 +948,27 @@ export class IslandScene {
      * short string and compared. The reads are cheap; the WRITES are what
      * had to be earned.
      */
-    const sig = `${mode}|${this.contextLive('carry') ? 1 : 0}`
+    /* The KIND is in the signature because it can change mid-session now:
+     * the founding turns the queen into a worker, and a worker stings. */
+    const sig = `${mode}|${this.antKind.id}|${this.contextLive('carry') ? 1 : 0}`
       + `${this.contextLive('interact') ? 1 : 0}`;
     if (sig === this.hudSig) return;
     this.hudSig = sig;
     this.hudMode = mode;
     for (const part of this.railParts) {
+      /*
+       * A PLATE FOR AN ABILITY THIS ANT DOES NOT HAVE IS NOT HERS.
+       *
+       * The rail is built from every caste the player can be, because it
+       * cannot be rebuilt — see the note in `islandHud`. So the ones the
+       * current ant lacks are hidden here, alongside the ones the current
+       * MODE hides, which is the pass that was already doing exactly this
+       * job for exactly these elements.
+       */
+      const hers = !this.abilityParts.has(part.part)
+        || (this.antKind.abilities as string[]).includes(part.part);
       const rank = rankOf(mode, part.part);
-      part.el.style.display = rank === 'hidden' ? 'none' : '';
+      part.el.style.display = !hers || rank === 'hidden' ? 'none' : '';
       /* Dimming is only ever about a contextual part being untrue. A
        * secondary control is quieter by SIZE, in the stylesheet, not by
        * opacity — see `.tm-cluster`. */
@@ -1173,6 +1194,17 @@ export class IslandScene {
 
   /** The last answer `applyHudMode` wrote, so it can skip writing it again. */
   private hudSig = '';
+
+  /**
+   * Which rail parts are ABILITIES, and therefore hers to have or not.
+   *
+   * Every ability's plate is registered under its own name, which is also
+   * its name in the mode table (see `plate` in `islandHud`), so the two
+   * vocabularies line up exactly. Everything else on the rail — DIG, the
+   * pace latch, VIEW — belongs to the game rather than to the caste and
+   * must never be gated by this.
+   */
+  private readonly abilityParts = new Set<string>(PLAYABLE_ABILITIES);
 
   /** The shovel, revealed once DIG is armed. */
   private scoopBtn: HTMLButtonElement | null = null;
@@ -1640,19 +1672,22 @@ export class IslandScene {
    * does her stamina — see `antKinds.ts`. One field, so a second playable
    * species is a swap rather than a branch.
    */
-  readonly antKind: AntKind = FIRE_ANT;
+  antKind: AntKind = FIRE_ANT;
+
+  /** Every plate the player can ever hold — see `applyHudMode`. */
+  readonly playableAbilities = PLAYABLE_ABILITIES;
 
   /** What keeps her going. See `islandVitals.ts`. */
-  readonly vitals = new Vitals(FIRE_ANT.vitals);
+  vitals = new Vitals(FIRE_ANT.vitals);
 
   /** The jaws and the sting. See `islandCombat.ts`. */
   /* Her caste's row of `CASTE_COMBAT`, off her kind — the same way
    * `carry` takes her strength row. One playable ant, one source. */
-  readonly combat = new Combat(FIRE_ANT.strength);
+  combat = new Combat(FIRE_ANT.strength);
 
   /** What is in her jaws. Off the KIND's strength row — see `antKinds.ts`
    * and `STRENGTH` in `mandibleReach.ts`. */
-  readonly carry = new Carry(FIRE_ANT.strength);
+  carry = new Carry(FIRE_ANT.strength);
 
   /** The loose things INTERACT is for. See `islandProps.ts`. */
   readonly props: Prop[] = [];
@@ -3371,6 +3406,68 @@ export class IslandScene {
    * the failure and measure whatever loaded, so the two castes they are
    * meant to compare have quietly been one.
    */
+  /**
+   * THE FOUNDING IS OVER, AND YOU ARE NOT THE QUEEN ANY MORE.
+   *
+   * Asked for: "when you create your nest, you no longer control the queen
+   * and you start as the worker."
+   *
+   * Right for the animal as much as for the game. A claustral queen founds
+   * and then never leaves the chamber again — every remaining thing the
+   * colony DOES is a worker's. Staying on the queen past the founding is
+   * playing the one ant whose job from here is to hold still and lay.
+   *
+   * THE QUEEN IS NOT DELETED, SHE IS PARKED. Her rig stops being driven and
+   * stays exactly where the founding finished, which is the chamber she
+   * dug — so the nest has her in it, which is most of the point of having
+   * dug it. Nothing steps her; she is scenery with a history.
+   *
+   * A FAILED LOAD LEAVES YOU AS THE QUEEN. Swapping first and fetching
+   * after would mean a slow connection costs the player their body, and an
+   * island with no ant in it is worse than one whose ant is the wrong
+   * caste. So the worker has to arrive before anything is handed over.
+   *
+   * WHAT CHANGES WITH HER: the rig, and every table keyed on caste — what
+   * she lifts, what she fights like, what she weighs to the shove system,
+   * and which plates are hers. Her VITALS are a fresh set rather than the
+   * queen's carried across, because she is a different animal and arriving
+   * half-spent from someone else's founding would be nonsense.
+   */
+  async becomeWorker(): Promise<boolean> {
+    if (this.antKind === FIRE_ANT_WORKER) return true;
+    const worker = new QueenModel('worker');
+    worker.ikEnabled = this.queen.ikEnabled;
+    const ok = await worker.load();
+    if (!ok) { worker.dispose(); return false; }
+
+    /* She stops here, standing, and is left alone from now on. */
+    this.queenNpc = this.queen;
+    this.queenNpc.root.visible = true;
+
+    this.scene.add(worker.root);
+    worker.root.visible = true;
+    this.queen = worker;
+    this.queenReady = true;
+    /* Her legs are measured off HER rig, not the one that just retired. */
+    this.buildLegDrive();
+
+    this.antKind = FIRE_ANT_WORKER;
+    this.vitals = new Vitals(FIRE_ANT_WORKER.vitals);
+    /* The colony exists, so she eats — the flag the founding was waiting
+     * on. See `trophallaxisTick` and `Vitals.feeding`. */
+    this.vitals.feeding = true;
+    this.carry = new Carry(FIRE_ANT_WORKER.strength);
+    this.combat = new Combat(FIRE_ANT_WORKER.strength);
+    /* The rail is NOT rebuilt — it cannot be, see `islandHud`. The mode
+     * signature carries the kind, so the next display pass shows STING. */
+    this.applyHudMode();
+    this.toastCombat('THE FIRST WORKER');
+    return true;
+  }
+
+  /** Which caste the player is. For probes, and for the save. */
+  get playerCaste(): string { return this.antKind.id; }
+
   spawnWorker(): void { spawnWorker(this.questHost); }
 
   /* -------------------------------------------------------------- probes */
@@ -3465,7 +3562,10 @@ export class IslandScene {
       id: QUEEN_BULK_ID,
       at: this.at,
       radius: BODY_HALF_TALL,
-      massMg: CASTE_MASS_MG[FIRE_ANT.strength],
+      /* HER caste's mass, not the kind she started as. A worker is a
+       * fraction of a queen and the shove system has to know it, or the
+       * founding would leave her still shouldering stones like one. */
+      massMg: CASTE_MASS_MG[this.antKind.strength],
     }];
     for (const q of this.quarry) {
       if (!q.alive && q === held) continue;

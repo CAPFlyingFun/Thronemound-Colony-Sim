@@ -862,21 +862,28 @@ export const COLONIST_ARRIVE = 1.2;
 export const COLONIST_ROAM = 12;
 
 /**
- * How fast a colonist may drop into, and climb out of, a hole.
+ * WHAT A COLONIST MAY WALK ONTO, and what she does when it is not there.
  *
- * World units a second. Needed only since colonists started reading the
- * SOIL rather than the original heightfield: the heightfield has no cliffs
- * at an ant's stride, the dug soil is nothing but cliffs, and a bare
- * assignment across a shaft mouth is a teleport.
+ * Needed only since colonists started reading the SOIL rather than the
+ * original heightfield: the heightfield has no cliffs at an ant's stride
+ * and dug soil is nothing but cliffs.
  *
- * DROP is a scramble and not free-fall — 9 is this scene's gravity and an
- * ant does not fall like a stone anyway, she runs down the wall. CLIMB is
- * slower because getting out is work, and because a colonist who can climb
- * as fast as she falls pops back out of a pit she should have to walk
- * around. Both are game tuning, not measured biology.
+ * A first cut made both directions a RATE, and that was wrong in the way
+ * that shows: "the other ants aren't sticking and walking through the dirt
+ * sometimes." A cap on rising ground is a cap on the one direction that
+ * cannot lag — ground coming up faster than the cap leaves her inside it.
+ *
+ * STEP_UP is therefore not a speed, it is a REFUSAL: more than this and it
+ * is a wall she does not walk onto. STEP_DOWN is how big a drop she simply
+ * takes, which is what keeps her stuck to ordinary undulation. Past that
+ * she FALLS, and accelerates, so a shaft reads as a shaft. All four are
+ * game tuning; the two step sizes are close to the beetle's, which were
+ * chosen against the same terrain.
  */
-export const COLONIST_DROP = 4;
-export const COLONIST_CLIMB = 2.2;
+export const COLONIST_STEP_UP = 1.1 / MM;
+export const COLONIST_STEP_DOWN = 1.4 / MM;
+export const COLONIST_FALL = 9;
+export const COLONIST_FALL_MAX = 6;
 
 
 

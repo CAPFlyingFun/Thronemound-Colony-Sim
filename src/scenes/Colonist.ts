@@ -17,8 +17,8 @@ import { QueenModel } from '../anim/QueenModel';
 import { FOOT_CLEARANCE_MM, LegDrive, type Ground, type LegSetup } from '../anim/legDrive';
 import { MM } from '../world/worldScape';
 import {
-  COLONIST_ARRIVE, COLONIST_CLIMB, COLONIST_DROP, COLONIST_SPEED,
-  COLONIST_TURN, FOOT_AIR, RIDE,
+  COLONIST_ARRIVE, COLONIST_FALL, COLONIST_FALL_MAX, COLONIST_SPEED,
+  COLONIST_STEP_DOWN, COLONIST_STEP_UP, COLONIST_TURN, FOOT_AIR, RIDE,
 } from './islandTuning';
 
 export /**
@@ -60,6 +60,9 @@ class Colonist {
   private dwell = 0;
 
   private speed = 0;
+
+  /** How fast she is falling, world units a second — see the seating. */
+  private fall = 0;
 
   private readonly wasAt = new THREE.Vector3();
 
@@ -184,24 +187,48 @@ class Colonist {
     if (this.up.lengthSq() < 1e-9) this.up.set(0, 1, 0);
     this.up.normalize();
     /*
-     * SHE CLIMBS DOWN INTO IT RATHER THAN APPEARING AT THE BOTTOM.
+     * SHE STANDS ON IT, STEPS DOWN IT, OR FALLS — three cases, and the
+     * previous cut had one rate for all of them.
      *
-     * This was a bare assignment, which was fine while the ground under a
-     * colonist could only change gently — a heightfield has no cliffs at
-     * her stride. Now that she reads the SOIL, it does: crossing the mouth
-     * of a shaft the answer jumps by the whole depth of it between one
-     * frame and the next, and an assignment would teleport her there.
+     * Reported: "the other ants aren't sticking and walking through the
+     * dirt sometimes." Both halves were the rate, and the climbing half was
+     * my mistake: a cap on RISING ground is a cap on the one direction that
+     * must never lag. Ground coming up under her at more than the cap means
+     * she is inside it — which is walking through the dirt — and the drop
+     * cap did the mirror image, leaving her hanging over ground that fell
+     * away, which is not sticking to it.
      *
-     * A rate turns that into a scramble, which is what it looks like. It is
-     * capped rather than eased so a long fall stays honest — she descends
-     * at a speed, she does not asymptote toward the floor — and the two
-     * directions differ because dropping into a hole is gravity and
-     * climbing out of one is work.
+     * RISING IS NOT NEGOTIABLE. You cannot sink into a bank by standing on
+     * it. What stops her levitating up a wall is not a slow climb, it is
+     * REFUSING THE STEP — a rise of more than `COLONIST_STEP_UP` is a wall
+     * and she does not take it, which is a fact about where she may walk
+     * rather than about how fast she rises.
+     *
+     * FALLING IS THE ONLY THING WITH A RATE, and only past a step. Ordinary
+     * undulation is a step and she takes it at once, so she sticks. A drop
+     * bigger than a step is a shaft mouth, and there she accelerates rather
+     * than descending at a constant speed, so a deep fall reads as a fall.
      */
     const wantY = groundAt(this.at.x, this.at.z) + this.ride;
     const gap = wantY - this.at.y;
-    const cap = (gap < 0 ? COLONIST_DROP : COLONIST_CLIMB) * dt;
-    this.at.y += Math.max(-cap, Math.min(cap, gap));
+    if (gap > COLONIST_STEP_UP) {
+      /* A wall. Refuse the ground she tried to walk onto and stay where
+       * she was — which is provably standing, since she was standing on
+       * it last frame. */
+      this.at.x = this.wasAt.x;
+      this.at.z = this.wasAt.z;
+      const heldY = groundAt(this.at.x, this.at.z) + this.ride;
+      this.at.y = Math.max(this.at.y, heldY);
+      this.fall = 0;
+    } else if (gap >= -COLONIST_STEP_DOWN) {
+      /* On it, or a step down she can simply take. */
+      this.at.y = wantY;
+      this.fall = 0;
+    } else {
+      this.fall = Math.min(COLONIST_FALL_MAX, this.fall + COLONIST_FALL * dt);
+      this.at.y = Math.max(wantY, this.at.y - this.fall * dt);
+      if (this.at.y === wantY) this.fall = 0;
+    }
     this.fwd.addScaledVector(this.up, -this.fwd.dot(this.up));
     if (this.fwd.lengthSq() < 1e-9) this.fwd.set(0, 0, 1).addScaledVector(this.up, -this.up.z);
     this.fwd.normalize();

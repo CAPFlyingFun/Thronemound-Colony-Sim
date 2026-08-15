@@ -63,6 +63,13 @@ export interface HudHost {
   readonly dodge: Dodge;
   readonly vitals: Vitals;
   readonly antKind: AntKind;
+  /**
+   * Every ability any caste the player can become has, in rail order.
+   *
+   * The rail is built from this and gated per-frame against `antKind` —
+   * see the note where it is looped, and `applyHudMode`.
+   */
+  readonly playableAbilities: readonly AbilityId[];
   biteBtn: HTMLButtonElement | null;
   stingBtn: HTMLButtonElement | null;
   carryBtn: HTMLButtonElement | null;
@@ -514,7 +521,24 @@ export function buildControls(host: HudHost, ): void {
    * ABILITY rather than the kind: whether the game does a thing is a fact
    * about the game, and whether this ant does it is a fact about the ant.
    */
-  for (const id of host.antKind.abilities) {
+  /*
+   * BUILT FROM EVERY CASTE THE PLAYER CAN BE, not from the one she is.
+   *
+   * The rail used to be built from `antKind.abilities`, which was right
+   * while the ant you play never changed. It does now — the founding hands
+   * you a worker, and a worker stings where the queen did not — and this
+   * HUD CANNOT BE REBUILT to suit: `buildControls` binds six listeners to
+   * `window` and `document` with anonymous handlers, so running it twice
+   * would double every key press and every stick release. Rebuilding was
+   * the obvious way to do this and it is a trap.
+   *
+   * So every plate the player could ever hold is built ONCE, and which of
+   * them she can see is decided each frame by `applyHudMode`, which already
+   * shows and hides these exact elements by mode. A caste change is then a
+   * change of DATA that the existing display pass picks up, with nothing
+   * torn down and nothing bound twice.
+   */
+  for (const id of host.playableAbilities) {
     const ability = ABILITIES[id];
     const b = plate(ability.art, ability.label,
       ability.built ? () => host.useAbility(id) : null);

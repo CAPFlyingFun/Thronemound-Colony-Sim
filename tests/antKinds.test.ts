@@ -4,8 +4,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  ABILITIES, ANT_KINDS, FIRE_ANT, GAME_MINUTES_PER_REAL_MINUTE,
-  REAL_SECONDS_PER_GAME_HOUR, TWIG_ANT, drainPerGameHours,
+  ABILITIES, ANT_KINDS, FIRE_ANT, FIRE_ANT_WORKER, GAME_MINUTES_PER_REAL_MINUTE,
+  PLAYABLE_ABILITIES, REAL_SECONDS_PER_GAME_HOUR, TWIG_ANT, drainPerGameHours,
 } from '../src/scenes/antKinds';
 import { STRENGTH } from '../src/scenes/mandibleReach';
 import { DEFAULT_VITALS } from '../src/scenes/islandVitals';
@@ -64,14 +64,60 @@ describe('two ants differ in DATA, not in code', () => {
     expect(FIRE_ANT.abilities).not.toContain('scout');
     expect(TWIG_ANT.abilities).toContain('scout');
     expect(TWIG_ANT.abilities).not.toContain('sting');
+    /* And the third ant this test said it would grow. The sting was never
+     * deleted, only taken off the queen; the worker is who has it. */
+    expect(FIRE_ANT_WORKER.abilities).toContain('sting');
+  });
+
+  it('makes the worker a worker, and the queen still a queen', () => {
+    /* The caste tables — what she lifts, what she fights like, what she
+     * weighs — are all keyed on this one field, so the handover at the
+     * founding is a row change rather than a branch. */
+    expect(FIRE_ANT.strength).toBe('queen');
+    expect(FIRE_ANT_WORKER.strength).toBe('worker');
   });
 
   it('gives them the same cluster size, so the rail cannot outgrow itself', () => {
     /* The rail was measured to fit four action plates. A species that
      * quietly wants six would push VIEW off the bottom edge again. */
-    for (const kind of Object.values(ANT_KINDS)) {
+    for (const kind of [...Object.values(ANT_KINDS), FIRE_ANT_WORKER]) {
       expect(kind.abilities.length).toBeLessThanOrEqual(4);
     }
+  });
+});
+
+describe('every plate the player can ever hold', () => {
+  /*
+   * The HUD's action rail is built from this ONCE and gated per-frame
+   * against whichever caste she is, because it cannot be rebuilt —
+   * `buildControls` binds six anonymous listeners to `window` and
+   * `document`, so running it twice would double every key press.
+   */
+  it('covers both castes the player can be', () => {
+    for (const id of FIRE_ANT.abilities) expect(PLAYABLE_ABILITIES).toContain(id);
+    for (const id of FIRE_ANT_WORKER.abilities) expect(PLAYABLE_ABILITIES).toContain(id);
+  });
+
+  it('says each one once, so no plate is built twice', () => {
+    expect(new Set(PLAYABLE_ABILITIES).size).toBe(PLAYABLE_ABILITIES.length);
+  });
+
+  it('keeps both castes in the same order, so plates do not shuffle', () => {
+    /* A player who becomes a worker must find BITE and CARRY where she
+     * left them. The union is in worker order because the queen's list is
+     * a subsequence of it. */
+    const order = (ids: readonly string[]): number[] =>
+      ids.map((id) => PLAYABLE_ABILITIES.indexOf(id as never));
+    for (const kind of [FIRE_ANT, FIRE_ANT_WORKER]) {
+      const seats = order(kind.abilities);
+      expect(seats).not.toContain(-1);
+      expect([...seats].sort((a, b) => a - b)).toEqual(seats);
+    }
+  });
+
+  it('adds nothing no caste asked for', () => {
+    const wanted = new Set([...FIRE_ANT.abilities, ...FIRE_ANT_WORKER.abilities]);
+    for (const id of PLAYABLE_ABILITIES) expect(wanted.has(id)).toBe(true);
   });
 });
 

@@ -210,6 +210,39 @@ export const FIRE_ANT: AntKind = {
 };
 
 /**
+ * THE ANT YOU BECOME once the nest exists — and the roster this file has
+ * been promising since `strength` was written.
+ *
+ * Asked for: "when you create your nest, you no longer control the queen
+ * and you start as the worker."
+ *
+ * Which is right for the animal as well as for the game. A claustral queen
+ * founds and then never leaves again; everything the rest of the colony's
+ * life consists of — foraging, hauling, fighting, digging out — is done by
+ * workers. Playing the queen past the founding would mean playing the one
+ * ant whose remaining job is to stay in a chamber and lay.
+ *
+ * STING COMES BACK HERE, exactly as the note on `FIRE_ANT.abilities`
+ * predicted it would: the mechanic was never deleted, only taken off the
+ * queen, because a founding queen sealed in a chamber has nothing to sting.
+ * A fire-ant worker stings and it is most of what she is for. Four
+ * abilities is the rail's capacity, which the HUD test pins.
+ *
+ * THE VITALS ARE THE QUEEN'S FOR NOW, and that is untuned rather than
+ * decided. A worker is a fraction of a queen's mass and should not have a
+ * queen's pool, but inventing a second table before there is a worker to
+ * feel it would be picking numbers to look thorough. It gets its own the
+ * moment there is a reason to tell them apart.
+ */
+export const FIRE_ANT_WORKER: AntKind = {
+  id: 'fire-worker',
+  name: 'Fire ant worker',
+  abilities: ['bite', 'sting', 'carry', 'interact'],
+  vitals: FIRE_ANT_VITALS,
+  strength: 'worker',
+};
+
+/**
  * The one she was filmed as — a Graceful Twig Ant, from the video that got
  * the per-leg footing built. No sting; it is a slender arboreal ant that
  * lives on bark, so it scouts and climbs where the fire ant burns.
@@ -224,6 +257,22 @@ export const TWIG_ANT: AntKind = {
   vitals: DEFAULT_VITALS,
   strength: 'worker',
 };
+
+/**
+ * Every ability any caste the PLAYER can be has, in rail order.
+ *
+ * The HUD's action rail is built from this once and gated per-frame against
+ * whichever kind she currently is, because the rail cannot be rebuilt — see
+ * the note in `islandHud`. Derived rather than typed out, so a caste that
+ * gains an ability gains its plate with nothing else to remember.
+ *
+ * Worker order first, because it is the superset: the queen's three are a
+ * subset of it in the same order, so neither caste sees its plates shuffle.
+ */
+export const PLAYABLE_ABILITIES: AbilityId[] = [
+  ...FIRE_ANT_WORKER.abilities,
+  ...FIRE_ANT.abilities.filter((id) => !FIRE_ANT_WORKER.abilities.includes(id)),
+];
 
 export const ANT_KINDS: Record<string, AntKind> = {
   fire: FIRE_ANT,

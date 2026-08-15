@@ -113,6 +113,8 @@ export interface QuestHost {
    * walks has to ask. See `footingFrom` in `islandLand`.
    */
   footingFrom(x: number, z: number, y: number): number;
+  /** The founding is over: hand the player a worker. See `becomeWorker`. */
+  becomeWorker(): Promise<boolean>;
   /** The MENU plate was pressed. The scene decides what that costs. */
   openMenu(): void;
 }
@@ -594,14 +596,29 @@ function renderQuestCard(host: QuestHost): void {
 export function spawnWorker(host: QuestHost, ): void {
   if (host.colony.length > 0) return;
   host.workerAnchor.copy(host.at);
-  /* A worker first, then a major beside her — the two castes the rig
-   * actually ships and the two the sandbox mechanics were written for. */
+  /*
+   * AND THE PLAYER STOPS BEING THE QUEEN. Fired here because this is the
+   * moment the founding is over and the first workers eclose — the same
+   * event, seen from the player's side. Unawaited: it has a model to fetch,
+   * and the queen goes on being playable until it lands. See `becomeWorker`.
+   */
+  void host.becomeWorker();
+  /*
+   * THE MAJOR IS OUT, for now — asked for directly, and with new models on
+   * the way that will decide what a major actually is. The rig and the
+   * caste tables are untouched; nothing spawns one. Putting her back is
+   * this list.
+   *
+   * And the worker who hatches here is NOT the one you play. The player
+   * becomes a worker of her own in `becomeWorker`, below; this one is a
+   * nestmate, so the colony has somebody in it besides you.
+   */
   let seed = 0x51ce;
   const rand = (): number => {
     seed = (seed * 1664525 + 1013904223) >>> 0;
     return seed / 4294967296;
   };
-  for (const caste of ['worker', 'major'] as const) {
+  for (const caste of ['worker'] as const) {
     const one = new Colonist(caste, rand);
     one.model.ikEnabled = host.ikWanted;
     host.scene.add(one.model.root);
