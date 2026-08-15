@@ -255,23 +255,20 @@ if (host) {
            * not parse now has somewhere to report it — see `reopen`.
            */
           onResume: () => enter(() => island?.resumeFromStorage() ?? false),
-          onSave: () => {
-            menu.setStatus(island?.saveToStorage()
-              ? 'Saved' : 'Could not save — storage is full or blocked');
-          },
           onDev: () => { window.location.search = '?scene=poseedit'; },
         });
         /*
          * START and RESUME need no island to be PRESSED, only to finish;
          * the curtain covers the difference, and RESUME only needs to know
-         * a save EXISTS, which is a localStorage read. SAVE genuinely
-         * cannot do anything until there is something to save, which is
-         * what "if applicable" means — a live button that silently does
-         * nothing is worse than a grey one.
+         * a save EXISTS, which is a localStorage read.
+         *
+         * SAVE used to be here too, enabled once a session was standing.
+         * It is gone from the front door entirely — "what are you going to
+         * save in the main menu?" — and lives in the PAUSE menu, which is
+         * the only place there is a run to write down.
          */
         menu.setEnabled('onStart', true);
         menu.setEnabled('onResume', IslandScene.hasSave());
-        menu.setEnabled('onSave', standing);
         /*
          * THE PRELOAD IS SILENT, and this line is where that is decided.
          *

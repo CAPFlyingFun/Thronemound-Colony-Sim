@@ -59,6 +59,8 @@ export interface VitalsTuning {
   secondWind: number;
 
   healthMax: number;
+  /** Health a second she mends, whatever she is doing. See the value. */
+  healthRegen: number;
   /** Her own working energy, which is NOT the colony's food store. */
   energyMax: number;
   waterMax: number;
@@ -90,6 +92,24 @@ export const DEFAULT_VITALS: VitalsTuning = {
   secondWind: 25,
 
   healthMax: 100,
+  /*
+   * SHE MENDS. Asked for directly: "all ants need to passively gain HP back
+   * over time."
+   *
+   * It is also the thing that makes combat damage LEGAL under this file's
+   * own rule — a bar may only move if there is a way to move it back. Until
+   * now nothing healed, so every point a beetle took was permanent and
+   * health was a one-way countdown; that is exactly why health has never
+   * been allowed to be a live drain. This is the way back, so the drain can
+   * exist.
+   *
+   * 0.6 a second is a full bar in a shade under three minutes: fast enough
+   * that a bad scrap is not a ruined save, slow enough that walking away
+   * mid-fight to heal up is not the winning move. GAME TUNING, not measured
+   * biology — insect wound repair is hours-to-days work, and a game that
+   * modelled it honestly would be a game about waiting.
+   */
+  healthRegen: 0.6,
   energyMax: 100,
   waterMax: 100,
   energyDrain: 0,
@@ -355,6 +375,24 @@ export class Vitals {
         this.stamina + rate * this.strainRecover * dt);
     }
     if (this.winded && this.stamina >= t.secondWind) this.winded = false;
+
+    /*
+     * AND SHE MENDS, whatever she is doing — see `healthRegen`.
+     *
+     * Unconditional on purpose. Tying it to standing still would make the
+     * optimal response to a beetle "walk away and wait", which is the least
+     * interesting thing the player can do and the reason stamina's recovery
+     * is graded by effort while this one is not. Health is a slow floor she
+     * climbs back to; stamina is the moment-to-moment budget. Two bars that
+     * recovered the same way would be one bar.
+     *
+     * Capped at the max rather than at a ceiling: unlike stamina, thirst
+     * and hunger do not lower what she can heal to. When they become live
+     * drains that is the decision to revisit, not this line.
+     */
+    if (this.health < t.healthMax) {
+      this.health = Math.min(t.healthMax, this.health + t.healthRegen * dt);
+    }
     /* Short of water or energy, the ceiling comes down — and she is
      * clamped to it rather than losing what she had, so the bar falls to
      * meet her rather than her waking up empty. */

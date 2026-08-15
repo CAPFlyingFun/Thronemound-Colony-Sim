@@ -208,3 +208,52 @@ describe('health', () => {
     expect(v.health).toBe(0);
   });
 });
+
+describe('she mends', () => {
+  /*
+   * Asked for directly: "all ants need to passively gain HP back over time."
+   *
+   * It is also what makes combat damage legal under this file's own rule —
+   * a bar may only move if there is a way to move it back. These are the
+   * assertions that keep the way back real.
+   */
+  const idle = { moving: 0, running: false, crawling: false };
+
+  it('climbs back after damage', () => {
+    const v = new Vitals();
+    v.damage(40);
+    expect(v.absOf('health').now).toBe(60);
+    for (let i = 0; i < 60; i += 1) v.tick(1 / 60, idle);
+    /* One second of 0.6 a second, and it must be a real gain rather than a
+     * rounding artefact of the readout. */
+    expect(v.absOf('health').now).toBe(61);
+  });
+
+  it('mends while she is working, not only while she rests', () => {
+    /* Deliberate: tying it to standing still makes "walk away and wait" the
+     * winning answer to every fight. Stamina is the bar graded by effort. */
+    const busy = { moving: 1, running: true, crawling: false };
+    const v = new Vitals();
+    v.damage(50);
+    for (let i = 0; i < 120; i += 1) v.tick(1 / 60, busy);
+    expect(v.absOf('health').now).toBeGreaterThan(50);
+  });
+
+  it('never climbs past full', () => {
+    const v = new Vitals();
+    v.damage(1);
+    for (let i = 0; i < 600; i += 1) v.tick(1 / 60, idle);
+    expect(v.absOf('health').now).toBe(v.absOf('health').max);
+  });
+
+  it('does not resurrect her from nothing', () => {
+    /* Regen is a floor she climbs, not a get-out. Downed is a state the
+     * scene owns; this only asserts the bar cannot be relied on to undo a
+     * kill within a frame of it. */
+    const v = new Vitals();
+    v.damage(1000);
+    expect(v.absOf('health').now).toBe(0);
+    v.tick(1 / 60, idle);
+    expect(v.absOf('health').now).toBeLessThan(1);
+  });
+});

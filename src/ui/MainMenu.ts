@@ -1,5 +1,5 @@
 /**
- * THE FRONT DOOR — Start / Resume / Save / Settings / Info / Dev.
+ * THE FRONT DOOR — Start / Resume / Settings / Info / Dev.
  *
  * Until now every route was a query string, which is fine for a probe and
  * hopeless for a person: the game opened straight into the island with no way
@@ -34,10 +34,24 @@ interface Entry {
   gated?: boolean;
 }
 
+/*
+ * NO SAVE ON THE FRONT DOOR — asked, and it is the right question: "save
+ * doesn't need to be on the main menu, lol. What are you going to save in
+ * the main menu?"
+ *
+ * Nothing. The front door is reached before a session exists or after one
+ * has been left, so the button either wrote an empty mound over a real one
+ * or wrote a state the player had already stopped playing. Saving belongs
+ * where there is something to save — the PAUSE menu, mid-run — and that is
+ * where it already is.
+ *
+ * `onSave` stays on the actions interface. It is not dead: the pause menu
+ * and the autosave both use the same hook, and removing it here removes a
+ * BUTTON rather than a capability.
+ */
 const ENTRIES: Entry[] = [
   { key: 'onStart', label: 'START' },
   { key: 'onResume', label: 'RESUME' },
-  { key: 'onSave', label: 'SAVE' },
   { key: 'onSettings', label: 'SETTINGS' },
   { key: 'onInfo', label: 'INFO' },
   { key: 'onDev', label: 'DEV', gated: true },
