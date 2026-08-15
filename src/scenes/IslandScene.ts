@@ -161,6 +161,9 @@ import { Combat, necrosis } from './islandCombat';
 import { Beetle } from './Beetle';
 import { resolveBulk, QUEEN_BULK_ID, type Bulk } from './islandBulk';
 import { Grit } from './islandGrit';
+import {
+  Worm, WORM_BORE_MM, WORM_COUNT, type WormSoil,
+} from './islandWorm';
 import { warmHudArt } from './hudArt';
 import {
   crushDamage, CRUSH_SHARE, CRUSH_REACH_SLACK, CRUSH_AGAIN_AFTER,
@@ -174,7 +177,7 @@ import {
   PROP_SCATTER, PROP_SPECS, Prop, type PropGround,
 } from './islandProps';
 import {
-  bite, biteCentre, biteRay, boreAim, updateAimDebug, type DigHost,
+  bite, biteCentre, biteRay, boreAim, enqueueBounds, updateAimDebug, type DigHost,
 } from './islandDig';
 import {
   readSpine, refreshAim, simulate, type BodyHost,
@@ -331,6 +334,26 @@ export class IslandScene {
    *  scene, because it is one instanced mesh that lives in it. */
   private grit: Grit | null = null;
 
+  /** The island's other diggers — see `islandWorm`. */
+  private readonly worms: Worm[] = [];
+
+  /**
+   * What a worm is allowed to know about the world.
+   *
+   * `covers` is the honest half: the fine soil is a 192 mm window that
+   * follows HER, and outside it there is no field to carve. A worm out
+   * there waits rather than pretending.
+   */
+  private readonly wormSoil: WormSoil = {
+    covers: (x, y, z) => this.stream?.densityAtWu(x, y, z) !== null
+      && this.stream?.densityAtWu(x, y, z) !== undefined,
+    carve: (x, y, z, r) => {
+      const hit = this.stream?.subtractSphere({ x, y, z }, r);
+      if (hit && hit.changedSamples > 0) enqueueBounds(this.digHost, hit.bounds);
+    },
+    surfaceAt: (x, z) => this.walkGroundAt(x, z),
+  };
+
   /** Stamped grid (mound included) — what the island mesh and walker use. */
   private heights: Int16Array | null = null;
 
@@ -485,6 +508,7 @@ export class IslandScene {
     this.scene.add(beetle.root);
     this.quarry.push(beetle);
     this.spawnProps();
+    this.spawnWorms();
   }
 
   /**
@@ -494,6 +518,37 @@ export class IslandScene {
    * because where she starts is where the island decided to put her and a
    * hardcoded pebble would end up inside a tree.
    */
+  /**
+   * A FEW WORMS, near where she founds.
+   *
+   * Near her because the fine soil window follows her and a worm outside
+   * it cannot carve — see `wormSoil.covers`. Seeded off her spot for the
+   * same reason the props are: where she starts is where the island put
+   * her, and a hardcoded worm would be inside a tree.
+   *
+   * Three, and deliberately few. Each one carves a 6 mm tube at 3 mm a
+   * second, which is 180 mm of burrow a minute; a dozen would turn the
+   * ground she is standing on into a sponge inside a session.
+   */
+  private spawnWorms(): void {
+    if (this.worms.length > 0) return;
+    let seed = 0x0eaf;
+    const rand = (): number => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+    for (let i = 0; i < WORM_COUNT; i += 1) {
+      const a = rand() * Math.PI * 2;
+      const away = (18 + rand() * 26) / MM;
+      const x = this.at.x + Math.cos(a) * away;
+      const z = this.at.z + Math.sin(a) * away;
+      /* Under the surface by more than its own thickness, so it starts
+       * inside the ground rather than half out of it. */
+      const y = this.walkGroundAt(x, z) - (WORM_BORE_MM * 2) / MM;
+      this.worms.push(new Worm(x, y, z, rand));
+    }
+  }
+
   private spawnProps(): void {
     if (this.props.length > 0) return;
     for (const { key, dxMm, dzMm } of PROP_SCATTER) {
@@ -694,6 +749,7 @@ export class IslandScene {
      * world rather than with the dig, because a chip outlives the stroke
      * that made it and must keep falling after DIG is let go. */
     this.grit?.tick(dt);
+    for (const w of this.worms) w.tick(dt, this.wormSoil);
     /* After the vitals have ticked, so the latch drops on the same frame she
      * bottoms out rather than one behind it. See `dropPaceIfSpent`. */
     this.dropPaceIfSpent();
@@ -3697,6 +3753,20 @@ export class IslandScene {
 
   /** For probes: cut once, the way the DIG plate does. */
   biteForTest(): void { this.bite(); }
+
+  /** For probes: where each worm is, and how much it has eaten. */
+  wormsForTest(): {
+    x: number; y: number; z: number;
+    dx: number; dy: number; dz: number;
+    bx: number; by: number; bz: number; bites: number;
+  }[] {
+    return this.worms.map((w) => ({
+      x: w.at.x, y: w.at.y, z: w.at.z,
+      dx: w.dir.x, dy: w.dir.y, dz: w.dir.z,
+      bx: w.lastBite.x, by: w.lastBite.y, bz: w.lastBite.z,
+      bites: w.bites,
+    }));
+  }
 
   /** For probes: how many chips of spoil are in the air. */
   gritLiveForTest(): number { return this.grit?.live ?? 0; }
