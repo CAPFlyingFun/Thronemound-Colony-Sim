@@ -269,6 +269,17 @@ export class IslandScene {
   }
 
   /**
+   * How deep inside the soil a point is. Implements `PropGround`.
+   *
+   * Straight off the density field, which is what makes per-shape collision
+   * affordable here: the terrain answers "are you inside me?" anywhere, so a
+   * prop's shape is decided entirely by WHERE it asks. See `Prop.hull`.
+   */
+  insideBy(x: number, y: number, z: number): number {
+    return this.soilDensityAt(x, y, z);
+  }
+
+  /**
    * Which way the soil faces here — the walker's own gradient.
    *
    * Implements `PropGround`. Delegated rather than re-derived: the walker

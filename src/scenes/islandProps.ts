@@ -50,10 +50,37 @@ export interface PropGround {
    * the slope a thing rolls down is the same slope she climbs.
    */
   soilNormal(x: number, y: number, z: number, into: THREE.Vector3): void;
+  /**
+   * HOW FAR INSIDE THE SOIL a point is. Positive is buried, negative is air.
+   *
+   * This is what makes per-shape collision cheap here rather than a physics
+   * engine's worth of work. The terrain is a signed DENSITY FIELD, not a
+   * mesh — so a prop does not need mesh-against-mesh intersection, which is
+   * the expensive thing people mean by "mesh collision". It needs to ask the
+   * field, at points on its own surface, whether they are in the ground.
+   * Shape falls out of WHERE you ask.
+   */
+  insideBy(x: number, y: number, z: number): number;
 }
 
 /** World units a second squared. Tuned so a prop dropped in a shaft lands
  *  in a beat rather than drifting — see `Prop.tick`. */
+/** How many contact points a shape is reduced to, and the spread they are
+ *  drawn from. Fourteen is the six extremes plus eight spread over the rest
+ *  — enough that a twig cannot pivot between two of them. */
+/** How far out of the soil a resting prop is held. Small enough to be
+ *  invisible, large enough that the next frame's read cannot flip. */
+/** Above this the contact is a floor and friction holds; below it, a wall,
+ *  where the sideways push is the whole point. About sixty degrees. */
+const FLOOR_FACES_UP = 0.5;
+
+const PROP_SKIN = 0.004;
+
+const HULL_MAX = 14;
+const HULL_SPREAD = 10;
+
+const HULL_P = new THREE.Vector3();
+const HIT_N = new THREE.Vector3();
 const ROLL_N = new THREE.Vector3();
 const ROLL_DOWN = new THREE.Vector3();
 const ROLL_AXIS = new THREE.Vector3();
@@ -163,6 +190,31 @@ export class Prop implements Portable {
   /** Where it is rolling, in world units a second. See `tick`. */
   private readonly roll = new THREE.Vector3();
 
+  /**
+   * ITS OWN SURFACE, AS POINTS — the collision shape, taken off the mesh.
+   *
+   * Asked for directly: "I was asking for proper per-shape collision... could
+   * do it mesh instead of shape for the collisions and would naturally be
+   * the right shape." That is exactly what this is, and in this world it is
+   * cheap rather than extravagant, because the TERRAIN IS A FIELD. Mesh
+   * collision usually means mesh-against-mesh intersection; here the ground
+   * answers "are you inside me?" at any point, so a shape only has to know
+   * where its own surface is. Ask at the right places and the shape is
+   * automatic.
+   *
+   * Read off the geometry rather than typed per kind, so a prop added later
+   * gets its true shape without anyone writing a hull for it: a twig's
+   * points run the length of its cylinder, a seed's wrap its ellipsoid, a
+   * rock's sit on its facets. That is the "naturally the right shape" part.
+   *
+   * STRIDED AND CAPPED. A sphere is 99 vertices and a dodecahedron more;
+   * asking the field at every one of them, per prop, per frame, is the
+   * expense that makes people reach for an engine. The extremes plus a
+   * spread of the rest is the same shape to within a fraction of a
+   * millimetre at this scale, for a tenth of the reads.
+   */
+  private readonly hull: number[] = [];
+
   constructor(
     readonly id: string,
     readonly spec: PropSpec,
@@ -191,13 +243,87 @@ export class Prop implements Portable {
     const mesh = new THREE.Mesh(geo, mat);
     mesh.castShadow = false;
     this.root.add(mesh);
+    this.buildHull(geo);
     /* A stone is not a sphere sitting on a plane; it is bedded in. Half a
      * radius down looks planted rather than balanced. */
     this.root.rotation.y = (spec.massMg * 1.7) % Math.PI;
   }
 
+  /**
+   * Pick the contact points off the geometry — see `hull`.
+   *
+   * The six axis extremes always go in, because those are the parts that
+   * touch first and losing one would let a corner sink. The rest are taken
+   * at a stride, which spreads them over the surface without caring what
+   * shape it is.
+   */
+  private buildHull(geo: THREE.BufferGeometry): void {
+    const pos = geo.getAttribute('position') as THREE.BufferAttribute | undefined;
+    if (!pos) return;
+    const n = pos.count;
+    if (n === 0) return;
+    /* The extremes, by index, so each is a real vertex rather than a
+     * corner of a box the shape never reaches. */
+    const far = [0, 0, 0, 0, 0, 0];
+    const best = [Infinity, -Infinity, Infinity, -Infinity, Infinity, -Infinity];
+    for (let i = 0; i < n; i += 1) {
+      const v = [pos.getX(i), pos.getY(i), pos.getZ(i)];
+      for (let a = 0; a < 3; a += 1) {
+        if (v[a]! < best[a * 2]!) { best[a * 2] = v[a]!; far[a * 2] = i; }
+        if (v[a]! > best[a * 2 + 1]!) { best[a * 2 + 1] = v[a]!; far[a * 2 + 1] = i; }
+      }
+    }
+    const take = new Set<number>(far);
+    const stride = Math.max(1, Math.floor(n / HULL_SPREAD));
+    for (let i = 0; i < n && take.size < HULL_MAX; i += stride) take.add(i);
+    for (const i of take) {
+      this.hull.push(pos.getX(i), pos.getY(i), pos.getZ(i));
+    }
+  }
+
+  /** For tests: the contact points this shape collides with. */
+  get hullForTest(): readonly number[] { return this.hull; }
+
   /** How close her jaws have to be, from its centre. */
   get radius(): number { return this.spec.halfMm / MM; }
+
+  /**
+   * PUSH THE SHAPE OUT OF THE SOIL, and report which way it was pushed.
+   *
+   * Every hull point is asked how deep it is; the deepest one wins and the
+   * whole prop moves out along the field's gradient there. One resolve per
+   * frame rather than iterating to convergence — the next frame gets
+   * another go, and a prop that needs many is one being crushed by terrain
+   * appearing around it, which no amount of iteration would fix.
+   *
+   * The gradient is taken AT THE CONTACT, not under the centre, which is
+   * the whole reason this reads as shape: a twig meeting a wall is pushed
+   * sideways because the soil there faces sideways.
+   *
+   * Returns false when nothing is touching, leaving `HIT_N` untouched, so
+   * the caller can tell resting from falling without a second query.
+   */
+  private pushOut(rest: PropGround): boolean {
+    if (this.hull.length === 0) return false;
+    let worst = 0;
+    let wx = 0;
+    let wy = 0;
+    let wz = 0;
+    for (let i = 0; i < this.hull.length; i += 3) {
+      HULL_P.set(this.hull[i]!, this.hull[i + 1]!, this.hull[i + 2]!)
+        .applyQuaternion(this.root.quaternion)
+        .add(this.at);
+      const depth = rest.insideBy(HULL_P.x, HULL_P.y, HULL_P.z);
+      if (depth > worst) { worst = depth; wx = HULL_P.x; wy = HULL_P.y; wz = HULL_P.z; }
+    }
+    if (worst <= 0) return false;
+    rest.soilNormal(wx, wy, wz, HIT_N);
+    if (HIT_N.lengthSq() < 1e-9) { HIT_N.set(0, 1, 0); } else { HIT_N.normalize(); }
+    /* A skin, so it rests ON the surface rather than exactly in it, where
+     * the next frame's read could go either way and the prop would buzz. */
+    this.at.addScaledVector(HIT_N, worst + PROP_SKIN);
+    return true;
+  }
 
   /**
    * IT ROLLS UNTIL IT FINDS ITS BALANCE — for the things that are round.
@@ -225,9 +351,11 @@ export class Prop implements Portable {
    */
   private rollOn(rest: PropGround, dt: number): void {
     if (!ROLLS.has(this.spec.kind) || dt <= 0) return;
-    rest.soilNormal(this.at.x, this.at.y, this.at.z, ROLL_N);
+    /* The surface it is actually resting ON, which `pushOut` just found —
+     * not the field under its centre, which on a slope is a different
+     * place and on a wall is meaningless. */
+    ROLL_N.copy(HIT_N);
     if (ROLL_N.lengthSq() < 1e-9) return;
-    ROLL_N.normalize();
     /* Gravity, less the part the ground holds up: the downhill tangent. */
     ROLL_DOWN.set(0, -1, 0).addScaledVector(ROLL_N, ROLL_N.y);
     const slope = ROLL_DOWN.length();
@@ -292,23 +420,56 @@ export class Prop implements Portable {
      * `floorUnder` asks the SOIL — the same field the walker stands on and
      * the same one the digging carves — so a chamber floor is a floor.
      */
-    const floor = rest.floorUnder(this.at.x, this.at.y, this.at.z) + this.rest;
-    if (this.at.y <= floor + 1e-6) {
-      /* Landed, or was already resting. Sitting it exactly on the floor
-       * rather than easing means a prop the player dug out from under
-       * cannot hover a hair above the new one. */
-      this.at.y = floor;
+    /*
+     * FALL FIRST, THEN PUSH THE SHAPE OUT OF WHATEVER IT IS IN.
+     *
+     * The point probe this replaces asked "how high is the floor under my
+     * centre" — which is a sphere of radius zero, and is why a twig could
+     * lie half-buried across a ridge and why nothing ever stopped against a
+     * wall. `pushOut` asks the field at points on the prop's OWN surface
+     * instead, so a floor, a chamber wall and a tunnel roof are the same
+     * question answered in different directions.
+     */
+    const wasX = this.at.x;
+    const wasZ = this.at.z;
+    this.fall = Math.min(PROP_FALL_MAX, this.fall + PROP_GRAVITY * dt);
+    this.at.y -= this.fall * dt;
+    this.at.addScaledVector(this.roll, dt);
+
+    const touched = this.pushOut(rest);
+    if (touched) {
+      /*
+       * FRICTION, and without it nothing on a slope ever stops.
+       *
+       * Resolving a penetration means pushing out along the surface normal,
+       * which is correct — and on a slope that push has a sideways part. So
+       * gravity pulls the prop in, the push shoves it out and a little
+       * downhill, and next frame it does it again: a twig laid on a bank
+       * creeps to the bottom, and a pebble that should have settled drifts
+       * for ever. That is exactly what a frictionless object does, and it is
+       * not what either of these is.
+       *
+       * So a FLOOR contact contributes no sideways travel at all: the only
+       * thing allowed to move a prop across the ground is `roll`, which is
+       * deliberate and has its own drag. A WALL contact is left alone,
+       * because there the sideways push IS the collision — it is what stops
+       * a rolling seed rather than letting it grind through.
+       */
+      if (HIT_N.y > FLOOR_FACES_UP) {
+        this.at.x = wasX + this.roll.x * dt;
+        this.at.z = wasZ + this.roll.z * dt;
+      }
+      /* Landed. Kill the fall, and take the part of the roll that was
+       * heading into the surface with it — a pebble against a wall stops
+       * rather than grinding along it. */
       this.fall = 0;
+      const into = this.roll.dot(HIT_N);
+      if (into < 0) this.roll.addScaledVector(HIT_N, -into);
       this.rollOn(rest, dt);
     } else {
-      /*
-       * FALLING, rather than snapping down. A prop whose support is dug
-       * away should drop, and a teleport reads as a glitch where a fall
-       * reads as the world working. Terminal speed is capped so nothing
-       * can tunnel through a thin floor between two frames.
-       */
-      this.fall = Math.min(PROP_FALL_MAX, this.fall + PROP_GRAVITY * dt);
-      this.at.y = Math.max(floor, this.at.y - this.fall * dt);
+      /* Airborne: it keeps whatever sideways travel it had, and gravity
+       * does the rest. No air steering. */
+      this.roll.multiplyScalar(Math.max(0, 1 - ROLL_DRAG * dt * 0.25));
     }
     this.root.position.copy(this.at);
   }
