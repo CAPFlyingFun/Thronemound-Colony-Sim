@@ -154,6 +154,9 @@ import { Vitals } from './islandVitals';
 import { FIRE_ANT, type AbilityId, type AntKind } from './antKinds';
 import { Combat, necrosis } from './islandCombat';
 import { Beetle } from './Beetle';
+import {
+  buildQuarryBars, syncQuarryBars, type QuarryBarHost, type QuarryBars,
+} from './islandQuarryBar';
 import { Carry, emptyStores, withinNest } from './islandCarry';
 import { PROP_SCATTER, PROP_SPECS, Prop } from './islandProps';
 import {
@@ -574,6 +577,18 @@ export class IslandScene {
     for (const e of this.combat.drain()) {
       if (e.kind === 'dry') this.toastCombat('OUT OF VENOM');
       else if (e.kind === 'shaken') this.toastCombat('SHAKEN OFF');
+      /*
+       * AND A KILL BY BITE SAYS SO.
+       *
+       * v0.1.46 gave the grip real damage and `Combat` has pushed `felled`
+       * ever since — but nothing listened, because the only fell that
+       * existed when this loop was written came from `necrosis`, which
+       * toasts on its own a few lines up. So chewing something to death was
+       * silent while poisoning it announced itself.
+       */
+      else if (e.kind === 'felled' && e.quarry) {
+        this.toastCombat(`THE ${e.quarry.toUpperCase()} IS DOWN`);
+      }
     }
     this.carryTick(dt);
     this.refreshCombatChips();
@@ -1479,6 +1494,13 @@ export class IslandScene {
 
   /** Everything on the island she could get her jaws into. */
   readonly quarry: Beetle[] = [];
+
+  /** Health bars over anything hurt or held. See `islandQuarryBar`. */
+  private quarryBars: QuarryBars | null = null;
+
+  /** What the bars need to know about the fight, without handing them
+   *  the whole combat model. */
+  get gripped(): Beetle | null { return this.combat.held as Beetle | null; }
 
   private toastEl: HTMLElement | null = null;
 
@@ -2824,6 +2846,13 @@ export class IslandScene {
     return this as unknown as CameraHost;
   }
 
+  /* The same one-cast seam the camera uses, for the same reason: naming the
+   * surface in `islandQuarryBar` is the point, and `private` stays
+   * meaningful for everything the bars have no business touching. */
+  private get barHost(): QuarryBarHost {
+    return this as unknown as QuarryBarHost;
+  }
+
   private aimCamera(dt: number): void { aimCamera(this.cameraHost, dt); }
 
   private lensClearance(): number { return lensClearance(this.cameraHost); }
@@ -2939,6 +2968,13 @@ export class IslandScene {
      * WOOD rather than to its origin — see `BuiltTree.updateLevels`. It has
      * to happen after the camera has been placed and before the draw. */
     this.tree?.updateLevels(this.camera.position);
+    /*
+     * The quarry bars project from the camera, so like the tree's levels
+     * they belong AFTER it has been placed — see `syncQuarryBars`. Built
+     * lazily because `hud` does not exist until the HUD does.
+     */
+    if (!this.quarryBars) this.quarryBars = buildQuarryBars(this.barHost);
+    syncQuarryBars(this.barHost, this.quarryBars);
     this.renderer.render(this.scene, this.camera);
     this.frame = requestAnimationFrame(this.animate);
   };

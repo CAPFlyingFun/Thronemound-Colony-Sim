@@ -32,6 +32,8 @@ export class Beetle implements Quarry, Portable {
 
   hp = 100;
 
+  readonly hpMax = 100;
+
   venomLoad = 0;
 
   /* Set by whoever stings it — see `Quarry.venomRate`. Zero until then,

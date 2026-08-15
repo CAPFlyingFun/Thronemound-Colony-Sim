@@ -3387,3 +3387,58 @@
   text-align: center;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
 }
+
+/*
+ * THE QUARRY'S HEALTH, over its head — see `islandQuarryBar.ts` for when it
+ * is allowed to be there at all, which is the harder half.
+ *
+ * `pointer-events: none` on the layer AND the bar. It sits in the middle of
+ * the screen, which is the camera-drag region the HUD has spent several
+ * versions clawing back; a bar that ate a pan would undo that on the one
+ * occasion the player most wants to look around.
+ *
+ * Positioned by `transform` with the centring built into the same value the
+ * script writes — a `translate(-50%,-50%)` here would be overwritten every
+ * frame — so the row is centred by a negative margin instead.
+ */
+.tm-quarry-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.tm-quarry {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 46px;
+  height: 5px;
+  margin: -3px 0 0 -23px;
+  border: 1px solid rgb(232 180 74 / 65%);
+  border-radius: 3px;
+  background: rgb(10 12 16 / 78%);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/*
+ * SMALL ON PURPOSE. It is a creature's state, not a boss bar — the design
+ * canvas is 932 wide and this thing can be on screen while she is also
+ * digging, carrying and being shaken about.
+ */
+.tm-quarry-fill {
+  height: 100%;
+  background: #b8402c;
+  transition: width 0.18s ease, background-color 0.25s ease;
+}
+
+/* Three states rather than a slide, so the colour is a fact you read
+ * instead of a shade you compare. Same stops as the carry bar's ends. */
+.tm-quarry.is-low .tm-quarry-fill { background: #d2782c; }
+.tm-quarry.is-dire .tm-quarry-fill { background: #e0b93c; }
+
+@media (height <= 520px) {
+  .tm-quarry { width: 38px; height: 4px; margin: -3px 0 0 -19px; }
+}

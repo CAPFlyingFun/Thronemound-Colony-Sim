@@ -24,6 +24,7 @@ const dummy = (over: Partial<Quarry> = {}): Quarry => ({
   radius: 1,
   alive: true,
   hp: 100,
+  hpMax: 100,
   venomLoad: 0,
   venomRate: 0,
   struggle: 0,

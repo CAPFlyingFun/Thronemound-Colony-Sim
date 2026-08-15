@@ -45,6 +45,14 @@ export interface Quarry {
   alive: boolean;
   /** Hit points, whatever the creature counts them in. */
   hp: number;
+  /**
+   * What `hp` started at, so a bar over its head has a denominator.
+   *
+   * On the quarry rather than in a table because a bestiary of different
+   * creatures is the whole point of the type — and because "is it hurt"
+   * needs to be answerable without knowing what species it is.
+   */
+  readonly hpMax: number;
   /** Venom sitting in it, ticking damage down. */
   venomLoad: number;
   /**
