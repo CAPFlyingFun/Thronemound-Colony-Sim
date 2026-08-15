@@ -28,7 +28,9 @@ import type { Dodge } from './dodge';
 import type { Vitals } from './islandVitals';
 import type { NestDesigner } from '../nest/NestDesigner';
 import type { IslandStream, IslandScrollReport } from '../world/IslandStream';
-import { SENSE_EASE, type SenseUniforms } from './undergroundSense';
+import {
+  SENSE_EASE, roofShare, ROOF_OPEN_MM, type SenseUniforms,
+} from './undergroundSense';
 import { CELL_SIZE, MM } from '../world/worldScape';
 import { VOXEL_MM } from '../anim/hexapod';
 import {
@@ -129,6 +131,34 @@ export interface BodyHost {
   walkGroundAt(x: number, z: number): number;
   soilSolidAt(x: number, y: number, z: number): boolean;
   soilDensityAt(x: number, y: number, z: number): number;
+}
+
+/**
+ * HOW FAR ABOVE HER HEAD THE NEAREST SOIL IS, in millimetres, or `null`
+ * for open sky.
+ *
+ * Straight up in WORLD +y, not along her own up, and that is the point: the
+ * question is whether the sky is over her, and the sky does not tilt when
+ * she walks onto a wall. Sampled from just clear of her head to
+ * `ROOF_OPEN_MM`, which is where the sense has faded out anyway.
+ *
+ * `ROOF_STEPS` of `soilSolidAt` a frame, and it is affordable where an
+ * earlier note said a cast was not: the step is three millimetres and the
+ * thinnest thing this has to notice is a tunnel roof, which is thicker
+ * than that. The camera guard alone spends more than this on a frame
+ * anywhere near soil. A roof thin enough to slip between two samples reads
+ * as sky, which for a roof that thin is close enough to true.
+ */
+const ROOF_STEPS = 20;
+
+function roofGapMm(host: BodyHost): number | null {
+  const from = host.at.y + RIDE;
+  const reach = ROOF_OPEN_MM / MM;
+  for (let i = 1; i <= ROOF_STEPS; i += 1) {
+    const up = (reach * i) / ROOF_STEPS;
+    if (host.soilSolidAt(host.at.x, from + up, host.at.z)) return up * MM;
+  }
+  return null;
 }
 
 export function simulate(host: BodyHost, dt: number): void {
@@ -264,9 +294,8 @@ export function simulate(host: BodyHost, dt: number): void {
     sheltered: host.enclosed,
   });
 
-  /* ONE height sample, TWO thresholds — the camera's and the sense's.
-   * Sharing the sample is what keeps the second answer free; see
-   * `ENCLOSED_MM` for why the sense may not afford a cast of its own. */
+  /* The camera's threshold, which is a question about GRADE and is right
+   * to be: whether to run the tunnel chase or the open-country one. */
   const overhead = host.walkGroundAt(host.at.x, host.at.z) - (host.at.y + RIDE);
   host.underground = overhead > UNDER_MM / MM;
   /*
@@ -274,8 +303,16 @@ export function simulate(host: BodyHost, dt: number): void {
    * the wireframe off for the whole of the entrance dig and then snapped it
    * on near the bottom. This fades it in over the four millimetres either
    * side of her going under, which is what sinking actually looks like.
+   *
+   * AND IT IS MULTIPLIED BY THE ROOF, which is the half that was missing —
+   * see `roofShare` for the reported nighttime sky. Depth says she is below
+   * where the ground used to be; the roof says whether anything is actually
+   * between her and the sky. A five-millimetre scoop satisfies the first
+   * and not the second, and it is the second that decides how the world is
+   * LIT. Both, multiplied: a deep tunnel is 1, an open pit is 0, and a
+   * tunnel mouth is the honest blend of the two.
    */
-  host.senseWant = senseAt(overhead * MM);
+  host.senseWant = senseAt(overhead * MM) * roofShare(roofGapMm(host));
   /* Kept as the boolean a probe reads: the sense is UP rather than merely
    * fading in. */
   host.enclosed = host.senseWant >= 1;

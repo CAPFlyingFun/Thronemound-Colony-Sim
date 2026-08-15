@@ -348,9 +348,33 @@ export function liftCameraClear(host: CameraHost, look?: THREE.Vector3, point?: 
  * need to fire again next frame, and the repeat-every-frame shake — not
  * the correction itself — is what stops.
  */
+/*
+ * AND ITS OWN EARLY-OUT WAS THE BUG THE WHOLE FILE IS ABOUT.
+ *
+ * This used to open with `if (soilDensityAt(p) <= 0) return` — a POINT
+ * test, which is precisely the test `frustumWorstAt` exists because it is
+ * not enough. A lens sitting a legal hair outside the surface with a
+ * near-plane corner buried in the hill answered "the point is in air" and
+ * was sent away without the corner test ever running. In third person that
+ * is the terrain coming through the picture, reported as seeing through the
+ * ground.
+ *
+ * It also quietly broke the instrument. `lensWorstMm` is written by
+ * `liftCameraClear`, so on every frame this returned early the number the
+ * probe grades was left over from the guard's last call — which in the
+ * chase is a measurement of the smoothed TARGET, not of where the lens
+ * actually ended up. The probe has therefore been reporting on the wrong
+ * point on most frames, which is how it could read clean while the picture
+ * had dirt in it.
+ *
+ * `liftCameraClear` has its OWN cheap early-out, and a better one: it
+ * bounds by three times the clearance because this field's magnitude is not
+ * a distance, and it costs the same single read. So there is nothing to
+ * gain by guessing first — the common frame still pays one field read, and
+ * the rare frame near soil now gets the corner test it always needed.
+ */
 export function settleLensBackstop(host: CameraHost, look?: THREE.Vector3): void {
   const p = host.camera.position;
-  if (host.soilDensityAt(p.x, p.y, p.z) <= 0) return;
   liftCameraClear(host, look, p);
   if (host.eyeAt) host.eyeAt.copy(p);
 }

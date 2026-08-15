@@ -62,6 +62,58 @@ export interface SenseUniforms {
 export const SENSE_EASE = 5.5;
 
 /**
+ * IS THERE A ROOF OVER HER — which is what "underground" actually means.
+ *
+ * Reported: "whenever going underground, the sky looks nighttime and
+ * everything goes dark."
+ *
+ * The sense was ramped on DEPTH BELOW HER ORIGINAL GRADE alone, full by
+ * five millimetres, and the sky is blended to near-black by the same
+ * number. Five millimetres is about her own height. So scooping a shallow
+ * hollow — or walking into any dip below where the ground used to be, since
+ * the depth is measured against the ORIGINAL heightfield and that knows
+ * nothing about digging — put the whole world at full sense with the sky
+ * wide open above her. Below grade, yes. Underground, no. Nighttime is
+ * exactly what that looks like.
+ *
+ * Depth was never the wrong question, it was only half of it. The other
+ * half is whether anything is actually between her and the sky, and the
+ * file already knew this: `enclosed` exists because "below grade" is the
+ * right question for choosing a camera and the wrong one for choosing a
+ * way of SEEING. It was just derived from the same depth number, so the
+ * distinction it was written for never existed.
+ *
+ * THE QUESTION IS WHETHER THERE IS SKY, NOT HOW LOW THE CEILING IS, and
+ * the first cut at these numbers got that wrong: 8 and 30 read a real
+ * queen chamber — 22 mm tall, eighty millimetres down, with the whole hill
+ * on top of it — as a third underground, because its roof is a long way
+ * from her head. Measured at 0.341, which would have left a buried room
+ * lit like an overcast afternoon.
+ *
+ * So the band is set where a ROOM still counts as inside. Anything within
+ * 25 mm overhead is a roof and nothing else; past 60 mm it stops mattering
+ * whether it is a roof or a cloud. The fade between is a rock ledge outdoors
+ * and the underside of a tunnel mouth, both of which should read as partly
+ * shut in, which they are.
+ */
+export const ROOF_TIGHT_MM = 25;
+export const ROOF_OPEN_MM = 60;
+
+/**
+ * How much roof a given gap counts as, 0..1.
+ *
+ * `null` — nothing solid overhead within reach — is open sky and answers 0.
+ * A pure function of one number, so the shape can be pinned in a test
+ * without a soil field.
+ */
+export function roofShare(gapMm: number | null): number {
+  if (gapMm === null) return 0;
+  if (gapMm <= ROOF_TIGHT_MM) return 1;
+  if (gapMm >= ROOF_OPEN_MM) return 0;
+  return (ROOF_OPEN_MM - gapMm) / (ROOF_OPEN_MM - ROOF_TIGHT_MM);
+}
+
+/**
  * Teach a material to be sensed as well as seen.
  *
  * Returns the uniforms so the scene can ramp `uSense` — 0 is the lit world,

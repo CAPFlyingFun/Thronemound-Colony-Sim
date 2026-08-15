@@ -3549,6 +3549,21 @@ export class IslandScene {
     return true;
   }
 
+  /**
+   * For probes: how underground the WORLD thinks she is, 0..1.
+   *
+   * This is the number that darkens the sky and unlights the terrain, so
+   * "the sky looks like nighttime in an open pit" is a claim about it. See
+   * `roofShare`.
+   */
+  senseForTest(): { want: number; now: number; depthMm: number } {
+    return {
+      want: this.senseWant,
+      now: this.sense?.uSense.value ?? 0,
+      depthMm: (this.walkGroundAt(this.at.x, this.at.z) - (this.at.y + RIDE)) * MM,
+    };
+  }
+
   /** For probes: carve a hollow, so a test can dig without a shovel. */
   carveForTest(x: number, y: number, z: number, radius: number): void {
     this.stream?.subtractSphere({ x, y, z }, radius);
