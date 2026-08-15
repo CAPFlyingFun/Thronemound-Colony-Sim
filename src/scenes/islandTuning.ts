@@ -53,18 +53,55 @@ export const SEC_VERTS = (MESH_N - 1) / SECTIONS + 1;
  * mm/s walking and 45 sprinting, near double the block room's pace on an
  * animal a third the size of its stride.
  */
-export const WALK_SPEED = 1.5;
-export const SPRINT = 3;
+/*
+ * 9 mm/s WALKING, 16 SPRINTING — Joshua's numbers, and close to where this
+ * already was (7.5 and 15).
+ *
+ * THESE ARE THE QUEEN'S. A founding Solenopsis queen is around 9 mm and is
+ * carrying a gaster full of eggs on flight muscle she is in the middle of
+ * digesting; she is built for one flight and then a lifetime of laying. Her
+ * workers are 2-6 mm and are the ones built to travel, and they should end
+ * up FASTER than her in absolute terms despite being smaller — which is why
+ * this wants to become a caste row alongside `STRENGTH` and `CASTE_COMBAT`
+ * the moment a second ant is playable.
+ *
+ * GAME TUNING against a real range, not a measured figure. Ants of this size
+ * move on the order of centimetres a second and fire-ant foragers sit around
+ * the low end of that; 16 mm/s is a defensible sprint for a laden queen and
+ * would be slow for a worker. Nothing here is a citation and it should not
+ * be read as one — see the note in CLAUDE.md about not letting a research
+ * comment become permanent truth.
+ */
+export const WALK_SPEED = 1.8;
+
+/*
+ * SPRINT AND CRAWL ARE MULTIPLES OF THE WALK, not speeds — and reading them
+ * as speeds is a mistake worth leaving a sign on.
+ *
+ * `paceScale` returns `SPRINT` or `CRAWL` and the result multiplies
+ * WALK_SPEED, so the absolute pace is `WALK_SPEED * this * MM` mm/s. Taking
+ * SPRINT = 3 to mean 3 world units — 15 mm/s — is out by the walk itself:
+ * it is 3 x 1.5 = 4.5 units, 22.5 mm/s. `probe:gait` measured 21.5 and that
+ * is what tripped it up.
+ *
+ * 16 mm/s asked for against a 9 mm/s walk is 16/9.
+ */
+export const SPRINT = 16 / 9;
 /*
  * CRAWL — the third pace, and the one the wave gait was written for.
  *
- * Three tenths rather than a third, because the gait switches below
- * `GAIT_WAVE_BELOW` (0.35) and a pace sitting exactly on the threshold
- * would flicker between one foot up and three as the speed filter breathed.
- * Two and a quarter millimetres a second: she picks her way rather than
- * travels, which is the whole point of having the pace at all.
+ * 4 mm/s, up from 2.25 — and like SPRINT this is a MULTIPLE OF THE WALK,
+ * not a speed. 4 against a 9 mm/s walk is 4/9.
+ *
+ * It is therefore the same number `GAIT_WAVE_BELOW` compares against, which
+ * is what makes the coupling exact rather than approximate: the old 0.3 sat
+ * under the old 0.35 threshold with almost nothing to spare, and 4/9 = 0.44
+ * steps straight over it. Raising the crawl without moving the threshold
+ * costs the crawl its gait and leaves the pace a label on a slower tripod —
+ * measured, `probe:gait` went from "1 foot up" to "3". The two numbers
+ * change together or not at all.
  */
-export const CRAWL = 0.3;
+export const CRAWL = 4 / 9;
 export const PACE_NAMES = ['CRAWL', 'WALK', 'RUN'] as const;
 
 /**
@@ -308,6 +345,9 @@ export const FPV_LIFT_RATE = 6;
 /** The orbit arm's own, so it can be asked to write into any of the others
  *  without quietly aliasing its working vector. */
 export const S_NOSE = new THREE.Vector3();
+
+/** Where the load rides — her mouth, read off the rig. See `carryTick`. */
+export const S_JAW = new THREE.Vector3();
 
 /**
  * The chase camera's fan, in radians off where it would like to be.

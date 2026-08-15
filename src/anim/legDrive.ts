@@ -203,7 +203,21 @@ const LOCK_AT = 0.9;
  * tripod whatever the speed says. The scene ships it on for the CRAWL pace;
  * `?gait=tripod`, or `drive.adaptiveGait = false`, puts the one gait back.
  */
-export const GAIT_WAVE_BELOW = 0.35;
+/*
+ * RAISED FROM 0.35, because the crawl moved.
+ *
+ * This is a fraction of WALK pace, not a speed, so it only ever had to
+ * bracket the crawl. The crawl went from 0.20 of a walk to 0.44 of one
+ * (2.25 mm/s to 4, against a 9 mm/s walk), which stepped straight over the
+ * old threshold — leaving CRAWL a label on a slower tripod rather than a
+ * different gait.
+ *
+ * 0.6 rather than something just above 0.44, for the reason the crawl's own
+ * comment gives: a pace sitting near the threshold flickers between one
+ * foot up and three as the speed filter breathes. This leaves the crawl
+ * well under it and the walk, at 1.0 by definition, well over.
+ */
+export const GAIT_WAVE_BELOW = 0.6;
 
 /**
  * How many of the due tripod's feet may swing together.

@@ -129,7 +129,7 @@ import {
   SCOOP_WIDE_MM, SCOOP_TALL_MM, SCOOP_DEEP_MM, SMOOTH_STRENGTH,
   SMOOTH_PASSES, SMOOTH_RADIUS_MM, SMOOTH_MAX_SHIFT, SMOOTH_GROW,
   EYE_SKIN, BONE_CLEARANCE, CAMERA_SKIN, EYE_FORWARD,
-  EYE_RISE, EYE_FOLLOW_MS, EYE_AIM_MS, EYE_FOLLOW_RATE,
+  EYE_RISE, EYE_FOLLOW_MS, EYE_AIM_MS, EYE_FOLLOW_RATE, S_JAW,
   EYE_ROLL_RATE, EYE_SNAP, EYE_BISECTIONS, EYE_MARCH_STEPS,
   LOOK_HOLD_S, LOOK_RETURN_RATE, CHASE_PITCH, CHASE_PITCH_MIN,
   CHASE_PITCH_MAX, CHASE_GROUND_CLEAR, CHASE_REACH, SHELL_REACH,
@@ -617,12 +617,46 @@ export class IslandScene {
       p.tick((x, z) => this.walkGroundAt(x, z));
     }
     if (load) {
-      /* At her jaws, which are at her nose. Not parented to her rig — the
-       * body is rebuilt by the walker every frame and a child of it would
-       * inherit the leg solve's twitch. */
-      load.at.x = this.at.x + this.fwd.x * JAW_PAST_NOSE;
-      load.at.y = this.at.y;
-      load.at.z = this.at.z + this.fwd.z * JAW_PAST_NOSE;
+      /*
+       * AT HER ACTUAL JAWS, off the rig — not at a point invented from her
+       * root.
+       *
+       * Reported: "picking up stuff with the queen snaps to her in the
+       * middle just under her body", and that is exactly what the old sum
+       * did. `at` is her body CENTRE and `at.y` is its height, so a seed
+       * rode 0.6 mm ahead of her middle at mid-body height, which is inside
+       * her thorax rather than in her mouth.
+       *
+       * `jawPosition` is the same anchor the BITE already used, and it
+       * already answers the worry raised here: "we didn't really create it
+       * for the queen, but we still should even if the jaws doesn't have
+       * the two jaw bones". It takes a real mandible tip where the rig has
+       * one — the worker and the major both do — and the tip of the mouth
+       * chain where it does not, which is the queen, whose auto-rig left
+       * her mandibles out entirely.
+       *
+       * The old comment worried that reading the rig would inherit the leg
+       * solve's twitch. It does, and that is now the right answer rather
+       * than a cost: the load twitches WITH her head, so it reads as
+       * attached. The camera needed filtering because a shaking lens is a
+       * shaking picture; a seed that moves with the mouth holding it is
+       * simply a seed being carried.
+       *
+       * The old sum stays as the fallback for the second before the model
+       * has loaded, which is the only time it was ever right.
+       */
+      if (!(this.queenReady && this.queen.jawPosition(S_JAW))) {
+        S_JAW.set(
+          this.at.x + this.fwd.x * JAW_PAST_NOSE,
+          this.at.y,
+          this.at.z + this.fwd.z * JAW_PAST_NOSE,
+        );
+      }
+      /* Component-wise, because `Portable.at` is a plain {x,y,z} — the
+       * carry model deliberately owns no THREE types. */
+      load.at.x = S_JAW.x;
+      load.at.y = S_JAW.y;
+      load.at.z = S_JAW.z;
     }
 
     /*
