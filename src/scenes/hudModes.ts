@@ -81,11 +81,26 @@ export const HUD_LAYOUTS: Record<HudMode, HudLayout> = {
   },
   combat: {
     primary: 'bite',
-    /* NO VIEW. Nobody switches camera mode mid-fight, and it was the sixth
-     * plate — measured, six wrapped the cluster to a second row and the far
-     * end of the arc landed on the quest text. A control that is never used
-     * here was costing the one thing this HUD is short of. */
-    secondary: ['sting', 'dodge', 'pace'],
+    /*
+     * VIEW IS BACK, and the seat it needed came from STING leaving.
+     *
+     * It was pulled as the sixth plate: six wrapped the cluster to a second
+     * row and the far end of the arc landed on the quest text, and the
+     * reasoning was that nobody switches camera mid-fight. Reported from the
+     * device, and it is the better argument: "realized VIEW wasn't available
+     * when I was attacking the beetle, but should allow both 1st and 3rd
+     * person." Fighting is exactly when you want to choose whether you are
+     * looking down your own mandibles or watching yourself do it, and a mode
+     * you can be dropped INTO by a beetle wandering up must not silently
+     * take away a camera you had a moment ago.
+     *
+     * It fits now because the queen has no sting — see `FIRE_ANT` — so this
+     * is five plates where it was six, and the plate that left is the one
+     * she could not use anyway. The `partsIn` count test below is what holds
+     * that; if a stinging caste becomes playable, six needs re-measuring
+     * rather than re-arguing.
+     */
+    secondary: ['view', 'dodge', 'pace'],
     contextual: ['carry'],
   },
   carry: {

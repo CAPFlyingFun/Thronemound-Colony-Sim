@@ -2404,19 +2404,27 @@
   -webkit-mask-box-image: url('/ui/fill-meter.png') 0 106 0 39 / 0 7.33px 0 2.7px stretch;
   mask-border: url('/ui/fill-meter.png') 0 106 0 39 / 0 7.33px 0 2.7px stretch;
   /*
-   * THE RAMP IS ANCHORED TO THE CHANNEL, NOT TO THE BAR.
+   * ONE FLAT COLOUR, AND THE LOAD PICKS IT — not a ramp along the bar.
    *
-   * `background-size` is the whole point of this rule. A gradient on an
-   * element that changes width rescales with it, so a bar with a red-to-
-   * green ramp would show the FULL ramp at every level — green at the tip
-   * when nearly empty, which is exactly backwards. Painting it at the
-   * channel's full width instead pins each colour to a POSITION, so the
-   * leading edge reports where it has got to and the colours never lie.
+   * This used to paint a gradient at the CHANNEL's full width, so each
+   * colour sat at a fixed position and the leading edge reported where the
+   * bar had got to. Asked for the other way round: "instead of a gradient
+   * fill, I wanted it to change color 3 times but be smooth so the whole
+   * thing was a solid color." A bar at 85% used to be green at its left and
+   * orange at its tip, so the colour only meant something if you found the
+   * end of it; flat, it means something at a glance.
+   *
+   * `--tm-level-paint` is now a COLOUR rather than a gradient, mixed in
+   * `loadColour` from the same three stops. It stays a background-image
+   * slot so the mask still paints through it; a colour is a legal image
+   * source here, and keeping the property name means one place decides.
+   *
+   * The transition covers BOTH: the width easing as before, and the colour
+   * so a load that jumps a stage slides rather than snapping.
    */
-  background-image: var(--tm-level-paint);
-  background-size: 131.5px 100%;
+  background-color: var(--tm-level-paint);
   background-repeat: no-repeat;
-  transition: width 0.2s ease;
+  transition: width 0.2s ease, background-color 0.25s ease;
   pointer-events: none;
 }
 
@@ -2425,18 +2433,11 @@
  * the bar reads empty, which is the truth. */
 .tm-meter {
   --tm-level: 0;
-  /* Light load to full, which for a thing she is CARRYING is the honest way
-   * round: green while she can still take more, red when her mandibles are
-   * full. The stops sit off the ends rather than at them so neither pure
-   * colour occupies a single pixel nobody can read. */
-  --tm-level-paint: linear-gradient(
-    90deg,
-    #5f9e33 0%,
-    #8fbb3a 22%,
-    #e0b93c 55%,
-    #d2782c 80%,
-    #b8402c 100%
-  );
+  /* The empty colour, and the first of `loadColour`'s three stops. Whoever
+   * owns the meter overwrites this every time the load changes; this is
+   * only what an untouched bar is painted, so the two cannot disagree
+   * about where the ramp starts. */
+  --tm-level-paint: #5f9e33;
 }
 
 /*

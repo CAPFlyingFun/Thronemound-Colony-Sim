@@ -48,8 +48,19 @@ describe('two ants differ in DATA, not in code', () => {
     expect(FIRE_ANT.strength).not.toBe(TWIG_ANT.strength);
   });
 
-  it('gives the fire ant a sting and the twig ant a scout', () => {
-    expect(FIRE_ANT.abilities).toContain('sting');
+  it('gives the twig ant a scout, and neither of them the queen\'s sting', () => {
+    /*
+     * FIRE_ANT's list is the QUEEN's — see the note on it. Reported from the
+     * device: "the queen can't sting and need to remove that from the queen
+     * as I saw it as another bug", and an ability offered that does nothing
+     * is exactly what `built` exists to prevent.
+     *
+     * The MECHANIC is untouched and still built; this is about who has it,
+     * so the assertion is on the ant rather than on `ABILITIES`. When the
+     * worker caste lands it gets a sting and this test grows a third ant
+     * rather than losing a line.
+     */
+    expect(FIRE_ANT.abilities).not.toContain('sting');
     expect(FIRE_ANT.abilities).not.toContain('scout');
     expect(TWIG_ANT.abilities).toContain('scout');
     expect(TWIG_ANT.abilities).not.toContain('sting');

@@ -18,6 +18,43 @@ import { Colonist } from './Colonist';
 import { stageOf, type Vitals } from './islandVitals';
 import type { Carry, ColonyStores } from './islandCarry';
 
+/**
+ * WHAT COLOUR A LOAD IS — the WHOLE bar, one colour, three stages.
+ *
+ * Asked for in these words: "instead of a gradient fill, I wanted it to
+ * change color 3 times but be smooth so the whole thing was a solid color".
+ *
+ * The bar used to carry the ramp along its LENGTH: a gradient painted at the
+ * channel's full width so each colour sat at a fixed position, which meant a
+ * bar at 85% showed green at its left and orange at its tip and the player
+ * had to read the far end to learn anything. One solid colour is a state you
+ * take in without reading — light, heavy, at her limit — and it is the same
+ * three stops, moved from the SPACE axis to the LOAD axis.
+ *
+ * Smooth because it is interpolated rather than stepped: three anchors, two
+ * segments, mixed in sRGB. At any instant the bar is a single flat colour;
+ * across a haul it slides green to amber to red without ever banding.
+ *
+ * Green when she can still take more, red when her mandibles are full — the
+ * honest way round for a thing she is CARRYING, and the same direction the
+ * old ramp ran.
+ */
+const LOAD_STOPS: [number, number, number][] = [
+  [0x5f, 0x9e, 0x33],
+  [0xe0, 0xb9, 0x3c],
+  [0xb8, 0x40, 0x2c],
+];
+
+export function loadColour(level: number): string {
+  const t = Math.min(1, Math.max(0, level)) * (LOAD_STOPS.length - 1);
+  const i = Math.min(LOAD_STOPS.length - 2, Math.floor(t));
+  const f = t - i;
+  const a = LOAD_STOPS[i]!;
+  const b = LOAD_STOPS[i + 1]!;
+  const mix = (k: number): number => Math.round(a[k]! + (b[k]! - a[k]!) * f);
+  return `rgb(${mix(0)} ${mix(1)} ${mix(2)})`;
+}
+
 /** The four, named once so a typo cannot invent a fifth. */
 export type VitalKind = 'health' | 'stamina' | 'energy' | 'water';
 
@@ -474,6 +511,8 @@ export function renderQuest(host: QuestHost): void {
     if (pct !== host.carryShown) {
       host.carryShown = pct;
       host.carryEl.style.setProperty('--tm-level', String(pct / 100));
+      /* The whole bar, one colour, by how full she is — see `loadColour`. */
+      host.carryEl.style.setProperty('--tm-level-paint', loadColour(pct / 100));
       /* Lit while she is actually holding something, so an empty meter is
        * quiet rather than a bar that is merely at zero. */
       host.carryEl.classList.toggle('is-loaded', pct > 0);

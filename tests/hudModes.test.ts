@@ -56,6 +56,45 @@ describe('what each mode shows', () => {
     }
   });
 
+  /*
+   * FIVE PLATES IS WHAT THE CLUSTER HOLDS — measured, not guessed.
+   *
+   * Six wrapped it to a second row and the far end of the fanned arc landed
+   * on the quest card's text. That was found by `probe:hudmodes`, which is a
+   * browser, a boot and a minute; this is the same fact as arithmetic, so a
+   * sixth plate fails in the unit run instead of surviving to the device.
+   *
+   * The plates a mode shows are not all "actions": `dig` mode's readouts
+   * (instruments, aim, heading, depth) are text, not tappable art, and do
+   * not sit in the cluster at all. So this counts the ACTION parts, which
+   * are the ones that fan.
+   */
+  it('never asks the cluster to hold more plates than it fits', () => {
+    const READOUTS = new Set(['instruments', 'aim', 'heading', 'depth', 'poseRow']);
+    for (const mode of Object.keys(HUD_LAYOUTS) as (keyof typeof HUD_LAYOUTS)[]) {
+      const plates = partsIn(mode).filter((p) => !READOUTS.has(p));
+      /* Named in the assertion so a failure says WHICH mode overflowed. */
+      expect({ mode, over: plates.length > 5 }).toEqual({ mode, over: false });
+    }
+  });
+
+  /*
+   * VIEW IS REACHABLE FROM EVERY MODE A FIGHT CAN DROP YOU INTO.
+   *
+   * Reported: "realized VIEW wasn't available when I was attacking the
+   * beetle, but should allow both 1st and 3rd person." Combat is entered by
+   * something ELSE walking up to her, so a camera she had a second ago must
+   * not vanish without her choosing it. `dig` and `pose` are the two she
+   * arms deliberately, and both carry VIEW anyway.
+   */
+  it('keeps VIEW reachable in every mode', () => {
+    for (const mode of Object.keys(HUD_LAYOUTS) as (keyof typeof HUD_LAYOUTS)[]) {
+      expect({ mode, view: partsIn(mode).includes('view') })
+        .toEqual({ mode, view: true });
+    }
+  });
+
+
   it('keeps normal exploration small', () => {
     /* Reported directly: exploration does not need a sting button. Three
      * standing controls plus two that appear when they are true. */

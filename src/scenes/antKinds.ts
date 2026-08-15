@@ -178,7 +178,32 @@ export const FIRE_ANT: AntKind = {
    * the two, CLIMB is the one that already happens without being asked
    * while INTERACT is a verb the player has no other way to reach.
    */
-  abilities: ['bite', 'sting', 'carry', 'interact'],
+  /*
+   * NO STING, BECAUSE THIS LIST IS THE QUEEN'S.
+   *
+   * Reported from the device: "the queen can't sting and need to remove that
+   * from the queen as I saw it as another bug." A control that is offered and
+   * does nothing is worse than one that is absent — that is this file's own
+   * rule, one line up from here.
+   *
+   * Worth being precise about what is being said, because the mechanic is
+   * NOT being deleted: `islandCombat` still implements grip, sting and venom
+   * in full, and `ABILITIES.sting.built` stays true. What changes is who has
+   * it. A fire-ant WORKER stings and it is most of what she is for; a
+   * founding queen is sealed in a chamber with no colony and nothing to
+   * sting, and the ant being played is her.
+   *
+   * (Biologically a mated Solenopsis queen does keep a functional sting —
+   * every female aculeate does. She has essentially no occasion to use it
+   * during claustral founding, so this is a GAME decision about the founding
+   * phase rather than a claim about the animal.)
+   *
+   * The comment on `strength` above already says this list belongs on the
+   * CASTE rather than the kind. This is the first place that actually bites:
+   * when the roster lands, sting comes back on the worker caste rather than
+   * being re-added here.
+   */
+  abilities: ['bite', 'carry', 'interact'],
   vitals: FIRE_ANT_VITALS,
   /* The one being played is her, and she is a queen. */
   strength: 'queen',
