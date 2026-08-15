@@ -26,6 +26,7 @@
  */
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
+import type { PropGround } from '../src/scenes/islandProps';
 import { Beetle } from '../src/scenes/Beetle';
 import { MM } from '../src/world/worldScape';
 
@@ -61,10 +62,25 @@ const RESTS_MM = 0.1;
 
 const GROUND = 3;
 
+/**
+ * A FLOOR AT `GROUND`, EVERYWHERE — the shape `Beetle.tick` now asks for.
+ *
+ * It used to take `(x, z) => height`, the surface heightfield, which is the
+ * bug this replaced: that field knows nothing about digging, so a beetle
+ * walked over the mouth of a shaft on terrain that was no longer there.
+ * `PropGround` answers "what is the floor under this POINT", which a carve
+ * does change.
+ */
+const flat: PropGround = {
+  floorUnder: () => GROUND,
+  soilNormal: (_x, _y, _z, into) => { into.set(0, 1, 0); },
+  insideBy: (_x, y) => GROUND - y,
+};
+
 describe('procedural beetle grounding', () => {
   it('stands ON the terrain, neither sunk nor floating', () => {
     const beetle = new Beetle('grounded', 0, GROUND, 0);
-    beetle.tick(1 / 60, () => GROUND, false);
+    beetle.tick(1 / 60, flat, false);
     const gap = clearanceMm(beetle, GROUND);
     expect(gap).toBeGreaterThanOrEqual(-1e-4);
     expect(gap).toBeLessThan(RESTS_MM);
@@ -77,7 +93,7 @@ describe('procedural beetle grounding', () => {
     let worstSunk = 0;
     let worstFloat = 0;
     for (let i = 0; i < 200; i += 1) {
-      beetle.tick(1 / 60, () => GROUND, false);
+      beetle.tick(1 / 60, flat, false);
       const gap = clearanceMm(beetle, GROUND);
       worstSunk = Math.min(worstSunk, gap);
       worstFloat = Math.max(worstFloat, gap);
@@ -89,7 +105,7 @@ describe('procedural beetle grounding', () => {
   it('lies on the ground when it falls, rather than pivoting through it', () => {
     const beetle = new Beetle('fallen', 0, GROUND, 0);
     beetle.alive = false;
-    beetle.tick(1 / 60, () => GROUND, false);
+    beetle.tick(1 / 60, flat, false);
     const gap = clearanceMm(beetle, GROUND);
     /* THE ONE THAT WAS REPORTED. Before the lift this was 3.4 mm under. */
     expect(gap).toBeGreaterThanOrEqual(-1e-4);
@@ -99,7 +115,7 @@ describe('procedural beetle grounding', () => {
   it('still rests while it is being fought', () => {
     const beetle = new Beetle('struggling', 0, GROUND, 0);
     for (let i = 0; i < 120; i += 1) {
-      beetle.tick(1 / 60, () => GROUND, true);
+      beetle.tick(1 / 60, flat, true);
       expect(clearanceMm(beetle, GROUND)).toBeGreaterThanOrEqual(-1e-4);
       expect(clearanceMm(beetle, GROUND)).toBeLessThan(RESTS_MM);
     }
@@ -112,7 +128,7 @@ describe('procedural beetle grounding', () => {
      * that are supposed to pick it up. */
     const beetle = new Beetle('anchor', 0, GROUND, 0);
     beetle.alive = false;
-    beetle.tick(1 / 60, () => GROUND, false);
+    beetle.tick(1 / 60, flat, false);
     expect(beetle.at.y).toBe(GROUND);
     expect(beetle.root.position.y).toBeGreaterThan(GROUND);
   });
@@ -123,7 +139,78 @@ describe('procedural beetle grounding', () => {
     const beetle = new Beetle('cargo', 0, GROUND, 0);
     beetle.carried = true;
     beetle.at.set(1, GROUND + 2, 1);
-    beetle.tick(1 / 60, () => GROUND, false);
+    beetle.tick(1 / 60, flat, false);
     expect(beetle.root.position.y).toBe(GROUND + 2);
+  });
+});
+
+describe('it does not walk over an opening', () => {
+  /*
+   * Reported from the device: "the ladybug just walked over the opening".
+   *
+   * Two faults in one line. `tick` took the SURFACE HEIGHTFIELD, which
+   * knows nothing about digging, so it strolled across the mouth of a shaft
+   * at the height the hill used to be. And fixing only the height would
+   * have swapped one wrong behaviour for another — it would have dropped
+   * down the shaft instead, and a ladybug in the queen's chamber is a worse
+   * surprise than one on the lawn.
+   */
+  /** Solid at `GROUND`, except a shaft past x = 0 that falls away. */
+  const shaft = (depth: number): PropGround => ({
+    floorUnder: (x) => (x > 0 ? GROUND - depth : GROUND),
+    soilNormal: (_x, _y, _z, into) => { into.set(0, 1, 0); },
+    insideBy: (x, y) => (x > 0 ? GROUND - depth : GROUND) - y,
+  });
+
+  /*
+   * THE HEADING IS RE-ASSERTED EVERY FRAME, and that is the point.
+   *
+   * `turnIn` starts at zero, so the wander re-rolls the heading on the very
+   * first tick and a heading set once is gone before the beetle takes a
+   * step. Holding it pins the test to the STEP DECISION — does it move onto
+   * that spot or not — instead of measuring where the wander happened to
+   * send it, which is what the first version of this test did.
+   *
+   * A beetle that refuses the step still cannot advance while the heading
+   * is held, so a refusal shows up as staying put rather than as turning.
+   */
+  const walkAt = (b: Beetle, ground: PropGround, seconds: number): void => {
+    for (let i = 0; i < seconds * 60; i += 1) {
+      b.headingForTest = Math.PI / 2;
+      b.tick(1 / 60, ground, false);
+    }
+  };
+
+  it('turns away from a drop instead of crossing it', () => {
+    const b = new Beetle('edge', -0.4, GROUND, 0);
+    walkAt(b, shaft(20 / 5), 6);
+    expect(b.at.x).toBeLessThanOrEqual(0.02);
+    /* And it is still on the solid side's floor, not in the hole. */
+    expect(b.at.y).toBeCloseTo(GROUND, 3);
+  });
+
+  it('walks down a lip it can manage', () => {
+    /* The rule is "not into a hole", not "never descends" — a step it could
+     * take without thinking must not become a wall. */
+    const lip = 0.6 / 5;
+    const b = new Beetle('lip', -0.4, GROUND, 0);
+    walkAt(b, shaft(lip), 6);
+    expect(b.at.x).toBeGreaterThan(0.05);
+    expect(b.at.y).toBeCloseTo(GROUND - lip, 3);
+  });
+
+  it('does not stall where there is no floor at all', () => {
+    /* Over a void `floorUnder` reports -Infinity. It must refuse the step
+     * and keep its position finite rather than being handed a NaN. */
+    const none: PropGround = {
+      floorUnder: (x) => (x > 0 ? -Infinity : GROUND),
+      soilNormal: (_x, _y, _z, into) => { into.set(0, 1, 0); },
+      insideBy: () => -1,
+    };
+    const b = new Beetle('void', -0.4, GROUND, 0);
+    walkAt(b, none, 6);
+    expect(Number.isFinite(b.at.x)).toBe(true);
+    expect(Number.isFinite(b.at.y)).toBe(true);
+    expect(b.at.x).toBeLessThanOrEqual(0.02);
   });
 });

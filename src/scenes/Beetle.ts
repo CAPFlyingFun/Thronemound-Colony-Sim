@@ -17,6 +17,18 @@ import * as THREE from 'three';
 import type { Quarry } from './islandCombat';
 import type { Portable } from './islandCarry';
 import { MM } from '../world/worldScape';
+import type { PropGround } from './islandProps';
+
+/**
+ * How far it will step down without thinking, and how far up it will look.
+ *
+ * A lip, a pebble or the side of a scuff is a step; the mouth of a shaft is
+ * not. GAME TUNING — a real ladybug walks over far rougher ground than this
+ * implies, but the thing being modelled is "does not stroll into a hole"
+ * rather than beetle gait.
+ */
+const STEP_DOWN = 1.2 / MM;
+const STEP_UP = 1.0 / MM;
 
 /**
  * Where the spots sit — across, along, and how big, as fractions of the
@@ -73,6 +85,9 @@ export class Beetle implements Quarry, Portable {
   private readonly home = new THREE.Vector3();
 
   private heading = 0;
+
+  /** For tests: point it somewhere deliberately. */
+  set headingForTest(radians: number) { this.heading = radians; }
 
   private turnIn = 0;
 
@@ -287,7 +302,18 @@ export class Beetle implements Quarry, Portable {
    * legs and no surface following, because a beetle that could climb a
    * tree would need all three and there is nothing up there for it.
    */
-  tick(dt: number, groundAt: (x: number, z: number) => number, held: boolean): void {
+  /**
+   * One frame.
+   *
+   * `ground` is asked for the floor UNDER a point rather than the height at
+   * an (x, z) — the difference is the whole of a bug reported from the
+   * device: "the ladybug just walked over the opening". The old callback
+   * was `walkGroundAt`, the ORIGINAL surface heightfield, which knows
+   * nothing about anything that has been dug. So it strolled across the
+   * mouth of a shaft on terrain that is no longer there, at the height the
+   * hill used to be.
+   */
+  tick(dt: number, ground: PropGround, held: boolean): void {
     if (this.carried) {
       /* Cargo. The scene has put it at her jaws and the ground has no say
        * — dropping the terrain clamp here is the whole reason this branch
@@ -302,7 +328,7 @@ export class Beetle implements Quarry, Portable {
       /* Down. `at` stays exactly on the terrain because reach tests read it;
        * the rendered root alone rises enough for the rotated shell to lie on
        * the surface instead of pivoting through it. */
-      this.at.y = groundAt(this.at.x, this.at.z);
+      this.at.y = this.floorAt(ground, this.at.x, this.at.z) ?? this.at.y;
       this.root.rotation.z = FALL_Z;
       this.placeGrounded(this.fallenLift);
       return;
@@ -329,11 +355,47 @@ export class Beetle implements Quarry, Portable {
     this.wobble += dt * 9;
 
     const speed = 1.6 / MM;
-    this.at.x += Math.sin(this.heading) * speed * dt;
-    this.at.z += Math.cos(this.heading) * speed * dt;
-    this.at.y = groundAt(this.at.x, this.at.z);
+    const nx = this.at.x + Math.sin(this.heading) * speed * dt;
+    const nz = this.at.z + Math.cos(this.heading) * speed * dt;
+    /*
+     * IT LOOKS BEFORE IT STEPS, which is the other half of the same report.
+     *
+     * Taking the floor at the new spot and moving there regardless would
+     * fix the HEIGHT and replace one wrong behaviour with another: instead
+     * of strolling over the mouth of a shaft it would drop down it, and a
+     * ladybug in the queen's chamber is a worse surprise than one on the
+     * lawn. So the step is tested first, and an edge it cannot walk down is
+     * a reason to turn rather than a reason to fall.
+     *
+     * `STEP_DOWN` is what it will step off without thinking — a lip, a
+     * pebble, the side of a scuff. Anything deeper is a hole.
+     */
+    const ahead = this.floorAt(ground, nx, nz);
+    if (ahead === null || this.at.y - ahead > STEP_DOWN) {
+      /* Turn away and spend this frame doing it. Half a turn plus the
+       * wobble's own drift, so two beetles at the same edge do not end up
+       * marching in step. */
+      this.heading += 2.2 + (this.wobble % 1) * 1.4;
+      this.turnIn = 0.6;
+    } else {
+      this.at.x = nx;
+      this.at.z = nz;
+      this.at.y = ahead;
+    }
     this.root.rotation.set(0, this.heading, Math.sin(this.wobble) * WALK_WOBBLE_Z);
     this.placeGrounded(this.standingLift);
+  }
+
+  /**
+   * The floor under a spot, or null when there is none within reach.
+   *
+   * Searched from a little ABOVE its current height rather than from where
+   * it stands, so a step up onto a lip is found as easily as a step down —
+   * starting at its own feet would miss anything higher than they are.
+   */
+  private floorAt(ground: PropGround, x: number, z: number): number | null {
+    const y = ground.floorUnder(x, this.at.y + STEP_UP, z);
+    return Number.isFinite(y) ? y : null;
   }
 
   dispose(): void {

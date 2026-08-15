@@ -3442,3 +3442,29 @@
 @media (height <= 520px) {
   .tm-quarry { width: 38px; height: 4px; margin: -3px 0 0 -19px; }
 }
+
+/*
+ * NO SQUARE RING ON A ROUND PLATE.
+ *
+ * Reported: "sometimes when I press a button, it shows a square border the
+ * first time and then the next time, actually is the correct round shape".
+ *
+ * Nothing in this file ever set `outline`, so the plates were getting the
+ * BROWSER'S DEFAULT focus ring — and a default ring is drawn on the
+ * element's box. These plates are square boxes carrying round art as a
+ * background, so the ring is square while the thing you can see is not. It
+ * appears on the first press because that is when the button takes focus,
+ * and looks like it "fixes itself" on the next one because focus has moved
+ * on to whatever you pressed after it.
+ *
+ * `:focus-visible` rather than `:focus`, so a keyboard still gets a ring —
+ * removing it outright would be taking away the only thing that says where
+ * you are for anyone not using a thumb. The ring follows `border-radius`,
+ * so on a plate it is round.
+ */
+.density-lab-button:focus { outline: none; }
+
+.density-lab-button:focus-visible {
+  outline: 2px solid #e8b44a;
+  outline-offset: 3px;
+}

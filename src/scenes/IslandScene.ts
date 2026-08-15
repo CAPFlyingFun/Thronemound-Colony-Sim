@@ -163,7 +163,9 @@ import {
   buildQuarryBars, syncQuarryBars, type QuarryBarHost, type QuarryBars,
 } from './islandQuarryBar';
 import { Carry, emptyStores, withinNest } from './islandCarry';
-import { PROP_SCATTER, PROP_SPECS, Prop } from './islandProps';
+import {
+  PROP_SCATTER, PROP_SPECS, Prop, type PropGround,
+} from './islandProps';
 import {
   bite, biteCentre, biteRay, boreAim, updateAimDebug, type DigHost,
 } from './islandDig';
@@ -628,7 +630,7 @@ export class IslandScene {
   private combatTick(dt: number): void {
     const held = this.combat.held;
     for (const q of this.quarry) {
-      q.tick(dt, (x, z) => this.walkGroundAt(x, z), q === held);
+      q.tick(dt, this.barHostGround, q === held);
       /* Necrosis runs on EVERYTHING, held or dropped or long since walked
        * away from. Solenopsins do not care whether she stayed to watch. */
       if (necrosis(q, dt)) this.toastCombat(`THE ${q.id.toUpperCase()} IS DOWN`);
@@ -3032,6 +3034,12 @@ export class IslandScene {
   /* The same one-cast seam the camera uses, for the same reason: naming the
    * surface in `islandQuarryBar` is the point, and `private` stays
    * meaningful for everything the bars have no business touching. */
+  /* The soil-aware floor query, handed to anything that walks or rests on
+   * the ground — props, and the insects. See `floorUnder`. */
+  private get barHostGround(): PropGround {
+    return this as unknown as PropGround;
+  }
+
   private get barHost(): QuarryBarHost {
     return this as unknown as QuarryBarHost;
   }
