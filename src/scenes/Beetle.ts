@@ -18,6 +18,20 @@ import type { Quarry } from './islandCombat';
 import type { Portable } from './islandCarry';
 import { MM } from '../world/worldScape';
 
+/**
+ * Where the spots sit — across, along, and how big, as fractions of the
+ * shell's radius. Mirrored left and right, so this is half a ladybug.
+ *
+ * Four a side plus the pair at the shoulders reads as a harlequin without
+ * counting; the species is famously variable, so an exact count would be
+ * false precision either way.
+ */
+const SPOTS: [number, number, number][] = [
+  [0.42, 0.52, 0.20],
+  [0.60, -0.10, 0.17],
+  [0.34, -0.62, 0.15],
+];
+
 const S_STEP = new THREE.Vector3();
 const FALL_Z = Math.PI * 0.85;
 const WALK_WOBBLE_Z = 0.03;
@@ -87,18 +101,78 @@ export class Beetle implements Quarry, Portable {
     this.home.copy(this.at);
     this.root.position.copy(this.at);
 
-    const shellMat = new THREE.MeshLambertMaterial({ color: 0x3a2f4d });
+    /*
+     * A LADYBUG, because it already looked like one.
+     *
+     * "let's modify the shape of the beetle to be a ladybug as it looks more
+     * like it right now" — and it did: a domed shell on six short legs is a
+     * coccinellid whatever colour it is painted. So it stops pretending and
+     * becomes one, which also gives the bestiary its first real species
+     * instead of a placeholder shape.
+     *
+     * ORANGE, deliberately, and it is the one that bites. Reported from
+     * life: "I had an orange ladybug bite me when I was outside. It actually
+     * hurt some." That is almost certainly Harmonia axyridis, the harlequin
+     * — the orange one that overwinters indoors, and the one with a genuine
+     * habit of nipping people. Native red Coccinella rarely do. So the
+     * colour is not decoration: it says which one this is, and the bite it
+     * already has in `struggle` is the right behaviour for it.
+     */
+    const shellMat = new THREE.MeshLambertMaterial({ color: 0xd4622a });
+    const spotMat = new THREE.MeshLambertMaterial({ color: 0x1a1216 });
     const legMat = new THREE.MeshLambertMaterial({ color: 0x241d31 });
-    /* Millimetres, like everything else she can walk up to: a beetle a few
-     * times her own length, which at MM = 5 is a handful of world units. */
+    /* Millimetres, like everything else she can walk up to. A harlequin is
+     * 5-8 mm long, which against a 9 mm queen is the right kind of fight:
+     * not vermin, not a monster. */
     const r = 2.6 / MM;
-    const shell = new THREE.Mesh(new THREE.SphereGeometry(r, 14, 12), shellMat);
-    shell.scale.set(1, 0.72, 1.35);
-    shell.position.y = r * 0.6;
+    /* DOMED, not egg-shaped. A ladybug is a half-sphere with a flat
+     * underside, which is why one sits so low and so round. */
+    const shell = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 12), shellMat);
+    shell.scale.set(1.02, 0.66, 1.18);
+    shell.position.y = r * 0.52;
     this.root.add(shell);
-    const head = new THREE.Mesh(new THREE.SphereGeometry(r * 0.42, 10, 10), shellMat);
-    head.position.set(0, r * 0.45, r * 1.45);
+    /*
+     * THE PRONOTUM — the black plate between shell and head, which is the
+     * feature that actually says "ladybug" from above.
+     *
+     * Proud of the shell's front rather than tucked under it, because the
+     * first cut put it at the dome's own height and the shell simply
+     * swallowed it: rendered, there was no head at all.
+     */
+    const pronotum = new THREE.Mesh(new THREE.SphereGeometry(r * 0.5, 12, 10), spotMat);
+    pronotum.scale.set(1.05, 0.45, 0.62);
+    pronotum.position.set(0, r * 0.62, r * 0.92);
+    this.root.add(pronotum);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(r * 0.26, 10, 8), spotMat);
+    head.scale.set(1, 0.8, 0.9);
+    head.position.set(0, r * 0.5, r * 1.22);
     this.root.add(head);
+    /*
+     * NO SEAM DOWN THE ELYTRA, and it is worth saying why rather than
+     * leaving the gap.
+     *
+     * A straight bar cannot follow a dome. Laid along the shell it sat
+     * inside the curve at the middle and floated clear of it at both ends —
+     * rendered, a black rod hanging off the back. Sinking it far enough to
+     * bury the ends buries the whole thing. Doing it properly means a curved
+     * strip or a texture, and the spots and pronotum already carry the read,
+     * so it is left out rather than left wrong.
+     */
+    for (const [sx, sz, ss] of SPOTS) {
+      for (const side of [-1, 1]) {
+        const spot = new THREE.Mesh(
+          new THREE.SphereGeometry(r * ss, 8, 6), spotMat,
+        );
+        spot.scale.set(1, 0.34, 1);
+        /* Sat on the dome's own surface, so a spot never floats off the
+         * shoulder of the shell. */
+        const px = side * r * sx;
+        const pz = r * sz;
+        const t = Math.max(0, 1 - (px * px) / (r * r) - (pz * pz) / (r * r * 1.4));
+        spot.position.set(px, r * 0.52 + r * 0.66 * Math.sqrt(t), pz);
+        this.root.add(spot);
+      }
+    }
     for (let i = 0; i < 6; i += 1) {
       const leg = new THREE.Mesh(
         new THREE.CylinderGeometry(r * 0.06, r * 0.04, r, 6), legMat,

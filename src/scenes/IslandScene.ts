@@ -153,8 +153,10 @@ import {
 } from './islandQuest';
 import { Vitals } from './islandVitals';
 import { FIRE_ANT, type AbilityId, type AntKind } from './antKinds';
+import { CASTE_MASS_MG } from './mandibleReach';
 import { Combat, necrosis } from './islandCombat';
 import { Beetle } from './Beetle';
+import { resolveBulk, type Bulk } from './islandBulk';
 import {
   buildQuarryBars, syncQuarryBars, type QuarryBarHost, type QuarryBars,
 } from './islandQuarryBar';
@@ -661,6 +663,9 @@ export class IslandScene {
       }
     }
     this.carryTick(dt);
+    /* Bodies shove each other AFTER everything has moved itself, so what is
+     * resolved is where things actually ended up. See `islandBulk`. */
+    this.resolveBulk();
     /* After the vitals have ticked, so the latch drops on the same frame she
      * bottoms out rather than one behind it. See `dropPaceIfSpent`. */
     this.dropPaceIfSpent();
@@ -3289,6 +3294,56 @@ export class IslandScene {
   }
 
   /** What the guard left in frame, and what it was defending. */
+  /**
+   * EVERY BODY THAT SHOULD NOT SIT INSIDE ANOTHER, gathered for one pass.
+   *
+   * Her, the insects and the loose things, on the same list and under the
+   * same rule — that is the point of `islandBulk`, and the reason a ladybug
+   * or a spider added later collides with all of it by having a mass.
+   *
+   * WHAT IS ANCHORED, and why each:
+   * - the CARRIED thing, because a seed in her jaws must not be knocked out
+   *   of them by the beetle she is walking past;
+   * - the thing she has GRIPPED, for the same reason — a fight is not a
+   *   shoving match with the terrain's rules.
+   *
+   * She is NOT anchored. Being stopped by a stone is the whole request, and
+   * the mass rule already says a 12 mg queen loses to a 120 mg one.
+   */
+  private bulkBodies(): Bulk[] {
+    const held = this.carry.held;
+    const grip = this.combat.held;
+    const out: Bulk[] = [{
+      id: 'queen',
+      at: this.at,
+      radius: BODY_HALF_TALL,
+      massMg: CASTE_MASS_MG[FIRE_ANT.strength],
+    }];
+    for (const q of this.quarry) {
+      if (!q.alive && q === held) continue;
+      out.push({
+        id: q.id, at: q.at, radius: q.radius, massMg: q.massMg,
+        anchored: q === held || q === grip,
+      });
+    }
+    for (const p of this.props) {
+      out.push({
+        id: p.id, at: p.at, radius: p.radius, massMg: p.massMg,
+        anchored: p === held,
+      });
+    }
+    return out;
+  }
+
+  private resolveBulk(): void {
+    resolveBulk(this.bulkBodies());
+  }
+
+  /** For probes: how many pairs were overlapping this frame. */
+  bulkPairsForTest(): number {
+    return resolveBulk(this.bulkBodies());
+  }
+
   /** For probes: carve a hollow, so a test can dig without a shovel. */
   carveForTest(x: number, y: number, z: number, radius: number): void {
     this.stream?.subtractSphere({ x, y, z }, radius);

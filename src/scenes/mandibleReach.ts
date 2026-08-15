@@ -249,6 +249,28 @@ export interface CarryVerdict {
  * were set against the beetle she already hauls. They diverge the moment
  * anything heavier than 60mg exists.
  */
+/**
+ * WHAT EACH CASTE WEIGHS, in milligrams — who gives way when two things
+ * meet. See `islandBulk`.
+ *
+ * Real masses, roughly: a newly-mated Solenopsis invicta queen is around
+ * 10-15 mg, gravid and carrying the flight muscle she will digest; a minor
+ * worker is well under a milligram and a major a few. The spread is what
+ * matters here rather than the decimals — she outweighs her own workers by
+ * ten to one, which is why a founding queen shoulders past things a nanitic
+ * could not.
+ *
+ * Rounded to game tuning, and stated as such. The numbers that decide
+ * anything are these against the props: 12 mg against a 3 mg seed sends it
+ * skittering, against a 22 mg pebble she does most of the giving way, and a
+ * 120 mg stone will not move for her at all.
+ */
+export const CASTE_MASS_MG: Record<AntStrength, number> = {
+  queen: 12,
+  worker: 1,
+  major: 3,
+};
+
 export const STRENGTH = {
   worker: { carryMg: 6, dragMg: 25 },
   major: { carryMg: 18, dragMg: 70 },
