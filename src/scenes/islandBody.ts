@@ -77,6 +77,8 @@ export interface BodyHost {
   /* --- what the thumb asked for --- */
   readonly input: { walk: number; yaw: number; strafe: number;
     dig: boolean; sprint: boolean; crawl: boolean };
+  /** Whether she is REALLY sprinting — see the note in `readEffort`. */
+  readonly sprinting: boolean;
   digMode: boolean;
   queenReady: boolean;
   underground: boolean;
@@ -229,7 +231,25 @@ export function simulate(host: BodyHost, dt: number): void {
    * cannot see the cause of. See `islandVitals.ts`.
    */
   host.vitals.tick(dt, {
-    running: host.input.sprint,
+    /*
+     * ACTUALLY SPRINTING, not merely asking to — and the difference was a
+     * real bug.
+     *
+     * This passed `input.sprint`, the raw latch. Once she bottoms out,
+     * `canRun` goes false and `paceScale` quietly drops her to WALK speed —
+     * but the latch is still held, so this said "running", `tick` took the
+     * DRAIN branch, and the recovery branch in its `else` never ran. She
+     * was walking, paying a walk's costs, and regenerating nothing.
+     *
+     * Reported exactly: "you have to stop after it drains to gain some
+     * which is annoying". She did, and there was no way to tell from the
+     * screen why — the gear still read RUN.
+     *
+     * `sprinting` is the one place that decides, and `paceScale` reads the
+     * same getter, so the speed she is given and the cost she is charged
+     * for it cannot disagree again.
+     */
+    running: host.sprinting,
     moving: host.groundSpeed / WALK_SPEED,
     crawling: host.input.crawl,
     digging: host.input.dig,

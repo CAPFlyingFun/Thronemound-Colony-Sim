@@ -260,3 +260,56 @@ describe('she mends', () => {
     expect(v.absOf('health').now).toBeLessThan(1);
   });
 });
+
+describe('a spent sprint recovers while she keeps walking', () => {
+  /*
+   * THE BUG THIS PINS. `readEffort` passed the raw sprint LATCH as
+   * `running`, not whether she was actually sprinting. Once she bottomed
+   * out, `canRun` went false and she was moved at walking pace — but this
+   * still read "running", so `tick` took the drain branch and the recovery
+   * in its `else` never ran. She walked, paid a walk's costs, and got
+   * nothing back.
+   *
+   * Reported as: "you have to stop after it drains to gain some which is
+   * annoying". She did, and nothing on screen said why.
+   *
+   * The scene now decides `sprinting` in one place and hands the ANSWER
+   * here, so these two cases are the contract that keeps it honest.
+   */
+  const moving = (running: boolean): Effort => ({
+    moving: 1, running, crawling: false,
+    digging: false, climbing: false, sheltered: false,
+  });
+
+  it('gives nothing back while she is genuinely sprinting', () => {
+    const v = new Vitals();
+    for (let i = 0; i < 60; i += 1) v.tick(1 / 60, moving(true));
+    expect(v.absOf('stamina').now).toBeLessThan(v.absOf('stamina').max);
+  });
+
+  it('recovers on the move once the sprint is spent', () => {
+    const v = new Vitals();
+    /* Run her flat out until she is winded. */
+    for (let i = 0; i < 60 * 30 && v.canRun; i += 1) v.tick(1 / 60, moving(true));
+    expect(v.canRun).toBe(false);
+    const bottom = v.absOf('stamina').now;
+
+    /*
+     * Now she is walking — `running` is FALSE because she cannot run, which
+     * is exactly what the fix makes true — and she must climb without ever
+     * standing still.
+     */
+    for (let i = 0; i < 60; i += 1) v.tick(1 / 60, moving(false));
+    expect(v.absOf('stamina').now).toBeGreaterThan(bottom);
+  });
+
+  it('would have stalled if the latch were passed instead', () => {
+    /* The regression, stated: hold `running` true past the bottom and she
+     * never climbs, however long she walks. */
+    const v = new Vitals();
+    for (let i = 0; i < 60 * 30 && v.canRun; i += 1) v.tick(1 / 60, moving(true));
+    const bottom = v.absOf('stamina').now;
+    for (let i = 0; i < 60 * 5; i += 1) v.tick(1 / 60, moving(true));
+    expect(v.absOf('stamina').now).toBe(bottom);
+  });
+});

@@ -591,6 +591,9 @@ export class IslandScene {
       }
     }
     this.carryTick(dt);
+    /* After the vitals have ticked, so the latch drops on the same frame she
+     * bottoms out rather than one behind it. See `dropPaceIfSpent`. */
+    this.dropPaceIfSpent();
     this.refreshCombatChips();
     /* THE DRESS FOLLOWS THE FACTS. A beetle closing, a load lifted, a seed
      * coming into reach — none of those are button presses, so the mode
@@ -762,9 +765,7 @@ export class IslandScene {
      * number on the HUD rather than something felt.
      */
     const laden = this.carry.speedFactor;
-    if (this.input.sprint && this.vitals.canRun && !this.carry.tooLadenToRun) {
-      return SPRINT * laden;
-    }
+    if (this.sprinting) return SPRINT * laden;
     return (this.input.crawl ? CRAWL : 1) * laden;
   }
 
@@ -945,6 +946,21 @@ export class IslandScene {
     if (show) this.poseReadout.textContent = this.posture.readout();
   }
 
+  /**
+   * IS SHE ACTUALLY SPRINTING — asked once, for both the speed she gets and
+   * the stamina she is charged.
+   *
+   * These used to be two expressions in two files: `paceScale` tested the
+   * latch AND `canRun` AND the load, while `readEffort` passed the bare
+   * latch. So the instant she bottomed out they disagreed — she was moved
+   * at walking pace and billed at a sprint's, which meant the recovery
+   * branch never ran and stamina sat at zero for as long as the latch was
+   * held. One getter, so that cannot come back.
+   */
+  get sprinting(): boolean {
+    return this.input.sprint && this.vitals.canRun && !this.carry.tooLadenToRun;
+  }
+
   private routeStick(): void {
     if (this.posture.armed) {
       this.input.walk = 0;
@@ -965,6 +981,40 @@ export class IslandScene {
    * gets the crawl the wave gait was written for as well as the run.
    */
   private pace: 0 | 1 | 2 = 1;
+
+  /**
+   * SHE DROPS OUT OF THE RUN WHEN SHE RUNS OUT — and has to ask for it back.
+   *
+   * Asked for: "when stamina is drained, automatic change the button from
+   * sprint to walk and allow at that instant the ability for stamina to
+   * regenerate". The regeneration half was a bug and is fixed in
+   * `sprinting`; this is the other half, and it is worth having on its own.
+   *
+   * The gear used to stay on RUN while she walked, because `canRun` is
+   * checked where the SPEED is decided and nothing told the latch. So the
+   * plate said RUN, the chip said RUN, and she was walking — the HUD naming
+   * a gear the game had already refused her. This file's own rule is that a
+   * control must not claim something it cannot do.
+   *
+   * IT ONLY EVER DROPS. Bottoming out moves the latch down to WALK; nothing
+   * moves it back up. That was the worry raised with the request — "the
+   * auto-button can be as well [annoying]" — and it is the half that would
+   * actually bite: a latch that re-armed itself at the second-wind mark
+   * would put her back into a sprint she did not ask for, seconds after she
+   * stopped paying attention to it. Having to press it again is a fair
+   * price and was accepted in the same breath.
+   *
+   * A HELD KEY IS NOT TOUCHED. Shift is a button someone is physically
+   * holding; taking it away under their finger would be a lie in the other
+   * direction. The latch is the thing that persists, so the latch is the
+   * thing that drops.
+   */
+  private dropPaceIfSpent(): void {
+    if (this.pace !== 2 || this.vitals.canRun) return;
+    this.pace = 1;
+    this.applyPace();
+    this.toastCombat('WINDED — BACK TO A WALK');
+  }
 
   /** Push the latch out to the two input flags and the chip's face. */
   private applyPace(): void {
