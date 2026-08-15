@@ -42,13 +42,55 @@ import type { Portable } from './islandCarry';
 export interface PropGround {
   /** The y a thing resting at (x, y, z) should sit at, searching down. */
   floorUnder(x: number, y: number, z: number): number;
+  /**
+   * Which way the soil FACES here — its outward normal.
+   *
+   * This is the density field's own gradient, which the walker already
+   * computes to seat her feet, so a rolling pebble costs no new machinery:
+   * the slope a thing rolls down is the same slope she climbs.
+   */
+  soilNormal(x: number, y: number, z: number, into: THREE.Vector3): void;
 }
 
 /** World units a second squared. Tuned so a prop dropped in a shaft lands
  *  in a beat rather than drifting — see `Prop.tick`. */
+const ROLL_N = new THREE.Vector3();
+const ROLL_DOWN = new THREE.Vector3();
+const ROLL_AXIS = new THREE.Vector3();
+const ROLL_Q = new THREE.Quaternion();
+
 const PROP_GRAVITY = 9;
 /** And capped, so nothing tunnels a thin floor between two frames. */
 const PROP_FALL_MAX = 6;
+
+/**
+ * WHICH THINGS ROLL — by shape, because that is what rolling is about.
+ *
+ * Asked for: "with say round objects or the egg shaped object, it should
+ * naturally roll around when released and will move around until it finds
+ * the right balance on the ground".
+ *
+ * A seed is a squashed sphere and a rock is a dodecahedron; both are round
+ * enough that resting on a slope looks wrong. A leaf and a twig are not —
+ * a twig on a slope stays put, and a rolling leaf would look sillier than a
+ * still one. Kept as a set rather than a flag on every spec because it is a
+ * fact about the SHAPE, and the shape is what `kind` already names.
+ */
+const ROLLS = new Set<PropSpec['kind']>(['seed', 'rock']);
+
+/**
+ * Below this slope it has found its balance and stops.
+ *
+ * The slope is `sin` of the angle off level, so 0.09 is about five degrees
+ * — shallow enough that a pebble settles in a dimple rather than creeping
+ * forever, steep enough that it will not sit on the side of a mound.
+ */
+const ROLL_RESTS_BELOW = 0.09;
+/** How hard the slope pushes it, and how fast rolling bleeds off. */
+const ROLL_PUSH = 5;
+const ROLL_DRAG = 1.9;
+/** Nothing rolls faster than this, so a long bank cannot fling it. */
+const ROLL_MAX = 1.4;
 import { MM } from '../world/worldScape';
 
 /** The kinds the island seeds, and what each weighs in milligrams. */
@@ -118,6 +160,9 @@ export class Prop implements Portable {
   /** Falling speed while it is unsupported, in world units a second. */
   private fall = 0;
 
+  /** Where it is rolling, in world units a second. See `tick`. */
+  private readonly roll = new THREE.Vector3();
+
   constructor(
     readonly id: string,
     readonly spec: PropSpec,
@@ -155,6 +200,60 @@ export class Prop implements Portable {
   get radius(): number { return this.spec.halfMm / MM; }
 
   /**
+   * IT ROLLS UNTIL IT FINDS ITS BALANCE — for the things that are round.
+   *
+   * Asked for: round and egg-shaped things "should naturally roll around
+   * when released and will move around until it finds the right balance on
+   * the ground". This is that, and it is deliberately NOT a physics engine.
+   *
+   * The soil's own normal is the slope. Gravity minus its component along
+   * that normal is the downhill tangent, which is zero on the level by
+   * construction — so "is it on a slope" and "which way is downhill" are one
+   * subtraction rather than a test and a search. The walker already computes
+   * this gradient to seat her feet, so a rolling pebble adds no new
+   * machinery to the frame.
+   *
+   * WHAT IT IS NOT: there are no contacts here. It rolls down the soil it is
+   * resting on and stops where the soil is level; it will not bounce off a
+   * chamber wall or come to rest against one, because a prop still collides
+   * with the world as a POINT. That is the honest limit — see the note on
+   * `PropGround`.
+   *
+   * The spin is derived from the travel rather than integrated separately:
+   * distance over radius is the angle a wheel of that radius turns, about
+   * the axis across its direction of travel. So it cannot visually skid.
+   */
+  private rollOn(rest: PropGround, dt: number): void {
+    if (!ROLLS.has(this.spec.kind) || dt <= 0) return;
+    rest.soilNormal(this.at.x, this.at.y, this.at.z, ROLL_N);
+    if (ROLL_N.lengthSq() < 1e-9) return;
+    ROLL_N.normalize();
+    /* Gravity, less the part the ground holds up: the downhill tangent. */
+    ROLL_DOWN.set(0, -1, 0).addScaledVector(ROLL_N, ROLL_N.y);
+    const slope = ROLL_DOWN.length();
+    if (slope > ROLL_RESTS_BELOW) {
+      ROLL_DOWN.multiplyScalar(1 / slope);
+      this.roll.addScaledVector(ROLL_DOWN, ROLL_PUSH * slope * dt);
+    }
+    /* Rolling resistance, and it is what makes "finds its balance" a state
+     * rather than an asymptote — below a crawl on level ground it stops. */
+    this.roll.multiplyScalar(Math.max(0, 1 - ROLL_DRAG * dt));
+    if (this.roll.lengthSq() > ROLL_MAX * ROLL_MAX) {
+      this.roll.setLength(ROLL_MAX);
+    }
+    const step = this.roll.length() * dt;
+    if (step < 1e-6) { this.roll.set(0, 0, 0); return; }
+    this.at.addScaledVector(this.roll, dt);
+    /* Turn it by the distance it covered, about the axis across its travel
+     * — the definition of rolling rather than sliding. */
+    ROLL_AXIS.crossVectors(ROLL_N, this.roll);
+    if (ROLL_AXIS.lengthSq() < 1e-12) return;
+    ROLL_AXIS.normalize();
+    ROLL_Q.setFromAxisAngle(ROLL_AXIS, step / Math.max(1e-4, this.radius));
+    this.root.quaternion.premultiply(ROLL_Q);
+  }
+
+  /**
    * Remember how it sat in her jaws, at the moment she closed them.
    *
    * Called by the scene on a successful lift. Her rotation inverted times
@@ -176,6 +275,7 @@ export class Prop implements Portable {
       /* Her rotation, times the grip it was taken with — see `grip`. */
       if (holder) this.root.quaternion.copy(holder).multiply(this.grip);
       this.fall = 0;
+      this.roll.set(0, 0, 0);
       return;
     }
     /*
@@ -199,6 +299,7 @@ export class Prop implements Portable {
        * cannot hover a hair above the new one. */
       this.at.y = floor;
       this.fall = 0;
+      this.rollOn(rest, dt);
     } else {
       /*
        * FALLING, rather than snapping down. A prop whose support is dug

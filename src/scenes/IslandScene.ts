@@ -130,7 +130,7 @@ import {
   SMOOTH_PASSES, SMOOTH_RADIUS_MM, SMOOTH_MAX_SHIFT, SMOOTH_GROW,
   EYE_SKIN, BONE_CLEARANCE, CAMERA_SKIN, EYE_FORWARD,
   EYE_RISE, EYE_FOLLOW_MS, EYE_AIM_MS, EYE_FOLLOW_RATE, S_JAW,
-  PROP_FLOOR_REACH, PROP_FLOOR_STEPS, PROP_FLOOR_BISECT,
+  PROP_FLOOR_REACH, PROP_FLOOR_STEPS, PROP_FLOOR_BISECT, S_PROP_AT,
   EYE_ROLL_RATE, EYE_SNAP, EYE_BISECTIONS, EYE_MARCH_STEPS,
   LOOK_HOLD_S, LOOK_RETURN_RATE, CHASE_PITCH, CHASE_PITCH_MIN,
   CHASE_PITCH_MAX, CHASE_GROUND_CLEAR, CHASE_REACH, SHELL_REACH,
@@ -266,6 +266,19 @@ export class IslandScene {
       if (this.soilSolidAt(x, mid, z)) lo = mid; else hi = mid;
     }
     return hi;
+  }
+
+  /**
+   * Which way the soil faces here — the walker's own gradient.
+   *
+   * Implements `PropGround`. Delegated rather than re-derived: the walker
+   * computes this every frame to seat her feet, so the slope a pebble rolls
+   * down is provably the same slope she stands on.
+   */
+  soilNormal(x: number, y: number, z: number, into: THREE.Vector3): void {
+    if (!this.walker) { into.set(0, 1, 0); return; }
+    S_PROP_AT.set(x, y, z);
+    this.walker.normalAt(S_PROP_AT, into);
   }
 
   private soilSolidAt(x: number, y: number, z: number): boolean {

@@ -18,7 +18,10 @@ import { Prop, PROP_SPECS, type PropGround } from '../src/scenes/islandProps';
 const twig = (): Prop => new Prop('twig', PROP_SPECS.twig!, 0, 0, 0);
 
 /** A floor at y = 0, so the resting half of `tick` is not under test. */
-const flat: PropGround = { floorUnder: () => 0 };
+const flat: PropGround = {
+  floorUnder: () => 0,
+  soilNormal: (_x, _y, _z, into) => { into.set(0, 1, 0); },
+};
 
 const yaw = (deg: number): THREE.Quaternion => new THREE.Quaternion()
   .setFromAxisAngle(new THREE.Vector3(0, 1, 0), (deg * Math.PI) / 180);
@@ -74,7 +77,10 @@ describe('a loose thing rests on the soil that is there now', () => {
     const p = twig();
     p.carried = false;
     p.at.set(0, 5, 0);
-    const deep: PropGround = { floorUnder: () => 0 };
+    const deep: PropGround = {
+      floorUnder: () => 0,
+      soilNormal: (_x, _y, _z, into) => { into.set(0, 1, 0); },
+    };
     p.tick(deep, 1 / 60);
     /* One frame is a fall, not a teleport. */
     expect(p.at.y).toBeGreaterThan(0.5);
@@ -93,9 +99,82 @@ describe('a loose thing rests on the soil that is there now', () => {
     const p = twig();
     p.carried = false;
     p.at.set(0, 5, 0);
-    const void_: PropGround = { floorUnder: () => -Infinity };
+    const void_: PropGround = {
+      floorUnder: () => -Infinity,
+      soilNormal: (_x, _y, _z, into) => { into.set(0, 1, 0); },
+    };
     for (let i = 0; i < 10; i += 1) p.tick(void_, 1 / 60);
     expect(p.at.y).toBeLessThan(5);
     expect(Number.isFinite(p.at.y)).toBe(true);
+  });
+});
+
+describe('round things roll until they find their balance', () => {
+  /*
+   * Asked for: "with say round objects or the egg shaped object, it should
+   * naturally roll around when released and will move around until it finds
+   * the right balance on the ground".
+   */
+  const sloped = (grade: number): PropGround => ({
+    floorUnder: () => 0,
+    /* A constant slope leaning towards +x, normalised. */
+    soilNormal: (_x, _y, _z, into) => { into.set(grade, 1, 0).normalize(); },
+  });
+
+  const seed = (): Prop => new Prop('seed', PROP_SPECS.seed!, 0, 0, 0);
+
+  it('rolls downhill, and turns as it goes', () => {
+    const p = seed();
+    p.carried = false;
+    const start = p.root.quaternion.clone();
+    for (let i = 0; i < 120; i += 1) p.tick(sloped(0.6), 1 / 60);
+    /*
+     * Downhill is +x when the normal leans +x, which is worth deriving
+     * rather than guessing — this assertion had the sign backwards first.
+     * For a plane through the origin, n . (x, y, z) = 0 gives
+     * y = -(n.x * x) / n.y, so with n.x and n.y both positive the height
+     * FALLS as x rises. The surface descends the way its normal leans.
+     */
+    expect(p.at.x).toBeGreaterThan(0.05);
+    /* And it turned rather than skidded. */
+    expect(p.root.quaternion.angleTo(start)).toBeGreaterThan(0.5);
+  });
+
+  it('settles on ground that is level enough, and stays put', () => {
+    const p = seed();
+    p.carried = false;
+    for (let i = 0; i < 600; i += 1) p.tick(sloped(0), 1 / 60);
+    const settled = p.at.x;
+    for (let i = 0; i < 600; i += 1) p.tick(sloped(0), 1 / 60);
+    expect(Math.abs(p.at.x - settled)).toBeLessThan(1e-6);
+  });
+
+  it('comes to rest rather than creeping forever on a gentle grade', () => {
+    /* Below ROLL_RESTS_BELOW nothing pushes it, so drag must bring it to a
+     * genuine stop — an asymptote would leave a pebble drifting all game. */
+    const p = seed();
+    p.carried = false;
+    for (let i = 0; i < 1200; i += 1) p.tick(sloped(0.04), 1 / 60);
+    const a = p.at.x;
+    for (let i = 0; i < 300; i += 1) p.tick(sloped(0.04), 1 / 60);
+    expect(Math.abs(p.at.x - a)).toBeLessThan(1e-6);
+  });
+
+  it('leaves flat things where they are put', () => {
+    /* A twig on a bank stays; a rolling leaf would look sillier than a
+     * still one. Shape decides, which is what `kind` already names. */
+    const t = new Prop('twig', PROP_SPECS.twig!, 0, 0, 0);
+    t.carried = false;
+    for (let i = 0; i < 300; i += 1) t.tick(sloped(0.8), 1 / 60);
+    expect(t.at.x).toBe(0);
+    expect(t.at.z).toBe(0);
+  });
+
+  it('does not roll while she is carrying it', () => {
+    const p = seed();
+    p.carried = true;
+    p.at.set(0, 1, 0);
+    for (let i = 0; i < 300; i += 1) p.tick(sloped(0.9), 1 / 60);
+    expect(p.at.x).toBe(0);
   });
 });

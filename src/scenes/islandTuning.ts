@@ -901,3 +901,6 @@ export const HEAD_PITCH_RATE = 3;
 export const PROP_FLOOR_REACH = 12 / MM;
 export const PROP_FLOOR_STEPS = 8;
 export const PROP_FLOOR_BISECT = 6;
+
+/** The prop ground query's own scratch — see `IslandScene.soilNormal`. */
+export const S_PROP_AT = new THREE.Vector3();
