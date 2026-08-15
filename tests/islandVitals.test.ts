@@ -217,7 +217,10 @@ describe('she mends', () => {
    * a bar may only move if there is a way to move it back. These are the
    * assertions that keep the way back real.
    */
-  const idle = { moving: 0, running: false, crawling: false };
+  const idle: Effort = {
+    moving: 0, running: false, crawling: false,
+    digging: false, climbing: false, sheltered: false,
+  };
 
   it('climbs back after damage', () => {
     const v = new Vitals();
@@ -232,7 +235,7 @@ describe('she mends', () => {
   it('mends while she is working, not only while she rests', () => {
     /* Deliberate: tying it to standing still makes "walk away and wait" the
      * winning answer to every fight. Stamina is the bar graded by effort. */
-    const busy = { moving: 1, running: true, crawling: false };
+    const busy: Effort = { ...idle, moving: 1, running: true };
     const v = new Vitals();
     v.damage(50);
     for (let i = 0; i < 120; i += 1) v.tick(1 / 60, busy);
