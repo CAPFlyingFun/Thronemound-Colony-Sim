@@ -47,7 +47,34 @@ export interface Bulk {
    * the beetle she is walking past.
    */
   readonly anchored?: boolean;
+  /**
+   * WHO IS HOLDING IT — and that pair is not a collision.
+   *
+   * Reported from a PC: "as soon as I grabbed the leaf I was going
+   * backwards without any input and weird animation."
+   *
+   * A thing in her jaws rides 0.6 mm past her nose, and a leaf's own radius
+   * is 4.4 against her 1.6 — so the two spheres want 6 mm between their
+   * centres and have 0.6. That is a 5.4 mm interpenetration by
+   * construction, present on every frame she carries anything, and
+   * `anchored` made it worse in the most direct way possible: the held
+   * thing takes none of the correction and hands its whole share to
+   * whatever hit it, so SHE took all 5.4 mm of it, backwards, sixty times
+   * a second. Measured at 31 mm a second of travel with the stick at rest.
+   * Every carried thing did this; the leaf is simply the biggest.
+   *
+   * `anchored` was right about what it was for and is kept. What was
+   * missing is that a carrier and its load are not two bodies that have
+   * collided, they are one body — so the pair is skipped and every other
+   * pair either of them is in still resolves. She can still shove a stone
+   * aside while holding a leaf, and the leaf can still be shoved by
+   * nothing.
+   */
+  readonly carrier?: string;
 }
+
+/** What she is called on the shove list — one name, not a literal twice. */
+export const QUEEN_BULK_ID = 'queen';
 
 const GAP = new THREE.Vector3();
 
@@ -90,6 +117,8 @@ export function resolveBulk(bodies: readonly Bulk[]): number {
     for (let j = i + 1; j < bodies.length; j += 1) {
       const b = bodies[j]!;
       if (a.anchored && b.anchored) continue;
+      /* A carrier and what it is carrying are one body — see `carrier`. */
+      if (a.carrier === b.id || b.carrier === a.id) continue;
       GAP.subVectors(b.at, a.at);
       const want = a.radius + b.radius;
       const d2 = GAP.lengthSq();

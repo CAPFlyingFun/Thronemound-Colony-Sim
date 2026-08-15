@@ -157,7 +157,7 @@ import { FIRE_ANT, type AbilityId, type AntKind } from './antKinds';
 import { CASTE_MASS_MG } from './mandibleReach';
 import { Combat, necrosis } from './islandCombat';
 import { Beetle } from './Beetle';
-import { resolveBulk, type Bulk } from './islandBulk';
+import { resolveBulk, QUEEN_BULK_ID, type Bulk } from './islandBulk';
 import { warmHudArt } from './hudArt';
 import {
   crushDamage, CRUSH_SHARE, CRUSH_REACH_SLACK, CRUSH_AGAIN_AFTER,
@@ -3442,12 +3442,18 @@ export class IslandScene {
    *
    * She is NOT anchored. Being stopped by a stone is the whole request, and
    * the mass rule already says a 12 mg queen loses to a 120 mg one.
+   *
+   * AND WHAT SHE IS HOLDING NAMES HER AS ITS CARRIER, which is what stops
+   * her being shoved backwards by her own load — see `Bulk.carrier`. It is
+   * not the same thing as `anchored` and neither replaces the other: the
+   * anchor is about a beetle not knocking a seed out of her jaws, the
+   * carrier is about her and the seed not being two bodies at all.
    */
   private bulkBodies(): Bulk[] {
     const held = this.carry.held;
     const grip = this.combat.held;
     const out: Bulk[] = [{
-      id: 'queen',
+      id: QUEEN_BULK_ID,
       at: this.at,
       radius: BODY_HALF_TALL,
       massMg: CASTE_MASS_MG[FIRE_ANT.strength],
@@ -3457,12 +3463,17 @@ export class IslandScene {
       out.push({
         id: q.id, at: q.at, radius: q.radius, massMg: q.massMg,
         anchored: q === held || q === grip,
+        /* Gripped counts too: a bite is her jaws closed on it, at the same
+         * 0.6 mm past her nose, so the same interpenetration is there and
+         * would push her out of her own bite. */
+        carrier: q === held || q === grip ? QUEEN_BULK_ID : undefined,
       });
     }
     for (const p of this.props) {
       out.push({
         id: p.id, at: p.at, radius: p.radius, massMg: p.massMg,
         anchored: p === held,
+        carrier: p === held ? QUEEN_BULK_ID : undefined,
       });
     }
     return out;

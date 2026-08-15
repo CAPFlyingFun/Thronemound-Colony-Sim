@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 
-import { pushShare, resolveBulk, type Bulk } from '../src/scenes/islandBulk';
+import {
+  pushShare, QUEEN_BULK_ID, resolveBulk, type Bulk,
+} from '../src/scenes/islandBulk';
 
 /**
  * WHO SHOVES WHOM. Asked for as "a weight/push system like Path of Titans so
@@ -99,5 +101,74 @@ describe('resolving overlaps', () => {
       prev = now;
     }
     expect(prev).toBeGreaterThan(1.9);
+  });
+});
+
+/*
+ * Reported from a PC: "as soon as I grabbed the leaf I was going backwards
+ * without any input and weird animation."
+ *
+ * The real numbers, in world units at MM = 5: her radius is 1.6 mm, a leaf's
+ * is 4.4, and a carried thing rides 0.6 mm past her nose. So the two spheres
+ * want 6 mm between their centres and have 0.6 — a 5.4 mm interpenetration
+ * that exists by construction on every frame she carries anything.
+ */
+describe('what she is carrying is part of her', () => {
+  const MM = 5;
+  const her = () => body({
+    id: QUEEN_BULK_ID, massMg: 12, radius: 1.6 / MM,
+    at: new THREE.Vector3(0, 0, 0),
+  });
+  /** In her jaws: 0.6 mm along +x, which stands for her nose. */
+  const leafInJaws = (over: Partial<Bulk> = {}) => body({
+    id: 'leaf', massMg: 4, radius: 4.4 / MM,
+    at: new THREE.Vector3(0.6 / MM, 0, 0),
+    carrier: QUEEN_BULK_ID,
+    anchored: true,
+    ...over,
+  });
+
+  it('does not shove her backwards out from under her own load', () => {
+    const queen = her();
+    const leaf = leafInJaws();
+    for (let i = 0; i < 60; i += 1) resolveBulk([queen, leaf]);
+    expect(queen.at.x).toBe(0);
+    expect(queen.at.length()).toBe(0);
+  });
+
+  it('is the bug, without the carrier flag', () => {
+    /*
+     * The same frame with `carrier` left off, which is what shipped: she is
+     * driven the full overlap backwards, and because the held thing is
+     * anchored she takes ALL of it. One pass, one frame.
+     */
+    const queen = her();
+    const leaf = leafInJaws({ carrier: undefined });
+    resolveBulk([queen, leaf]);
+    expect(queen.at.x * MM).toBeCloseTo(-5.4, 6);
+  });
+
+  it('still lets her shove a stone aside while she is holding the leaf', () => {
+    /* Skipping the PAIR, not the body: every other pair either of them is
+     * in has to resolve exactly as before. */
+    const queen = her();
+    const leaf = leafInJaws();
+    const stone = body({
+      id: 'stone', massMg: 120, radius: 4.4 / MM,
+      at: new THREE.Vector3(0, 0, 0.5),
+    });
+    resolveBulk([queen, leaf, stone]);
+    expect(queen.at.z).toBeLessThan(0);
+    /* And the leaf was still not allowed to move her. */
+    expect(queen.at.x).toBe(0);
+  });
+
+  it('leaves an ordinary loose thing colliding with her as it always did', () => {
+    /* The flag must be about being HELD, not about being a prop. */
+    const queen = her();
+    const loose = leafInJaws({ carrier: undefined, anchored: undefined });
+    resolveBulk([queen, loose]);
+    expect(queen.at.x).toBeLessThan(0);
+    expect(loose.at.x).toBeGreaterThan(0.6 / MM);
   });
 });
