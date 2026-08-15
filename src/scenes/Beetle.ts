@@ -34,6 +34,10 @@ export class Beetle implements Quarry, Portable {
 
   venomLoad = 0;
 
+  /* Set by whoever stings it — see `Quarry.venomRate`. Zero until then,
+   * which is also what "nothing has stung it" means. */
+  venomRate = 0;
+
   /**
    * What it does to her while she is on it, in health a second.
    *

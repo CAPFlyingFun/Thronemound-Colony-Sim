@@ -1459,7 +1459,9 @@ export class IslandScene {
   readonly vitals = new Vitals(FIRE_ANT.vitals);
 
   /** The jaws and the sting. See `islandCombat.ts`. */
-  readonly combat = new Combat();
+  /* Her caste's row of `CASTE_COMBAT`, off her kind — the same way
+   * `carry` takes her strength row. One playable ant, one source. */
+  readonly combat = new Combat(FIRE_ANT.strength);
 
   /** What is in her jaws. Off the KIND's strength row — see `antKinds.ts`
    * and `STRENGTH` in `mandibleReach.ts`. */

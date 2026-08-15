@@ -47,6 +47,16 @@ export interface Quarry {
   hp: number;
   /** Venom sitting in it, ticking damage down. */
   venomLoad: number;
+  /**
+   * HP A SECOND that load bleeds off at, set by whoever stung it.
+   *
+   * On the QUARRY rather than in the tuning because the dose belongs to the
+   * ant that delivered it — a worker's venom lingers where a major's bites
+   * — and the load has to keep working after she has let go and walked
+   * away. A quarry that had to ask its attacker how fast to bleed would
+   * need to remember an attacker.
+   */
+  venomRate: number;
   /** How hard it fights back, in health a second, while she is holding it. */
   readonly struggle: number;
   /** How likely it is to shake her off, per second. */
@@ -60,6 +70,8 @@ export interface CombatTuning {
   sequenceStings: number;
   /** Seconds between stings inside a sequence. */
   stingInterval: number;
+  /** Seconds between bite beats while she has hold. See `tick`. */
+  biteInterval: number;
   /** Venom a single sting injects, in quarry hit points' worth. */
   stingLoad: number;
   /** How fast a load burns down into damage, per second. */
@@ -89,6 +101,10 @@ export const DEFAULT_COMBAT: CombatTuning = {
   venomStings: 32,
   sequenceStings: 7,
   stingInterval: 0.42,
+  /* One a second, as asked. Her own beat, not the quarry's — the struggle
+   * coming back at her is still continuous, because being shaken about is
+   * not a series of events the way a bite is. */
+  biteInterval: 1,
   stingLoad: 9,
   necrosisRate: 4,
   venomRefillSeconds: 240,
@@ -99,11 +115,57 @@ export const DEFAULT_COMBAT: CombatTuning = {
   reach: 2.4,
 };
 
+/**
+ * WHAT EACH CASTE DOES IN A FIGHT — data, the way `STRENGTH` is data.
+ *
+ * Set by Joshua: "1 enemy HP loss per second for queen, 4 HP loss for
+ * worker, and like 9 HP for Major", plus a venom DOT of "3HP/s for 10s for
+ * the workers, and 6HP/s for 8s for major".
+ *
+ * BITE IS THE GRIP, still. That was asked for explicitly — "I would still
+ * keep bite = grip" — so this does not add an attack button. Holding on IS
+ * the attack: the mandibles are in it, and it bleeds while she is there.
+ * The grip's own costs, its struggle and its break-free chance are what
+ * make that a decision rather than a hold-to-win.
+ *
+ * THE QUEEN HAS NO VENOM, which is not a nerf but the same fact v0.1.44
+ * recorded: her sting came off in `FIRE_ANT.abilities`, so a zero here
+ * keeps the two from disagreeing. A caste with no sting cannot dose.
+ *
+ * WORKER PAIN LASTS LONGER, MAJOR PAIN HITS HARDER — from the observation
+ * that set the numbers: "at least to humans (me, lol) the smaller fire ants
+ * hurt worse than the big ones". Worth being precise, because the totals
+ * run the other way: 3 for 10 seconds is 30, and 6 for 8 is 48, so a major
+ * still does more overall. What the small one gets is DURATION. Read as
+ * lingering rather than as total, which is what a fire-ant sting actually
+ * does to a person, that is the right shape.
+ *
+ * (Biologically, majors carry larger venom sacs and deliver more per sting;
+ * the impression that minors hurt worse is usually a number-of-stings
+ * effect, since minors defend a nest in their hundreds. So this is GAME
+ * TUNING chosen to match a felt experience, not a measured per-sting
+ * potency. Flagged rather than quietly inverted.)
+ */
+export interface CasteCombat {
+  /** HP off the quarry per bite beat, while she has hold of it. */
+  bite: number;
+  /** Venom dose: HP a second... */
+  venomRate: number;
+  /** ...and for how many seconds. Zero rate means this caste has no sting. */
+  venomSeconds: number;
+}
+
+export const CASTE_COMBAT: Record<'queen' | 'worker' | 'major', CasteCombat> = {
+  queen: { bite: 1, venomRate: 0, venomSeconds: 0 },
+  worker: { bite: 4, venomRate: 3, venomSeconds: 10 },
+  major: { bite: 9, venomRate: 6, venomSeconds: 8 },
+};
+
 export type CombatPhase = 'free' | 'gripped' | 'stinging';
 
 /** What just happened, for the HUD and the sound that does not exist yet. */
 export interface CombatEvent {
-  kind: 'grip' | 'sting' | 'released' | 'shaken' | 'felled' | 'dry';
+  kind: 'grip' | 'bite' | 'sting' | 'released' | 'shaken' | 'felled' | 'dry';
   quarry?: string;
 }
 
@@ -121,9 +183,22 @@ export class Combat {
 
   private next = 0;
 
+  /** Counts down to the next bite beat. See `tick`. */
+  private chew = 0;
+
   private readonly events: CombatEvent[] = [];
 
-  constructor(private tuning: CombatTuning = DEFAULT_COMBAT) {}
+  constructor(
+    /** Which row of `CASTE_COMBAT` she fights by — off her kind. */
+    private caste: keyof typeof CASTE_COMBAT = 'queen',
+    private tuning: CombatTuning = DEFAULT_COMBAT,
+  ) {}
+
+  /** The caste's own numbers, so callers read one source. */
+  get profile(): CasteCombat { return CASTE_COMBAT[this.caste]; }
+
+  /** She has a sting at all — a queen does not. See `CASTE_COMBAT`. */
+  get venomous(): boolean { return this.profile.venomRate > 0; }
 
   retune(tuning: CombatTuning): void { this.tuning = tuning; }
 
@@ -147,6 +222,9 @@ export class Combat {
     if (this.phase !== 'free') return false;
     if (!spend(this.tuning.gripCost)) return false;
     this.held = quarry;
+    /* A full beat before the first bite, so taking hold is not a free hit
+     * and spamming grip-release cannot out-damage simply holding on. */
+    this.chew = this.tuning.biteInterval;
     this.phase = 'gripped';
     this.events.push({ kind: 'grip', quarry: quarry.id });
     return true;
@@ -167,6 +245,17 @@ export class Combat {
    * it is the animal's, not a balance decision.
    */
   sting(): boolean {
+    /*
+     * A CASTE WITH NO STING CANNOT START A SEQUENCE — refused here rather
+     * than allowed to run and deliver a dose of zero.
+     *
+     * v0.1.44 took the sting off the queen in `FIRE_ANT.abilities`, which
+     * removes her BUTTON. This is the same fact one layer down, and it has
+     * to be said twice: the UI list is what the player can reach, and a
+     * mechanic that quietly no-ops when called directly is the kind of
+     * thing a future caller trusts and a future bug hides in.
+     */
+    if (!this.venomous) return false;
     if (this.phase !== 'gripped' && this.phase !== 'stinging') return false;
     if (this.dry) {
       this.events.push({ kind: 'dry' });
@@ -207,6 +296,31 @@ export class Combat {
       if (chance() < held.breakFree * dt) { this.release('shaken'); return; }
     }
 
+    /*
+     * THE BITE BEAT — the grip IS the attack, and it lands on a clock.
+     *
+     * Asked for as "1 bite or sting per second and takes damage also once
+     * per second", and the beat is the point rather than the arithmetic: a
+     * continuous `bite * dt` trickle is invisible and has nothing for an
+     * animation to sync to, where a discrete hit is a thing you watch land
+     * and a clip can be cut to. Same total damage, legible delivery.
+     *
+     * Only while she is ON it and only while it is alive — a felled quarry
+     * is cargo, not a fight, and biting cargo is just carrying it.
+     */
+    if (held.alive) {
+      this.chew -= dt;
+      if (this.chew <= 0) {
+        this.chew += t.biteInterval;
+        held.hp = Math.max(0, held.hp - this.profile.bite);
+        this.events.push({ kind: 'bite', quarry: held.id });
+        if (held.hp <= 0) {
+          held.alive = false;
+          this.events.push({ kind: 'felled', quarry: held.id });
+        }
+      }
+    }
+
     if (this.phase !== 'stinging') return;
     this.next -= dt;
     if (this.next > 0) return;
@@ -216,7 +330,12 @@ export class Combat {
     if (!spend(t.stingCost)) { this.phase = 'gripped'; return; }
 
     this.venom = Math.max(0, this.venom - 1 / t.venomStings);
-    held.venomLoad += t.stingLoad;
+    /* The dose is the CASTE's — rate times seconds is the whole load, and
+     * the rate rides along on the quarry so it keeps bleeding correctly
+     * after she has let go. See `CASTE_COMBAT`. */
+    const dose = this.profile;
+    held.venomLoad += dose.venomRate * dose.venomSeconds;
+    held.venomRate = dose.venomRate;
     this.events.push({ kind: 'sting', quarry: held.id });
     this.left -= 1;
     if (this.left <= 0) this.phase = 'gripped';
@@ -245,7 +364,12 @@ export function necrosis(
   q: Quarry, dt: number, tuning: CombatTuning = DEFAULT_COMBAT,
 ): boolean {
   if (q.venomLoad <= 0 || !q.alive) return false;
-  const bite = Math.min(q.venomLoad, tuning.necrosisRate * dt);
+  /* The quarry's OWN rate, set by whoever dosed it — a worker's venom
+   * bleeds slower and longer than a major's. Falls back to the tuning for
+   * anything stung before the caste table existed, or in a test that builds
+   * a quarry by hand. */
+  const rate = q.venomRate > 0 ? q.venomRate : tuning.necrosisRate;
+  const bite = Math.min(q.venomLoad, rate * dt);
   q.venomLoad -= bite;
   q.hp -= bite;
   if (q.hp > 0) return false;
