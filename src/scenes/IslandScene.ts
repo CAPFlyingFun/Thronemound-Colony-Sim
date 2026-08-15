@@ -131,6 +131,7 @@ import {
   EYE_SKIN, BONE_CLEARANCE, CAMERA_SKIN, EYE_FORWARD,
   EYE_RISE, EYE_FOLLOW_MS, EYE_AIM_MS, EYE_FOLLOW_RATE, S_JAW,
   PROP_FLOOR_REACH, PROP_FLOOR_STEPS, PROP_FLOOR_BISECT, S_PROP_AT,
+  S_TILT_FWD, S_TILT_AT,
   EYE_ROLL_RATE, EYE_SNAP, EYE_BISECTIONS, EYE_MARCH_STEPS,
   LOOK_HOLD_S, LOOK_RETURN_RATE, CHASE_PITCH, CHASE_PITCH_MIN,
   CHASE_PITCH_MAX, CHASE_GROUND_CLEAR, CHASE_REACH, SHELL_REACH,
@@ -157,6 +158,7 @@ import { CASTE_MASS_MG } from './mandibleReach';
 import { Combat, necrosis } from './islandCombat';
 import { Beetle } from './Beetle';
 import { resolveBulk, type Bulk } from './islandBulk';
+import { DEFAULT_TILT, strengthFor, TiltShift } from './islandTilt';
 import {
   buildQuarryBars, syncQuarryBars, type QuarryBarHost, type QuarryBars,
 } from './islandQuarryBar';
@@ -1659,6 +1661,9 @@ export class IslandScene {
   /** Health bars over anything hurt or held. See `islandQuarryBar`. */
   private quarryBars: QuarryBars | null = null;
 
+  /** The macro look — a sharp band across the middle. See `islandTilt`. */
+  private readonly tilt = new TiltShift();
+
   /** What the bars need to know about the fight, without handing them
    *  the whole combat model. */
   get gripped(): Beetle | null { return this.combat.held as Beetle | null; }
@@ -1873,6 +1878,23 @@ export class IslandScene {
     if (new URLSearchParams(
       typeof location === 'undefined' ? '' : location.search,
     ).get('gait') === 'tripod') this.adaptiveGait = false;
+    /*
+     * ONE ESCAPE HATCH, and deliberately not a tuning surface.
+     *
+     * The macro effect's SETTINGS are going in the settings panel, where a
+     * person can see what they are changing — scattering half a dozen query
+     * parameters around would be building the same feature twice and
+     * leaving the worse one in.
+     *
+     * This is not that. It is the switch that matters when the panel does
+     * not exist yet and the game is tested from a live deploy on a phone:
+     * an effect that costs three extra fullscreen passes needs a way to be
+     * turned off that does not require shipping another build to find out.
+     */
+    if (new URLSearchParams(
+      typeof location === 'undefined' ? '' : location.search,
+    ).get('blur') === 'off') this.tilt.enabled = false;
+    this.readTiltParams();
     /*
      * `?support=0` — take her feet out of her attitude and leave it to the
      * density gradient under her belly, as it was. The control for
@@ -3136,9 +3158,83 @@ export class IslandScene {
      */
     if (!this.quarryBars) this.quarryBars = buildQuarryBars(this.barHost);
     syncQuarryBars(this.barHost, this.quarryBars);
-    this.renderer.render(this.scene, this.camera);
+    /*
+     * THROUGH THE MACRO EFFECT — see `islandTilt`. It falls back to a plain
+     * render when it is off, so this stays one call either way.
+     *
+     * The strength comes from where the camera is LOOKING: the tilt-shift
+     * assumes screen height stands in for distance, and aimed at her feet
+     * that assumption is simply false, so the effect fades out rather than
+     * smearing a flat floor.
+     */
+    S_TILT_FWD.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    /*
+     * THE SHARP CIRCLE IS CENTRED ON HER, projected fresh each frame.
+     *
+     * Not the middle of the screen: the chase camera sits her low and the
+     * HUD's weight is at the bottom, so a fixed centre would keep the sharp
+     * spot hovering above her head while she walked about under it. Behind
+     * the lens — which happens as the camera swings — there is no honest
+     * screen position, so it falls back to the middle rather than to the
+     * mirrored garbage `project` returns for a point behind the camera.
+     */
+    S_TILT_AT.copy(this.at).project(this.camera);
+    if (S_TILT_AT.z > 1) this.tilt.focus.set(0.5, 0.5);
+    else {
+      this.tilt.focus.set(
+        Math.min(1.4, Math.max(-0.4, (S_TILT_AT.x + 1) / 2)),
+        Math.min(1.4, Math.max(-0.4, (1 - S_TILT_AT.y) / 2)),
+      );
+    }
+    this.tilt.render(this.renderer, this.scene, this.camera, strengthFor(S_TILT_FWD.y));
     this.frame = requestAnimationFrame(this.animate);
   };
+
+  /**
+   * THE MACRO EFFECT'S KNOBS, off the URL — so it can be dialled on the
+   * PHONE rather than by rebuilding and redeploying to find out.
+   *
+   * `?blur=off` turns it off outright. The rest take numbers, all in
+   * screen HEIGHTS measured out from her: `?blurband` is the radius of the
+   * sharp circle, `?blurfull` where the blur stops growing, `?blurr` the
+   * radius in half-res pixels, `?blurmax` the most of the blurred image
+   * that may ever be mixed in, and `?blurwide` how many times wider than
+   * tall the sharp oval is.
+   *
+   * Every one is clamped, because a value typed on a phone keyboard with no
+   * validation is one fat finger away from a radius of four thousand and a
+   * frame that never finishes.
+   */
+  private readTiltParams(): void {
+    const q = new URLSearchParams(
+      typeof location === 'undefined' ? '' : location.search,
+    );
+    if (q.get('blur') === 'off') this.tilt.enabled = false;
+    const num = (key: string, lo: number, hi: number): number | null => {
+      const raw = q.get(key);
+      if (raw === null) return null;
+      const v = Number(raw);
+      return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : null;
+    };
+    const t = this.tilt.tuning;
+    t.sharp = num('blurband', 0, 0.5) ?? DEFAULT_TILT.sharp;
+    t.full = num('blurfull', 0.02, 1) ?? DEFAULT_TILT.full;
+    t.radius = num('blurr', 0, 12) ?? DEFAULT_TILT.radius;
+    t.most = num('blurmax', 0, 1) ?? DEFAULT_TILT.most;
+    t.wide = num('blurwide', 0.2, 6) ?? DEFAULT_TILT.wide;
+    /* The ramp has to have somewhere to happen: a `full` at or inside
+     * `sharp` divides by nothing in the shader's smoothstep and the band
+     * becomes a hard edge across the screen. */
+    if (t.full <= t.sharp + 0.01) t.full = t.sharp + 0.01;
+  }
+
+  /** For probes and the dev drawer: the macro effect's live settings. */
+  tiltForTest(): {
+    on: boolean; sharp: number; full: number;
+    radius: number; most: number; wide: number;
+  } {
+    return { on: this.tilt.enabled, ...this.tilt.tuning };
+  }
 
   private resize(): void {
     const w = this.host.clientWidth || 1;
@@ -3146,6 +3242,11 @@ export class IslandScene {
     this.renderer.setSize(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    /* The targets take the DRAWING size, not the CSS size — the adaptive
+     * pixel ratio is the whole point of that distinction, and sizing the
+     * effect off the CSS box would keep it expensive exactly when the
+     * scaler is trying to make things cheaper. */
+    this.tilt.setSize(w * this.pixelRatioNow, h * this.pixelRatioNow);
   }
 
   /* --------------------------------------------------- the lost context */

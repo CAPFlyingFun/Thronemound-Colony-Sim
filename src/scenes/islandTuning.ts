@@ -904,3 +904,9 @@ export const PROP_FLOOR_BISECT = 6;
 
 /** The prop ground query's own scratch — see `IslandScene.soilNormal`. */
 export const S_PROP_AT = new THREE.Vector3();
+
+/** The macro effect's own scratch — the camera's forward, for its strength. */
+export const S_TILT_FWD = new THREE.Vector3();
+
+/** Her position projected to the screen, for the macro effect's focus. */
+export const S_TILT_AT = new THREE.Vector3();
