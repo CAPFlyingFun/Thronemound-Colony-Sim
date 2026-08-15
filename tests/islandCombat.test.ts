@@ -80,10 +80,14 @@ describe('the sequence', () => {
     expect(stings).toBe(DEFAULT_COMBAT.sequenceStings);
     /* Still holding on — she re-grips to sting again, she does not fall off. */
     expect(c.phase).toBe('gripped');
-    /* The dose is the CASTE's now: rate times seconds, per sting. */
+    /*
+     * ONE dose for the whole burst, not one per sting. She pivots and
+     * stings several times without letting go, but what she delivers is a
+     * single envenomation — four full doses is what let one press put
+     * 120 hp of venom into a 100 hp beetle.
+     */
     const w = CASTE_COMBAT.worker;
-    expect(q.venomLoad)
-      .toBeCloseTo(DEFAULT_COMBAT.sequenceStings * w.venomRate * w.venomSeconds, 4);
+    expect(q.venomLoad).toBeCloseTo(w.venomRate * w.venomSeconds, 4);
     expect(q.venomRate).toBe(w.venomRate);
   });
 
@@ -101,20 +105,41 @@ describe('the sequence', () => {
 });
 
 describe('venom is a reserve, not a cooldown', () => {
-  it('carries about thirty-two stings and then runs dry', () => {
+  it('collapses from a full burst to a trickle under sustained fighting', () => {
+    /*
+     * IT NO LONGER RUNS DRY AND STAYS DRY, and that is the cooldown's doing
+     * rather than a weakened reserve.
+     *
+     * A burst of seven spends 21.9% of a 32-sting tank; the 10-second
+     * cooldown that follows refills 4.2% of a 240-second one. So sustained
+     * fighting walks her down — 26 stings left, then 21, 16, 11, 5 — until
+     * she settles at one or two, where each burst spends exactly what the
+     * last cooldown paid back. She is never locked out; she is reduced to a
+     * trickle, which is the better shape: an ability that vanishes is a
+     * player standing about waiting, and one that thins is a player
+     * choosing when to spend it.
+     *
+     * Measured with a trace, not assumed — the previous version of this
+     * test asserted `dry` and would have gone green only by accident.
+     */
     const c = stinger();
     expect(c.stingsLeft).toBe(DEFAULT_COMBAT.venomStings);
-    const q = dummy();
-    /* Four sequences of seven is twenty-eight; she should still have a
-     * few and then run out inside the fifth. */
-    for (let i = 0; i < 6; i += 1) {
+    const q = dummy({ hp: 1e6 });
+    const burst = (): number => {
       c.grip(q, rich);
       c.sting();
       frames(c, DEFAULT_COMBAT.sequenceStings * DEFAULT_COMBAT.stingInterval + 0.2);
       c.release();
-    }
-    expect(c.dry).toBe(true);
-    expect(c.sting()).toBe(false);
+      const n = c.drain().filter((e) => e.kind === 'sting').length;
+      frames(c, CASTE_COMBAT.worker.venomSeconds + 0.1);
+      return n;
+    };
+    const first = burst();
+    expect(first).toBe(DEFAULT_COMBAT.sequenceStings);
+    for (let i = 0; i < 6; i += 1) burst();
+    expect(c.stingsLeft).toBeLessThanOrEqual(3);
+    /* And the trickle is real: a late burst delivers a fraction of the first. */
+    expect(burst()).toBeLessThan(first);
   });
 
   it('builds back on its own, whatever she is doing', () => {
@@ -140,19 +165,21 @@ describe('the venom does the killing, not the sting', () => {
     expect(q.hp).toBe(100 - 3 * CASTE_COMBAT.worker.bite);
     expect(q.venomLoad).toBeGreaterThan(0);
 
-    /* Walked away. It dies anyway, which is the whole point. */
-    let felled = false;
-    for (let i = 0; i < 60 * 60 && !felled; i += 1) felled = necrosis(q, 1 / 60);
-    expect(felled).toBe(true);
-    expect(q.hp).toBe(0);
     /*
-     * It no longer runs the load exactly to zero, and that is right rather
-     * than a loosened assertion: a worker's sequence now doses far more
-     * venom than a 100 hp dummy needs, so the quarry dies with some still
-     * in it. Insisting the load empty would be insisting she never
-     * over-stings anything.
+     * Walked away, and the load keeps working — which is the whole point,
+     * and is still true now the dose is one rather than four.
+     *
+     * It no longer KILLS a 100 hp dummy on its own, and that is the fix
+     * rather than a regression: a worker's single envenomation is 30 hp of
+     * damage, so a beetle takes a sting AND a spell of biting. One press
+     * used to be the whole fight.
      */
-    expect(q.venomLoad).toBeGreaterThanOrEqual(0);
+    const before = q.hp;
+    for (let i = 0; i < 60 * 60; i += 1) necrosis(q, 1 / 60);
+    const w = CASTE_COMBAT.worker;
+    expect(before - q.hp).toBeCloseTo(w.venomRate * w.venomSeconds, 3);
+    expect(q.alive).toBe(true);
+    expect(q.venomLoad).toBeCloseTo(0, 3);
   });
 
   it('fells a quarry whose load outruns its hit points', () => {
@@ -311,5 +338,77 @@ describe('the venom dose is the caste\'s', () => {
 
   it('gives the queen no venom at all', () => {
     expect(CASTE_COMBAT.queen.venomRate).toBe(0);
+  });
+});
+
+describe('the dose IS the cooldown', () => {
+  /*
+   * Joshua's design: "press sting once and once that 8 or 10 seconds are
+   * up, will be the cool down". The venom working and the ability being
+   * spent are the same fact, so the cooldown explains itself on screen.
+   */
+  it('locks the sting out for exactly the dose\'s duration', () => {
+    for (const caste of ['worker', 'major'] as const) {
+      const c = new Combat(caste);
+      const q = dummy({ hp: 1e6 });
+      c.grip(q, rich);
+      expect({ caste, ready: c.stingReadyIn }).toEqual({ caste, ready: 0 });
+      expect(c.sting()).toBe(true);
+      expect({ caste, ready: c.stingReadyIn })
+        .toEqual({ caste, ready: CASTE_COMBAT[caste].venomSeconds });
+
+      /* A second before it is up: still refused. */
+      frames(c, CASTE_COMBAT[caste].venomSeconds - 1);
+      expect({ caste, sting: c.sting() }).toEqual({ caste, sting: false });
+
+      /* And past it: ready again. */
+      frames(c, 1.2);
+      expect({ caste, ready: c.stingReadyIn }).toEqual({ caste, ready: 0 });
+      expect({ caste, sting: c.sting() }).toEqual({ caste, sting: true });
+    }
+  });
+
+  it('runs the cooldown whether or not she still has hold', () => {
+    /* It is the venom's clock, not the grip's — letting go must not stall
+     * it, or releasing becomes a way to keep the sting on tap. */
+    const c = new Combat('major');
+    const q = dummy({ hp: 1e6 });
+    c.grip(q, rich);
+    c.sting();
+    c.release();
+    frames(c, CASTE_COMBAT.major.venomSeconds + 0.2);
+    expect(c.stingReadyIn).toBe(0);
+  });
+
+  it('stops one press from being the whole fight', () => {
+    /*
+     * The hole this closes. A press fires seven stings and each ADDED a
+     * full dose, so a worker put 7 x 30 hp of venom into a 100 hp beetle.
+     * One press now delivers one envenomation.
+     */
+    const c = stinger();
+    const q = dummy();
+    c.grip(q, rich);
+    c.sting();
+    frames(c, DEFAULT_COMBAT.sequenceStings * DEFAULT_COMBAT.stingInterval + 0.2);
+    const w = CASTE_COMBAT.worker;
+    expect(q.venomLoad).toBeCloseTo(w.venomRate * w.venomSeconds, 3);
+    expect(q.venomLoad).toBeLessThan(q.hp);
+  });
+
+  it('never lets a lighter sting shallow out a heavier one', () => {
+    /* A worker stinging something a major already hit must not help it. */
+    const q = dummy();
+    const major = new Combat('major');
+    major.grip(q, rich);
+    major.sting();
+    frames(major, 1);
+    const deep = q.venomLoad;
+    const worker = new Combat('worker');
+    worker.grip(q, rich);
+    worker.sting();
+    frames(worker, 1);
+    expect(q.venomLoad).toBeGreaterThanOrEqual(deep - CASTE_COMBAT.major.venomRate * 2);
+    expect(q.venomRate).toBe(CASTE_COMBAT.major.venomRate);
   });
 });

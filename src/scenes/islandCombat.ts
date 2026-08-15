@@ -186,6 +186,23 @@ export class Combat {
   /** Counts down to the next bite beat. See `tick`. */
   private chew = 0;
 
+  /**
+   * SECONDS UNTIL SHE CAN DOSE AGAIN — and it is the DOT's own duration.
+   *
+   * Joshua's idea, and it is the right one: "could be that cooldown based
+   * on duration so press sting once and once that 8 or 10 seconds are up,
+   * will be the cool down". The venom working and the ability being spent
+   * become the same fact, which means the cooldown explains itself on
+   * screen — you are watching it happen to the beetle.
+   *
+   * It also fixes a real hole rather than merely gating one. A press fires
+   * `sequenceStings` stings and each ADDED a full dose, so a worker put
+   * 4 x 30 = 120 hp of venom into a 100 hp beetle: one press killed
+   * anything beetle-sized and the bite never mattered. The dose is set
+   * rather than accumulated now, and this stops her topping it up.
+   */
+  private cooling = 0;
+
   private readonly events: CombatEvent[] = [];
 
   constructor(
@@ -199,6 +216,9 @@ export class Combat {
 
   /** She has a sting at all — a queen does not. See `CASTE_COMBAT`. */
   get venomous(): boolean { return this.profile.venomRate > 0; }
+
+  /** Seconds until the sting is available again. 0 when it is ready. */
+  get stingReadyIn(): number { return Math.max(0, this.cooling); }
 
   retune(tuning: CombatTuning): void { this.tuning = tuning; }
 
@@ -256,6 +276,8 @@ export class Combat {
      * thing a future caller trusts and a future bug hides in.
      */
     if (!this.venomous) return false;
+    /* Still bleeding out the last dose — see `cooling`. */
+    if (this.cooling > 0) return false;
     if (this.phase !== 'gripped' && this.phase !== 'stinging') return false;
     if (this.dry) {
       this.events.push({ kind: 'dry' });
@@ -264,6 +286,9 @@ export class Combat {
     this.phase = 'stinging';
     this.left = this.tuning.sequenceStings;
     this.next = 0;
+    /* The dose's own length. Set when the sequence STARTS rather than when
+     * it finishes, so the burst and its cooldown are one press. */
+    this.cooling = this.profile.venomSeconds;
     return true;
   }
 
@@ -279,6 +304,9 @@ export class Combat {
      * to make venom, and a pool that only fills while idle would have the
      * player standing about waiting for it. */
     this.venom = Math.min(1, this.venom + dt / t.venomRefillSeconds);
+    /* Runs whatever she is doing, and whether or not she still has hold —
+     * it is the venom's clock, not the grip's. */
+    if (this.cooling > 0) this.cooling = Math.max(0, this.cooling - dt);
 
     if (this.phase === 'free' || !this.held) return;
     const held = this.held;
@@ -330,12 +358,22 @@ export class Combat {
     if (!spend(t.stingCost)) { this.phase = 'gripped'; return; }
 
     this.venom = Math.max(0, this.venom - 1 / t.venomStings);
-    /* The dose is the CASTE's — rate times seconds is the whole load, and
-     * the rate rides along on the quarry so it keeps bleeding correctly
-     * after she has let go. See `CASTE_COMBAT`. */
+    /*
+     * SET, NOT ADDED — the dose does not stack.
+     *
+     * A press is `sequenceStings` stings, which is the animal: she pivots
+     * about the bite and stings several times without letting go. What she
+     * is delivering across that burst is ONE envenomation, not four, and
+     * adding four full doses is what let a worker put 120 hp of venom into
+     * a 100 hp beetle from a single press.
+     *
+     * `Math.max` rather than a bare assignment so a second sting cannot
+     * REDUCE a load that is already deeper — stinging something a major has
+     * already hit should not help it.
+     */
     const dose = this.profile;
-    held.venomLoad += dose.venomRate * dose.venomSeconds;
-    held.venomRate = dose.venomRate;
+    held.venomLoad = Math.max(held.venomLoad, dose.venomRate * dose.venomSeconds);
+    held.venomRate = Math.max(held.venomRate, dose.venomRate);
     this.events.push({ kind: 'sting', quarry: held.id });
     this.left -= 1;
     if (this.left <= 0) this.phase = 'gripped';
