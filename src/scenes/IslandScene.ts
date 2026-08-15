@@ -160,6 +160,7 @@ import { CASTE_MASS_MG } from './mandibleReach';
 import { Combat, necrosis } from './islandCombat';
 import { Beetle } from './Beetle';
 import { resolveBulk, QUEEN_BULK_ID, type Bulk } from './islandBulk';
+import { Grit } from './islandGrit';
 import { warmHudArt } from './hudArt';
 import {
   crushDamage, CRUSH_SHARE, CRUSH_REACH_SLACK, CRUSH_AGAIN_AFTER,
@@ -325,6 +326,10 @@ export class IslandScene {
   /* The queen, once she has stopped being the player — parked where the
    * founding finished and no longer driven by anything. */
   private queenNpc: QueenModel | null = null;
+
+  /** Chips of soil thrown off a cut — see `islandGrit`. Built with the
+   *  scene, because it is one instanced mesh that lives in it. */
+  private grit: Grit | null = null;
 
   /** Stamped grid (mound included) — what the island mesh and walker use. */
   private heights: Int16Array | null = null;
@@ -685,6 +690,10 @@ export class IslandScene {
     /* And a shove hard enough to be a crushing costs her. Immediately after
      * the shove, because that is the frame the contact is known on. */
     this.crushTick(dt);
+    /* And the spoil in the air, whichever stroke threw it. Ticked with the
+     * world rather than with the dig, because a chip outlives the stroke
+     * that made it and must keep falling after DIG is let go. */
+    this.grit?.tick(dt);
     /* After the vitals have ticked, so the latch drops on the same frame she
      * bottoms out rather than one behind it. See `dropPaceIfSpent`. */
     this.dropPaceIfSpent();
@@ -1840,6 +1849,9 @@ export class IslandScene {
     host.appendChild(this.renderer.domElement);
     this.watchContext();
 
+    this.grit = new Grit();
+    this.scene.add(this.grit.mesh);
+
     this.scene.background = new THREE.Color(0x9cc4e0);
     this.skyColour.copy(this.scene.background as THREE.Color);
     /* Haze, not blindness: from the summit the coast is ~5,600 world units
@@ -2925,6 +2937,34 @@ export class IslandScene {
     forward.addScaledVector(up, -forward.dot(up)).normalize();
     const right = S_RIGHT.crossVectors(up, forward).normalize();
     this.queen.root.position.copy(this.at);
+    /*
+     * WRITTEN, NOT CHASED — and that is a measurement, not a preference.
+     *
+     * TRIED AND REJECTED, recorded so it is not tried twice. nel370's PR #8
+     * eases this instead: "treat the whole ant like the middle tank of a
+     * three-body gimbal — the root chases the local surface frame instead
+     * of snapping to it". It is a good instinct and it is wrong here, for a
+     * reason particular to this rig: the walker ALREADY smooths `up`, so
+     * the frame arriving here is a filtered signal, and a second filter on
+     * a filtered signal is all cost.
+     *
+     * Measured over 600 frames of her walking real ground, in degrees:
+     *
+     *   rate   jitter worst  jitter mean   lag worst   lag mean
+     *      0          1.041        0.202       5.527      1.922
+     *     10          3.019        0.207      25.726     11.404
+     *     20          1.907        0.203      14.997      5.655
+     *
+     * The mean jitter — the thing easing exists to remove — does not move
+     * at all: 0.202 against 0.207. The WORST single-frame turn gets three
+     * times worse, because a lagging frame has to catch up and the catch-up
+     * is a bigger step than anything the direct write ever took. And her
+     * drawn body ends up eleven degrees off the frame she is standing in,
+     * which on a slope is the whole of her posture.
+     *
+     * If the input here ever stops being pre-smoothed, this is worth
+     * re-measuring rather than re-arguing.
+     */
     this.queen.root.quaternion.setFromRotationMatrix(S_MAT.makeBasis(right, up, forward));
     /*
      * AND THEN SHE LEANS — see `LEAN_PER_ACCEL`. Post-multiplied, so the
@@ -3655,6 +3695,12 @@ export class IslandScene {
     }
   }
 
+  /** For probes: cut once, the way the DIG plate does. */
+  biteForTest(): void { this.bite(); }
+
+  /** For probes: how many chips of spoil are in the air. */
+  gritLiveForTest(): number { return this.grit?.live ?? 0; }
+
   /** For probes: how many pairs were overlapping this frame. */
   bulkPairsForTest(): number {
     return resolveBulk(this.bulkBodies());
@@ -4251,6 +4297,7 @@ export class IslandScene {
     this.soilMaterial?.dispose();
     if (this.textures) for (const tex of Object.values(this.textures)) tex.dispose();
     this.nestView?.dispose();
+    this.grit?.dispose();
     this.queen.dispose();
     for (const one of this.colony) one.dispose();
     for (const q of this.quarry) q.dispose();

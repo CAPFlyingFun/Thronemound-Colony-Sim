@@ -14,6 +14,7 @@
  * interface rather than a class.
  */
 import * as THREE from 'three';
+import type { Grit } from './islandGrit';
 import type { QueenModel } from '../anim/QueenModel';
 import type { IslandStream } from '../world/IslandStream';
 import { CELL_SIZE, MM } from '../world/worldScape';
@@ -30,6 +31,8 @@ import {
 /** What the jaws may reach, and nothing else. */
 export interface DigHost {
   readonly scene: THREE.Scene;
+  /** The spoil thrown off a cut, once there is a scene to throw it in. */
+  readonly grit: Grit | null;
   readonly camera: THREE.PerspectiveCamera;
   readonly queen: QueenModel;
   readonly at: THREE.Vector3;
@@ -213,6 +216,10 @@ export function bite(host: DigHost, ): void {
     minZ = Math.min(minZ, bb.minZ); maxZ = Math.max(maxZ, bb.maxZ);
   }
   host.biteTouched = touched > 0;
+  /* SPOIL, and only when soil actually came out. A stroke that met air
+   * cuts nothing, and throwing chips off it would be the ghost's own
+   * "confident hole over open air" mistake in another form. */
+  if (touched > 0) host.grit?.burst(centre, aim);
   if (touched === 0) return;
   /*
    * AND SHAVE WHAT WAS JUST CUT, in the same stroke.
