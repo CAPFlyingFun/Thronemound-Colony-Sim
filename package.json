@@ -1,7 +1,7 @@
 {
   "name": "thronemound-colony-sim",
   "private": true,
-  "version": "0.1.67",
+  "version": "0.1.68",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -57,6 +57,7 @@
     "bake:models": "node scripts/bake-models.mjs",
     "probe:models": "node scripts/probe-models.mjs",
     "probe:worm": "node scripts/probe-worm.mjs",
+    "probe:scale": "node scripts/probe-scale.mjs",
     "gen:meter-mask": "node scripts/make-meter-mask.mjs",
     "gen:meter-fill": "node scripts/make-meter-fill.mjs"
   },
