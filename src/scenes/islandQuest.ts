@@ -107,6 +107,12 @@ export interface QuestHost {
   carryShown: number;
   readonly groundForLegs: Ground;
   walkGroundAt(x: number, z: number): number;
+  /**
+   * What is underfoot AT A GIVEN HEIGHT — the soil-aware answer, which is
+   * a different question from `walkGroundAt` and the one anything that
+   * walks has to ask. See `footingFrom` in `islandLand`.
+   */
+  footingFrom(x: number, z: number, y: number): number;
   /** The MENU plate was pressed. The scene decides what that costs. */
   openMenu(): void;
 }
@@ -603,10 +609,14 @@ export function spawnWorker(host: QuestHost, ): void {
     void one.load().then((ok) => {
       if (!ok) return;
       const a = rand() * Math.PI * 2;
+      /* The soil, not the heightfield — she must not hatch standing on
+       * the ghost of a surface the queen has already dug away. Searched
+       * from the QUEEN's height, because that is where she is arriving
+       * from and the anchor is where the chamber quest completed. */
       one.place(
         host.workerAnchor.x + Math.cos(a) * COLONIST_ARRIVE,
         host.workerAnchor.z + Math.sin(a) * COLONIST_ARRIVE,
-        (x, z) => host.walkGroundAt(x, z),
+        (x, z) => host.footingFrom(x, z, host.workerAnchor.y),
       );
     });
   }
@@ -616,11 +626,32 @@ export function poseWorker(host: QuestHost, dt: number): void {
   const walker = host.walker;
   if (!walker || host.colony.length === 0) return;
   for (const one of host.colony) {
+    /*
+     * THE SOIL, NOT THE HEIGHTFIELD SHE WAS BORN ON.
+     *
+     * Reported: "the new ants don't crawl underground in the dug areas and
+     * also was crawling up an invisible object."
+     *
+     * Both halves are one fault, and it is the one this codebase has now
+     * made three times: `walkGroundAt` is the ORIGINAL surface, and the
+     * whole verb of this game is changing where the surface is. So a
+     * colonist walked across the mouth of a shaft at the grade the hill
+     * used to have — over the hole rather than into it — and climbed the
+     * ghost of any mound that has since been dug away, which from the
+     * outside is walking up nothing at all.
+     *
+     * `footingFrom` is the answer the QUEEN has always used: the first
+     * soil below a point, searched from that point's own height, falling
+     * back to the heightfield only where the streamed window has nothing
+     * to say. Closed over her CURRENT height, so a foot on a shaft wall
+     * and a foot on the rim get different answers — the third argument is
+     * the whole reason that function exists (see its note).
+     */
     one.step(
       dt,
       host.workerAnchor,
       COLONIST_ROAM,
-      (x, z) => host.walkGroundAt(x, z),
+      (x, z) => host.footingFrom(x, z, one.at.y),
       (p, into) => { walker.normalAt(p, into); },
       host.groundForLegs,
     );

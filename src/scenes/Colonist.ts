@@ -17,7 +17,8 @@ import { QueenModel } from '../anim/QueenModel';
 import { FOOT_CLEARANCE_MM, LegDrive, type Ground, type LegSetup } from '../anim/legDrive';
 import { MM } from '../world/worldScape';
 import {
-  COLONIST_ARRIVE, COLONIST_SPEED, COLONIST_TURN, FOOT_AIR, RIDE,
+  COLONIST_ARRIVE, COLONIST_CLIMB, COLONIST_DROP, COLONIST_SPEED,
+  COLONIST_TURN, FOOT_AIR, RIDE,
 } from './islandTuning';
 
 export /**
@@ -182,7 +183,25 @@ class Colonist {
     normalAt(this.at, this.up);
     if (this.up.lengthSq() < 1e-9) this.up.set(0, 1, 0);
     this.up.normalize();
-    this.at.y = groundAt(this.at.x, this.at.z) + this.ride;
+    /*
+     * SHE CLIMBS DOWN INTO IT RATHER THAN APPEARING AT THE BOTTOM.
+     *
+     * This was a bare assignment, which was fine while the ground under a
+     * colonist could only change gently — a heightfield has no cliffs at
+     * her stride. Now that she reads the SOIL, it does: crossing the mouth
+     * of a shaft the answer jumps by the whole depth of it between one
+     * frame and the next, and an assignment would teleport her there.
+     *
+     * A rate turns that into a scramble, which is what it looks like. It is
+     * capped rather than eased so a long fall stays honest — she descends
+     * at a speed, she does not asymptote toward the floor — and the two
+     * directions differ because dropping into a hole is gravity and
+     * climbing out of one is work.
+     */
+    const wantY = groundAt(this.at.x, this.at.z) + this.ride;
+    const gap = wantY - this.at.y;
+    const cap = (gap < 0 ? COLONIST_DROP : COLONIST_CLIMB) * dt;
+    this.at.y += Math.max(-cap, Math.min(cap, gap));
     this.fwd.addScaledVector(this.up, -this.fwd.dot(this.up));
     if (this.fwd.lengthSq() < 1e-9) this.fwd.set(0, 0, 1).addScaledVector(this.up, -this.up.z);
     this.fwd.normalize();

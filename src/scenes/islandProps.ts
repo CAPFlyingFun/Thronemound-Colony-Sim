@@ -106,6 +106,15 @@ const PROP_FALL_MAX = 6;
 const ROLLS = new Set<PropSpec['kind']>(['seed', 'rock']);
 
 /**
+ * WHICH THINGS ARE A SURFACE RATHER THAN A SOLID — and so have a back.
+ *
+ * A leaf is one disc of geometry. Everything else here is closed, and a
+ * closed shape must stay single-sided: its inside is never visible, so
+ * drawing it is fill rate spent on nothing.
+ */
+const FLAT = new Set<PropSpec['kind']>(['leaf']);
+
+/**
  * Below this slope it has found its balance and stays there.
  *
  * The slope is `sin` of the angle off level, so 0.09 is about five degrees
@@ -292,7 +301,25 @@ export class Prop implements Portable {
     this.at.set(x, y, z);
     this.root.position.copy(this.at);
 
-    const mat = new THREE.MeshLambertMaterial({ color: spec.colour });
+    /*
+     * A FLAT THING HAS TWO SIDES. Reported: "leaf works, but only shows
+     * 1-sided."
+     *
+     * Every other prop here is a closed solid — a sphere, a dodecahedron, a
+     * cylinder — and for those the default is not just fine but wanted: you
+     * can never see the inside of a rock, so drawing it is fill rate spent
+     * on nothing. A leaf is a single disc of geometry with all its normals
+     * facing one way, so from underneath there is simply nothing there. She
+     * picks it up, turns, and it vanishes.
+     *
+     * Kept as a question about the SHAPE rather than a flag on the spec,
+     * for the same reason `ROLLS` is: whether a thing has an underside is a
+     * fact about its geometry, and `kind` already names the geometry.
+     */
+    const mat = new THREE.MeshLambertMaterial({
+      color: spec.colour,
+      side: FLAT.has(spec.kind) ? THREE.DoubleSide : THREE.FrontSide,
+    });
     const r = spec.halfMm / MM;
     let geo: THREE.BufferGeometry;
     if (spec.kind === 'twig') {

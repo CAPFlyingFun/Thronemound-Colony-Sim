@@ -150,7 +150,7 @@ import {
 } from './islandCamera';
 import { buildControls, updateStatus, type HudHost } from './islandHud';
 import {
-  depthMm, questTick, type QuestHost, type VitalBar, type VitalKind,
+  depthMm, questTick, spawnWorker, type QuestHost, type VitalBar, type VitalKind,
 } from './islandQuest';
 import { Vitals } from './islandVitals';
 import { FIRE_ANT, type AbilityId, type AntKind } from './antKinds';
@@ -2331,7 +2331,7 @@ export class IslandScene {
     return groundHeightAt(this.landHost, x, z);
   }
 
-  private footingFrom(x: number, z: number, y: number): number {
+  footingFrom(x: number, z: number, y: number): number {
     return footingFrom(this.landHost, x, z, y);
   }
 
@@ -3364,6 +3364,15 @@ export class IslandScene {
 
   private questTick(dt: number): void { questTick(this.questHost, dt); }
 
+  /**
+   * For probes: hatch the colony now rather than playing the founding to
+   * it. `probe-sides` and `shot-colony` have both been calling
+   * `islandScene.spawnWorker()`, which has never existed — they swallow
+   * the failure and measure whatever loaded, so the two castes they are
+   * meant to compare have quietly been one.
+   */
+  spawnWorker(): void { spawnWorker(this.questHost); }
+
   /* -------------------------------------------------------------- probes */
 
   /**
@@ -3573,6 +3582,23 @@ export class IslandScene {
       now: this.sense?.uSense.value ?? 0,
       depthMm: (this.walkGroundAt(this.at.x, this.at.z) - (this.at.y + RIDE)) * MM,
     };
+  }
+
+  /**
+   * For probes: where each colonist is standing, as plain numbers.
+   *
+   * "The new ants don't crawl underground in the dug areas" is a claim
+   * about their height against the soil, so a probe needs their height.
+   */
+  colonyForTest(): { caste: string; x: number; y: number; z: number }[] {
+    return this.colony.filter((c) => c.ready).map((c) => ({
+      caste: c.caste, x: c.at.x, y: c.at.y, z: c.at.z,
+    }));
+  }
+
+  /** For probes: the ORIGINAL grade, which is what they used to stand on. */
+  walkGroundAtForTest(x: number, z: number): number {
+    return this.walkGroundAt(x, z);
   }
 
   /** For probes: carve a hollow, so a test can dig without a shovel. */

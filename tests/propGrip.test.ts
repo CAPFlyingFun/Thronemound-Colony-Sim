@@ -287,6 +287,35 @@ describe('round things roll until they find their balance', () => {
   });
 });
 
+describe('how a loose thing is drawn', () => {
+  /*
+   * Reported: "leaf works, but only shows 1-sided." A leaf is one disc of
+   * geometry with all its normals facing one way, so from underneath there
+   * is nothing there — she picks it up, turns, and it vanishes.
+   */
+  const sideOf = (p: Prop): number | null => {
+    let side: number | null = null;
+    p.root.traverse((n) => {
+      const mat = (n as THREE.Mesh).material as THREE.Material | undefined;
+      if (mat && 'side' in mat) side = (mat as THREE.Material).side;
+    });
+    return side;
+  };
+
+  it('draws a leaf from both sides, because a leaf has a back', () => {
+    expect(sideOf(new Prop('leaf', PROP_SPECS.leaf!, 0, 0, 0))).toBe(THREE.DoubleSide);
+  });
+
+  it('leaves the closed shapes single-sided', () => {
+    /* You can never see the inside of a rock, so drawing it is fill rate
+     * spent on nothing. The rule is about the SHAPE, not about props. */
+    for (const key of ['seed', 'crumb', 'twig', 'pebble', 'stone']) {
+      const spec = PROP_SPECS[key]!;
+      expect(sideOf(new Prop(key, spec, 0, 0, 0))).toBe(THREE.FrontSide);
+    }
+  });
+});
+
 describe('the collision is the object\'s own shape', () => {
   /*
    * Asked for: "I was asking for proper per-shape collision... could do it

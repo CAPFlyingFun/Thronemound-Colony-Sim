@@ -861,6 +861,23 @@ export const COLONIST_ARRIVE = 1.2;
 /** How far from her birthplace a colonist will wander, in world units. */
 export const COLONIST_ROAM = 12;
 
+/**
+ * How fast a colonist may drop into, and climb out of, a hole.
+ *
+ * World units a second. Needed only since colonists started reading the
+ * SOIL rather than the original heightfield: the heightfield has no cliffs
+ * at an ant's stride, the dug soil is nothing but cliffs, and a bare
+ * assignment across a shaft mouth is a teleport.
+ *
+ * DROP is a scramble and not free-fall — 9 is this scene's gravity and an
+ * ant does not fall like a stone anyway, she runs down the wall. CLIMB is
+ * slower because getting out is work, and because a colonist who can climb
+ * as fast as she falls pops back out of a pit she should have to walk
+ * around. Both are game tuning, not measured biology.
+ */
+export const COLONIST_DROP = 4;
+export const COLONIST_CLIMB = 2.2;
+
 
 
 /**
