@@ -20,7 +20,7 @@
 import { chromium } from 'playwright';
 
 const MM = 5;
-const SECONDS = 90;
+const SECONDS = Number(process.env.WORM_SECONDS ?? 90);
 
 const browser = await chromium.launch({
   executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
@@ -35,6 +35,12 @@ await page.goto(process.env.SMOKE_URL ?? 'http://127.0.0.1:5173/?scene=island', 
 await page.waitForFunction(() => window.islandScene?.ready === true, null, { timeout: 200000 });
 await page.waitForFunction(() => !document.querySelector('.tm-loading-root'), null, { timeout: 200000 });
 await page.waitForTimeout(900);
+/* The bodies are fetched off the critical path, and this probe steps 90
+ * seconds of SIMULATED time in a fraction of a real one — so it has to
+ * wait for the model rather than assume it beat the first step. */
+await page.waitForFunction(
+  () => window.islandScene.wormBodiesForTest().length > 0, null, { timeout: 60000 },
+).catch(() => { /* Reported as zero bodies below. */ });
 
 const out = await page.evaluate(async (seconds) => {
   const s = window.islandScene;
@@ -114,6 +120,23 @@ const out = await page.evaluate(async (seconds) => {
     widths.push(widthAt(back, bx.x, bx.y, bx.z));
   }
 
+  /*
+   * AND THE BODY LIES IN THE HOLE. Each bone's world position is asked of
+   * the density field: a bone in air is a bone in the burrow, and a bone
+   * in soil is a worm drawn through its own wall.
+   */
+  const bodies = s.wormBodiesForTest();
+  let inSoil = 0;
+  let checked = 0;
+  for (const b of s.wormBoneWorldForTest()) {
+    for (const p of b) {
+      const q = s.lensQueryForTest(p[0], p[1], p[2]);
+      if (q.fine === 'unavailable') continue;
+      checked += 1;
+      if (q.finalMm > 0) inSoil += 1;
+    }
+  }
+
   const travelled = after.map((w, i) => Math.hypot(
     w.x - before[i].x, w.y - before[i].y, w.z - before[i].z,
   ) * MM);
@@ -126,6 +149,10 @@ const out = await page.evaluate(async (seconds) => {
     travelledMm: travelled.map((v) => +v.toFixed(1)),
     widthsMm: widths.map((v) => +v.toFixed(2)),
     outOfWindow,
+    bodies: bodies.length,
+    bones: bodies.map((b) => b.bones),
+    boneChecked: checked,
+    boneInSoil: inSoil,
     /* And how deep they are, which says whether they stayed underground. */
     depthMm: after.map((w) => +((s.walkGroundAtForTest(w.x, w.z) - w.y) * MM).toFixed(1)),
   };
@@ -151,6 +178,15 @@ if (kept.length) {
   console.log(`    mean             ${mean(kept).toFixed(2)} mm`);
   console.log(`    widest           ${Math.max(...kept).toFixed(2)} mm`);
 }
+console.log(`\n  bodies drawn       ${out.bodies}, ${out.bones.join('/')} bones each`);
+if (out.boneChecked > 0) {
+  const pct = (100 * out.boneInSoil) / out.boneChecked;
+  console.log(`  bones in the tube  ${out.boneChecked - out.boneInSoil} of ${out.boneChecked}`
+    + ` (${(100 - pct).toFixed(0)}% in air, the rest drawn through the wall)`);
+} else {
+  console.log('  bones in the tube  no bone was inside the streamed window');
+}
+
 console.log(`\n  for comparison     her own bore is about 7 mm across`);
 console.log(`                     her body is 1.6 mm half-height`);
 if (errs.length) console.log('\npage errors:', errs.slice(0, 2).join(' | '));

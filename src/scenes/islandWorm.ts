@@ -30,6 +30,13 @@
  * near the player, which is where anyone would ever see it, and it is
  * stated here rather than discovered later as a bug.
  *
+ * IT ALSO MEANS A WORM CAN STALL FOR GOOD. Measured: a worm digs about
+ * 120 mm, leaves the window, and then never moves again while she stands
+ * still — 300 seconds of probe travelled exactly as far as 90 did. In play
+ * she moves and the window goes with her, so they start again; standing
+ * in one spot, the worms around you finish their burrows and stop. Worth
+ * knowing before anyone tunes the speed by watching one.
+ *
  * ## Not a physics animal
  *
  * It burrows THROUGH soil rather than walking on it, so it has no footing,
@@ -92,8 +99,22 @@ export const WORM_COUNT = 3;
 export const WORM_HEADING_MIN_S = 30;
 export const WORM_HEADING_MAX_S = 60;
 
-/** How fast it swings onto a new heading. A worm does not pivot. */
-export const WORM_TURN = 0.5;
+/**
+ * How fast it swings onto a new heading, RADIANS A SECOND — and it is a
+ * hard angular limit, not an easing factor.
+ *
+ * THE TURN RADIUS HAS TO BEAT THE BORE, which is what the first cut got
+ * wrong. It eased `dir` toward the target by half the remaining angle each
+ * second, so a fresh 90-degree heading turned at about 45 degrees a second
+ * against a speed of 3 mm — a turning radius of roughly 4 mm inside a 6 mm
+ * tube. The worm was digging a knot, and it measured: with the body laid
+ * on the path, only 49% of its bones were in air and the rest were drawn
+ * through the wall of the very burrow they had just made.
+ *
+ * Radius is speed over rate, so 3 mm/s at 0.12 rad/s is 25 mm — four bores
+ * wide, which a 150 mm body can lie in.
+ */
+export const WORM_TURN = 0.12;
 
 /**
  * How far under the surface it tries to stay, in millimetres.
@@ -103,6 +124,19 @@ export const WORM_TURN = 0.5;
  * them all crawling along one plane at exactly this depth.
  */
 export const WORM_UNDER_MM = 12;
+
+/**
+ * How far apart the breadcrumbs are, in millimetres, and how many there
+ * are — together, how much body the trail can hold.
+ *
+ * Every 3 mm over 56 points is 165 mm of path, which covers the 150 mm
+ * worm with room to spare. The spacing matters more than it looks: the
+ * body is laid on the POLYLINE through these points, so a coarse trail
+ * cuts the corners of a curve and pushes the body into the wall. Five was
+ * the first choice and it cut visibly.
+ */
+export const TRAIL_STEP_MM = 3;
+export const TRAIL_POINTS = 56;
 
 const S_WANT = new THREE.Vector3();
 const S_HEAD = new THREE.Vector3();
@@ -150,15 +184,44 @@ export class Worm {
   /** Where its last bite landed. The one point its burrow is certainly at. */
   readonly lastBite = new THREE.Vector3();
 
+  /**
+   * WHERE IT HAS BEEN — its own burrow, remembered so its body can lie in
+   * it rather than through the wall.
+   *
+   * Newest first, so the head is `trail[0]` and reading the body is a walk
+   * forward through the array. Sampled by DISTANCE rather than by frame:
+   * at a fixed interval the spacing changes with the frame rate, and a
+   * body laid on frames would stretch and gather as the phone breathed.
+   *
+   * Long enough to hold the whole animal and no longer — see `TRAIL_MM`.
+   */
+  readonly trail: THREE.Vector3[] = [];
+
   constructor(
     x: number, y: number, z: number,
     private readonly rand: () => number = Math.random,
   ) {
     this.at.set(x, y, z);
+    /* Born already lying somewhere: a worm whose trail is empty has its
+     * whole body collapsed onto its head for the first second. */
+    for (let i = 0; i < TRAIL_POINTS; i += 1) {
+      this.trail.push(new THREE.Vector3(x, y, z).addScaledVector(this.dir, -i * TRAIL_STEP_MM / MM));
+    }
     this.untilTurn = WORM_HEADING_MIN_S
       + this.rand() * (WORM_HEADING_MAX_S - WORM_HEADING_MIN_S);
     wanderDir(this.rand, WORM_UNDER_MM, this.want);
     this.dir.copy(this.want);
+  }
+
+  /**
+   * Drop a breadcrumb if it has moved far enough since the last one, and
+   * forget the far end once the trail is longer than the animal.
+   */
+  private remember(): void {
+    const first = this.trail[0];
+    if (first && first.distanceTo(this.at) < TRAIL_STEP_MM / MM) return;
+    this.trail.unshift(this.at.clone());
+    while (this.trail.length > TRAIL_POINTS) this.trail.pop();
   }
 
   /** One frame. Returns whether it actually took a bite. */
@@ -173,9 +236,16 @@ export class Worm {
         + this.rand() * (WORM_HEADING_MAX_S - WORM_HEADING_MIN_S);
     }
 
-    /* Swing onto the new heading rather than snapping to it. */
-    const turn = Math.min(1, WORM_TURN * dt);
-    this.dir.addScaledVector(S_WANT.copy(this.want).sub(this.dir), turn).normalize();
+    /* Swing onto the new heading at a limited ANGULAR rate — see the note
+     * on `WORM_TURN` for why a lerp factor is the wrong tool here. */
+    const gap = this.dir.angleTo(this.want);
+    if (gap > 1e-6) {
+      const step = Math.min(gap, WORM_TURN * dt);
+      S_WANT.copy(this.dir).cross(this.want);
+      if (S_WANT.lengthSq() > 1e-12) {
+        this.dir.applyAxisAngle(S_WANT.normalize(), step).normalize();
+      }
+    }
 
     /*
      * IT ONLY MOVES WHEN IT CAN DIG. A worm drifting through soil it
@@ -186,6 +256,7 @@ export class Worm {
     if (!soil.covers(this.at.x, this.at.y, this.at.z)) return false;
 
     this.at.addScaledVector(this.dir, (WORM_STEP_MM / MM / WORM_BITE_S) * dt);
+    this.remember();
 
     this.sinceBite += dt;
     if (this.sinceBite < WORM_BITE_S) return false;

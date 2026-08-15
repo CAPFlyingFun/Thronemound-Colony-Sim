@@ -3422,10 +3422,35 @@
 .tm-gait {
   position: absolute;
   z-index: 2;
-  left: calc(max(18px, env(safe-area-inset-left)) + 150px);
-  bottom: calc(max(16px, env(safe-area-inset-bottom)) + 92px);
+  /*
+   * TEN OF AIR PAST THE PAD'S EDGE. Measured flush at first — the pad ends
+   * at 168 and the plate began at 168 — and two touch targets sharing an
+   * edge is a mis-tap on a phone whatever the code does.
+   */
+  left: calc(max(18px, env(safe-area-inset-left)) + 160px);
+  /*
+   * LOW, BESIDE THE PAD'S WAIST. Drawn level with its top in the mockup,
+   * and measured there it cut the camera-drag glass from 33% to 31% by
+   * standing in the middle of the open left side. Dropped to the pad's
+   * waist it is in the corner with the stick, out of the swipe, and still
+   * exactly where a left thumb reaches without leaving the pad.
+   */
+  bottom: calc(max(16px, env(safe-area-inset-bottom)) + 44px);
   pointer-events: none;
 }
+
+/*
+ * AND ITS PLATE TAKES TOUCHES. The box is air like every other HUD
+ * container — `pointer-events: none`, so the gaps between controls do not
+ * eat the camera drag — and the CONTROL inside it has to opt back in.
+ *
+ * Missing this made the pace latch completely dead from v0.1.64, when it
+ * moved out of `.density-lab-actions` and left the one rule that grants
+ * it. Reported as "I can't press the button to go faster or slower",
+ * blamed on the joystick beside it, and the joystick was innocent: the
+ * plate simply was not there as far as a thumb was concerned.
+ */
+.tm-gait > * { pointer-events: auto; }
 
 .tm-gait > .tm-art { width: 56px; height: 56px; }
 

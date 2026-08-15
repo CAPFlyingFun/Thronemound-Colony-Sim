@@ -164,6 +164,8 @@ import { Grit } from './islandGrit';
 import {
   Worm, WORM_BORE_MM, WORM_COUNT, type WormSoil,
 } from './islandWorm';
+import { WormBody } from './WormBody';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { warmHudArt } from './hudArt';
 import {
   crushDamage, CRUSH_SHARE, CRUSH_REACH_SLACK, CRUSH_AGAIN_AFTER,
@@ -336,6 +338,9 @@ export class IslandScene {
 
   /** The island's other diggers — see `islandWorm`. */
   private readonly worms: Worm[] = [];
+
+  /** One drawn body per worm, laid along the burrow it dug. */
+  private readonly wormBodies: WormBody[] = [];
 
   /**
    * What a worm is allowed to know about the world.
@@ -547,6 +552,20 @@ export class IslandScene {
       const y = this.walkGroundAt(x, z) - (WORM_BORE_MM * 2) / MM;
       this.worms.push(new Worm(x, y, z, rand));
     }
+    /*
+     * AND THEIR BODIES, fetched once and cloned. Off the critical path —
+     * the island is playable without them, and a worm that arrives a
+     * second late is a worm nobody noticed arriving.
+     */
+    void new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}models/earthworm.glb`)
+      .then((gltf) => {
+        for (let i = 0; i < this.worms.length; i += 1) {
+          const body = new WormBody(gltf.scene);
+          this.scene.add(body.root);
+          this.wormBodies.push(body);
+        }
+      })
+      .catch(() => { /* No worm bodies. They still dig. */ });
   }
 
   private spawnProps(): void {
@@ -749,7 +768,13 @@ export class IslandScene {
      * world rather than with the dig, because a chip outlives the stroke
      * that made it and must keep falling after DIG is let go. */
     this.grit?.tick(dt);
-    for (const w of this.worms) w.tick(dt, this.wormSoil);
+    for (let i = 0; i < this.worms.length; i += 1) {
+      this.worms[i]!.tick(dt, this.wormSoil);
+      /* And the body lies in the hole, which is the only place it fits:
+       * a 150 mm animal drawn rigid would be mostly inside the wall of the
+       * 6 mm tube it just made. See `WormBody`. */
+      this.wormBodies[i]?.layAlong(this.worms[i]!.trail);
+    }
     /* After the vitals have ticked, so the latch drops on the same frame she
      * bottoms out rather than one behind it. See `dropPaceIfSpent`. */
     this.dropPaceIfSpent();
@@ -3754,6 +3779,20 @@ export class IslandScene {
   /** For probes: cut once, the way the DIG plate does. */
   biteForTest(): void { this.bite(); }
 
+  /** For probes: how many worm bodies are drawn, and how many bones each. */
+  wormBodiesForTest(): { bones: number; visible: boolean; headMm: number[] }[] {
+    return this.wormBodies.map((b) => ({
+      bones: b.bones,
+      visible: b.root.visible,
+      headMm: [b.root.position.x * MM, b.root.position.y * MM, b.root.position.z * MM],
+    }));
+  }
+
+  /** For probes: every worm bone's world position, in world units. */
+  wormBoneWorldForTest(): number[][][] {
+    return this.wormBodies.map((b) => b.boneWorld());
+  }
+
   /** For probes: where each worm is, and how much it has eaten. */
   wormsForTest(): {
     x: number; y: number; z: number;
@@ -4367,6 +4406,7 @@ export class IslandScene {
     this.soilMaterial?.dispose();
     if (this.textures) for (const tex of Object.values(this.textures)) tex.dispose();
     this.nestView?.dispose();
+    for (const b of this.wormBodies) b.dispose();
     this.grit?.dispose();
     this.queen.dispose();
     for (const one of this.colony) one.dispose();

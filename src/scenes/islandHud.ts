@@ -902,14 +902,49 @@ export function buildControls(host: HudHost, ): void {
   canvas.addEventListener('pointerdown', (e) => {
     try { canvas.setPointerCapture(e.pointerId); } catch { /* fine */ }
     if (host.designer?.isOpen) { host.designer.handlePointerDown(e); return; }
-    if (e.clientX < window.innerWidth * 0.5 && host.stickPointer === null) {
+    /*
+     * THE STICK IS FIXED, and it has to be.
+     *
+     * Reported: "we need to make the joystick fixed as I can't press the
+     * button to go faster or slower because the joystick right now
+     * dynamically moves."
+     *
+     * It used to claim the whole LEFT HALF of the glass and jump to
+     * whatever thumb landed there — "the discoverability of a fixed pad
+     * with the ergonomics of a floating one", which was a fair trade right
+     * up until something else wanted to live on that side. v0.1.64 moved
+     * the pace latch next to the pad, and a pad that teleports onto your
+     * thumb lands ON the plate you were reaching for. My regression: the
+     * plate moved, the pad's appetite did not.
+     *
+     * So the pad stays home and the touch has to land on IT. Everything
+     * else on the left is a look-drag now, exactly as the right half
+     * already was — which is also what makes the pace plate reachable,
+     * because a tap beside the pad is no longer a tap on it.
+     *
+     * Measured against the ELEMENT rather than a remembered corner: it is
+     * bottom-anchored with safe-area insets, so where it actually is
+     * depends on the phone.
+     */
+    const pad = host.stickEl.getBoundingClientRect();
+    const onPad = e.clientX >= pad.left && e.clientX <= pad.right
+      && e.clientY >= pad.top && e.clientY <= pad.bottom;
+    if (onPad && host.stickPointer === null) {
       host.stickPointer = e.pointerId;
-      host.stickOrigin.x = e.clientX;
-      host.stickOrigin.y = e.clientY;
-      host.stickEl.style.left = `${e.clientX}px`;
-      host.stickEl.style.top = `${e.clientY}px`;
-      host.stickEl.classList.remove('is-home');
+      /* The pad's own centre, not the touch. A fixed stick measures from
+       * where it IS, so a thumb landing off-centre is already an input —
+       * which is what makes the edge of the pad mean full deflection. */
+      host.stickOrigin.x = pad.left + pad.width / 2;
+      host.stickOrigin.y = pad.top + pad.height / 2;
       host.stickEl.classList.add('is-live');
+      /* And the knob answers on the first frame rather than waiting for a
+       * move, so a tap-and-hold at the edge walks her at once. */
+      const dx = Math.max(-48, Math.min(48, e.clientX - host.stickOrigin.x));
+      const dy = Math.max(-48, Math.min(48, e.clientY - host.stickOrigin.y));
+      host.stickX = stickCurve(dx / 48);
+      host.stickY = stickCurve(-dy / 48);
+      host.routeStick();
+      host.stickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
     } else if (host.lookPointer === null) {
       host.lookPointer = e.pointerId;
       /* The stroke starts here. Whether it turns out to be a look or a
@@ -1017,10 +1052,9 @@ export function buildControls(host: HudHost, ): void {
     /* Home is a CSS position, and the inline `left`/`top` written while
      * the thumb was down would win over it — so they are cleared, not
      * overwritten with numbers this method would have to compute. */
-    host.stickEl.style.left = '';
-    host.stickEl.style.top = '';
+    /* `is-home` is permanent now — nothing ever writes an inline position,
+     * so there is nothing to clear. Only the lit state comes off. */
     host.stickEl.classList.remove('is-live');
-    host.stickEl.classList.add('is-home');
   };
   const release = (e: PointerEvent) => {
     if (host.designer?.isOpen) { host.designer.handlePointerUp(e); return; }
