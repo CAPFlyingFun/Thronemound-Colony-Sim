@@ -113,11 +113,41 @@ const ROLLS = new Set<PropSpec['kind']>(['seed', 'rock']);
  * forever, steep enough that it will not sit on the side of a mound.
  */
 const ROLL_RESTS_BELOW = 0.09;
-/** How hard the slope pushes it, and how fast rolling bleeds off. */
+/**
+ * HOW FAST IT ENDS UP GOING IS THE SLOPE'S ANSWER, NOT THE CAP'S.
+ *
+ * Reported: "the physics on the rocks and objects are too constant meaning
+ * it keeps moving at the same speed downhill or straight". Exactly right,
+ * and the arithmetic said so before the eye did.
+ *
+ * Push against linear drag settles at `ROLL_PUSH / ROLL_DRAG * slope` — a
+ * speed PROPORTIONAL to steepness, which is the behaviour wanted. But the
+ * old numbers made that 5 / 1.9 = 2.6 x slope, so anything past a slope of
+ * 0.53 — about 32 degrees, which most of this island's banks beat —
+ * settled ABOVE the 1.4 cap and got clamped to it. Every real hill
+ * therefore rolled at the same 1.4, and the cap, not the ground, was the
+ * physics. A steeper bank changed nothing; that is the "constant".
+ *
+ * So the ratio comes down to 2.0 and the cap goes UP to 2.6, which puts the
+ * clamp back where it was meant to be: a backstop against a freak frame,
+ * not the number you watch. Across the slopes the island actually has, a
+ * gentle 0.15 now creeps at 0.3 and a steep 0.9 runs at 1.8 — six times the
+ * difference, where before there was none.
+ *
+ * `ROLL_PUSH` stays at 5 because it is not a speed, it is the ACCELERATION,
+ * and 5 x slope is close to the 5/7 g sin(theta) of a solid sphere rolling
+ * without slipping at this scene's gravity of 9. Keeping it means a pebble
+ * still gathers pace over about a second rather than snapping to its
+ * terminal speed, and the ramp is most of what reads as weight.
+ */
 const ROLL_PUSH = 5;
-const ROLL_DRAG = 1.9;
-/** Nothing rolls faster than this, so a long bank cannot fling it. */
-const ROLL_MAX = 1.4;
+const ROLL_DRAG = 2.5;
+/**
+ * A backstop, not a governor: nothing here should reach it. Terminal speed
+ * on a vertical face is 2.0, so this only catches a frame where the field's
+ * normal is degenerate or dt spikes.
+ */
+const ROLL_MAX = 2.6;
 import { MM } from '../world/worldScape';
 
 /** The kinds the island seeds, and what each weighs in milligrams. */

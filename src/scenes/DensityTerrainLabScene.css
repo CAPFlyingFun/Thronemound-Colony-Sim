@@ -3450,21 +3450,24 @@
  * first time and then the next time, actually is the correct round shape".
  *
  * Nothing in this file ever set `outline`, so the plates were getting the
- * BROWSER'S DEFAULT focus ring — and a default ring is drawn on the
- * element's box. These plates are square boxes carrying round art as a
- * background, so the ring is square while the thing you can see is not. It
- * appears on the first press because that is when the button takes focus,
- * and looks like it "fixes itself" on the next one because focus has moved
- * on to whatever you pressed after it.
+ * BROWSER'S DEFAULT focus ring, drawn on the element's box — and these are
+ * square boxes carrying round art as a background, so the ring is square
+ * while the thing you can see is not. `:focus` clears it.
  *
- * `:focus-visible` rather than `:focus`, so a keyboard still gets a ring —
- * removing it outright would be taking away the only thing that says where
- * you are for anyone not using a thumb. The ring follows `border-radius`,
- * so on a plate it is round.
+ * WHAT A KEYBOARD GETS BACK IS A BOX-SHADOW, NOT AN OUTLINE. v0.1.57 put an
+ * `outline` on `:focus-visible` and that was half a fix: `outline` only
+ * learned to follow `border-radius` in Safari 16.4, and Joshua tests on a
+ * phone. On anything older that rule draws the SQUARE the note above is
+ * about — the bug, reintroduced by its own fix, in the one browser that
+ * matters here. A `box-shadow` ring has followed `border-radius` in every
+ * engine for a decade, so on a plate it is round everywhere.
+ *
+ * `:focus-visible` rather than `:focus`, so a thumb gets nothing and a
+ * keyboard still gets the only thing that says where it is.
  */
 .density-lab-button:focus { outline: none; }
 
 .density-lab-button:focus-visible {
-  outline: 2px solid #e8b44a;
-  outline-offset: 3px;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(232, 180, 74, 0.95);
 }

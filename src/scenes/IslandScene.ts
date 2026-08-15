@@ -158,6 +158,7 @@ import { CASTE_MASS_MG } from './mandibleReach';
 import { Combat, necrosis } from './islandCombat';
 import { Beetle } from './Beetle';
 import { resolveBulk, type Bulk } from './islandBulk';
+import { warmHudArt } from './hudArt';
 import { DEFAULT_TILT, strengthFor, TiltShift } from './islandTilt';
 import {
   buildQuarryBars, syncQuarryBars, type QuarryBarHost, type QuarryBars,
@@ -1751,6 +1752,17 @@ export class IslandScene {
   constructor(host: HTMLElement, private readonly boot: IslandBoot = {}) {
     this.host = host;
     host.classList.add('density-lab-host');
+    /*
+     * The plate art nothing wears until it is PRESSED, fetched now.
+     *
+     * Here rather than in `main` for two reasons. The stylesheet this reads
+     * is imported by THIS file, so anywhere earlier is a scan of a sheet
+     * that has not arrived. And `?scene=island` builds the island without
+     * ever going through the front door, so a call sited by the menu warms
+     * nothing in exactly the build a probe measures — which is how the
+     * first attempt at this was caught. See `hudArt`.
+     */
+    warmHudArt();
     /*
      * Safari in a TAB ignores `user-scalable=no` on purpose, and answers a
      * pinch with its own `gesture*` events rather than with touches — so
@@ -3451,6 +3463,31 @@ export class IslandScene {
   /** For probes: how many pairs were overlapping this frame. */
   bulkPairsForTest(): number {
     return resolveBulk(this.bulkBodies());
+  }
+
+  /**
+   * For probes: every body the shove system knows about, as plain numbers.
+   *
+   * Asked, and it is a fair question: "is the collision working between the
+   * objects and ants?" A unit test of `resolveBulk` cannot answer it,
+   * because what it tests is the arithmetic, not whether the LIVE scene
+   * hands it her and the props on the same list. This does — a probe can
+   * read the real bodies out of the running game and check the gaps.
+   */
+  bulkReportForTest(): {
+    id: string; x: number; y: number; z: number; radius: number; massMg: number;
+  }[] {
+    return this.bulkBodies().map((b) => ({
+      id: b.id, x: b.at.x, y: b.at.y, z: b.at.z, radius: b.radius, massMg: b.massMg,
+    }));
+  }
+
+  /** For probes: put a body somewhere, so a test can force an overlap. */
+  placeBodyForTest(id: string, x: number, y: number, z: number): boolean {
+    const body = this.bulkBodies().find((b) => b.id === id);
+    if (!body) return false;
+    body.at.set(x, y, z);
+    return true;
   }
 
   /** For probes: carve a hollow, so a test can dig without a shovel. */

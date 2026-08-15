@@ -166,6 +166,49 @@ describe('round things roll until they find their balance', () => {
     expect(Math.abs(p.at.x - a)).toBeLessThan(1e-6);
   });
 
+  /**
+   * The speed a roll settles at, in world units per second, measured the way
+   * an eye measures it: how far it got over the last second, once it has had
+   * long enough to stop accelerating.
+   */
+  const settledSpeed = (grade: number): number => {
+    const p = seed();
+    p.carried = false;
+    const ground = sloped(grade);
+    for (let i = 0; i < 240; i += 1) p.tick(ground, 1 / 60);
+    const from = p.at.clone();
+    for (let i = 0; i < 60; i += 1) p.tick(ground, 1 / 60);
+    /* Distance ALONG THE SLOPE, not along x. On a steep bank most of the
+     * travel is downwards, so measuring x alone reads a near-vertical face
+     * as slower than a gentle one. */
+    return p.at.distanceTo(from);
+  };
+
+  it('rolls FASTER down a steeper bank, rather than the same speed down all of them', () => {
+    /*
+     * Reported: "the physics on the rocks and objects are too constant
+     * meaning it keeps moving at the same speed downhill or straight".
+     *
+     * Push against linear drag settles at push / drag * slope, which is
+     * proportional to steepness and is the whole point — but the old ratio
+     * put that above the speed cap for any slope past about 32 degrees, so
+     * every real bank clamped to the same number and the CAP was the
+     * physics. These three grades are roughly 25, 45 and 72 degrees.
+     */
+    const gentle = settledSpeed(0.47);
+    const middling = settledSpeed(1);
+    const steep = settledSpeed(3);
+    expect(middling).toBeGreaterThan(gentle * 1.4);
+    expect(steep).toBeGreaterThan(middling * 1.2);
+  });
+
+  it('never reaches the cap on ground the island actually has', () => {
+    /* The clamp is a backstop against a degenerate normal or a spiked
+     * frame. If a hill can reach it, it has become the tuning. Even a
+     * near-vertical face must settle below it. */
+    expect(settledSpeed(20)).toBeLessThan(2.6);
+  });
+
   it('leaves flat things where they are put', () => {
     /* A twig on a bank stays; a rolling leaf would look sillier than a
      * still one. Shape decides, which is what `kind` already names. */
