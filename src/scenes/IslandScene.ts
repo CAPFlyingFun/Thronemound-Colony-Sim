@@ -159,6 +159,9 @@ import { Combat, necrosis } from './islandCombat';
 import { Beetle } from './Beetle';
 import { resolveBulk, type Bulk } from './islandBulk';
 import { warmHudArt } from './hudArt';
+import {
+  crushDamage, CRUSH_SHARE, CRUSH_REACH_SLACK, CRUSH_AGAIN_AFTER,
+} from './islandCrush';
 import { DEFAULT_TILT, strengthFor, TiltShift } from './islandTilt';
 import {
   buildQuarryBars, syncQuarryBars, type QuarryBarHost, type QuarryBars,
@@ -671,6 +674,9 @@ export class IslandScene {
     /* Bodies shove each other AFTER everything has moved itself, so what is
      * resolved is where things actually ended up. See `islandBulk`. */
     this.resolveBulk();
+    /* And a shove hard enough to be a crushing costs her. Immediately after
+     * the shove, because that is the frame the contact is known on. */
+    this.crushTick(dt);
     /* After the vitals have ticked, so the latch drops on the same frame she
      * bottoms out rather than one behind it. See `dropPaceIfSpent`. */
     this.dropPaceIfSpent();
@@ -1650,6 +1656,12 @@ export class IslandScene {
 
   /** The loose things INTERACT is for. See `islandProps.ts`. */
   readonly props: Prop[] = [];
+
+  /* Props that have already landed a crushing and are still on her — see
+   * `crushTick`, against the seconds left before it may hurt her again.
+   * Ids, not references, so a prop that is disposed of takes its entry with
+   * it rather than pinning the object. */
+  private readonly crushedBy = new Map<string, number>();
 
   /**
    * THE COLONY'S LARDER, and the first thing on this island that is the
@@ -3458,6 +3470,53 @@ export class IslandScene {
 
   private resolveBulk(): void {
     resolveBulk(this.bulkBodies());
+  }
+
+  /**
+   * RUN OVER BY SOMETHING HEAVY, and it costs her.
+   *
+   * Asked for: "we should like take some HP loss if like getting run over by
+   * a heavy rock or something, maybe like 30%".
+   *
+   * ONE EVENT, GATED ON TIME rather than on contact — see
+   * `CRUSH_AGAIN_AFTER` for the ten-charges-per-rock this replaces. A thing
+   * coming to rest on her really does touch, get shoved clear and touch
+   * again, so "are they still touching" cannot tell one crushing from six.
+   *
+   * What she is CARRYING cannot crush her, whatever it weighs: it is in her
+   * jaws, its speed is hers, and being hurt by your own load every step is
+   * not what anyone asked for.
+   */
+  private crushTick(dt: number): void {
+    const healthMax = this.vitals.absOf('health').max;
+    for (const p of this.props) {
+      const gap = Math.hypot(p.at.x - this.at.x, p.at.y - this.at.y, p.at.z - this.at.z);
+      const on = !p.carried && gap <= BODY_HALF_TALL + p.radius + CRUSH_REACH_SLACK;
+      const hurt = p.carried ? 0 : crushDamage(p.massMg, p.speed, healthMax);
+
+      const left = this.crushedBy.get(p.id);
+      if (left !== undefined) {
+        /*
+         * IT HAS TO HAVE WAITED, AND IT HAS TO BE OVER. The timer alone
+         * still charged twice for one stone — a rock that lands on her is
+         * shoved clear, drops back and is STILL rolling across her a
+         * second and a half later, which is the same event, not a new one.
+         * So it is forgotten once the wait is up and it has either gone
+         * quiet or come off her. A rock that rolls away, stops and then
+         * comes down the next bank clears on the second of those and hurts
+         * her again, correctly.
+         */
+        const next = left - dt;
+        if (next <= 0 && (hurt <= 0 || !on)) this.crushedBy.delete(p.id);
+        else this.crushedBy.set(p.id, Math.max(0, next));
+        continue;
+      }
+
+      if (!on || hurt <= 0) continue;
+      this.crushedBy.set(p.id, CRUSH_AGAIN_AFTER);
+      this.vitals.damage(hurt);
+      this.toastCombat(hurt >= healthMax * CRUSH_SHARE ? 'CRUSHED' : 'STRUCK');
+    }
   }
 
   /** For probes: how many pairs were overlapping this frame. */

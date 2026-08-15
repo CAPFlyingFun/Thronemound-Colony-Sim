@@ -193,13 +193,19 @@ describe('round things roll until they find their balance', () => {
      * proportional to steepness and is the whole point — but the old ratio
      * put that above the speed cap for any slope past about 32 degrees, so
      * every real bank clamped to the same number and the CAP was the
-     * physics. These three grades are roughly 25, 45 and 72 degrees.
+     * physics.
+     *
+     * These three grades are roughly 17, 39 and 58 degrees. All three are
+     * BANKS and not walls: past about 60 the contact stops being a floor
+     * and `pushOut` treats it as something to stop against instead, which
+     * is a different behaviour and not what this is measuring. An earlier
+     * draft used 72 and was quietly testing the wall path.
      */
-    const gentle = settledSpeed(0.47);
-    const middling = settledSpeed(1);
-    const steep = settledSpeed(3);
-    expect(middling).toBeGreaterThan(gentle * 1.4);
-    expect(steep).toBeGreaterThan(middling * 1.2);
+    const gentle = settledSpeed(0.3);
+    const middling = settledSpeed(0.8);
+    const steep = settledSpeed(1.6);
+    expect(middling).toBeGreaterThan(gentle * 2);
+    expect(steep).toBeGreaterThan(middling * 1.3);
   });
 
   it('never reaches the cap on ground the island actually has', () => {
@@ -207,6 +213,59 @@ describe('round things roll until they find their balance', () => {
      * frame. If a hill can reach it, it has become the tuning. Even a
      * near-vertical face must settle below it. */
     expect(settledSpeed(20)).toBeLessThan(2.6);
+  });
+
+  it('runs out and STOPS when a bank gives way to the flat', () => {
+    /*
+     * Asked: "do the objects have friction that will slow them down, so if
+     * it was on a steep slope and gets to a flat part, will it naturally
+     * slow down and stop based on friction and gravity, instead of still
+     * crawling along?"
+     *
+     * There was friction, and it was the wrong kind: drag proportional to
+     * speed decays exponentially and never lands. Measured on this exact
+     * setup before the fix, distance covered in each second on the level:
+     *
+     *     0.25333  0.05161  0.01052  0.00214  0.00044  0.00006
+     *
+     * Visibly creeping into the third second. Constant rolling resistance
+     * is what ends a roll, so the test is that it comes to a genuine,
+     * early, PERMANENT stop rather than an ever-smaller drift.
+     */
+    const p = new Prop('stone', PROP_SPECS.stone!, 0, 0, 0);
+    p.carried = false;
+    const hill = sloped(3);
+    for (let i = 0; i < 300; i += 1) p.tick(hill, 1 / 60);
+    expect(p.speed).toBeGreaterThan(1);
+
+    /* A level plane where it currently is, so the run-out is measured and
+     * not a fall onto a floor that moved. */
+    const y0 = p.at.y;
+    const flat: PropGround = {
+      floorUnder: () => y0,
+      soilNormal: (_x, _y, _z, into) => { into.set(0, 1, 0); },
+      insideBy: (_x, y) => y0 - y,
+    };
+
+    const from = p.at.x;
+    for (let i = 0; i < 45; i += 1) p.tick(flat, 1 / 60);
+    /*
+     * WHERE IT IS, not what `speed` says. A prop at rest still reports a
+     * fraction of a fall: it settles a hair, is pushed back out, and does
+     * it again, so the fall term never sits at a clean zero. Position is
+     * the thing the question was about and the thing that cannot lie.
+     */
+    const atThreeQuarters = p.at.x;
+    for (let i = 0; i < 15; i += 1) p.tick(flat, 1 / 60);
+    const firstSecond = p.at.x - from;
+    /* Already still by three quarters of a second, and inside a body
+     * length or so of ground: about 2.6 mm at MM = 5. */
+    expect(p.at.x).toBe(atThreeQuarters);
+    expect(firstSecond).toBeLessThan(0.75);
+
+    /* And it stays stopped. The old curve was still moving here. */
+    for (let i = 0; i < 300; i += 1) p.tick(flat, 1 / 60);
+    expect(p.at.x).toBe(atThreeQuarters);
   });
 
   it('leaves flat things where they are put', () => {

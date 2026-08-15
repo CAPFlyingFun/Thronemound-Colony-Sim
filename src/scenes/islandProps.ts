@@ -106,11 +106,16 @@ const PROP_FALL_MAX = 6;
 const ROLLS = new Set<PropSpec['kind']>(['seed', 'rock']);
 
 /**
- * Below this slope it has found its balance and stops.
+ * Below this slope it has found its balance and stays there.
  *
  * The slope is `sin` of the angle off level, so 0.09 is about five degrees
  * — shallow enough that a pebble settles in a dimple rather than creeping
  * forever, steep enough that it will not sit on the side of a mound.
+ *
+ * It is no longer TESTED for. It is the angle at which the slope's push and
+ * the rolling resistance are equal, so `ROLL_FRICTION` is derived from it
+ * and the resting angle comes out of the arithmetic rather than out of a
+ * second rule that had to be kept in step with the first.
  */
 const ROLL_RESTS_BELOW = 0.09;
 /**
@@ -148,6 +153,39 @@ const ROLL_DRAG = 2.5;
  * normal is degenerate or dt spikes.
  */
 const ROLL_MAX = 2.6;
+
+/**
+ * ROLLING RESISTANCE, WHICH IS WHAT ACTUALLY STOPS IT.
+ *
+ * Asked: "do the objects have friction that will slow them down, so if it
+ * was on a steep slope and gets to a flat part, will it naturally slow down
+ * and stop based on friction and gravity, instead of still crawling along?"
+ *
+ * There WAS friction, and it was the wrong kind. `ROLL_DRAG` takes a share
+ * of the speed every second, so what is left decays exponentially and never
+ * reaches nothing. Measured on a stone leaving a steep bank onto the level,
+ * one line per second of travel:
+ *
+ *     0.25333  0.05161  0.01052  0.00214  0.00044  0.00006
+ *
+ * It is still visibly creeping in the third second and still technically
+ * moving in the sixth. That is the crawl in the report, and it is inherent
+ * to drag: a force proportional to speed cannot remove the last of it.
+ *
+ * Real rolling resistance is near enough a CONSTANT retarding force — it
+ * comes from the contact patch deforming, which does not care how fast the
+ * thing is going. A constant deceleration reaches zero at a definite moment
+ * and STAYS there, which is both the honest model and the behaviour asked
+ * for. Drag stays alongside it because it is what makes the terminal speed
+ * proportional to the slope; friction is what ends the roll.
+ *
+ * 0.45 is `ROLL_PUSH * ROLL_RESTS_BELOW` on purpose, so the slope a thing
+ * comes to rest on is unchanged at about five degrees — it is now a
+ * CONSEQUENCE of the friction rather than a separate threshold, which is
+ * why the old explicit test for it is gone. A stone now runs out in about
+ * nine tenths of a second and 2.6 mm, and then it is still.
+ */
+const ROLL_FRICTION = ROLL_PUSH * ROLL_RESTS_BELOW;
 import { MM } from '../world/worldScape';
 
 /** The kinds the island seeds, and what each weighs in milligrams. */
@@ -318,6 +356,28 @@ export class Prop implements Portable {
   get radius(): number { return this.spec.halfMm / MM; }
 
   /**
+   * How fast it is MOVING, world units a second — rolling and falling both.
+   *
+   * Read by the scene to decide whether a contact is a nudge or a crushing
+   * (see `islandCrush`), and the fall belongs in it: a stone dropped down a
+   * shaft onto her is the same injury as one that rolls into her, and a
+   * version of this that counted only `roll` would have said a rock landing
+   * on her head was harmless. The two are perpendicular, so they combine as
+   * a magnitude rather than a sum.
+   *
+   * NOT A CLEAN ZERO AT REST. A prop sitting on the ground settles by a
+   * hair each frame, is pushed back out, and does it again, so the fall
+   * term hovers around one frame of gravity — 0.15 — rather than nothing.
+   * That is under the crush system's free band for everything the island
+   * holds, but it is a real floor under this number, and anything that
+   * wants "is it moving" should compare positions instead.
+   *
+   * The vectors themselves stay private — nothing outside is allowed to
+   * steer a rolling thing.
+   */
+  get speed(): number { return Math.hypot(this.roll.length(), this.fall); }
+
+  /**
    * PUSH THE SHAPE OUT OF THE SOIL, and report which way it was pushed.
    *
    * Every hull point is asked how deep it is; the deepest one wins and the
@@ -389,13 +449,27 @@ export class Prop implements Portable {
     /* Gravity, less the part the ground holds up: the downhill tangent. */
     ROLL_DOWN.set(0, -1, 0).addScaledVector(ROLL_N, ROLL_N.y);
     const slope = ROLL_DOWN.length();
-    if (slope > ROLL_RESTS_BELOW) {
+    /*
+     * The push goes on at EVERY slope now, with no "is it steep enough"
+     * test in front of it. Friction is what decides whether a bank can
+     * move the thing at all: below about five degrees the constant bite
+     * below takes back more than the slope put in, so it never gets going.
+     * One rule instead of a rule and a threshold that had to agree.
+     */
+    if (slope > 1e-6) {
       ROLL_DOWN.multiplyScalar(1 / slope);
       this.roll.addScaledVector(ROLL_DOWN, ROLL_PUSH * slope * dt);
     }
-    /* Rolling resistance, and it is what makes "finds its balance" a state
-     * rather than an asymptote — below a crawl on level ground it stops. */
+    /* Drag: proportional to speed, and what sets the terminal speed on a
+     * bank. It cannot stop anything — see `ROLL_FRICTION`. */
     this.roll.multiplyScalar(Math.max(0, 1 - ROLL_DRAG * dt));
+    /* Rolling resistance: a constant bite out of the speed, whatever the
+     * speed is. Taken as a length so it never reverses the direction of
+     * travel — friction stops a thing, it does not drive it backwards. */
+    const speed = this.roll.length();
+    const bite = ROLL_FRICTION * dt;
+    if (speed <= bite) { this.roll.set(0, 0, 0); return; }
+    this.roll.multiplyScalar((speed - bite) / speed);
     if (this.roll.lengthSq() > ROLL_MAX * ROLL_MAX) {
       this.roll.setLength(ROLL_MAX);
     }
