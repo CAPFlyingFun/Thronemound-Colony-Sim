@@ -84,9 +84,22 @@ export const WALK_SPEED = 1.8;
  * it is 3 x 1.5 = 4.5 units, 22.5 mm/s. `probe:gait` measured 21.5 and that
  * is what tripped it up.
  *
- * 16 mm/s asked for against a 9 mm/s walk is 16/9.
+ * 2.5x THE WALK — 22.5 mm/s, and chosen as a multiple rather than derived
+ * from a millimetre figure because that is what this number IS.
+ *
+ * It went to 16/9 for one version, which cut the sprint 29% from where it
+ * had been, and the cut was accidental: the old SPRINT of 3 was read as
+ * "3 world units, 15 mm/s" when it actually meant 3 x the walk, 22.5. Put
+ * back deliberately, with the reasoning stated: "gives the player a
+ * noticeable and satisfying burst when burning stamina".
+ *
+ * 2.5 body lengths a second on a 9 mm queen. That is slow for an ant and
+ * meant to be — a worker is 2-6 mm and runs at 9-10 BL/s, so she is roughly
+ * a quarter of a worker's pace in body lengths while being only about half
+ * of it in absolute mm/s. Heavy and deliberate, which is what a gravid
+ * founding queen is.
  */
-export const SPRINT = 16 / 9;
+export const SPRINT = 2.5;
 /*
  * CRAWL — the third pace, and the one the wave gait was written for.
  *
