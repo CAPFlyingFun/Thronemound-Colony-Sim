@@ -690,6 +690,41 @@ export const CHARGES_MAX = 3; //          in flight at once, held press or not
 export const CHARGE_POP_GRIT = 18; //     spoil chips in the landing pop
 
 /**
+ * THE CHARGE IS A FIREBALL 🔥 — she is, after all, some kind of fire ant.
+ *
+ * Three ideas, all theatre and one of them mechanical:
+ *
+ * THE BEAD BURNS. The flat yellow dot reads as a pebble; a bead that
+ * flickers between a hot core and a flare colour, swelling and shrinking
+ * a fraction as it flies, reads as something ALIGHT. The flicker is keyed
+ * off path flown, not wall-clock, so a probe stepping the sim by hand
+ * sees the same fire a player does.
+ *
+ * IT SHEDS SPARKS. Every few millimetres of flight an ember chip is
+ * thrown backwards off the bead — the same instanced-chip machinery as
+ * the spoil, in ember orange, so the whole trail is one extra draw call.
+ *
+ * AND IT SMOULDERS. The mechanical part: a landing does not spend the
+ * whole charge at once. After the landing pop the fire keeps eating —
+ * a few more scoop-ticks, each a beat apart, each burrowing one step
+ * further along the line of flight — so the fireball's total hole is a
+ * short burnt bore, not a single pocket. The fire goes out on its own
+ * when the ticks are spent, or EARLY the moment a tick meets nothing it
+ * can burn (bark, air, the streamed window's edge): fire without fuel is
+ * not an error, it is just out. Totals: the pop plus three ticks is four
+ * scoops for one 1.1 s cooldown, against the jaws' scoop-per-press at no
+ * cooldown at all — the throw stays the slower way to move soil.
+ */
+export const BURN_TICKS = 3; //           extra scoops after the landing pop
+export const BURN_TICK_S = 0.55; //       beat between them — legible, not a drumroll
+export const BURN_STEP_FRAC = 0.75; //    how far each tick burrows, in scoop-depths
+export const BURN_EMBERS = 6; //          ember chips puffed out per tick
+export const EMBER_TRAIL_GAP_MM = 5; //   flight millimetres between shed sparks
+export const EMBER_COLOR = 0xff7a2a; //   the chips — ember orange, unlit
+export const FIRE_CORE = 0xffd23f; //     the bead's hot centre
+export const FIRE_FLARE = 0xff4f1f; //    what it flickers towards
+
+/**
  * How hard each stroke's own hole is relaxed afterwards, and how often.
  *
  * Halfway to the neighbourhood mean, twice — one gentle pass took the

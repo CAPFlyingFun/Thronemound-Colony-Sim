@@ -18,7 +18,8 @@ import * as THREE from 'three';
 import { CELL_SIZE, MM } from '../world/worldScape';
 import {
   CHARGES_MAX, CHARGE_GRAVITY_MM, CHARGE_RADIUS_MM,
-  CHARGE_RANGE_MM, CHARGE_REACH_MM, CHARGE_SPEED_MM, NOSE_REACH,
+  CHARGE_RANGE_MM, CHARGE_REACH_MM, CHARGE_SPEED_MM,
+  EMBER_TRAIL_GAP_MM, FIRE_CORE, FIRE_FLARE, NOSE_REACH,
 } from './islandTuning';
 
 /**
@@ -55,6 +56,12 @@ export interface ChargeWorld {
    * the two-limit note in `step`.
    */
   readonly at: THREE.Vector3;
+  /**
+   * A spark shed off the flying bead — the fireball's trail. Optional
+   * because the flight owes the tests nothing visual; the scene wires it
+   * to the ember chips.
+   */
+  ember?(at: THREE.Vector3, along: THREE.Vector3): void;
 }
 
 interface Charge {
@@ -63,10 +70,14 @@ interface Charge {
   vel: THREE.Vector3;
   /** Path length flown so far — the throw's budget, not a timer. */
   gone: number;
+  /** Path since the last shed spark — the trail's own little odometer. */
+  sinceEmber: number;
   mesh: THREE.Mesh;
 }
 
 const S_DIR = new THREE.Vector3();
+const S_CORE = new THREE.Color(FIRE_CORE);
+const S_FLARE = new THREE.Color(FIRE_FLARE);
 
 export class DigCharges {
   private readonly pool: Charge[] = [];
@@ -91,12 +102,14 @@ export class DigCharges {
         at: new THREE.Vector3(),
         vel: new THREE.Vector3(),
         gone: 0,
+        sinceEmber: 0,
         /* A small bright bead, unlit on purpose: down a tunnel there is no
          * light to catch, and a charge you cannot see is a fizzle you
-         * cannot explain. */
+         * cannot explain. It BURNS — flicker and trail in `step` — so the
+         * base colour here is only the fire's cold start. */
         mesh: new THREE.Mesh(
           new THREE.SphereGeometry(CHARGE_RADIUS_MM / MM, 10, 8),
-          new THREE.MeshBasicMaterial({ color: 0xffd23f }),
+          new THREE.MeshBasicMaterial({ color: FIRE_CORE }),
         ),
       };
       this.world.scene.add(slot.mesh);
@@ -104,6 +117,7 @@ export class DigCharges {
     }
     slot.live = true;
     slot.gone = 0;
+    slot.sinceEmber = 0;
     slot.at.copy(origin);
     slot.vel.copy(aim).normalize().multiplyScalar(CHARGE_SPEED_MM / MM);
     slot.mesh.position.copy(slot.at);
@@ -133,7 +147,16 @@ export class DigCharges {
          * falls at the floor, which is what makes the arc legible. */
         c.vel.y -= (CHARGE_GRAVITY_MM / MM) * sub;
         c.at.addScaledVector(c.vel, sub);
-        c.gone += c.vel.length() * sub;
+        const flown = c.vel.length() * sub;
+        c.gone += flown;
+        /* THE TRAIL — a spark every few millimetres of PATH, so a slow
+         * lob and a flat one shed at the same spacing and the arc is
+         * written in embers behind the bead. */
+        c.sinceEmber += flown;
+        if (c.sinceEmber >= EMBER_TRAIL_GAP_MM / MM) {
+          c.sinceEmber = 0;
+          this.world.ember?.(c.at, c.vel);
+        }
         if (this.world.groundSolidAt(c.at.x, c.at.y, c.at.z)) {
           c.live = false;
           c.mesh.visible = false;
@@ -170,7 +193,22 @@ export class DigCharges {
           break;
         }
       }
-      if (c.live) c.mesh.position.copy(c.at);
+      if (c.live) {
+        c.mesh.position.copy(c.at);
+        /*
+         * THE FLICKER — keyed off path flown, not the wall clock, so a
+         * probe stepping the sim by hand sees the same fire a player
+         * does. Two incommensurate sine frequencies beat against each
+         * other, which is as close to firelight as one line gets; the
+         * bead swells a sixth and leans from core yellow towards flare
+         * red as it flares.
+         */
+        const w = c.gone * MM;
+        const flare = 0.5 + 0.25 * Math.sin(w * 5.1) + 0.25 * Math.sin(w * 13.7);
+        c.mesh.scale.setScalar(1 + 0.17 * flare);
+        (c.mesh.material as THREE.MeshBasicMaterial).color
+          .lerpColors(S_CORE, S_FLARE, flare * 0.8);
+      }
     }
   }
 

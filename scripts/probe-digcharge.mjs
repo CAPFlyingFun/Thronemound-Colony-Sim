@@ -83,6 +83,10 @@ const dirt = await page.evaluate(() => {
     landedAll: s.chargesForTest() === 0,
     steps,
     noteOn: el?.classList.contains('is-on') ?? false,
+    /* THE FIREBALL'S SECOND ACT: a landing that carved must leave a fire
+     * still eating — read the instant the last bead lands, before the
+     * smoulder's own ticks can spend it. */
+    burning: s.burnsForTest(),
   };
 });
 /* The spoil pop is COUNTED by the render loop's grit.step, not by the
@@ -92,12 +96,30 @@ await page.waitForTimeout(150);
 dirt.grit = await page.evaluate(() => window.islandScene.gritLiveForTest());
 await page.screenshot({ path: '/tmp/charge-dirt.png' });
 
+/* And the fire goes OUT by itself: step the sim through every burn beat
+ * plus slack, then confirm nothing is still alight — a smoulder that
+ * never dies would carve the hill forever. Embers are checked mid-burn,
+ * off a rendered frame, the same way the grit is. */
+const burn = await page.evaluate(() => {
+  const s = window.islandScene;
+  s.stepForTest(1 / 60, 40); // into the first beat...
+  return { midBurn: s.burnsForTest() };
+});
+await page.waitForTimeout(150);
+burn.embers = await page.evaluate(() => window.islandScene.embersLiveForTest());
+burn.after = await page.evaluate(() => {
+  const s = window.islandScene;
+  s.stepForTest(1 / 60, 180); // ...and through every remaining one.
+  return s.burnsForTest();
+});
+
 const verdict = {
-  sky, dirt, errors,
+  sky, dirt, burn, errors,
   /* The sky throw lands now rather than fizzling — see the note above the
    * `sky` block. So neither throw should raise the miss note. */
   pass: sky.flying === 1 && sky.landedAll && !sky.noteOn
     && dirt.flying === 1 && dirt.landedAll && dirt.grit > 0 && !dirt.noteOn
+    && dirt.burning >= 1 && burn.after === 0
     && errors.length === 0,
 };
 console.log(JSON.stringify(verdict, null, 2));

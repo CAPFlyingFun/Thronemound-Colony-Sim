@@ -3,7 +3,8 @@ import * as THREE from 'three';
 import { DigCharges, launchPoint } from '../src/scenes/digCharge';
 import { chargeImpact, type DigHost } from '../src/scenes/islandDig';
 import {
-  CHARGES_MAX, CHARGE_RANGE_MM, CHARGE_REACH_MM, NOSE_REACH, SCOOP_DEEP_MM,
+  CHARGES_MAX, CHARGE_RANGE_MM, CHARGE_REACH_MM, EMBER_TRAIL_GAP_MM,
+  NOSE_REACH, SCOOP_DEEP_MM,
 } from '../src/scenes/islandTuning';
 import {
   CAP_PLANES, CELL_MM, CELL_SIZE, MM, TILE_CELLS,
@@ -128,6 +129,39 @@ describe('the flight', () => {
     charges.dispose();
     expect(scene.removed).toBe(scene.added);
     expect(charges.count()).toBe(0);
+  });
+
+  it('writes its arc in embers, spaced by path flown', () => {
+    /* The fireball's trail: a spark every EMBER_TRAIL_GAP_MM of PATH.
+     * Over a fizzled flight the spark count must match the path budget,
+     * give or take the sub-step quantisation — a trail keyed to frames
+     * or wall-clock would thin out exactly when a lob slows at its
+     * apex, which is where the arc most needs writing. */
+    const sparks: THREE.Vector3[] = [];
+    const scene = { add() {}, remove() {} };
+    const charges = new DigCharges(
+      {
+        scene: scene as unknown as THREE.Scene,
+        groundSolidAt: () => false,
+        at: new THREE.Vector3(),
+        ember: (at) => sparks.push(at.clone()),
+      },
+      () => {},
+      () => {},
+    );
+    charges.lob(new THREE.Vector3(), new THREE.Vector3(0, 0.4, 1).normalize());
+    const dt = 1 / 60;
+    for (let t = 0; t < 4 && charges.count() > 0; t += dt) charges.step(dt);
+    /* This throw dies at the WINDOW's edge, not the path budget — see
+     * the two-limit note in `step` — so the floor is keyed to the reach
+     * (its path is at least its displacement) and the ceiling to the
+     * budget no flight may outspend. */
+    expect(sparks.length).toBeGreaterThanOrEqual(
+      CHARGE_REACH_MM / EMBER_TRAIL_GAP_MM - 1,
+    );
+    expect(sparks.length).toBeLessThanOrEqual(CHARGE_RANGE_MM / EMBER_TRAIL_GAP_MM + 1);
+    /* And the sparks trace a path, not a point. */
+    expect(sparks[0]!.distanceTo(sparks[sparks.length - 1]!)).toBeGreaterThan(0.5);
   });
 
   it('caps how many fly at once, and says no to the rest', () => {

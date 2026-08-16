@@ -93,7 +93,12 @@ export class Grit {
 
   private readonly dummy = new THREE.Object3D();
 
-  constructor(private readonly rand: () => number = Math.random) {
+  constructor(
+    private readonly rand: () => number = Math.random,
+    /* Soil by default; the fireball's ember trail builds a second Grit in
+     * ember orange — same pool, same one draw call, different colour. */
+    color = 0x6b543a,
+  ) {
     this.mesh = new THREE.InstancedMesh(
       /* A tetrahedron, not a sphere: at a third of a millimetre nobody
        * counts its faces, and four of them is the cheapest thing that
@@ -105,7 +110,7 @@ export class Grit {
        * exactly where this is most wanted. At this size shading is invisible
        * anyway, so a flat soil colour is the honest trade.
        */
-      new THREE.MeshBasicMaterial({ color: 0x6b543a }),
+      new THREE.MeshBasicMaterial({ color }),
       GRIT_CAP,
     );
     this.mesh.frustumCulled = false;

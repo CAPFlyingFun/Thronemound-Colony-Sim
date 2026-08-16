@@ -142,6 +142,7 @@ import {
   CHAMBER_CAM_NEAR, COLONIST_SPEED, COLONIST_TURN, COLONIST_ARRIVE,
   COLONIST_ROAM, TROPHALLAXIS_REACH, TROPHALLAXIS_RATE, CARRY_DELIVER_REACH,
   FIGHT_NOTICE, CHARGE_COOLDOWN_S, CHARGE_RANGE_MM,
+  BURN_EMBERS, EMBER_COLOR,
 } from './islandTuning';
 import { Colonist } from './Colonist';
 import { SoilQuery } from './soilQuery';
@@ -187,10 +188,11 @@ import {
   PROP_SCATTER, PROP_SPECS, Prop, type PropGround,
 } from './islandProps';
 import {
-  bite, biteCentre, biteRay, boreAim, chargeImpact, enqueueBounds,
-  updateAimDebug, type DigHost,
+  bite, biteCentre, biteRay, boreAim, carveScoop, chargeImpact,
+  enqueueBounds, updateAimDebug, type DigHost,
 } from './islandDig';
 import { DigCharges, launchPoint } from './digCharge';
+import { Smolders } from './digBurn';
 import {
   readSpine, refreshAim, simulate, type BodyHost,
 } from './islandBody';
@@ -353,6 +355,14 @@ export class IslandScene {
   /** Seconds until the next lob is allowed — the guardrail that keeps a
    *  held stroke over a canyon from carpeting the far wall. */
   private chargeCooldown = 0;
+
+  /** Ember chips — the fireball's trail and the smoulder's puffs. A
+   *  second Grit in ember orange, so the whole fire is one draw call. */
+  private embers: Grit | null = null;
+
+  /** Fires still eating where charges landed — see `digBurn`. Lazy for
+   *  the same reason the charges are. */
+  private burns: Smolders | null = null;
 
   /** The island's other diggers — see `islandWorm`. */
   /**
@@ -937,6 +947,7 @@ export class IslandScene {
      * world rather than with the dig, because a chip outlives the stroke
      * that made it and must keep falling after DIG is let go. */
     this.grit?.tick(dt);
+    this.embers?.tick(dt);
     /* The walkers, on the SOIL — `footingFrom`, not the stale heightfield.
      * See the note at the top of `Critter`. */
     for (const one of this.critters) {
@@ -2136,6 +2147,8 @@ export class IslandScene {
 
     this.grit = new Grit();
     this.scene.add(this.grit.mesh);
+    this.embers = new Grit(Math.random, EMBER_COLOR);
+    this.scene.add(this.embers.mesh);
 
     this.scene.background = new THREE.Color(0x9cc4e0);
     this.skyColour.copy(this.scene.background as THREE.Color);
@@ -2974,6 +2987,8 @@ export class IslandScene {
      * the sim by hand flies them too. */
     this.chargeCooldown = Math.max(0, this.chargeCooldown - dt);
     this.charges?.step(dt);
+    /* And the fires still eating where charges landed. */
+    this.burns?.step(dt);
   }
 
   private refreshAim(): void { refreshAim(this.bodyHost); }
@@ -3017,11 +3032,27 @@ export class IslandScene {
           /* The soil is streamed into a window centred on HER, so a charge
            * that flies past its edge lands where nothing can be carved. */
           at: this.at,
+          /* The trail — sparks shed backwards off the flying bead. */
+          ember: (at, along) => { this.embers?.burst(at, along, 1); },
         },
         /* A landing carves; a landing on bark carves NOTHING, and wood
-         * shrugging off the charge earns the same note a fizzle does. */
+         * shrugging off the charge earns the same note a fizzle does.
+         * A landing that DID carve stays alight — the smoulder keeps
+         * eating along the line of flight for a few beats more. */
         (at, dir) => {
           if (chargeImpact(this.digHost, at, dir) === 0) this.biteMiss();
+          /* The glow bead is skipped when the landing is at her nose —
+           * a steep lob onto the ground in front of her would otherwise
+           * park a flickering ember centimetres from the first-person
+           * lens and fill the frame with yellow. The burn is unchanged;
+           * its ember puffs still mark the spot. */
+          else {
+            this.smolders().start(
+              at, dir,
+              this.camera.position.distanceToSquared(at)
+                > (NOSE_REACH * 2) ** 2,
+            );
+          }
         },
         () => this.biteMiss(),
       );
@@ -3032,8 +3063,31 @@ export class IslandScene {
     if (this.charges.lob(from, aim)) this.chargeCooldown = CHARGE_COOLDOWN_S;
   }
 
+  /**
+   * The smoulder pool, built the first time a charge actually lands on
+   * something it can burn. Each tick is a scoop cut by the same shared
+   * carve the jaws use — no grit count passed, so a burn tick's chips are
+   * a bite's quiet handful; the EMBERS are its fanfare.
+   */
+  private smolders(): Smolders {
+    if (!this.burns) {
+      this.burns = new Smolders(
+        this.scene,
+        (at, dir) => carveScoop(this.digHost, at, dir),
+        (at, along) => { this.embers?.burst(at, along, BURN_EMBERS); },
+      );
+    }
+    return this.burns;
+  }
+
   /** How many charges are mid-air — the probe's window. */
   chargesForTest(): number { return this.charges?.count() ?? 0; }
+
+  /** How many landed fires are still eating — the probe's other window. */
+  burnsForTest(): number { return this.burns?.count() ?? 0; }
+
+  /** Ember chips in the air — flight trail and smoulder puffs alike. */
+  embersLiveForTest(): number { return this.embers?.live ?? 0; }
 
   /** For probes: the throw's own range, so a report cannot quote a stale
    *  constant it was written beside. */
@@ -5045,6 +5099,8 @@ export class IslandScene {
     this.nestView?.dispose();
     for (const b of this.wormBodies) b.dispose();
     this.grit?.dispose();
+    this.embers?.dispose();
+    this.burns?.dispose();
     this.queen.dispose();
     for (const one of this.colony) one.dispose();
     for (const q of this.quarry) q.dispose();
