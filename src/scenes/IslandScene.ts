@@ -141,7 +141,7 @@ import {
   BODY_HALF_TALL, BODY_FLOOR_MARGIN, AIM_LIMIT, CHAMBER_CAM_FAR,
   CHAMBER_CAM_NEAR, COLONIST_SPEED, COLONIST_TURN, COLONIST_ARRIVE,
   COLONIST_ROAM, TROPHALLAXIS_REACH, TROPHALLAXIS_RATE, CARRY_DELIVER_REACH,
-  FIGHT_NOTICE, CHARGE_COOLDOWN_S, CHARGE_RANGE_MM,
+  FIGHT_NOTICE, CHARGE_COOLDOWN_S, CHARGE_RANGE_MM, CHARGE_REACH_MM,
   BURN_EMBERS, EMBER_COLOR,
 } from './islandTuning';
 import { Colonist } from './Colonist';
@@ -2147,8 +2147,6 @@ export class IslandScene {
 
     this.grit = new Grit();
     this.scene.add(this.grit.mesh);
-    this.embers = new Grit(Math.random, EMBER_COLOR);
-    this.scene.add(this.embers.mesh);
 
     this.scene.background = new THREE.Color(0x9cc4e0);
     this.skyColour.copy(this.scene.background as THREE.Color);
@@ -3033,7 +3031,7 @@ export class IslandScene {
            * that flies past its edge lands where nothing can be carved. */
           at: this.at,
           /* The trail — sparks shed backwards off the flying bead. */
-          ember: (at, along) => { this.embers?.burst(at, along, 1); },
+          ember: (at, along) => { this.emberGrit().burst(at, along, 1); },
         },
         /* A landing carves; a landing on bark carves NOTHING, and wood
          * shrugging off the charge earns the same note a fizzle does.
@@ -3073,11 +3071,38 @@ export class IslandScene {
     if (!this.burns) {
       this.burns = new Smolders(
         this.scene,
-        (at, dir) => carveScoop(this.digHost, at, dir),
-        (at, along) => { this.embers?.burst(at, along, BURN_EMBERS); },
+        (at, dir) => {
+          /*
+           * THE FIRE OBEYS THE SAME EDGE THE FLIGHT DOES. `CHARGE_REACH_
+           * MM` is where the streamed window stops answering and — the
+           * quieter failure — where `TerrainStream.remember` stops
+           * RECORDING, so a scoop cut past it would vanish on reload.
+           * The flight checks it every sub-step; a burn lives 1.65 s
+           * during which she can walk and drag the window with her, so
+           * each tick asks again from her CURRENT position. Past the
+           * edge is not an error, it is just no fuel: zero, fire out.
+           */
+          if (Math.hypot(at.x - this.at.x, at.z - this.at.z)
+            > CHARGE_REACH_MM / MM) return 0;
+          return carveScoop(this.digHost, at, dir);
+        },
+        (at, along) => { this.emberGrit().burst(at, along, BURN_EMBERS); },
       );
     }
     return this.burns;
+  }
+
+  /**
+   * The ember chips, built on the first spark rather than with the scene:
+   * a session that never throws a fireball should not pay an instanced
+   * mesh's matrix upload every frame for chips it will never see.
+   */
+  private emberGrit(): Grit {
+    if (!this.embers) {
+      this.embers = new Grit(Math.random, EMBER_COLOR);
+      this.scene.add(this.embers.mesh);
+    }
+    return this.embers;
   }
 
   /** How many charges are mid-air — the probe's window. */

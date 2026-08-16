@@ -685,7 +685,16 @@ export const CHARGE_REACH_MM = (TILE_CELLS * CELL_SIZE * MM) * 2;
  */
 export const CHARGE_RANGE_MM = Math.round(CHARGE_REACH_MM * 1.6);
 export const CHARGE_RADIUS_MM = 1.2; //   the bead the eye follows
-export const CHARGE_COOLDOWN_S = 1.1; //  slower than the jaws, on purpose
+/*
+ * SLOWER THAN THE JAWS, ON PURPOSE — and retuned when the charge caught
+ * fire. A fireball is worth the pop plus `BURN_TICKS` smoulder scoops
+ * (four in all), and at the old 1.1 s that out-dug a held jaw stroke
+ * (0.42 s a scoop — the very thing the throw must not do. 2.4 s keeps
+ * the fireball's four under the jaws' cadence, and reads as her catching
+ * her breath after a throw. It also outlives a burn (three beats of
+ * `BURN_TICK_S`), so one thrower can never stack two fires.
+ */
+export const CHARGE_COOLDOWN_S = 2.4;
 export const CHARGES_MAX = 3; //          in flight at once, held press or not
 export const CHARGE_POP_GRIT = 18; //     spoil chips in the landing pop
 
@@ -712,8 +721,13 @@ export const CHARGE_POP_GRIT = 18; //     spoil chips in the landing pop
  * when the ticks are spent, or EARLY the moment a tick meets nothing it
  * can burn (bark, air, the streamed window's edge): fire without fuel is
  * not an error, it is just out. Totals: the pop plus three ticks is four
- * scoops for one 1.1 s cooldown, against the jaws' scoop-per-press at no
- * cooldown at all — the throw stays the slower way to move soil.
+ * scoops per cooldown — see the note on `CHARGE_COOLDOWN_S`, which was
+ * lengthened for exactly this arithmetic so the throw stays the slower
+ * way to move soil. And the fire obeys the same edge the flight does:
+ * a tick that would cut past `CHARGE_REACH_MM` from HER — she may have
+ * walked; the window follows her — is fuel the world cannot hold, and
+ * the scene answers it with zero. See the smoulder wiring in
+ * `IslandScene`.
  */
 export const BURN_TICKS = 3; //           extra scoops after the landing pop
 export const BURN_TICK_S = 0.55; //       beat between them — legible, not a drumroll
