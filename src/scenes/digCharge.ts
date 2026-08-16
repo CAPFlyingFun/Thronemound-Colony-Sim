@@ -18,7 +18,7 @@ import * as THREE from 'three';
 import { CELL_SIZE, MM } from '../world/worldScape';
 import {
   CHARGES_MAX, CHARGE_GRAVITY_MM, CHARGE_RADIUS_MM,
-  CHARGE_RANGE_MM, CHARGE_SPEED_MM, NOSE_REACH,
+  CHARGE_RANGE_MM, CHARGE_REACH_MM, CHARGE_SPEED_MM, NOSE_REACH,
 } from './islandTuning';
 
 /**
@@ -49,6 +49,12 @@ export function launchPoint(
 export interface ChargeWorld {
   readonly scene: THREE.Scene;
   groundSolidAt(x: number, y: number, z: number): boolean;
+  /**
+   * WHERE SHE IS — because the streamed soil is a window centred on her,
+   * and a charge that leaves it lands somewhere the game cannot carve. See
+   * the two-limit note in `step`.
+   */
+  readonly at: THREE.Vector3;
 }
 
 interface Charge {
@@ -134,9 +140,30 @@ export class DigCharges {
           this.onImpact(c.at, S_DIR.copy(c.vel).normalize());
           break;
         }
-        if (c.gone > CHARGE_RANGE_MM / MM) {
-          /* Out of throw with nothing met: open air, open sky, or a drop
-           * deeper than the arc. The scene says so out loud. */
+        /*
+         * TWO LIMITS, AND THEY ARE DIFFERENT QUESTIONS.
+         *
+         * `gone` is PATH LENGTH — how much throw is left in it. `CHARGE_
+         * REACH_MM` is how far from her the game can still carve, which is
+         * the streamed window's own edge and nothing to do with the arc.
+         *
+         * Conflating them cost a version each way. A path budget alone let
+         * a charge fly to 150 mm when the world ends at 64, and two throws
+         * in three carved nothing. Cutting the path budget to fit the
+         * window then killed the lobs instead: an arc's path is LONGER
+         * than its reach, so a steep throw that would have landed well
+         * inside the window ran out of budget in mid-air.
+         *
+         * So the path budget is generous enough for a full lob, and the
+         * hard stop is the one that actually matters — leaving the soil
+         * the game can cut.
+         */
+        if (c.gone > CHARGE_RANGE_MM / MM
+          || Math.hypot(c.at.x - this.world.at.x, c.at.z - this.world.at.z)
+            > CHARGE_REACH_MM / MM) {
+          /* Out of throw with nothing met: open air, open sky, a drop
+           * deeper than the arc, or ground the streamer has not built.
+           * The scene says so out loud. */
           c.live = false;
           c.mesh.visible = false;
           this.onFizzle(c.at);

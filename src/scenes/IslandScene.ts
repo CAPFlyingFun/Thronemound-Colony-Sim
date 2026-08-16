@@ -141,7 +141,7 @@ import {
   BODY_HALF_TALL, BODY_FLOOR_MARGIN, AIM_LIMIT, CHAMBER_CAM_FAR,
   CHAMBER_CAM_NEAR, COLONIST_SPEED, COLONIST_TURN, COLONIST_ARRIVE,
   COLONIST_ROAM, TROPHALLAXIS_REACH, TROPHALLAXIS_RATE, CARRY_DELIVER_REACH,
-  FIGHT_NOTICE, CHARGE_COOLDOWN_S,
+  FIGHT_NOTICE, CHARGE_COOLDOWN_S, CHARGE_RANGE_MM,
 } from './islandTuning';
 import { Colonist } from './Colonist';
 import { SoilQuery } from './soilQuery';
@@ -2948,6 +2948,9 @@ export class IslandScene {
         {
           scene: this.scene,
           groundSolidAt: (x, y, z) => this.groundSolidAt(x, y, z),
+          /* The soil is streamed into a window centred on HER, so a charge
+           * that flies past its edge lands where nothing can be carved. */
+          at: this.at,
         },
         /* A landing carves; a landing on bark carves NOTHING, and wood
          * shrugging off the charge earns the same note a fizzle does. */
@@ -2965,6 +2968,10 @@ export class IslandScene {
 
   /** How many charges are mid-air — the probe's window. */
   chargesForTest(): number { return this.charges?.count() ?? 0; }
+
+  /** For probes: the throw's own range, so a report cannot quote a stale
+   *  constant it was written beside. */
+  chargeRangeForTest(): number { return CHARGE_RANGE_MM; }
 
   /** The hand that puts the miss note out — re-armed by every miss, so a
    *  held stroke over a drop keeps it lit rather than blinking. */

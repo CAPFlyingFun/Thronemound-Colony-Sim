@@ -23,7 +23,7 @@
 import * as THREE from 'three';
 
 import {
-  CELLS_Y, CELL_SIZE, MM, TILE_CELLS, WINDOW_CELLS,
+  CAP_PLANES, CELLS_Y, CELL_MM, CELL_SIZE, MM, TILE_CELLS, WINDOW_CELLS,
 } from '../world/worldScape';
 
 
@@ -596,9 +596,64 @@ export const SCOOP_DEEP_MM = 3;
  * that cut every stroke, so walking up and biting stays the fast way to
  * move soil.
  */
-export const CHARGE_SPEED_MM = 260; //    mm/s down the aim line
-export const CHARGE_GRAVITY_MM = 480; //  mm/s² of stage gravity, world down
-export const CHARGE_RANGE_MM = 150; //    path length before a fizzle
+/*
+ * THE ARC HAS TO COMPLETE INSIDE THE WINDOW, which is what set these.
+ *
+ * They were 260 mm/s and 480 mm/s², a ballistic pair whose maximum range —
+ * v²/g at 45 degrees — is 141 mm. The carvable world reaches 64 (see
+ * `CHARGE_REACH_MM`), so the throw was tuned to more than twice the world
+ * it could affect, and two throws in three carved nothing at all.
+ *
+ * Capping the RANGE alone made it worse rather than better, which is worth
+ * recording: with the path cut to fit the window but the arc unchanged,
+ * every charge expired in mid-air before it could come down, and all three
+ * test pitches carved nothing. A range cap is not a substitute for
+ * ballistics that fit — the flight has to finish inside the world.
+ *
+ * So the pair is solved against the window instead: 170 and 600 give a
+ * maximum range of 48 mm and a path at 45 degrees of about 55, which lands
+ * inside `CHARGE_RANGE_MM` with the rim to spare. Still a lob — slower and
+ * heavier than before, which at ant scale reads as MORE thrown, not less.
+ */
+export const CHARGE_SPEED_MM = 170; //    mm/s down the aim line
+export const CHARGE_GRAVITY_MM = 600; //  mm/s² of stage gravity, world down
+
+/**
+ * HOW FAR A CHARGE MAY FLY — AND IT IS THE STREAMER'S NUMBER, NOT TASTE.
+ *
+ * This was 150 mm, chosen as a feel. Measured in the running game, the
+ * fine density field stops answering **64 mm** from her: the carvable
+ * window is `WINDOW_MM` (192) across and she is held in a middle tile, so
+ * the guaranteed clearance to its rim is two tiles either way. A charge
+ * flying 150 mm was therefore capable of landing more than twice as far
+ * out as the game can cut anything.
+ *
+ * It showed exactly as you would expect and as nothing in the code said:
+ * `probe:chargesave` threw at three pitches and TWO OF THEM CARVED
+ * NOTHING — a bead that arcs, lands, pops and leaves the soil untouched.
+ * Not a miss the player can learn from; a silent hole in the feature.
+ *
+ * There is a second, quieter failure past the same edge.
+ * `TerrainStream.remember()` refuses to record edits within `CAP_PLANES`
+ * of the window rim, and justifies it with "the rim is at least sixteen
+ * millimetres from any bite" — true only while digging is jaw-range. A
+ * charge landing out there would carve a pocket that is never SAVED, so
+ * the hole would vanish on reload.
+ *
+ * So the range is derived rather than typed, and it stays honest if the
+ * window is ever retuned. Two tiles of clearance, less the rim the stream
+ * will not record, less a bore's margin so a pocket's own radius cannot
+ * push it over the line. It is a PATH length, so a flat throw and a lobbed
+ * one are both bounded by it.
+ */
+export const CHARGE_REACH_MM = (TILE_CELLS * CELL_SIZE * MM) * 2;
+/*
+ * PATH BUDGET, not reach — see the two-limit note in `digCharge.step`. A
+ * lob's path is longer than the ground it covers, so this has to allow a
+ * full arc; what stops a charge leaving the carvable world is
+ * `CHARGE_REACH_MM`, checked separately against her own position.
+ */
+export const CHARGE_RANGE_MM = Math.round(CHARGE_REACH_MM * 1.6);
 export const CHARGE_RADIUS_MM = 1.2; //   the bead the eye follows
 export const CHARGE_COOLDOWN_S = 1.1; //  slower than the jaws, on purpose
 export const CHARGES_MAX = 3; //          in flight at once, held press or not

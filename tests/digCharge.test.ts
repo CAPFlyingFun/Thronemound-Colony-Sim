@@ -3,10 +3,11 @@ import * as THREE from 'three';
 import { DigCharges, launchPoint } from '../src/scenes/digCharge';
 import { chargeImpact, type DigHost } from '../src/scenes/islandDig';
 import {
-  CHARGES_MAX, CHARGE_RANGE_MM, NOSE_REACH, SCOOP_DEEP_MM,
+  CHARGES_MAX, CHARGE_RANGE_MM, CHARGE_REACH_MM, NOSE_REACH, SCOOP_DEEP_MM,
 } from '../src/scenes/islandTuning';
-import { CELL_SIZE } from '../src/world/worldScape';
-import { MM } from '../src/world/worldScape';
+import {
+  CAP_PLANES, CELL_MM, CELL_SIZE, MM, TILE_CELLS,
+} from '../src/world/worldScape';
 
 /*
  * THE THROWN CHARGE'S TWO PROMISES, pinned:
@@ -33,7 +34,8 @@ function makeWorld(solid: (x: number, y: number, z: number) => boolean) {
   const hits: { at: THREE.Vector3; dir: THREE.Vector3 }[] = [];
   const fizzles: THREE.Vector3[] = [];
   const charges = new DigCharges(
-    { scene: scene as unknown as THREE.Scene, groundSolidAt: solid },
+    { scene: scene as unknown as THREE.Scene, groundSolidAt: solid,
+      at: new THREE.Vector3() },
     (at, dir) => hits.push({ at: at.clone(), dir: dir.clone() }),
     (at) => fizzles.push(at.clone()),
   );
@@ -230,5 +232,88 @@ describe('the landing', () => {
       host, new THREE.Vector3(1, 1, 1), new THREE.Vector3(0, 0, 1),
     );
     expect(touched).toBe(0);
+  });
+});
+
+describe('how far a charge may be thrown', () => {
+  /*
+   * THE RANGE IS THE STREAMER'S NUMBER, NOT A FEEL.
+   *
+   * It shipped as a flat 150 mm. The carvable world is `WINDOW_MM` (192)
+   * across and she is held in a middle tile, so the fine density field
+   * stops answering two tiles out — measured in the running game at
+   * exactly 64 mm. A charge that may fly 150 could therefore land more
+   * than twice as far out as the game can cut, and `probe:chargesave`
+   * caught it doing so: of three throws at different pitches, TWO CARVED
+   * NOTHING. A bead that arcs, lands, pops, and leaves the soil untouched.
+   *
+   * There is a quieter failure just inside the same edge:
+   * `TerrainStream.remember()` will not record edits within `CAP_PLANES`
+   * of the window rim, on the stated grounds that "the rim is at least
+   * sixteen millimetres from any bite" — true only while digging is
+   * jaw-range. A charge landing there carves a pocket that is never
+   * saved, so the hole disappears on reload.
+   */
+  it('keeps the path budget and the reach as SEPARATE limits', () => {
+    /*
+     * The correction that cost a version each way. `CHARGE_RANGE_MM` is
+     * path length — how much throw is in it. `CHARGE_REACH_MM` is how far
+     * from her the game can still carve. A lob's path is LONGER than the
+     * ground it covers, so a budget cut to fit the window killed every
+     * steep throw in mid-air; measured, all three test pitches carved
+     * nothing. The budget must therefore EXCEED the reach.
+     */
+    expect(CHARGE_RANGE_MM).toBeGreaterThan(CHARGE_REACH_MM);
+    /* But not without bound — it is still the thing that ends a throw
+     * that meets nothing at all. */
+    expect(CHARGE_RANGE_MM).toBeLessThan(CHARGE_REACH_MM * 3);
+  });
+
+  it('fizzles a charge that leaves the carvable window', () => {
+    /*
+     * The hard stop that actually matters, and the one the path budget
+     * cannot express. Fired dead level and fast from the origin over
+     * ground that is never solid, it must die at the window's edge rather
+     * than sail on to carve where nothing can be carved.
+     */
+    const scene = { add() {}, remove() {} };
+    const fizzles: THREE.Vector3[] = [];
+    const charges = new DigCharges(
+      { scene: scene as unknown as THREE.Scene, groundSolidAt: () => false,
+        at: new THREE.Vector3() },
+      () => {},
+      (at) => fizzles.push(at.clone()),
+    );
+    charges.lob(new THREE.Vector3(0, 0, 0), new THREE.Vector3(1, 0, 0));
+    for (let i = 0; i < 600 && fizzles.length === 0; i += 1) charges.step(1 / 60);
+    expect(fizzles.length).toBe(1);
+    const outMm = Math.hypot(fizzles[0]!.x, fizzles[0]!.z) * MM;
+    /* At the edge, not far past it — one sub-step of overshoot at most. */
+    expect(outMm).toBeGreaterThan(CHARGE_REACH_MM - 12);
+    expect(outMm).toBeLessThan(CHARGE_REACH_MM + 12);
+  });
+
+  it('stops short of the rim the stream refuses to record', () => {
+    /* `TerrainStream.remember()` will not record edits within `CAP_PLANES`
+     * of the window rim, so a pocket carved out there vanishes on reload.
+     * The reach has to stay inside that band, not merely inside the
+     * window. */
+    const halfWindowMm = TILE_CELLS * CELL_SIZE * MM * 3;
+    expect(halfWindowMm - CHARGE_REACH_MM).toBeGreaterThan(CAP_PLANES * CELL_MM);
+  });
+
+  it('derives that reach rather than restating it', () => {
+    /* Two tiles of guaranteed clearance. Written as a derivation so a
+     * retuned window carries the throw with it instead of silently
+     * outgrowing it — which is exactly how 150 came to be wrong. */
+    expect(CHARGE_REACH_MM).toBe(TILE_CELLS * CELL_SIZE * MM * 2);
+    /* And the measurement it has to agree with. */
+    expect(CHARGE_REACH_MM).toBe(64);
+  });
+
+  it('is still worth throwing — several body lengths of the ant', () => {
+    /* A guardrail that guardrails the guardrail: clamping to the window
+     * must not quietly reduce the feature to a nudge. */
+    expect(CHARGE_RANGE_MM).toBeGreaterThan(9 * 4);
   });
 });
