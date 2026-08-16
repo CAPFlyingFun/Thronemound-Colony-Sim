@@ -20,7 +20,16 @@
 import { chromium } from 'playwright';
 
 const MM = 5;
-const SECONDS = Number(process.env.WORM_SECONDS ?? 90);
+/*
+ * TWENTY SECONDS, NOT NINETY — and the reason is the window, not impatience.
+ *
+ * A worm travels 3 mm a second, so in ninety it covers 270 mm and has dug
+ * its way clean out of the 192 mm streamed window. Measured at ninety, the
+ * burrow read 0.20 mm across: not a narrow tunnel but a sample taken in
+ * ground the fine field no longer describes. At twenty it is still inside
+ * its own hole and the same code measures 5.4 to 5.7 mm.
+ */
+const SECONDS = Number(process.env.WORM_SECONDS ?? 20);
 
 const browser = await chromium.launch({
   executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
@@ -46,8 +55,22 @@ const out = await page.evaluate(async (seconds) => {
   const s = window.islandScene;
   const MM = 5;
   const WORM_BORE_MM = 6;
+  if (s.wormsForTest().length === 0) return { error: 'no worms on the island' };
+
+  /*
+   * PUT A FEW WORMS WHERE SHE IS FIRST.
+   *
+   * Fifty worms over a 56-metre island against a 192 mm streamed window
+   * means the expected number inside it is 0.0006 — measured, zero of fifty
+   * bit anything in ninety seconds. That is the honest island and it is
+   * reported below; but it means the probe has to ARRANGE the situation it
+   * wants to measure, or it measures nothing at all and calls it a failure.
+   */
+  const planted = [0, 1, 2].filter((i) => s.putWormNearForTest(i, 30 + i * 25));
+
+  /* Snapshotted AFTER planting, or the teleport counts as travel — it read
+   * as an 18-metre journey in twenty seconds. */
   const before = s.wormsForTest();
-  if (before.length === 0) return { error: 'no worms on the island' };
 
   /* Dig. Stepped rather than waited on, so the measurement does not depend
    * on how fast this machine renders. */
@@ -168,7 +191,8 @@ const out = await page.evaluate(async (seconds) => {
     boneInSoil: inSoil,
     /* And how deep they are, which says whether they stayed underground. */
     depthMm: after.map((w) => +((s.walkGroundAtForTest(w.x, w.z) - w.y) * MM).toFixed(1)),
-    moods: after.map((w) => w.mood),
+    aboveBaseMm: after.map((w) => +w.aboveBaseMm.toFixed(1)),
+    planted: planted.length,
     deepestMm: deepest.map((d) => +d.depthMm.toFixed(1)),
   };
 }, SECONDS);
@@ -182,11 +206,12 @@ const mean = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
  * narrow burrow and must not be filtered away as noise. */
 const kept = out.widthsMm.filter((w) => w < 39);
 console.log(`\nTHE BURROW A WORM LEAVES — ${out.worms} worms, ${out.seconds} s of digging\n`);
-console.log(`  bites taken        ${out.bites.join(', ')}`);
-console.log(`  doing              ${out.moods.join(', ')}`);
-console.log(`  deepest burrow     ${out.deepestMm.join(', ')} mm below grade`);
-console.log(`  head travelled     ${out.travelledMm.join(', ')} mm`);
-console.log(`  depth below grade  ${out.depthMm.join(', ')} mm`);
+console.log(`  bites taken        ${out.bites.filter((b) => b > 0).join(', ') || 'none yet'}`);
+console.log(`  above the base     ${out.aboveBaseMm.slice(0, 8).join(', ')} mm`);
+console.log(`  worms that dug     ${out.bites.filter((b) => b > 0).length} of ${out.worms}`
+  + ` (${out.planted} were placed beside her — see the note in this script)`);
+console.log(`  head travelled     ${out.travelledMm.filter((v) => v > 0.1).map((v) => v.toFixed(0)).join(', ') || 'none'} mm`);
+console.log(`  depth below grade  min ${Math.min(...out.depthMm).toFixed(1)}, max ${Math.max(...out.depthMm).toFixed(0)} mm`);
 console.log(`\n  burrow width, measured across the field:`);
 console.log(`    samples          ${kept.length} of ${out.widthsMm.length}`
   + ` (${out.outOfWindow} out of the streamed window,`

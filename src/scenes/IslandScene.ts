@@ -163,8 +163,10 @@ import { Beetle } from './Beetle';
 import { resolveBulk, QUEEN_BULK_ID, type Bulk } from './islandBulk';
 import { Grit } from './islandGrit';
 import {
-  Worm, WORM_BORE_MM, WORM_COUNT, WORM_OUT_MM, type WormSoil,
+  Worm, WORM_BORE_MM, WORM_CEIL_MM, WORM_COUNT, WORM_DRAWN, WORM_FLOOR_MM,
+  type WormSoil,
 } from './islandWorm';
+import { dressCreature } from './creatureSkin';
 import { WormBody } from './WormBody';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { warmHudArt } from './hudArt';
@@ -358,6 +360,7 @@ export class IslandScene {
       if (hit && hit.changedSamples > 0) enqueueBounds(this.digHost, hit.bounds);
     },
     surfaceAt: (x, z) => this.walkGroundAt(x, z),
+    baseAt: (x, z) => this.wormBaseAt(x, z),
   };
 
   /** Stamped grid (mound included) — what the island mesh and walker use. */
@@ -543,43 +546,103 @@ export class IslandScene {
       seed = (seed * 1664525 + 1013904223) >>> 0;
       return seed / 4294967296;
     };
-    for (let i = 0; i < WORM_COUNT; i += 1) {
-      const a = rand() * Math.PI * 2;
-      const away = (18 + rand() * 26) / MM;
-      const x = this.at.x + Math.cos(a) * away;
-      const z = this.at.z + Math.sin(a) * away;
-      /*
-       * THE FIRST ONE IS LYING ON THE GRASS WHEN SHE ARRIVES.
-       *
-       * Reported twice — "I don't see any worms" — and both times they were
-       * there, digging, entirely inside opaque ground. Three animals nobody
-       * could ever have seen. One at the surface from the first frame is
-       * what makes the feature exist for the player at all; the others come
-       * up on their own clock — see `WORM_DIG_S`.
-       */
-      const out = i === 0;
+    /*
+     * SCATTERED OVER THE WHOLE ISLAND, not huddled round her founding.
+     *
+     * Joshua's call, and it changes what a worm is FOR. Three beside her
+     * were three animals to look at; fifty across 56 metres are something
+     * you find, which is the version that pays off when you are tunnelling
+     * somewhere new. Only the handful inside the 192 mm streamed window can
+     * dig at any moment, so the simulation cost does not scale with this —
+     * see `WORM_COUNT` — and the drawing cost is capped separately.
+     */
+    const span = SPAN_MM / MM;
+    let tries = 0;
+    while (this.worms.length < WORM_COUNT && tries < WORM_COUNT * 200) {
+      tries += 1;
+      const x = rand() * span;
+      const z = rand() * span;
       const grade = this.walkGroundAt(x, z);
-      /* At the mouth its head is just clear of the grass — the same ceiling
-       * every worm answers to. Otherwise under the surface by more than its
-       * own thickness, so it starts inside the ground rather than half out
-       * of it. */
-      const y = out ? grade + WORM_OUT_MM / MM : grade - (WORM_BORE_MM * 2) / MM;
-      this.worms.push(new Worm(x, y, z, rand, out ? 'out' : 'down'));
+      const base = this.wormBaseAt(x, z);
+      /*
+       * ON LAND, AND WITH ROOM TO LIVE. "Do need to make sure they don't end
+       * up on the ocean since they aren't sea worms." The test is not "is
+       * this water" but "is there a soil column here at all": both ends of
+       * its band are computed and a spot with less than a body-thickness
+       * between them is rejected. Out over the water the seafloor is below
+       * sea level, so the band inverts and nothing is placed. The same test
+       * also skips the thin fringe at the tideline, where a worm would spawn
+       * inside a wall it could never leave.
+       */
+      const ceil = grade - WORM_CEIL_MM / MM;
+      const floor = base + WORM_FLOOR_MM / MM;
+      if (ceil - floor < (WORM_BORE_MM * 2) / MM) continue;
+      /* Anywhere in the band, so fifty worms are not fifty worms on one
+       * plane. Weighted nowhere: the island decides where the soil is. */
+      const y = floor + rand() * (ceil - floor);
+      this.worms.push(new Worm(x, y, z, rand));
     }
     /*
-     * AND THEIR BODIES, fetched once and cloned. Off the critical path —
-     * the island is playable without them, and a worm that arrives a
-     * second late is a worm nobody noticed arriving.
+     * AND THEIR BODIES — A POOL, not one each.
+     *
+     * Fifty skinned meshes at seventeen bones apiece, each solved against a
+     * path every frame, is real work on a phone, and at any moment at most a
+     * couple are somewhere she could see. So a few bodies are loaded and
+     * lent to whichever worms are nearest — see `dressWorms`.
+     *
+     * Off the critical path: the island is playable without them, and a worm
+     * that arrives a second late is a worm nobody noticed arriving.
      */
     void new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}models/earthworm.glb`)
       .then((gltf) => {
-        for (let i = 0; i < this.worms.length; i += 1) {
+        /*
+         * DRESSED ONCE, ON THE TEMPLATE. `SkeletonUtils.clone` shares
+         * materials with the original, so fixing the template fixes every
+         * clone — and doing it per clone would redo the same work six times.
+         * See `creatureSkin` for what the exporter left behind.
+         */
+        dressCreature(gltf.scene);
+        for (let i = 0; i < Math.min(WORM_DRAWN, this.worms.length); i += 1) {
           const body = new WormBody(gltf.scene);
           this.scene.add(body.root);
           this.wormBodies.push(body);
         }
       })
       .catch(() => { /* No worm bodies. They still dig. */ });
+  }
+
+  /**
+   * The bottom of the diggable earth under a column.
+   *
+   * Sea level, because below that is water and these are not sea worms. It
+   * is a method rather than the constant zero so the rule has one home: if
+   * the island ever grows a real bedrock horizon, this is what changes.
+   */
+  private wormBaseAt(_x: number, _z: number): number {
+    return 0;
+  }
+
+  /**
+   * HAND THE BODIES TO THE WORMS WORTH DRAWING.
+   *
+   * Nearest first, and re-decided every frame rather than assigned once,
+   * because she moves. A body whose worm is out of range is parked rather
+   * than destroyed — building a `SkinnedMesh` is far dearer than hiding one.
+   */
+  private dressWorms(): void {
+    if (this.wormBodies.length === 0) return;
+    const near = this.worms
+      .map((w, i) => ({ i, d: w.at.distanceToSquared(this.at) }))
+      .sort((a, b) => a.d - b.d)
+      .slice(0, this.wormBodies.length);
+    for (let k = 0; k < this.wormBodies.length; k += 1) {
+      const body = this.wormBodies[k]!;
+      const pick = near[k];
+      const worm = pick ? this.worms[pick.i] : undefined;
+      if (!worm) { body.root.visible = false; continue; }
+      body.root.visible = true;
+      body.layAlong(worm.trail);
+    }
   }
 
   private spawnProps(): void {
@@ -782,13 +845,12 @@ export class IslandScene {
      * world rather than with the dig, because a chip outlives the stroke
      * that made it and must keep falling after DIG is let go. */
     this.grit?.tick(dt);
-    for (let i = 0; i < this.worms.length; i += 1) {
-      this.worms[i]!.tick(dt, this.wormSoil);
-      /* And the body lies in the hole, which is the only place it fits:
-       * a 150 mm animal drawn rigid would be mostly inside the wall of the
-       * 6 mm tube it just made. See `WormBody`. */
-      this.wormBodies[i]?.layAlong(this.worms[i]!.trail);
-    }
+    for (const worm of this.worms) worm.tick(dt, this.wormSoil);
+    /* And the bodies lie in the holes, which is the only place they fit: a
+     * 150 mm animal drawn rigid would be mostly inside the wall of the 6 mm
+     * tube it just made. A pool of them, handed to the nearest worms rather
+     * than one each — see `dressWorms` and `WormBody`. */
+    this.dressWorms();
     /* After the vitals have ticked, so the latch drops on the same frame she
      * bottoms out rather than one behind it. See `dropPaceIfSpent`. */
     this.dropPaceIfSpent();
@@ -3812,6 +3874,30 @@ export class IslandScene {
     }));
   }
 
+  /**
+   * For probes: put a worm where she is, so carving can still be checked.
+   *
+   * Worms are scattered over the whole island now, and the fine soil is a
+   * 192 mm window around HER — so a freshly loaded island has none of the
+   * fifty anywhere they could dig, and a probe that just waits measures
+   * nothing. This is the probe reaching in to arrange the one situation it
+   * wants to measure, rather than the game arranging it for the probe.
+   */
+  putWormNearForTest(i: number, offMm = 40): boolean {
+    const worm = this.worms[i];
+    if (!worm) return false;
+    const x = this.at.x + offMm / MM;
+    const z = this.at.z;
+    const grade = this.walkGroundAt(x, z);
+    worm.at.set(x, grade - (WORM_BORE_MM * 3) / MM, z);
+    worm.trail.length = 0;
+    worm.dug = 0;
+    for (let k = 0; k < 8; k += 1) {
+      worm.trail.push(worm.at.clone().addScaledVector(worm.dir, -k * 0.6));
+    }
+    return true;
+  }
+
   /** For probes: every worm bone's world position, in world units. */
   wormBoneWorldForTest(): number[][][] {
     return this.wormBodies.map((b) => b.boneWorld());
@@ -3847,17 +3933,18 @@ export class IslandScene {
     x: number; y: number; z: number;
     dx: number; dy: number; dz: number;
     bx: number; by: number; bz: number; bites: number;
-    mood: string; depthMm: number;
+    depthMm: number; aboveBaseMm: number;
   }[] {
     return this.worms.map((w) => ({
       x: w.at.x, y: w.at.y, z: w.at.z,
       dx: w.dir.x, dy: w.dir.y, dz: w.dir.z,
       bx: w.lastBite.x, by: w.lastBite.y, bz: w.lastBite.z,
       bites: w.bites,
-      /* Whether it is buried is the whole question — see `WORM_DIG_S`. A
-       * negative depth is a head out in the open where it can be SEEN. */
-      mood: w.mood,
+      /* Where it sits in its band — see `WORM_CEIL_MM`. Both ends, because
+       * "is it underground" and "is it above the seafloor" are different
+       * questions and only one of them keeps it out of the ocean. */
       depthMm: (this.walkGroundAt(w.at.x, w.at.z) - w.at.y) * MM,
+      aboveBaseMm: (w.at.y - this.wormBaseAt(w.at.x, w.at.z)) * MM,
     }));
   }
 

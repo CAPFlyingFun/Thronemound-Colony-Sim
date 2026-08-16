@@ -95,6 +95,7 @@ export class WormBody {
       }
       if (run.length > this.chain.length) this.chain.push(...run.splice(0));
     }
+    this.measureChain();
   }
 
   /** How many bones its body has — for probes. */
@@ -119,7 +120,6 @@ export class WormBody {
    */
   layAlong(path: readonly THREE.Vector3[]): void {
     if (path.length < 2 || this.chain.length < 2) return;
-    const spacing = this.spacing();
 
     /*
      * SOLVED AGAINST EACH BONE'S REAL PARENT, not an assumed frame.
@@ -136,11 +136,22 @@ export class WormBody {
     for (let i = 0; i + 1 < this.chain.length; i += 1) {
       const bone = this.chain[i]!;
       const child = this.chain[i + 1]!;
-      /* Where this bone sits along the path, and where the next one wants
-       * to be — by ARC LENGTH, so a seat does not slide as the crumbs
-       * bunch up on a turn. */
-      walkPath(path, spacing * i, S_AT);
-      walkPath(path, spacing * (i + 1), S_NEXT);
+      /*
+       * Where this bone sits along the path, and where the next one wants
+       * to be — by ARC LENGTH, so a seat does not slide as the crumbs bunch
+       * up on a turn.
+       *
+       * EACH BONE'S OWN LENGTH, not one spacing for all of them. Asked for
+       * as "like the snake game or a train, where the first bone is the
+       * head and everything that follows follows exactly the same path" —
+       * and a train's carriages are only in the right place if each one is
+       * put its OWN length behind the last. This rig is not uniform: taking
+       * the first gap and multiplying it by the bone's index put every bone
+       * after the first at the wrong station, which stretches the animal in
+       * some places and gathers it in others as it turns.
+       */
+      walkPath(path, this.reach[i]!, S_AT);
+      walkPath(path, this.reach[i + 1]!, S_NEXT);
       S_WANT.copy(S_NEXT).sub(S_AT);
       if (S_WANT.lengthSq() < 1e-12) continue;
       S_WANT.normalize();
@@ -169,12 +180,29 @@ export class WormBody {
     }
   }
 
-  /** One bone's length, in the root's own units. */
-  private spacing(): number {
-    const a = this.chain[0]!;
-    const b = this.chain[1]!;
-    return b.position.length() * this.root.scale.x;
+  /**
+   * How far each bone sits behind the head, ALONG THE BODY, in world units.
+   *
+   * Built once from the rest pose, because a skeleton's bone lengths do not
+   * change — only its angles do. `chain[i].position` is bone i's offset from
+   * its parent in the parent's space, so running totals of those lengths is
+   * the distance from the head to each station on the train.
+   */
+  private readonly reach: number[] = [];
+
+  private measureChain(): void {
+    const scale = this.root.scale.x;
+    let along = 0;
+    this.reach.length = 0;
+    this.reach.push(0);
+    for (let i = 1; i < this.chain.length; i += 1) {
+      along += this.chain[i]!.position.length() * scale;
+      this.reach.push(along);
+    }
   }
+
+  /** How long the whole animal is, in world units — for probes. */
+  get span(): number { return this.reach[this.reach.length - 1] ?? 0; }
 
   dispose(): void {
     this.root.traverse((n) => {

@@ -55,6 +55,16 @@ export interface WormSoil {
   carve(x: number, y: number, z: number, radius: number): void;
   /** The drawn surface above this column, so a worm can stay under it. */
   surfaceAt(x: number, z: number): number;
+  /**
+   * The bottom of the diggable earth under this column — sea level on this
+   * island, because below that is water and these are not sea worms.
+   *
+   * A separate question from `surfaceAt`, and it has to be: out over the
+   * water the seafloor is BELOW sea level, so the column there is inverted
+   * and a worm has nowhere to be. That is what keeps them off the ocean —
+   * no special case, just a band with no room in it.
+   */
+  baseAt(x: number, z: number): number;
 }
 
 /**
@@ -89,11 +99,27 @@ export const WORM_STEP_MM = 3;
 /**
  * How many the island seeds.
  *
- * Deliberately few. Each carves a 6 mm tube at 3 mm a second, which is
- * 180 mm of burrow a minute — a dozen would turn the ground under her into
- * a sponge inside one session.
+ * Fifty, scattered over the whole island rather than three around her
+ * founding — Joshua's call, and the reason the old number was three no
+ * longer applies. Three was chosen because each carves 180 mm of burrow a
+ * minute and a dozen packed around one spot would turn the ground under her
+ * into a sponge inside a session. Spread across 56 metres of island that is
+ * not a risk: only the handful inside the 192 mm streamed window can dig at
+ * all, and the rest are waiting their turn wherever she is not.
+ *
+ * The cost is drawing them, not simulating them — see `WORM_DRAWN`.
  */
-export const WORM_COUNT = 3;
+export const WORM_COUNT = 50;
+
+/**
+ * How many worms have a BODY at any moment.
+ *
+ * Fifty skinned meshes at seventeen bones each, posed every frame against a
+ * path, is real work for a phone — and forty-nine of them are somewhere she
+ * cannot see. The bodies are a pool handed to whichever worms are nearest,
+ * which costs a sort of fifty items a frame and nothing else.
+ */
+export const WORM_DRAWN = 6;
 
 /** Seconds on one heading before it picks another — Joshua's range. */
 export const WORM_HEADING_MIN_S = 30;
@@ -117,116 +143,102 @@ export const WORM_HEADING_MAX_S = 60;
 export const WORM_TURN = 0.12;
 
 /**
- * How far under the surface it tries to stay, in millimetres.
+ * THE BAND A WORM LIVES IN, in millimetres.
  *
- * Not a hard ceiling — it is a bias applied to the heading, so a worm
- * heading up gets turned down rather than stopped. A hard clamp would have
- * them all crawling along one plane at exactly this depth.
+ * Joshua's placement: "keep them underground, maybe +5 mm from the max depth
+ * the base of the earth is, to -5 mm underground, so they have a large area
+ * to dig since they have the whole island — but do need to make sure they
+ * don't end up in the ocean since they aren't sea worms."
+ *
+ * So the roaming volume is the whole soil column at wherever it stands, less
+ * five millimetres of headroom at each end: near enough the surface to be
+ * found by digging, never through it, and never down past the bottom of the
+ * island into water.
+ *
+ * This REPLACES the surfacing behaviour of v0.1.71. That was written to
+ * answer "I don't see any worms", it worked, and having seen them Joshua
+ * asked for them underground instead. The visibility problem is solved a
+ * different way now: fifty of them across the island rather than three, so
+ * digging runs into one.
+ *
+ * Both are hard limits enforced on the STEP, not biases on the heading — see
+ * `wanderDir` for why a bias alone is not enough, which cost a version.
+ */
+export const WORM_CEIL_MM = 5;
+export const WORM_FLOOR_MM = 5;
+
+/**
+ * How much room it wants before it stops worrying about a wall.
+ *
+ * The hard limits above stop a worm; this is the distance over which it is
+ * gently turned away from one, so it curves off rather than swimming into
+ * the ceiling and sitting there. A whole body length: it is a long animal
+ * and a turn takes it 25 mm of travel — see `WORM_TURN`.
  */
 export const WORM_UNDER_MM = 12;
-
-/**
- * HOW LONG IT DIGS BEFORE COMING UP FOR AIR, and how long it lies there.
- *
- * Reported twice: "I don't see any worms." They were there and they were
- * digging — the probe counted their bites — but they spawned twelve
- * millimetres under the grass and `wanderDir` turns a shallow worm DOWN, so
- * nothing ever brought one back up. Three animals living their whole lives
- * inside opaque ground. The bug was not that they were missing; it was that
- * nothing could ever have seen them.
- *
- * Surfacing is also the honest biology rather than a visibility hack.
- * Lumbricus terrestris is ANECIC: it holds a more or less permanent vertical
- * burrow and comes to the mouth of it to feed on leaf litter and to cast,
- * chiefly at night and after rain, with the tail anchored below. A worm that
- * never left its tunnel would be the wrong animal.
- *
- * Both numbers are GAME TUNING, not measured biology. A real worm spends
- * hours at this; a player is looking at the ground for seconds.
- */
-export const WORM_DIG_S = 40;
-export const WORM_BASK_S = 18;
-
-/**
- * How steeply it climbs when it decides to surface, as a fraction of
- * straight up.
- *
- * Straight up would have it rise through its own body and come out of the
- * burrow it is lying in. Climbing at a slope leaves a ramp that the body can
- * still lie along — the same reason `WORM_TURN` is a radius rather than a
- * snap.
- */
-export const WORM_CLIMB = 0.55;
-
-/**
- * How far its head clears the grass when it is lying at the mouth, in
- * millimetres — and, the same number, how far ANY worm may rise.
- *
- * It is a hard ceiling rather than another bias, and that is the fix for a
- * bug this file already had and the surfacing behaviour merely exposed:
- * `wanderDir` biases DOWNWARD only at the moment a new heading is picked,
- * and a heading lasts thirty to sixty seconds. A worm pointed up therefore
- * carried on up, and `WORM_TURN` is 0.12 rad/s — thirteen seconds to swing
- * through a right angle, thirty-nine millimetres of travel. Measured in the
- * running game before this existed: three worms with their heads 10, 23 and
- * 28 mm ABOVE the ground, flying.
- *
- * Ten was chosen by looking at it. Four — two thirds of a bore — is
- * technically visible and renders as a pink nub that reads as a pebble; at
- * ten the annulations are legible and it is unmistakably a worm, while still
- * being a fraction of a 150 mm animal, so it reads as coming OUT of a hole
- * rather than standing beside one. It is also just over the queen's own
- * length, which makes it something she can be shown next to.
- */
-export const WORM_OUT_MM = 10;
 
 /**
  * How far apart the breadcrumbs are, in millimetres, and how many there
  * are — together, how much body the trail can hold.
  *
- * Every 3 mm over 56 points is 165 mm of path, which covers the 150 mm
- * worm with room to spare. The spacing matters more than it looks: the
- * body is laid on the POLYLINE through these points, so a coarse trail
- * cuts the corners of a curve and pushes the body into the wall. Five was
- * the first choice and it cut visibly.
+ * Every 3 mm over 56 points is 165 mm of path, which covers the 150 mm worm
+ * with room to spare. The spacing matters more than it looks: the body is
+ * laid on the POLYLINE through these points, so a coarse trail cuts the
+ * corners of a curve and pushes the body into the wall. Five was the first
+ * choice and it cut visibly.
  */
 export const TRAIL_STEP_MM = 3;
 export const TRAIL_POINTS = 56;
 
 const S_WANT = new THREE.Vector3();
 const S_HEAD = new THREE.Vector3();
+const S_STEP = new THREE.Vector3();
 
 /**
- * A new heading, biased down when it is too near the sky.
+ * A new heading, turned away from whichever end of the band is nearer.
  *
  * Pulled out because it is the only interesting decision a worm makes, and
- * because "pick a random direction" and "do not leave the ground" fight
- * unless one of them is written as a bias on the other.
+ * because "pick a random direction" and "stay inside the soil" fight unless
+ * one of them is written as a bias on the other.
+ *
+ * `roomUpMm` is how far it may still rise before the ceiling, `roomDownMm`
+ * how far it may still fall before the floor. Both, rather than one depth,
+ * because the band has two ends now: the grass above and the bottom of the
+ * island below. A worm given only the first happily dug down into the sea.
+ *
+ * NOTE THAT A BIAS IS NOT A LIMIT. This runs only when a heading is CHOSEN,
+ * and a heading lasts thirty to sixty seconds against a turn rate of 0.12
+ * rad/s — thirteen seconds to come about. A worm pointed at the sky keeps
+ * going for tens of millimetres whatever this says, which is exactly how
+ * v0.1.70 ended up with worms flying 28 mm above the ground. The hard stop
+ * lives in `tick`; this only makes the hard stop rare.
  */
 export function wanderDir(
-  rand: () => number, depthMm: number, into: THREE.Vector3,
+  rand: () => number, roomUpMm: number, roomDownMm: number, into: THREE.Vector3,
 ): THREE.Vector3 {
   const yaw = rand() * Math.PI * 2;
   /* Mostly level. A worm that picked uniformly on a sphere would spend
    * most of its life going straight up or straight down. */
   let pitch = (rand() - 0.5) * 0.9;
-  /* Too shallow: bias downward in proportion to how shallow. At the
-   * surface it can only go down; well under, it is free. */
-  const shallow = Math.max(0, 1 - depthMm / WORM_UNDER_MM);
-  if (shallow > 0) pitch = -Math.abs(pitch) * shallow + pitch * (1 - shallow);
+  /* Near a wall, bend away from it in proportion to how near. At the wall
+   * itself the bias is total; a body length off it, there is none. Both
+   * ends are computed and the STRONGER one wins, so a worm in a thin seam
+   * of soil with both walls close is turned by whichever it is nearer
+   * rather than by the sum, which would cancel out to level and leave it
+   * ploughing along one plane. */
+  const nearTop = Math.max(0, 1 - roomUpMm / WORM_UNDER_MM);
+  const nearFloor = Math.max(0, 1 - roomDownMm / WORM_UNDER_MM);
+  const bend = Math.max(nearTop, nearFloor);
+  if (bend > 0) {
+    /* Away from the closer wall: down if the ceiling is nearer, up if the
+     * floor is. */
+    const away = nearTop >= nearFloor ? -1 : 1;
+    pitch = away * Math.abs(pitch) * bend + pitch * (1 - bend);
+  }
   const flat = Math.cos(pitch);
   return into.set(Math.sin(yaw) * flat, Math.sin(pitch), Math.cos(yaw) * flat)
     .normalize();
 }
-
-/**
- * What a worm is doing with itself.
- *
- * `down` is digging, `up` is climbing for the surface, `out` is lying at the
- * mouth of its own burrow with its head in the open air. Named rather than
- * a pair of booleans because two flags allow a state that is neither.
- */
-export type WormMood = 'down' | 'up' | 'out';
 
 export class Worm {
   /** Its head — the end that does the digging. */
@@ -261,44 +273,16 @@ export class Worm {
    */
   readonly trail: THREE.Vector3[] = [];
 
-  /** Digging, climbing out, or lying at the mouth. */
-  mood: WormMood;
-
-  /** Seconds left in whatever it is doing. */
-  private moodFor: number;
-
   constructor(
     x: number, y: number, z: number,
     private readonly rand: () => number = Math.random,
-    /* Where in its cycle it starts. The island lays one worm out on the
-     * grass from the first frame so there is something to SEE, and starts
-     * the rest underground — see `spawnWorms`. */
-    mood: WormMood = 'down',
   ) {
-    this.mood = mood;
-    /*
-     * STAGGERED, so three worms are not one worm drawn three times. Sharing
-     * a clock would have them surface together, lie together and dive
-     * together, which reads as a scripted event rather than as animals.
-     */
-    this.moodFor = (mood === 'out' ? WORM_BASK_S : WORM_DIG_S) * (0.25 + rand() * 0.75);
     this.at.set(x, y, z);
-
-    /*
-     * WHICH WAY IT IS POINTED BEFORE ITS BODY IS LAID OUT, because the body
-     * is laid BACKWARDS along the heading and so the heading decides where
-     * the body goes.
-     *
-     * One lying at the mouth points UP, which puts its trail — and therefore
-     * its body — straight down the burrow beneath it with only the head in
-     * the open. That is the posture the animal actually holds: an anecic
-     * worm feeds at its doorway with the tail still anchored below, ready to
-     * be pulled back in.
-     */
     this.untilTurn = WORM_HEADING_MIN_S
       + this.rand() * (WORM_HEADING_MAX_S - WORM_HEADING_MIN_S);
-    if (mood === 'out') this.want.set(0, 1, 0);
-    else wanderDir(this.rand, WORM_UNDER_MM, this.want);
+    /* Born with room both ways, so its first heading is unbiased. Where it
+     * actually stands is checked from the first tick onward. */
+    wanderDir(this.rand, WORM_UNDER_MM, WORM_UNDER_MM, this.want);
     this.dir.copy(this.want);
 
     /* Born already lying somewhere: a worm whose trail is empty has its
@@ -343,79 +327,39 @@ export class Worm {
   tick(dt: number, soil: WormSoil): boolean {
     if (dt <= 0) return false;
 
-    const depthMm = (soil.surfaceAt(this.at.x, this.at.z) - this.at.y) * MM;
-
     /*
-     * THE DAY OF A WORM: dig for a while, climb out, lie at the mouth, dig
-     * again. See `WORM_DIG_S` for why this exists at all — without it a worm
-     * is an animal nobody can ever see.
+     * WHERE THE WALLS ARE, right here. Both ends of the band are read every
+     * tick rather than once at spawn, because the surface and the seafloor
+     * both move as it travels — a worm heading for the coast has its floor
+     * rise to meet its ceiling until there is no band left, which is what
+     * keeps it out of the water without a special case for the water.
      */
-    /* At or through the ceiling — see `WORM_OUT_MM`. */
-    const atSky = depthMm <= -WORM_OUT_MM;
-
-    this.moodFor -= dt;
-    if (this.mood === 'up' && atSky) {
-      /* Arrived. It stops HERE, head just clear of the grass, rather than
-       * carrying on into the sky where there is no field to live in. */
-      this.mood = 'out';
-      this.moodFor = WORM_BASK_S;
-    } else if (this.moodFor <= 0) {
-      if (this.mood === 'down') {
-        this.mood = 'up';
-        /* Long enough to climb from any working depth, and no longer: if it
-         * cannot find the surface in this it has met something it cannot
-         * dig, and going back to work beats climbing forever. */
-        this.moodFor = WORM_DIG_S;
-      } else {
-        this.mood = 'down';
-        this.moodFor = WORM_DIG_S;
-      }
-      /* A fresh heading on every change of mind, so it does not dive back
-       * down the hole it just came up. */
-      this.untilTurn = 0;
-    }
-
-    if (this.mood === 'out') {
-      /* Lying at its own doorway. It does not move, and it does not dig —
-       * the burrow behind it is what its body is drawn along, and a worm
-       * that kept carving up here would be carving the sky. */
-      return false;
-    }
+    const ceil = soil.surfaceAt(this.at.x, this.at.z) - WORM_CEIL_MM / MM;
+    const floor = soil.baseAt(this.at.x, this.at.z) + WORM_FLOOR_MM / MM;
+    const roomUpMm = (ceil - this.at.y) * MM;
+    const roomDownMm = (this.at.y - floor) * MM;
 
     this.untilTurn -= dt;
     if (this.untilTurn <= 0) {
-      wanderDir(this.rand, depthMm, this.want);
+      wanderDir(this.rand, roomUpMm, roomDownMm, this.want);
       this.untilTurn = WORM_HEADING_MIN_S
         + this.rand() * (WORM_HEADING_MAX_S - WORM_HEADING_MIN_S);
     }
 
     /*
-     * CLIMBING OVERRIDES THE WANDER, and it has to: `wanderDir` turns a
-     * shallow worm DOWN in proportion to how shallow it is, which is right
-     * for a digging worm and is exactly what kept every one of them buried.
-     * The yaw it picked is kept, so it surfaces somewhere it was heading
-     * anyway rather than reversing on the spot.
+     * AGAINST A WALL: aim away from it at once rather than waiting for the
+     * heading to expire. A heading lasts up to sixty seconds, so without
+     * this a worm that touched the ceiling would grind along it for most of
+     * a minute — and the version that had only a bias, and no wall at all,
+     * put worms 28 mm above the grass. Re-aimed only when it is actually
+     * pointed the wrong way, so it is not re-rolling a heading every frame.
      */
-    if (this.mood === 'up') {
-      const flat = Math.hypot(this.want.x, this.want.z) || 1;
-      const level = Math.sqrt(Math.max(0, 1 - WORM_CLIMB * WORM_CLIMB));
-      this.want.set(
-        (this.want.x / flat) * level, WORM_CLIMB, (this.want.z / flat) * level,
-      ).normalize();
-    }
-
-    /*
-     * THE CEILING, half one. A digging worm that has nosed out of the ground
-     * aims back down at once — see `WORM_OUT_MM` for the measurement that
-     * made this necessary.
-     *
-     * A worm lying at the mouth has already returned, above, so anything
-     * still here is one that means to be underground.
-     */
-    if (atSky && this.want.y > -0.1) {
-      /* Depth zero makes `wanderDir`'s bias total, so this always comes
-       * back pointing into the ground. */
-      wanderDir(this.rand, 0, this.want);
+    if (roomUpMm <= 0 && this.want.y > -0.1) {
+      wanderDir(this.rand, 0, WORM_UNDER_MM, this.want);
+      this.untilTurn = WORM_HEADING_MIN_S
+        + this.rand() * (WORM_HEADING_MAX_S - WORM_HEADING_MIN_S);
+    } else if (roomDownMm <= 0 && this.want.y < 0.1) {
+      wanderDir(this.rand, WORM_UNDER_MM, 0, this.want);
       this.untilTurn = WORM_HEADING_MIN_S
         + this.rand() * (WORM_HEADING_MAX_S - WORM_HEADING_MIN_S);
     }
@@ -432,30 +376,72 @@ export class Worm {
     }
 
     /*
-     * THE CEILING, half two — AND IT MUST COME AFTER THE TURN.
+     * THE WALLS THEMSELVES — AND THEY MUST COME AFTER THE TURN.
      *
      * Refusing the step matters as much as re-aiming, because the turn is a
      * hard 0.12 rad/s and a worm that kept moving while it came about would
-     * climb most of a body length into the air first. But putting this
+     * travel most of a body length the wrong way first. But putting this
      * refusal BEFORE the turn deadlocks it: the worm returns early, never
-     * reaches the swing, and so is frozen pointing at the sky forever. That
-     * is not hypothetical — it measured, as a worm sitting at exactly the
+     * reaches the swing, and is frozen pointing at the wall forever. That is
+     * not hypothetical — it measured, as a worm sitting at exactly the
      * ceiling with zero bites and zero travel after ninety seconds.
      *
-     * So it turns first and only then declines to move. It noses out,
-     * pauses while it comes about, and goes back in.
+     * So it turns first and only then declines to move. It noses into the
+     * wall, pauses while it comes about, and goes back the other way.
+     *
+     * Out over the water this is what stops it: the floor rises above the
+     * ceiling, both tests fire at once, and the worm simply cannot advance
+     * in any direction that takes it further out. No sea check anywhere.
      */
-    if (atSky && this.dir.y > 0) return false;
+    /*
+     * TESTED AT THE STEP'S DESTINATION, NOT AT ITS HEADING.
+     *
+     * A first cut refused to move only when the worm was POINTED at a wall,
+     * which misses the case that actually happens: on a slope, a worm
+     * travelling dead level has the ground come down to meet it. It never
+     * rises and the ceiling arrives anyway. Measured — a worm 2.6 mm under
+     * the grass against a 5 mm ceiling it never knowingly approached.
+     *
+     * So the candidate position is worked out first and CLAMPED into the
+     * band that exists where it is going. Clamping rather than refusing on
+     * purpose: a worm that hits its ceiling should follow the contour along,
+     * the way a shallow worm does, not stop dead at the foot of every rise.
+     */
+    S_STEP.copy(this.at).addScaledVector(
+      this.dir, (WORM_STEP_MM / MM / WORM_BITE_S) * dt,
+    );
+    const ceilNext = soil.surfaceAt(S_STEP.x, S_STEP.z) - WORM_CEIL_MM / MM;
+    const floorNext = soil.baseAt(S_STEP.x, S_STEP.z) + WORM_FLOOR_MM / MM;
+    /* No band at all where it is going — over the water, where the seafloor
+     * has risen past the surface. It simply does not go. */
+    if (ceilNext <= floorNext) return false;
+    S_STEP.y = Math.min(ceilNext, Math.max(floorNext, S_STEP.y));
 
     /*
-     * IT ONLY MOVES WHEN IT CAN DIG. A worm drifting through soil it
-     * cannot carve is a worm leaving no burrow and turning up somewhere
-     * else — which reads as teleporting, not as burrowing. Out of the
-     * window it simply waits.
+     * IT MOVES WHEREVER IT IS; IT ONLY CARVES WHERE THE WORLD IS REAL.
+     *
+     * This was the other way round until fifty worms went out across the
+     * island, and the reason it changed is arithmetic. The fine soil is a
+     * 192 mm window that follows HER. That window is about 37,000 square
+     * millimetres of a 3.1-billion-square-millimetre island, so the expected
+     * number of fifty scattered worms inside it at any moment is 0.0006 —
+     * and measured, over ninety seconds, exactly zero of fifty took a single
+     * bite. A worm that may only move when it can dig is, at island scale, a
+     * worm that never moves.
+     *
+     * The old rule was written when there were three of them beside her and
+     * the worry was watching one cross the window's edge, keep going, and
+     * pop out elsewhere with no burrow behind it. That worry does not
+     * survive the change: soil is OPAQUE, the only ground she can see into
+     * is ground inside the window, and only the six nearest worms are drawn
+     * at all. A worm out there is behind a wall. When she arrives, it is
+     * where it should be and starts leaving a real hole from that moment.
+     *
+     * The band still holds everywhere — the heightfield knows the whole
+     * island — so a worm roaming unwatched still cannot break the surface
+     * or wander out under the sea.
      */
-    if (!soil.covers(this.at.x, this.at.y, this.at.z)) return false;
-
-    this.at.addScaledVector(this.dir, (WORM_STEP_MM / MM / WORM_BITE_S) * dt);
+    this.at.copy(S_STEP);
     this.remember();
 
     this.sinceBite += dt;
