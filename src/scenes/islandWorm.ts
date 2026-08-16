@@ -207,6 +207,22 @@ export const WORM_UNDER_MM = 12;
 export const TRAIL_STEP_MM = 3;
 export const TRAIL_POINTS = 56;
 
+/**
+ * How far apart the collision beads sit along the body, in millimetres.
+ *
+ * MUST BE UNDER THE BORE — the same rule the burrow itself answers to, for
+ * the same reason. Beads spaced wider than they are across leave holes
+ * between them, and a 1.6 mm ant walks straight through a hole. Five
+ * against a six-millimetre bore leaves every bead overlapping its
+ * neighbour by a millimetre, so the surface is continuous.
+ *
+ * It also sets the cost. A 150 mm worm at five is about thirty beads, and
+ * the shove list is resolved pairwise — so this is the number to raise if
+ * it ever needs to be cheaper, NOT the worm count, which is already culled
+ * by reach.
+ */
+export const BEAD_STEP_MM = 5;
+
 const S_WANT = new THREE.Vector3();
 const S_HEAD = new THREE.Vector3();
 const S_STEP = new THREE.Vector3();
@@ -378,6 +394,65 @@ export class Worm {
 
   /** Whether it is still alive to be drawn and simulated. */
   get alive(): boolean { return this.mind.health > 0; }
+
+  /**
+   * ITS BODY AS A CHAIN OF BEADS ALONG THE SPINE, newest first.
+   *
+   * Asked for: "can we make the collision for the worm based on the mesh
+   * like with the terrain? That way you can attack a worm from the sides
+   * and back without walking through it — especially since I will want a
+   * swarm of ants to crawl all over it and sting it."
+   *
+   * The complaint was right and the number is embarrassing: the worm was
+   * ONE sphere at its head, 6 mm across, standing in for a 150 mm animal.
+   * Ninety-six per cent of it was air. You could walk the length of a worm
+   * and never touch it.
+   *
+   * ## Beads rather than the mesh, and why that is not a compromise
+   *
+   * Terrain can afford real mesh collision because it is STATIC — re-meshed
+   * only when somebody digs it. A worm reshapes every frame, and mesh
+   * collision on a deforming skinned body means rebuilding an acceleration
+   * structure sixty times a second, per worm.
+   *
+   * It also does not need one. A worm is a tube of constant thickness bent
+   * along a line, and this file already knows that line: `trail` is the
+   * path the visible body is DRAWN along, so beads laid on the same path
+   * are the drawn mesh rather than an approximation of it. They deform for
+   * free, because the path already did.
+   *
+   * ## Spaced closer than they are wide, or it is a string of gaps
+   *
+   * The same rule the burrow answers to, for the same reason — see
+   * `BEAD_STEP_MM`.
+   */
+  bulkBeads(): THREE.Vector3[] {
+    const out: THREE.Vector3[] = [];
+    const path = this.trail;
+    if (path.length === 0) return out;
+    const step = BEAD_STEP_MM / MM;
+    /*
+     * Walked by ARC LENGTH along the polyline rather than one bead per
+     * breadcrumb: the crumbs bunch up on a turn, so per-crumb beads would
+     * crowd on the bends and thin out on the straights — which is where a
+     * gap would open.
+     */
+    out.push(path[0]!.clone());
+    let want = step;
+    let along = 0;
+    for (let i = 0; i + 1 < path.length; i += 1) {
+      const a = path[i]!;
+      const b = path[i + 1]!;
+      const seg = a.distanceTo(b);
+      if (seg <= 1e-9) continue;
+      while (want <= along + seg) {
+        out.push(a.clone().lerp(b, (want - along) / seg));
+        want += step;
+      }
+      along += seg;
+    }
+    return out;
+  }
 
   /**
    * One frame. Returns whether it actually took a bite.

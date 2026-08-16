@@ -619,7 +619,9 @@ export function spawnWorker(host: QuestHost, ): void {
     return seed / 4294967296;
   };
   for (const caste of ['worker'] as const) {
-    const one = new Colonist(caste, rand);
+    /* Numbered, because she goes on the shove list and a body there
+     * needs a name that stays hers. */
+    const one = new Colonist(caste, rand, host.colony.length);
     one.model.ikEnabled = host.ikWanted;
     host.scene.add(one.model.root);
     host.colony.push(one);

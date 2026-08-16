@@ -164,7 +164,7 @@ import { resolveBulk, QUEEN_BULK_ID, type Bulk } from './islandBulk';
 import { Grit } from './islandGrit';
 import {
   Worm, WORM_BORE_MM, WORM_CEIL_MM, WORM_COUNT, WORM_DRAWN, WORM_FLOOR_MM,
-  WORM_REACH, type WormSoil,
+  WORM_REACH, TRAIL_POINTS, TRAIL_STEP_MM, type WormSoil,
 } from './islandWorm';
 import { dressCreature } from './creatureSkin';
 import { wound } from './creatureBrain';
@@ -3870,7 +3870,51 @@ export class IslandScene {
     for (const w of this.worms) {
       if (!w.alive) continue;
       if (w.at.distanceToSquared(this.at) > WORM_REACH * WORM_REACH) continue;
-      out.push({ id: `worm-${w.id}`, at: w.at, radius: w.radius, massMg: w.massMg });
+      /*
+       * A WHOLE WORM, not its nose. One sphere at the head left 96% of a
+       * 150 mm animal as air — you could walk its length and never touch
+       * it, which is no good at all for a swarm meant to climb on one and
+       * sting it. See `Worm.bulkBeads`.
+       *
+       * ANCHORED, and that is a statement rather than a shortcut: the beads
+       * are derived from the spine every frame, so a push written into one
+       * would be discarded on the next. Anchoring says so honestly and
+       * hands the whole correction to whatever hit it — which is also the
+       * right physics, since a 4 g worm wedged in its own burrow is not
+       * going to be shoved aside by a 1 mg ant.
+       */
+      for (const bead of w.bulkBeads()) {
+        out.push({
+          id: `worm-${w.id}-${out.length}`,
+          at: bead,
+          radius: w.radius,
+          massMg: w.massMg,
+          anchored: true,
+        });
+      }
+    }
+    /*
+     * AND THE COLONY, which had never been on this list at all.
+     *
+     * Found by measuring the answer to "is there collision between worms and
+     * ant and worm now?" — yes for both, but the question exposed that her
+     * WORKERS collided with nothing whatsoever: not worms, not stones, not
+     * the beetle, not each other. They walked through the lot, and had done
+     * since they were added.
+     *
+     * They belong here for the same reason she does, and by the same rule: a
+     * worker is `CASTE_MASS_MG` of ant, so a stone shoves her aside and a
+     * worm shoves her harder. Nothing here is special-cased for being an
+     * ally.
+     */
+    for (const one of this.colony) {
+      if (!one.ready) continue;
+      out.push({
+        id: `ant-${one.id}`,
+        at: one.at,
+        radius: BODY_HALF_TALL,
+        massMg: CASTE_MASS_MG[one.caste],
+      });
     }
     return out;
   }
@@ -3956,8 +4000,18 @@ export class IslandScene {
     worm.at.set(x, grade - (WORM_BORE_MM * 3) / MM, z);
     worm.trail.length = 0;
     worm.dug = 0;
-    for (let k = 0; k < 8; k += 1) {
-      worm.trail.push(worm.at.clone().addScaledVector(worm.dir, -k * 0.6));
+    /*
+     * A FULL-LENGTH WORM, laid the way the constructor lays one.
+     *
+     * A first cut seeded eight points and made a 24 mm animal — which then
+     * measured as ten collision beads on a body that should carry about
+     * thirty, and read as the bead chain being too short rather than as the
+     * test helper building a stunted worm.
+     */
+    for (let k = 0; k < TRAIL_POINTS; k += 1) {
+      worm.trail.push(
+        worm.at.clone().addScaledVector(worm.dir, (-k * TRAIL_STEP_MM) / MM),
+      );
     }
     return true;
   }

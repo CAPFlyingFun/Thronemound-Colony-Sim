@@ -70,10 +70,15 @@ class Colonist {
 
   private readonly basis = new THREE.Matrix4();
 
+  /** Her name on the shove list. Stable for as long as she lives. */
+  readonly id: number;
+
   constructor(
     readonly caste: 'worker' | 'major',
     private readonly rand: () => number,
+    id = 0,
   ) {
+    this.id = id;
     this.model = new QueenModel(caste);
     this.model.root.visible = false;
   }

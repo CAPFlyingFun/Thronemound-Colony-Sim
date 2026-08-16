@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import {
-  WORM_BITE_S, WORM_BORE_MM, WORM_CEIL_MM, WORM_FLOOR_MM, WORM_STEP_MM,
-  WORM_UNDER_MM, Worm, wanderDir,
+  BEAD_STEP_MM, WORM_BITE_S, WORM_BORE_MM, WORM_CEIL_MM, WORM_FLOOR_MM,
+  WORM_STEP_MM, WORM_UNDER_MM, Worm, wanderDir,
 } from '../src/scenes/islandWorm';
 
 /** Millimetres per world unit — the project's own scale. */
@@ -256,5 +256,66 @@ describe('a worm inside its band', () => {
       hi = Math.max(hi, w.at.y);
     }
     expect((hi - lo) * MM).toBeGreaterThan(WORM_BORE_MM);
+  });
+});
+
+describe('a worm you can actually touch', () => {
+  /*
+   * Asked for: "can we make the collision for the worm based on the mesh
+   * like with the terrain? That way you can attack a worm from the sides
+   * and back without walking through it — especially since I will want a
+   * swarm of ants to crawl all over it and sting it."
+   *
+   * It was ONE sphere at the head, 6 mm across, standing in for a 150 mm
+   * animal. Ninety-six per cent of it was air.
+   */
+  it('has a bead for the whole body, not one at the nose', () => {
+    const w = new Worm(0, -20, 0, steady());
+    const beads = w.bulkBeads();
+    /* The trail holds about 165 mm of path; at a five-millimetre step that
+     * is roughly thirty beads, and certainly not one. */
+    expect(beads.length).toBeGreaterThan(25);
+    const head = beads[0]!;
+    const tail = beads[beads.length - 1]!;
+    expect(head.distanceTo(tail) * MM).toBeGreaterThan(140);
+  });
+
+  it('leaves no gap an ant could walk through', () => {
+    /*
+     * THE ONE PROPERTY THAT MATTERS. Beads spaced wider than they are
+     * across are a string of holes, and a 1.6 mm ant goes straight between
+     * them — which would be the original complaint with extra steps.
+     */
+    const w = new Worm(0, -20, 0, steady());
+    const beads = w.bulkBeads();
+    for (let i = 0; i + 1 < beads.length; i += 1) {
+      const gapMm = beads[i]!.distanceTo(beads[i + 1]!) * MM;
+      expect(gapMm).toBeLessThan(WORM_BORE_MM);
+    }
+    expect(BEAD_STEP_MM).toBeLessThan(WORM_BORE_MM);
+  });
+
+  it('spaces them by ARC LENGTH, so bends do not crowd and straights do not thin', () => {
+    /* One bead per breadcrumb would bunch on a turn, because the crumbs
+     * themselves do — and a thinned straight is where a hole opens. */
+    const w = new Worm(0, -20, 0, steady());
+    const s = soil({ surface: 0, base: -1000 });
+    /* Drive it through a long curve so the trail is genuinely bent. */
+    for (let i = 0; i < 60 * 120; i += 1) w.tick(1 / 60, s);
+    const beads = w.bulkBeads();
+    const gaps = [];
+    for (let i = 0; i + 1 < beads.length; i += 1) {
+      gaps.push(beads[i]!.distanceTo(beads[i + 1]!) * MM);
+    }
+    const spread = Math.max(...gaps) - Math.min(...gaps);
+    /* Every gap the same to within rounding, however bent the path is. */
+    expect(spread).toBeLessThan(0.5);
+  });
+
+  it('never hands back an empty body', () => {
+    /* Something has to be there even before it has moved, or a fresh worm
+     * is uncollidable for its first frames. */
+    const w = new Worm(0, -20, 0, steady());
+    expect(w.bulkBeads().length).toBeGreaterThan(0);
   });
 });
