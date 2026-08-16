@@ -396,6 +396,43 @@ export class TerrainStream {
    *
    * Eight bytes a sample against some forty as JSON text.
    */
+  /**
+   * What the stored edits actually contain — for probes, walked HERE where
+   * the format is known rather than re-parsed from the bytes outside.
+   *
+   * A probe that re-derived this from `serializeEdits` output drifted out of
+   * alignment and reported local indices in the billions and values at
+   * 3.4e38. Both were artefacts of the parse. This exists so a decision
+   * about the format is taken on numbers from the map itself.
+   */
+  editStats(): {
+    samples: number; tiles: number;
+    minValue: number; maxValue: number; maxLocal: number; levels: number;
+  } {
+    let samples = 0;
+    let minValue = Infinity;
+    let maxValue = -Infinity;
+    let maxLocal = 0;
+    const levels = new Set<number>();
+    for (const tile of this.edits.values()) {
+      for (const [local, value] of tile) {
+        samples += 1;
+        if (value < minValue) minValue = value;
+        if (value > maxValue) maxValue = value;
+        if (local > maxLocal) maxLocal = local;
+        if (levels.size < 5000) levels.add(Math.round(value * 100));
+      }
+    }
+    return {
+      samples,
+      tiles: this.edits.size,
+      minValue: samples ? minValue : 0,
+      maxValue: samples ? maxValue : 0,
+      maxLocal,
+      levels: levels.size,
+    };
+  }
+
   serializeEdits(): Uint8Array {
     let bytes = 4;
     for (const tile of this.edits.values()) bytes += 6 + tile.size * 8;

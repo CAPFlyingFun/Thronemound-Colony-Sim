@@ -112,6 +112,44 @@ export class IslandStream {
    * a tunnel that heals part of itself on resume, which is the exact bug
    * that comment was written about.
    */
+  /**
+   * What the stored edits actually contain — walked HERE, where the format
+   * is known, rather than re-parsed from the bytes outside.
+   *
+   * A probe that re-derived this from `serializeEdits` output parsed it with
+   * `TerrainStream`'s layout, which writes a uint16 tile key where this
+   * writes a uint32. Two bytes out per tile, and it reported local indices
+   * in the billions and density values at 3.4e38 — both pure artefact, and
+   * both nearly used to justify a format decision.
+   */
+  editStats(): {
+    samples: number; tiles: number;
+    minValue: number; maxValue: number; maxLocal: number; levels: number;
+  } {
+    let samples = 0;
+    let minValue = Infinity;
+    let maxValue = -Infinity;
+    let maxLocal = 0;
+    const levels = new Set<number>();
+    for (const tile of this.edits.values()) {
+      for (const [local, value] of tile) {
+        samples += 1;
+        if (value < minValue) minValue = value;
+        if (value > maxValue) maxValue = value;
+        if (local > maxLocal) maxLocal = local;
+        if (levels.size < 5000) levels.add(Math.round(value * 100));
+      }
+    }
+    return {
+      samples,
+      tiles: this.edits.size,
+      minValue: samples ? minValue : 0,
+      maxValue: samples ? maxValue : 0,
+      maxLocal,
+      levels: levels.size,
+    };
+  }
+
   serializeEdits(): Uint8Array {
     let bytes = 4;
     for (const tile of this.edits.values()) bytes += 8 + tile.size * 8;

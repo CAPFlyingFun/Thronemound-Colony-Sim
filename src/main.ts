@@ -219,10 +219,16 @@ if (host) {
        * not work" — the door goes back up with a reason rather than the
        * curtain lifting on a world the player did not ask for.
        */
-      const enter = (then?: () => boolean | void): void => {
+      const enter = (then?: () => boolean | void | Promise<boolean>): void => {
         menu.dispose();
+        /* Awaited, because restoring reads the saved world out of IndexedDB
+         * — see `islandStore`. A synchronous check would have taken the
+         * pending promise for a truthy answer and never reported a bad
+         * save at all. */
         const run = (): void => {
-          if (then?.() === false) reopen('That save could not be read');
+          void Promise.resolve(then?.()).then((ok) => {
+            if (ok === false) reopen('That save could not be read');
+          });
         };
         if (standing) { run(); return; }
         curtain = new LoadingOverlay(host);
@@ -254,7 +260,9 @@ if (host) {
            * button can be live from the first frame. And a save that will
            * not parse now has somewhere to report it — see `reopen`.
            */
-          onResume: () => enter(() => island?.resumeFromStorage() ?? false),
+          /* A promise now: the saved world lives in IndexedDB, which is
+           * asynchronous. `enter` already awaits what it is given. */
+          onResume: () => enter(async () => (await island?.resumeFromStorage()) ?? false),
           onDev: () => { window.location.search = '?scene=poseedit'; },
         });
         /*
@@ -304,7 +312,7 @@ if (host) {
         island?.setPaused(true);
         pause = new PauseMenu(host, {
           onResume: () => { pause = null; island?.setPaused(false); },
-          onSave: () => island?.saveToStorage() ?? false,
+          onSave: async () => (await island?.saveToStorage()) ?? false,
           onDev: () => island?.toggleDev() ?? false,
           /*
            * LEAVING IS A SCENE SWAP NOW, not a reload. The island keeps

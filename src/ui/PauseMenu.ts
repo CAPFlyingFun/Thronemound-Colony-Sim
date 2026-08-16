@@ -23,7 +23,15 @@
 /** Where the buttons go, in the order a thumb should meet them. */
 export interface PauseMenuActions {
   onResume: () => void;
-  onSave: () => boolean;
+  /**
+   * SAVE, and it is a PROMISE now.
+   *
+   * The payload moved to IndexedDB — see `islandStore` — because a dug-out
+   * nest outgrew localStorage's five megabytes. IndexedDB is asynchronous,
+   * so the honest contract is a promise: reporting "Saved" before the write
+   * has landed would be reporting a guess.
+   */
+  onSave: () => boolean | Promise<boolean>;
   onMainMenu: () => void;
   /** Toggle the DEV drawer, returning whether it is now open. Optional: a
    *  build without instrumentation simply does not draw the handle. */
@@ -142,8 +150,14 @@ export class PauseMenu {
     this.button('SAVE GAME', () => {
       /* The one thing on this menu that reports back. A save that says
        * nothing is a save you press twice. */
-      this.say.textContent = this.actions.onSave()
-        ? 'Saved' : 'Could not save — storage is full or blocked';
+      /* Says so WHILE it writes. A megabyte-scale save is not instant, and
+       * a button that looks inert until it finishes is a button pressed
+       * twice — the same reason it reported back at all. */
+      this.say.textContent = 'Saving…';
+      void Promise.resolve(this.actions.onSave()).then((ok) => {
+        this.say.textContent = ok
+          ? 'Saved' : 'Could not save — storage is full or blocked';
+      });
     });
 
     /*

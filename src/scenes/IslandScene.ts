@@ -167,6 +167,7 @@ import {
   WORM_REACH, TRAIL_POINTS, TRAIL_STEP_MM, type WormSoil,
 } from './islandWorm';
 import { dressCreature } from './creatureSkin';
+import { dropSave, getSave, putSave, readMark } from './islandStore';
 import { wound } from './creatureBrain';
 import { EARTHWORM } from './creatureKinds';
 import { WormBody } from './WormBody';
@@ -4478,6 +4479,38 @@ export class IslandScene {
     return this.stream ? JSON.stringify(this.buildSave()) : null;
   }
 
+  /**
+   * For probes: write the save, read it straight back, and say whether the
+   * bytes survived — the one question a size measurement cannot answer.
+   */
+  async saveRoundTripForTest(): Promise<boolean> {
+    const want = this.saveBlobForTest();
+    if (!want) return false;
+    if (!await this.saveToStorage()) return false;
+    const got = await getSave(ISLAND_SAVE_KEY);
+    if (got === null) return false;
+    /* Compared on the DUG payload rather than the whole blob: `when` is
+     * stamped at write time and would differ by a millisecond. */
+    const a = parseIslandSave(want);
+    const b = parseIslandSave(got);
+    return !!a && !!b && a.dug === b.dug;
+  }
+
+  /** For probes: hand an arbitrary payload to the real store. */
+  static putSaveForTest(key: string, text: string): Promise<boolean> {
+    return putSave(key, text);
+  }
+
+  /** For probes: clean up after `putSaveForTest`. */
+  static dropSaveForTest(key: string): Promise<void> {
+    return dropSave(key);
+  }
+
+  /** What the stored edits contain, straight from the map that holds them. */
+  saveEditStatsForTest(): ReturnType<IslandStream['editStats']> | null {
+    return this.stream ? this.stream.editStats() : null;
+  }
+
   /** The packed edit bytes themselves, for measuring what they compress to. */
   saveEditsRawForTest(): Uint8Array | null {
     return this.stream ? this.stream.serializeEdits() : null;
@@ -4500,27 +4533,26 @@ export class IslandScene {
     };
   }
 
-  saveToStorage(): boolean {
+  async saveToStorage(): Promise<boolean> {
     if (!this.stream) return false;
-    const save: IslandSave = {
-      v: ISLAND_SAVE_V,
-      when: Date.now(),
-      at: [this.at.x, this.at.y, this.at.z],
-      up: [this.up.x, this.up.y, this.up.z],
-      fwd: [this.fwd.x, this.fwd.y, this.fwd.z],
-      facing: this.facing,
-      dug: toBase64(this.stream.serializeEdits()),
-    };
-    try {
-      window.localStorage.setItem(ISLAND_SAVE_KEY, JSON.stringify(save));
-      return true;
-    } catch {
-      return false;
-    }
+    return putSave(ISLAND_SAVE_KEY, JSON.stringify(this.buildSave()));
   }
 
-  /** Is there a save worth offering a RESUME for? */
+  /**
+   * Is there a save worth offering a RESUME for?
+   *
+   * SYNCHRONOUS, because the front menu decides whether to light the button
+   * while it is being built and before any island exists. It reads the
+   * MARKER rather than the save — see `islandStore`, where the few bytes
+   * that say "a save is here" stay in localStorage and the megabytes went
+   * to IndexedDB.
+   *
+   * The fallback keeps faith with saves written before that split: a player
+   * whose nest is sitting in localStorage from an older build still gets
+   * their RESUME button.
+   */
   static hasSave(): boolean {
+    if (readMark()) return true;
     try {
       return parseIslandSave(window.localStorage.getItem(ISLAND_SAVE_KEY)) !== null;
     } catch {
@@ -4530,6 +4562,8 @@ export class IslandScene {
 
   /** When it was written, for a menu that wants to say so. */
   static savedWhen(): number {
+    const mark = readMark();
+    if (mark) return mark.when;
     try {
       return parseIslandSave(window.localStorage.getItem(ISLAND_SAVE_KEY))?.when ?? 0;
     } catch {
@@ -4550,10 +4584,10 @@ export class IslandScene {
    * save whose BYTES are bad is dropped, because `restoreEdits` refuses
    * before touching the store and there is nothing half-applied to undo.
    */
-  resumeFromStorage(): boolean {
+  async resumeFromStorage(): Promise<boolean> {
     if (!this.stream) return false;
-    const save = (() => {
-      try { return parseIslandSave(window.localStorage.getItem(ISLAND_SAVE_KEY)); } catch {
+    const save = await (async () => {
+      try { return parseIslandSave(await getSave(ISLAND_SAVE_KEY)); } catch {
         return null;
       }
     })();

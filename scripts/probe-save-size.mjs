@@ -74,27 +74,58 @@ const out = await page.evaluate(async () => {
     window.__editBytes = editBytes;
   } catch (e) { deflated = `unavailable: ${e.name}`; }
 
-  /* And how many DISTINCT density values there are — if it is a handful,
-   * a float32 per sample is thirty-one bits of nothing. */
-  let distinct = null;
-  try {
-    const bytes = s.saveEditBytesForTest();
-    distinct = bytes;
-  } catch { /* reported as null */ }
+  /*
+   * WHAT THE STORED VALUES ACTUALLY LOOK LIKE.
+   *
+   * `remember()` already drops any sample that still agrees with the
+   * generator, so these are all real disagreements — the first guess, that
+   * the brush was storing its whole bounding box untouched, was WRONG. So
+   * the question becomes what a float32 per sample is buying: if the values
+   * cluster on a handful of levels, thirty-one of those bits are nothing.
+   */
+  /* Straight from the map that holds them — see `IslandStream.editStats`.
+   * Re-parsing the serialised bytes out here got the tile-key width wrong
+   * (uint32 there, uint16 in `TerrainStream`) and reported local indices in
+   * the billions and values at 3.4e38, both pure artefact. */
+  const stats = s.saveEditStatsForTest();
 
-  /* What actually happens on a write, and WHY if it fails. */
-  let wrote = null;
+  /*
+   * THE OLD SHELF, for comparison: what localStorage does with this blob.
+   * This is the failure Joshua hit, reproduced on purpose.
+   */
+  let oldWrote = null;
   let why = null;
   try {
-    const raw = s.saveBlobForTest ? s.saveBlobForTest() : '';
-    window.localStorage.setItem('__tm_probe', raw);
+    window.localStorage.setItem('__tm_probe', s.saveBlobForTest());
     window.localStorage.removeItem('__tm_probe');
-    wrote = true;
-  } catch (e) {
-    wrote = false;
-    why = `${e.name}: ${e.message}`;
-  }
-  return { rows, wrote, why, deflated, ratio,
+    oldWrote = true;
+  } catch (e) { oldWrote = false; why = `${e.name}`; }
+
+  /* AND THE REAL PATH, end to end: write it, read it back, check it matches. */
+  const wroteReal = await s.saveToStorage();
+  const roundTrip = await s.saveRoundTripForTest();
+
+  /*
+   * THE DECIDING TEST. This machine's localStorage is more generous than a
+   * phone's, so a 2.6 MB save is accepted here and was refused on Joshua's
+   * device. Rather than argue about whose quota is whose, both shelves are
+   * handed a payload the size a real session reaches — an hour of digging is
+   * several times the two minutes measured above — and asked outright.
+   */
+  const big = 'x'.repeat(12 * 1024 * 1024);
+  let bigLocal = null;
+  let bigWhy = null;
+  try {
+    window.localStorage.setItem('__tm_big', big);
+    window.localStorage.removeItem('__tm_big');
+    bigLocal = true;
+  } catch (e) { bigLocal = false; bigWhy = e.name; }
+  const bigStore = await s.constructor.putSaveForTest('__tm_big', big);
+  /* Put it back the way it was found — the probe must not leave a twelve
+   * megabyte scratch payload in the player's browser, nor a marker claiming
+   * a save that is not a save. */
+  await s.constructor.dropSaveForTest('__tm_big');
+  return { rows, oldWrote, wroteReal, roundTrip, why, deflated, ratio, stats, bigLocal, bigWhy, bigStore,
     editsPacked: window.__editsPacked, editBytes: window.__editBytes };
 });
 
@@ -112,7 +143,20 @@ if (out.editsPacked) {
   console.log(`  raw edits deflated ${kb(out.editsPacked)}`
     + `  (${(out.editBytes / out.editsPacked).toFixed(1)}x smaller than the ${kb(out.editBytes)} of edits)`);
 }
-console.log(`  write succeeded    ${out.wrote}`);
+if (out.stats) {
+  const t = out.stats;
+  console.log(`\n  stored samples     ${t.samples.toLocaleString()}`);
+  console.log(`  value range        ${t.minValue.toFixed(4)} .. ${t.maxValue.toFixed(4)}`);
+  console.log(`  distinct levels    ${t.levels >= 5000 ? '5000+' : t.levels.toLocaleString()} (to 1/100)`);
+  console.log(`  largest local idx  ${t.maxLocal.toLocaleString()} (uint16 holds 65,535)`);
+  console.log(`  tiles              ${t.tiles.toLocaleString()}`);
+}
+console.log(`\n  localStorage       ${out.oldWrote ? 'accepted it' : `REFUSED it (${out.why})`}`);
+console.log(`  saveToStorage      ${out.wroteReal ? 'wrote it' : 'FAILED'}`);
+console.log(`  read back intact   ${out.roundTrip}`);
+console.log(`\n  a 12 MB payload — the size a real session reaches:`);
+console.log(`    localStorage     ${out.bigLocal ? 'accepted' : `REFUSED (${out.bigWhy})`}`);
+console.log(`    IndexedDB        ${out.bigStore ? 'accepted' : 'REFUSED'}`);
 if (out.why) console.log(`  failure           ${out.why}`);
 console.log('\n  for scale          localStorage is about 5 MiB per origin,');
 console.log('                     and base64 inflates bytes by a third.');
