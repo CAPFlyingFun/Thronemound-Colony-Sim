@@ -168,8 +168,10 @@ import {
 } from './islandWorm';
 import { dressCreature } from './creatureSkin';
 import { dropSave, getSave, putSave, readMark } from './islandStore';
-import { wound } from './creatureBrain';
-import { EARTHWORM } from './creatureKinds';
+import { wound, type CreatureKind } from './creatureBrain';
+import { APHID, EARTHWORM, HOUSEFLY } from './creatureKinds';
+import { Critter } from './Critter';
+import { CREATURES } from './creatureScale';
 import { WormBody } from './WormBody';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { warmHudArt } from './hudArt';
@@ -353,6 +355,13 @@ export class IslandScene {
   private chargeCooldown = 0;
 
   /** The island's other diggers — see `islandWorm`. */
+  /**
+   * THE ANIMALS THAT WALK — aphids and houseflies today, beetles and
+   * ladybugs when their models arrive. Worms are kept separate because a
+   * worm lives inside the ground and shares almost nothing with these.
+   */
+  private readonly critters: Critter[] = [];
+
   private readonly worms: Worm[] = [];
 
   /** One drawn body per worm, laid along the burrow it dug. */
@@ -510,48 +519,76 @@ export class IslandScene {
   }
 
   /**
-   * SOMETHING TO FIGHT.
+   * THE ISLAND'S OTHER ANIMALS.
    *
-   * One beetle, a walk from where she starts, on the same side as the
-   * landmark tree so the first thing a player does — head for the tree —
-   * takes them past it. Not hidden and not on top of her: a first
-   * encounter should be a thing you choose to have.
+   * Asked for: "I will want the fly, aphid and worm in the game", and the
+   * aphid to replace the ladybug "about the same 2-3 mm like a real aphid".
    *
-   * It is a placeholder in the sense that a real bestiary will not be a
-   * `for` loop over one number, and it is NOT a placeholder in the sense
-   * that it has hit points, fights back, and can kill her.
+   * THE BEETLE IS GONE FROM THE WORLD AND KEPT IN THE BOOK. Joshua: "remove
+   * it as I will add a real GLB beetle(s) and a ladybug later... maybe don't
+   * remove completely, but keep in the insect brain database". So `BEETLE`
+   * and `LADYBUG` are full entries in `creatureKinds` — temperament, senses,
+   * damage, the numbers the procedural one actually fought with — and they
+   * simply have no model and no spawn. When the GLBs arrive they need a file
+   * name and a line here, not a design.
+   *
+   * That leaves the island with nothing that fights back, and that is the
+   * honest state rather than an oversight: an aphid cannot hurt an ant and a
+   * housefly has no interest in one. The threat returns with the beetle.
    */
+  private spawnCritters(): void {
+    if (this.critters.length > 0) return;
+    let seed = 0xa9ecd;
+    const rand = (): number => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+    /* A handful of each, scattered where a walk finds them — near enough
+     * that the first trip out meets something, far enough that they are not
+     * standing on her founding. */
+    const plan: { kind: CreatureKind; count: number }[] = [
+      { kind: APHID, count: 5 },
+      { kind: HOUSEFLY, count: 3 },
+    ];
+    for (const { kind, count } of plan) {
+      for (let i = 0; i < count; i += 1) {
+        const a = rand() * Math.PI * 2;
+        const away = (40 + rand() * 90) / MM;
+        const x = this.at.x + Math.cos(a) * away;
+        const z = this.at.z + Math.sin(a) * away;
+        const one = new Critter(
+          kind, x, this.walkGroundAt(x, z), z, rand, this.critters.length,
+        );
+        this.scene.add(one.root);
+        this.critters.push(one);
+      }
+    }
+    /*
+     * ONE FETCH PER SPECIES, then cloned — and DRESSED ON THE TEMPLATE.
+     * `SkeletonUtils.clone` shares materials with the original, so fixing
+     * the template fixes every clone and doing it per clone would redo the
+     * same work. See `creatureSkin` for what the exporter leaves behind.
+     */
+    for (const kind of [APHID, HOUSEFLY]) {
+      const file = CREATURES[kind.id]?.model;
+      if (!file) continue;
+      void new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}models/${file}`)
+        .then((gltf) => {
+          dressCreature(gltf.scene);
+          for (const one of this.critters) {
+            if (one.kind.id === kind.id) one.dress(gltf.scene);
+          }
+        })
+        .catch(() => { /* No body. It still thinks, it is just not drawn. */ });
+    }
+  }
+
   private spawnQuarry(): void {
-    if (this.quarry.length > 0) return;
-    const away = 34 / MM;
-    const x = this.at.x + away;
-    const z = this.at.z + away * 0.4;
-    const beetle = new Beetle('beetle', x, this.walkGroundAt(x, z), z);
-    this.scene.add(beetle.root);
-    this.quarry.push(beetle);
+    this.spawnCritters();
     this.spawnProps();
     this.spawnWorms();
   }
 
-  /**
-   * THE LOOSE THINGS, scattered where walking finds them.
-   *
-   * Seeded off her founding spot rather than at fixed world coordinates,
-   * because where she starts is where the island decided to put her and a
-   * hardcoded pebble would end up inside a tree.
-   */
-  /**
-   * A FEW WORMS, near where she founds.
-   *
-   * Near her because the fine soil window follows her and a worm outside
-   * it cannot carve — see `wormSoil.covers`. Seeded off her spot for the
-   * same reason the props are: where she starts is where the island put
-   * her, and a hardcoded worm would be inside a tree.
-   *
-   * Three, and deliberately few. Each one carves a 6 mm tube at 3 mm a
-   * second, which is 180 mm of burrow a minute; a dozen would turn the
-   * ground she is standing on into a sponge inside a session.
-   */
   private spawnWorms(): void {
     if (this.worms.length > 0) return;
     let seed = 0x0eaf;
@@ -900,6 +937,11 @@ export class IslandScene {
      * world rather than with the dig, because a chip outlives the stroke
      * that made it and must keep falling after DIG is let go. */
     this.grit?.tick(dt);
+    /* The walkers, on the SOIL — `footingFrom`, not the stale heightfield.
+     * See the note at the top of `Critter`. */
+    for (const one of this.critters) {
+      one.step(dt, (x, z) => this.footingFrom(x, z, one.at.y));
+    }
     for (const worm of this.worms) worm.tick(dt, this.wormSoil);
     this.crushWorms(dt);
     /* And the bodies lie in the holes, which is the only place they fit: a
@@ -4038,6 +4080,14 @@ export class IslandScene {
         });
       }
     }
+    /* The other animals, by the same rule as everything else — an aphid is
+     * a third of a milligram of ant and gives way to all of it. */
+    for (const one of this.critters) {
+      if (!one.ready || !one.alive) continue;
+      out.push({
+        id: `bug-${one.id}`, at: one.at, radius: one.radius, massMg: one.massMg,
+      });
+    }
     /*
      * AND THE COLONY, which had never been on this list at all.
      *
@@ -4200,6 +4250,31 @@ export class IslandScene {
       }
       return { x: best.x, y: best.y, z: best.z, depthMm: deep * MM };
     });
+  }
+
+  /** For probes: every walking creature — kind, whether it is drawn, and
+   *  what its brain is doing. */
+  crittersForTest(): {
+    kind: string; ready: boolean; behaviour: string;
+    x: number; y: number; z: number; health: number;
+  }[] {
+    return this.critters.map((c) => ({
+      kind: c.kind.id, ready: c.ready, behaviour: c.mind.behaviour,
+      x: c.at.x, y: c.at.y, z: c.at.z, health: c.mind.health,
+    }));
+  }
+
+  /** For probes: how big a drawn creature actually is, in millimetres —
+   *  the one number a screenshot's framing cannot tell you. */
+  critterSizeForTest(kind: string): number[] | null {
+    const one = this.critters.find((c) => c.kind.id === kind && c.ready);
+    if (!one) return null;
+    const box = new THREE.Box3().setFromObject(one.root);
+    return [
+      (box.max.x - box.min.x) * MM,
+      (box.max.y - box.min.y) * MM,
+      (box.max.z - box.min.z) * MM,
+    ].map((v) => +v.toFixed(2));
   }
 
   /** For probes: a worm's brain and stats, so the port can be measured. */

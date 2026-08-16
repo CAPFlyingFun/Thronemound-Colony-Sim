@@ -32,7 +32,21 @@ await page.waitForTimeout(2500);
 await page.click('button[aria-label="Dig"]', { noWaitAfter: true });
 await page.waitForTimeout(600);
 
-// A lob at the sky: it must fly, then fizzle into the miss note.
+/*
+ * A LOB AT THE SKY: it must fly, and then COME BACK DOWN AND LAND.
+ *
+ * This case used to assert a fizzle, and that premise died with v0.1.82.
+ * It only ever held because the original ballistics could throw 141 mm
+ * against a carvable world reaching 64 — the very mismatch that had two
+ * throws in three silently carving nothing. With an arc that fits the
+ * world, a charge thrown upward returns to the ground and digs, which is
+ * both more physical and no longer a miss.
+ *
+ * The fizzle is still pinned, just not here: `tests/digCharge.test.ts`
+ * proves a charge dies at the window's edge deterministically, with no
+ * browser and no terrain to arrange. That is the better home for it — the
+ * scenario is exact rather than provoked.
+ */
 const sky = await page.evaluate(() => {
   const s = window.islandScene;
   s.aimPitchForTest(0.9);
@@ -80,7 +94,9 @@ await page.screenshot({ path: '/tmp/charge-dirt.png' });
 
 const verdict = {
   sky, dirt, errors,
-  pass: sky.flying === 1 && sky.landedAll && sky.noteOn
+  /* The sky throw lands now rather than fizzling — see the note above the
+   * `sky` block. So neither throw should raise the miss note. */
+  pass: sky.flying === 1 && sky.landedAll && !sky.noteOn
     && dirt.flying === 1 && dirt.landedAll && dirt.grit > 0 && !dirt.noteOn
     && errors.length === 0,
 };
