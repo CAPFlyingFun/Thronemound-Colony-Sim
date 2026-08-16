@@ -492,9 +492,26 @@ export class LegDrive {
    */
   private readonly corner: CornerTurn;
 
-  constructor(setup: LegSetup[]) {
+  /**
+   * HOW BIG THIS ANIMAL IS AGAINST THE ONE THE NUMBERS WERE TAKEN FROM.
+   *
+   * Every millimetre constant in this file — stride, spare down-reach, the
+   * reach-up bound — was MEASURED, and measured on the queen. A worker is
+   * 4 mm to her 9: hand those queen millimetres to a worker's `LegDrive`
+   * and every step aims a 2 mm stride off legs less than half the length
+   * they were measured on, every plant trusts a spare reach the leg does
+   * not have, and the IK is left holding feet the skeleton cannot deliver.
+   * That is the stiff, floating, sometimes-refusing-to-step worker the
+   * founding handed the player. One ratio, applied wherever a raw
+   * millimetre is spent, keeps the measurements honest for every caste
+   * without re-measuring each one.
+   */
+  readonly scale: number;
+
+  constructor(setup: LegSetup[], scale = 1) {
+    this.scale = scale;
     for (const leg of setup) {
-      const spare = (REACH_DOWN_MM[leg.slot] ?? 1) / MM;
+      const spare = ((REACH_DOWN_MM[leg.slot] ?? 1) * scale) / MM;
       this.legs.push({
         slot: leg.slot,
         home: leg.home.clone(),
@@ -665,7 +682,7 @@ export class LegDrive {
     const total = linear + rotational;
     const turn = total > 1e-9 ? rotational / total : 0;
     const mm = STRIDE_MM.walk + (STRIDE_MM.turn - STRIDE_MM.walk) * turn;
-    return mm / 2 / MM;
+    return (mm * this.scale) / 2 / MM;
   }
 
   /**
@@ -689,7 +706,9 @@ export class LegDrive {
     if (speed <= 1e-9) DEST_DIR.copy(leg.dir);
     const ahead = DEST_AHEAD.copy(home)
       .addScaledVector(DEST_DIR, speed > 1e-9 ? radius : 0);
-    return ground.nearest(ahead, body.up, leg.down, REACH_UP_MM / MM) !== null;
+    return ground.nearest(
+      ahead, body.up, leg.down, (REACH_UP_MM * this.scale) / MM,
+    ) !== null;
   }
 
   /**
@@ -716,7 +735,9 @@ export class LegDrive {
     if (speed <= 1e-9) DEST_DIR.copy(leg.dir);
     const ahead = DEST_AHEAD.copy(home)
       .addScaledVector(DEST_DIR, speed > 1e-9 ? radius : 0);
-    const hit = ground.nearest(ahead, body.up, leg.down, REACH_UP_MM / MM);
+    const hit = ground.nearest(
+      ahead, body.up, leg.down, (REACH_UP_MM * this.scale) / MM,
+    );
     if (!hit) return false;
     return hit.distanceTo(leg.anchor) > radius * 0.35;
   }
@@ -736,14 +757,15 @@ export class LegDrive {
      * surfaces a transition is held between. See `CornerTurn.reset`. */
     this.corner.reset();
     const home = new THREE.Vector3();
-    const lead = STRIDE_MM.walk / 2 / MM;
+    const lead = (STRIDE_MM.walk * this.scale) / 2 / MM;
+    const up = (REACH_UP_MM * this.scale) / MM;
     for (const leg of this.legs) {
       this.homeWorld(leg, body, home);
       const want = TRIPOD_B.includes(leg.slot)
         ? home.clone().addScaledVector(body.forward, lead)
         : home.clone();
-      const hit = ground.nearest(want, body.up, leg.down, REACH_UP_MM / MM)
-        ?? ground.nearest(home, body.up, leg.down, REACH_UP_MM / MM);
+      const hit = ground.nearest(want, body.up, leg.down, up)
+        ?? ground.nearest(home, body.up, leg.down, up);
       leg.planted = !!hit;
       leg.groping = !hit;
       leg.anchor.copy(hit ?? home);
@@ -1267,7 +1289,9 @@ export class LegDrive {
       const hit = fresh
         ? SCRATCH_AIM.copy(SCRATCH_CONTACT.point)
           .addScaledVector(SCRATCH_CONTACT.normal, FOOT_CLEARANCE_MM / MM)
-        : (leg.crossing ? leg.to : ground.nearest(ahead, body.up, leg.down, REACH_UP_MM / MM));
+        : (leg.crossing
+          ? leg.to
+          : ground.nearest(ahead, body.up, leg.down, (REACH_UP_MM * this.scale) / MM));
       if (!hit) {
         /*
          * Nothing to stand on. She keeps the leg raised and keeps reaching —
@@ -1345,7 +1369,7 @@ export class LegDrive {
     let clearance = Infinity;
     if (under) {
       clearance = body.at.clone().sub(under).dot(body.up);
-      const want = RIDE_CLEARANCE_MM / MM;
+      const want = (RIDE_CLEARANCE_MM * this.scale) / MM;
       if (settle && clearance < want) {
         const budget = Math.min(...this.legs.filter((l) => l.planted).map((l) => l.down), 1);
         const lift = Math.min(want - clearance, Number.isFinite(budget) ? budget : want);

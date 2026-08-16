@@ -4,8 +4,9 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  ABILITIES, ANT_KINDS, FIRE_ANT, FIRE_ANT_WORKER, GAME_MINUTES_PER_REAL_MINUTE,
-  PLAYABLE_ABILITIES, REAL_SECONDS_PER_GAME_HOUR, TWIG_ANT, drainPerGameHours,
+  ABILITIES, ANT_KINDS, FIRE_ANT, FIRE_ANT_MAJOR, FIRE_ANT_WORKER,
+  GAME_MINUTES_PER_REAL_MINUTE, PLAYABLE_ABILITIES, REAL_SECONDS_PER_GAME_HOUR,
+  TWIG_ANT, drainPerGameHours,
 } from '../src/scenes/antKinds';
 import { STRENGTH } from '../src/scenes/mandibleReach';
 import { DEFAULT_VITALS } from '../src/scenes/islandVitals';
@@ -67,6 +68,13 @@ describe('two ants differ in DATA, not in code', () => {
     /* And the third ant this test said it would grow. The sting was never
      * deleted, only taken off the queen; the worker is who has it. */
     expect(FIRE_ANT_WORKER.abilities).toContain('sting');
+    /* Asked for by name: "bite and sting button available for the worker
+     * and major, only bite for queen." The major's row exists before she
+     * is playable so the handover is a row change, not a design session. */
+    expect(FIRE_ANT_MAJOR.abilities).toContain('bite');
+    expect(FIRE_ANT_MAJOR.abilities).toContain('sting');
+    expect(FIRE_ANT_MAJOR.strength).toBe('major');
+    expect(FIRE_ANT.abilities).toContain('bite');
   });
 
   it('makes the worker a worker, and the queen still a queen', () => {
@@ -116,7 +124,10 @@ describe('every plate the player can ever hold', () => {
   });
 
   it('adds nothing no caste asked for', () => {
-    const wanted = new Set([...FIRE_ANT.abilities, ...FIRE_ANT_WORKER.abilities]);
+    const wanted = new Set([
+      ...FIRE_ANT.abilities, ...FIRE_ANT_WORKER.abilities,
+      ...FIRE_ANT_MAJOR.abilities,
+    ]);
     for (const id of PLAYABLE_ABILITIES) expect(wanted.has(id)).toBe(true);
   });
 });

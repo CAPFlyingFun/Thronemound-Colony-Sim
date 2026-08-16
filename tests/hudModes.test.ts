@@ -83,8 +83,12 @@ describe('what each mode shows', () => {
     const READOUTS = new Set(['instruments', 'aim', 'roll', 'heading', 'depth', 'poseRow']);
     for (const mode of Object.keys(HUD_LAYOUTS) as (keyof typeof HUD_LAYOUTS)[]) {
       const plates = partsIn(mode).filter((p) => !READOUTS.has(p));
-      /* Named in the assertion so a failure says WHICH mode overflowed. */
-      expect({ mode, over: plates.length > 6 }).toEqual({ mode, over: false });
+      /* Named in the assertion so a failure says WHICH mode overflowed.
+       * SEVEN, re-measured when the weapons moved into explore: as the
+       * worker (the caste that sees all seven), `shot:hudmodes` draws the
+       * cluster clear of the quest card at 932x430, 844x390 and 667x375.
+       * The pictures are in `shots/`. */
+      expect({ mode, over: plates.length > 7 }).toEqual({ mode, over: false });
     }
   });
 
@@ -117,18 +121,28 @@ describe('what each mode shows', () => {
   });
 
 
-  it('keeps normal exploration small', () => {
-    /* Reported directly: exploration does not need a sting button. Three
-     * standing controls plus two that appear when they are true. */
+  it('keeps normal exploration small, with the weapons dimmed on her hip', () => {
+    /*
+     * A CHANGE OF MIND, RECORDED. This test used to pin "exploration does
+     * not need a sting button", and the player has since asked for the
+     * opposite by name: bite and sting at hand for the worker and major,
+     * bite for the queen — not parked until a beetle crosses the notice
+     * radius. So the weapons ride in explore as CONTEXTUAL plates, dimmed
+     * until something is in reach, and the standing controls stay three.
+     * Which caste sees which weapon is the ability list's job, not this
+     * table's.
+     */
     expect(partsIn('explore').sort()).toEqual(
-      ['carry', 'dig', 'interact', 'pace', 'view'].sort(),
+      ['bite', 'carry', 'dig', 'interact', 'pace', 'sting', 'view'].sort(),
     );
+    for (const weapon of ['bite', 'sting'] as HudPart[]) {
+      expect(rankOf('explore', weapon)).toBe('contextual');
+    }
   });
 
-  it('keeps combat out of exploration and digging out of combat', () => {
-    for (const weapon of ['bite', 'sting', 'dodge'] as HudPart[]) {
-      expect(rankOf('explore', weapon)).toBe('hidden');
-    }
+  it('keeps dodging out of exploration and digging out of combat', () => {
+    /* Dodge stays a fight-only reflex; the jaws travel everywhere now. */
+    expect(rankOf('explore', 'dodge')).toBe('hidden');
     expect(rankOf('combat', 'scoop')).toBe('hidden');
     expect(rankOf('combat', 'dig')).toBe('hidden');
   });

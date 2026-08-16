@@ -70,7 +70,23 @@ export const HUD_LAYOUTS: Record<HudMode, HudLayout> = {
   explore: {
     primary: 'dig',
     secondary: ['view', 'pace'],
-    contextual: ['interact', 'carry'],
+    /*
+     * HER WEAPONS RIDE ON HER HIP NOW, and this is a change of mind worth
+     * stating because a test used to pin the opposite ("exploration does
+     * not need a sting button"). Asked for since: "add bite and sting
+     * button available for the worker and major, only bite for queen" —
+     * the player wants the jaws at hand BEFORE the HUD decides a fight is
+     * on, not only once a beetle crosses `FIGHT_NOTICE`.
+     *
+     * CONTEXTUAL, not secondary, which is what keeps this honest: the
+     * plates sit dimmed until there is something living in reach (BITE)
+     * or a grip to sting from (STING), exactly the language INTERACT and
+     * CARRY already speak. Which CASTE sees which plate is not decided
+     * here at all — the rail gates every plate on the ant's own ability
+     * list, so the queen's rail shows BITE and never STING because her
+     * list says so. Data, not a branch.
+     */
+    contextual: ['interact', 'carry', 'bite', 'sting'],
   },
   dig: {
     primary: 'scoop',

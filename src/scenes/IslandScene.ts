@@ -1226,7 +1226,11 @@ export class IslandScene {
     /* The KIND is in the signature because it can change mid-session now:
      * the founding turns the queen into a worker, and a worker stings. */
     const sig = `${mode}|${this.antKind.id}|${this.contextLive('carry') ? 1 : 0}`
-      + `${this.contextLive('interact') ? 1 : 0}`;
+      + `${this.contextLive('interact') ? 1 : 0}`
+      /* The weapons are contextual in explore now, so their liveness is
+       * part of what the rail looks like — leave them out of the signature
+       * and a beetle strolling into reach would not light the plate. */
+      + `${this.contextLive('bite') ? 1 : 0}${this.contextLive('sting') ? 1 : 0}`;
     if (sig === this.hudSig) return;
     this.hudSig = sig;
     this.hudMode = mode;
@@ -1273,9 +1277,31 @@ export class IslandScene {
    * Runs only inside `applyHudMode`, which is already behind a signature
    * check, so the sort happens on a mode change and not on a frame.
    */
+  /**
+   * The quest card is the other party in the measured bargain below, and
+   * it CHANGES SIZE on its own schedule — objectives arrive, lines wrap,
+   * checklists grow — while `fanCluster` only runs on a mode change. A fan
+   * measured against the card's morning height stood 8px clear of a card
+   * that had grown a checklist by noon. So the card is watched, and a
+   * resize re-runs the measurement; the fan only writes plate margins,
+   * which cannot resize the card back, so this cannot loop.
+   */
+  private questWatch: ResizeObserver | null = null;
+
+  private questWatched: Element | null = null;
+
   private fanCluster(): void {
     const cluster = this.hud.querySelector('.tm-cluster');
     if (!cluster) return;
+    const questEl = this.hud.querySelector('.tm-quest');
+    if (questEl !== this.questWatched) {
+      this.questWatch?.disconnect();
+      this.questWatched = questEl;
+      if (questEl && typeof ResizeObserver !== 'undefined') {
+        this.questWatch = new ResizeObserver(() => this.fanCluster());
+        this.questWatch.observe(questEl);
+      }
+    }
     const up = [...cluster.children]
       .filter((el) => (el as HTMLElement).style.display !== 'none')
       .map((el, i) => ({
@@ -1324,7 +1350,73 @@ export class IslandScene {
       } else {
         p.el.style.marginRight = '';
       }
+      /* Any deepened overlap from the LAST mode is cleared before this
+       * mode is measured, or a short mode would inherit a tall mode's
+       * squeeze and stand tighter than it needs to. */
+      p.el.style.marginTop = '';
     });
+    /*
+     * THE DIAGONAL GIVES OVERLAP UNTIL IT CLEARS THE QUEST CARD — measured,
+     * not assumed, which is the same bargain the stylesheet already strikes
+     * per screen height ("the thing that gives is the OVERLAP, which is the
+     * one dimension a diagonal has spare"). The stylesheet's steps were
+     * tuned when the tallest run was five plates; the weapons joining the
+     * explore rail made it seven seats and six visible plates, and re-tuning
+     * three media queries for every count is exactly the stale-constant trap
+     * this file keeps warning about. So the run is stood up at the
+     * stylesheet's own overlap, MEASURED against the card, and only if the
+     * two actually touch does every joint close up by an equal share of the
+     * shortfall — floored so no plate ever gives more than the stylesheet's
+     * own tightest screen asks (38 of 56, the iPhone SE number), because
+     * past that a plate's label sits under the plate above it.
+     */
+    const quest = questEl;
+    if (!quest || up.length < 2) return;
+    const card = quest.getBoundingClientRect();
+    if (card.width <= 0) return;
+    let x0 = Infinity;
+    let x1 = -Infinity;
+    let top = Infinity;
+    for (const p of up) {
+      const r = p.el.getBoundingClientRect();
+      x0 = Math.min(x0, r.left);
+      x1 = Math.max(x1, r.right);
+      top = Math.min(top, r.top);
+    }
+    if (x1 <= card.left || x0 >= card.right || top >= card.bottom) return;
+    const AIR = 8;
+    const short = card.bottom + AIR - top;
+    /*
+     * The stylesheet hangs the overlap on every child EXCEPT the DOM-first
+     * (`:first-child`), so the override must speak DOM order too — `up` is
+     * sorted for the eye, which is the wrong ledger here.
+     */
+    const firstDom = Math.min(...up.map((p) => p.i));
+    const donor = up.find((p) => p.i !== firstDom);
+    if (!donor) return;
+    /*
+     * HOW MANY MARGINS ACTUALLY LOWER THE TOP PLATE. Not "plates minus
+     * one": the visual-topmost plate's own margin-top faces the container
+     * edge, so closing it shrinks the box's bookkeeping without moving the
+     * plate a pixel — the first cut divided by five, watched four joints
+     * do the work, and left VIEW twelve pixels inside the card. Measured
+     * on the debug rig, not deduced.
+     */
+    const visualTop = up[up.length - 1];
+    const joints = up.filter((p) => p.i !== firstDom && p !== visualTop).length;
+    if (joints < 1) return;
+    const base = parseFloat(getComputedStyle(donor.el).marginTop) || 0;
+    /* How much MORE each joint may close: down to the stylesheet's own
+     * tightest screen (-38, the iPhone SE number) and no further, because
+     * past that a plate's label sits under the plate above it. Nothing to
+     * give means the card is simply met, which the short screens already
+     * live with. */
+    const give = Math.min(short / joints, Math.max(0, base + 38));
+    if (give <= 0) return;
+    for (const p of up) {
+      if (p.i === firstDom) continue;
+      p.el.style.marginTop = `${base - give}px`;
+    }
   }
 
   /**
@@ -1350,6 +1442,15 @@ export class IslandScene {
     if (part === 'interact') {
       return this.props.some((p) => p === this.carry.held) || this.propInReach() !== null;
     }
+    /* The weapons ride in EXPLORE now — see the note in `hudModes`. BITE
+     * is live while she holds on or something living is in her jaws'
+     * reach; STING only once the mandibles are anchored, which is the
+     * animal's own rule (`useAbility` says BITE FIRST), and only while
+     * there is venom to spend. */
+    if (part === 'bite') {
+      return this.combat.phase !== 'free' || this.quarryInReach() !== null;
+    }
+    if (part === 'sting') return this.combat.phase !== 'free' && !this.combat.dry;
     return true;
   }
 
@@ -2674,10 +2775,24 @@ export class IslandScene {
       this.at.addScaledVector(this.up, this.legRide - this.walker.tune.ride);
       (this.walker.tune as { ride: number }).ride = this.legRide;
     }
-    this.drive = new LegDrive(setup);
+    /*
+     * AND HOW BIG SHE IS. The drive's millimetre tables — stride, spare
+     * reach, the reach-up bound — were measured on the QUEEN, and the
+     * founding hands the player a worker less than half her length. Fed
+     * raw, those numbers had the worker striding 2 mm on legs measured
+     * for 9 mm of animal: stiff knees, feet groping past ground they
+     * could never reach, and steps whose destinations failed the "would
+     * it go somewhere" gate — the frozen worker. The ratio of the two
+     * caste lengths is the whole correction, and the queen's is 1 so
+     * nothing she does changes.
+     */
+    const scale = CASTE_LENGTH_MM[this.queen.rig.caste] / CASTE_LENGTH_MM.queen;
+    this.drive = new LegDrive(setup, scale);
     /* The slow gaits, if they were asked for — see `feetAllowedUp`. */
     this.drive.adaptiveGait = this.adaptiveGait;
-    this.drive.walkSpeed = WALK_SPEED;
+    /* The pace her gait fractions are judged against scales with her too:
+     * a worker at the queen's walk speed is, for her legs, running. */
+    this.drive.walkSpeed = WALK_SPEED * scale;
     this.drive.plantAll(
       { at: this.at, up: this.up, forward: this.fwd }, this.groundForLegs,
     );
@@ -3550,10 +3665,15 @@ export class IslandScene {
     /* ANCHORED. Without this the solver may only raise and lower a foot,
      * and nothing in the pipeline knows where one IS from frame to frame —
      * so nothing can hold one still, and every planted foot skates. */
+    /* The band is HER ride height, not the global constant — after the
+     * founding `legRide` is the worker's own number, and a queen-sized
+     * search band around a worker-sized body lets feet plant on ground
+     * her legs cannot honestly reach. Before the drive exists `legRide`
+     * IS the constant, so the first second of a session is unchanged. */
     this.queen.solveFeet(
       (x, z, y) => this.footingFrom(x, z, y),
       FOOT_CLEARANCE_MM / MM,
-      RIDE * 2,
+      this.legRide * 2,
       this.drive ? (slot) => this.drive!.anchorFor(slot) : undefined,
       this.boreFrame(),
     );

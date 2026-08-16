@@ -243,6 +243,26 @@ export const FIRE_ANT_WORKER: AntKind = {
 };
 
 /**
+ * THE MAJOR, WRITTEN DOWN BEFORE SHE IS PLAYABLE — deliberately.
+ *
+ * Her rig, her combat row and her strength row all exist already; what did
+ * not exist was the answer to "which plates are hers", and that answer was
+ * asked for by name: bite and sting for the worker AND the major. Putting
+ * her in the table now means the day a major becomes playable is a control
+ * handover, not a HUD design session — the same promise this file makes
+ * about every caste. Same abilities as the worker, same order, so the rail
+ * never shuffles between the two; what differs is the animal behind them
+ * (a major bites 9 to a worker's 4 — see `CASTE_COMBAT`).
+ */
+export const FIRE_ANT_MAJOR: AntKind = {
+  id: 'fire-major',
+  name: 'Fire ant major',
+  abilities: ['bite', 'sting', 'carry', 'interact'],
+  vitals: FIRE_ANT_VITALS,
+  strength: 'major',
+};
+
+/**
  * The one she was filmed as — a Graceful Twig Ant, from the video that got
  * the per-leg footing built. No sting; it is a slender arboreal ant that
  * lives on bark, so it scouts and climbs where the fire ant burns.
@@ -271,6 +291,10 @@ export const TWIG_ANT: AntKind = {
  */
 export const PLAYABLE_ABILITIES: AbilityId[] = [
   ...FIRE_ANT_WORKER.abilities,
+  /* The major's set is the worker's set today, so this line adds nothing —
+   * and that is why it is here: the day her set grows, her plates arrive
+   * without anyone remembering this list exists. */
+  ...FIRE_ANT_MAJOR.abilities.filter((id) => !FIRE_ANT_WORKER.abilities.includes(id)),
   ...FIRE_ANT.abilities.filter((id) => !FIRE_ANT_WORKER.abilities.includes(id)),
 ];
 
