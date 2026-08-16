@@ -40,6 +40,7 @@ export interface HudHost {
   readonly renderer: THREE.WebGLRenderer;
   readonly camera: THREE.PerspectiveCamera;
   readonly crosshair: HTMLElement;
+  readonly digMissEl: HTMLElement;
   readonly statsPanel: DebugStatsPanel;
 
   /* --- the stick, and the stroke that is either a look or a flick --- */
@@ -897,6 +898,14 @@ export function buildControls(host: HudHost, ): void {
   host.crosshair.style.display = 'none';
   host.crosshair.style.pointerEvents = 'none';
   host.hud.appendChild(host.crosshair);
+
+  /* The miss note, parked just under the crosshair's spot and invisible
+   * until `biteMiss` lights it. In EITHER view — third person hides the
+   * crosshair but a press over a drop misses just the same. */
+  host.digMissEl.className = 'dig-miss';
+  host.digMissEl.textContent = 'OUT OF REACH';
+  host.digMissEl.style.pointerEvents = 'none';
+  host.hud.appendChild(host.digMissEl);
 
   const canvas = host.renderer.domElement;
   canvas.addEventListener('pointerdown', (e) => {

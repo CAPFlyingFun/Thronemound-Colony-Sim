@@ -1,7 +1,7 @@
 {
   "name": "thronemound-colony-sim",
   "private": true,
-  "version": "0.1.75",
+  "version": "0.1.76",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -38,6 +38,7 @@
     "probe:aimshake": "node scripts/probe-aimshake.mjs",
     "icons": "node scripts/make-icons.mjs",
     "probe:lens": "node scripts/probe-lens.mjs",
+    "probe:digmiss": "node scripts/probe-digmiss.mjs",
     "probe:gaster": "node scripts/probe-gaster.mjs",
     "probe:corner": "node scripts/probe-corner.mjs",
     "probe:sides": "node scripts/probe-sides.mjs",

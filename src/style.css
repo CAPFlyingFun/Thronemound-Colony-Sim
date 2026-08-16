@@ -91,6 +91,39 @@ canvas {
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
 }
 
+/*
+ * THE MISS NOTE — "OUT OF REACH", lit under the crosshair when a stroke
+ * removes nothing. A CLASS AND A TIMER, not a keyframe animation, and on
+ * purpose: the toast (`.dig-toast`) learned the same lesson. With the main
+ * thread deep in a render, a fire-and-forget animation's snap-back is at
+ * the compositor's mercy — measured lingering at full opacity long after
+ * its 0.9 s were up. A transition driven by the class going away has a
+ * definite final state the moment the style resolves.
+ */
+.dig-miss {
+  position: absolute;
+  top: calc(50% + 20px);
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  color: rgba(255, 196, 140, 0.95);
+  text-shadow: 0 0 4px rgba(0, 0, 0, 0.85), 0 1px 2px rgba(0, 0, 0, 0.7);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+
+.dig-miss.is-on {
+  opacity: 1;
+  transition: opacity 0.06s ease;
+}
+
+/* The ring blushes with the note, and settles back to its lamp colour. */
+.density-lab-crosshair.is-miss {
+  border-color: rgba(255, 150, 105, 0.95);
+}
+
 .dig-controls {
   position: absolute;
   right: max(14px, env(safe-area-inset-right));

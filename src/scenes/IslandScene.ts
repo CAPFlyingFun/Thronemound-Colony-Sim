@@ -2008,6 +2008,10 @@ export class IslandScene {
 
   private readonly crosshair = document.createElement('div');
 
+  /** "OUT OF REACH" — flashed by `biteMiss` when a stroke removes nothing,
+   *  so a press that finds no soil is an answer rather than a silence. */
+  private readonly digMissEl = document.createElement('div');
+
   private aimReadout: HTMLElement | null = null;
 
   /** The ↕ and 🚁 chips, and the live pose numbers beside them. */
@@ -2904,6 +2908,31 @@ export class IslandScene {
 
   private bite(): void { bite(this.digHost); }
 
+  /** The hand that puts the miss note out — re-armed by every miss, so a
+   *  held stroke over a drop keeps it lit rather than blinking. */
+  private missTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * A STROKE THAT REMOVED NOTHING SAYS SO. The silent version of this is
+   * the report "sometimes pressing dig doesn't dig": the range is real —
+   * her jaws only reach so far — but a button that answers some presses
+   * and swallows others reads as broken, not short. The note lights at
+   * the crosshair's height and the ring itself blushes with it; a timer
+   * takes both away, so the OFF state is a class the style system can
+   * resolve rather than the tail of an animation the compositor may or
+   * may not have finished (see `.dig-miss` in style.css).
+   */
+  private biteMiss(): void {
+    this.digMissEl.classList.add('is-on');
+    this.crosshair.classList.add('is-miss');
+    if (this.missTimer !== null) clearTimeout(this.missTimer);
+    this.missTimer = setTimeout(() => {
+      this.digMissEl.classList.remove('is-on');
+      this.crosshair.classList.remove('is-miss');
+      this.missTimer = null;
+    }, 650);
+  }
+
   private biteRay(aim: THREE.Vector3): { origin: THREE.Vector3; reach: number } {
     return biteRay(this.digHost, aim);
   }
@@ -3475,6 +3504,29 @@ export class IslandScene {
           this.pixelChangedAt = now;
           this.goodSeconds = 0;
           this.resize();
+        } else if (this.goodSeconds >= 8 && !cooling
+          && this.pixelRatioNow >= roof && this.pixelCeiling < this.pixelCap) {
+          /*
+           * THE CEILING HEALS — because a verdict passed during a dig is
+           * not a verdict about the resolution.
+           *
+           * "Only ever comes down" assumed every dip below 28 was the
+           * fill rate's honest confession. It is not: a scoop's meshing
+           * burst drops a couple of frames at ANY resolution, and one
+           * such spike used to convict the current rung permanently —
+           * the whole session stayed soft after a single hard dig, which
+           * is the "sometimes everything is blurry" report in numbers.
+           *
+           * So a rung is forgiven the way it was condemned: by evidence.
+           * Eight consecutive comfortable seconds AT the lowered roof —
+           * a stricter ask than the climb's three — raise the ceiling a
+           * quarter step and let the ordinary climb retry it. A rung
+           * that truly is too expensive just gets re-convicted, at most
+           * once per dozen seconds, which is a slow flicker of sharpness
+           * against an eternity of soft.
+           */
+          this.pixelCeiling = Math.min(this.pixelCap, this.pixelCeiling + 0.25);
+          this.goodSeconds = 0;
         }
       } else {
         /* Anywhere between the two is not a run of good seconds. */
@@ -3522,7 +3574,29 @@ export class IslandScene {
         Math.min(1.4, Math.max(-0.4, (1 - S_TILT_AT.y) / 2)),
       );
     }
-    this.tilt.render(this.renderer, this.scene, this.camera, strengthFor(S_TILT_FWD.y));
+    /*
+     * BUT NOT WITH THE SHOVEL OUT, AND NOT SHUT IN — the two places the
+     * effect's premise fails and the pitch fade cannot save it.
+     *
+     * The macro blur trades on screen height standing in for distance,
+     * which is true on the open hill and false inside a bore: there every
+     * pixel is the same few millimetres away, and a "background" blur is
+     * just a smeared tunnel wall. The pitch fade only catches the case of
+     * looking DOWN at a flat floor — level down a tunnel it reads as
+     * thirty degrees of nothing and leaves the blur at full strength,
+     * which is precisely where digging happens. Reported as the camera
+     * (and the sense grid with it) blurring while she digs.
+     *
+     * So the strength folds in the two facts the lens has to respect:
+     * DIG being armed — an aiming view, where softening the frame's edge
+     * is softening the work — and the sense's own eased measure of being
+     * shut in, the same 0..1 the tunnel view fades on, so the blur leaves
+     * as the walls close around her and returns as she surfaces.
+     */
+    const macro = this.digMode ? 0
+      : strengthFor(S_TILT_FWD.y) * (1 - (this.sense?.uSense.value ?? 0));
+    this.macroNow = macro;
+    this.tilt.render(this.renderer, this.scene, this.camera, macro);
     this.frame = requestAnimationFrame(this.animate);
   };
 
@@ -3565,11 +3639,16 @@ export class IslandScene {
   }
 
   /** For probes and the dev drawer: the macro effect's live settings. */
+  /** The strength the macro blur was actually drawn with this frame —
+   *  written beside the render call so a probe grades the picture, not a
+   *  reconstruction of it. */
+  private macroNow = 0;
+
   tiltForTest(): {
     on: boolean; sharp: number; full: number;
-    radius: number; most: number; wide: number;
+    radius: number; most: number; wide: number; macroNow: number;
   } {
-    return { on: this.tilt.enabled, ...this.tilt.tuning };
+    return { on: this.tilt.enabled, ...this.tilt.tuning, macroNow: this.macroNow };
   }
 
   private resize(): void {

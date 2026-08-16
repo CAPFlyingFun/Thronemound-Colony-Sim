@@ -73,6 +73,9 @@ export interface DigHost {
   depthMm(): number;
   soilSolidAt(x: number, y: number, z: number): boolean;
   groundSolidAt(x: number, y: number, z: number): boolean;
+  /** A stroke that removed nothing — the scene's chance to say "out of
+   *  reach" instead of the silence that reads as a broken button. */
+  biteMiss(): void;
 }
 
 /** The way she is pointed AND pitched — the line the bore cuts and, while
@@ -220,7 +223,10 @@ export function bite(host: DigHost, ): void {
    * cuts nothing, and throwing chips off it would be the ghost's own
    * "confident hole over open air" mistake in another form. */
   if (touched > 0) host.grit?.burst(centre, aim);
-  if (touched === 0) return;
+  /* The miss is TOLD, not swallowed. Which presses fail is physics —
+   * air ahead and air below it — but that they failed belongs on the
+   * screen, or the button reads as broken instead of short. */
+  if (touched === 0) { host.biteMiss(); return; }
   /*
    * AND SHAVE WHAT WAS JUST CUT, in the same stroke.
    *
