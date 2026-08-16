@@ -485,14 +485,21 @@ export function refreshAim(host: BodyHost, ): void {
       const bank = bankOf(host.fwd, host.up);
       if (bank !== null) {
         const rollDeg = Math.round((bank * 180) / Math.PI);
+        /* Positive drops her LEFT side — the rig's own sign, see
+         * `bankOf` — so positive points the arrow left. */
         const roll = rollDeg === 0 ? 'level'
-          : `${rollDeg > 0 ? '\u25b6' : '\u25c0'} ${Math.abs(rollDeg)}\u00b0`;
+          : `${rollDeg > 0 ? '\u25c0' : '\u25b6'} ${Math.abs(rollDeg)}\u00b0`;
         if (host.rollReadout.textContent !== roll) {
           host.rollReadout.textContent = roll;
           /* Past a right angle she is closer to her back than her feet —
            * the reading that answers "am I upside down?" with yes. */
           host.rollReadout.classList.toggle('is-steep', Math.abs(rollDeg) >= 90);
         }
+      } else if (!host.rollReadout.textContent) {
+        /* Armed the shovel while already plumb: there is no last reading
+         * to hold, and a blank gauge on a fresh panel reads as broken.
+         * Say what is true — she is nose-plumb and roll has no answer. */
+        host.rollReadout.textContent = 'plumb';
       }
     }
   }

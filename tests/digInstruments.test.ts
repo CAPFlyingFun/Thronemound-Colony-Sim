@@ -6,30 +6,47 @@ import { bankOf } from '../src/scenes/bodyPosture';
  * actually meets in a bore: level floor, a wall, the ceiling of a loop,
  * and the plumb shaft where the question has no answer.
  *
- * Convention under test: positive drops her RIGHT side (the posture rig's
- * own sign), zero is feet-down level, ±180° is upside down, and a vertical
- * forward returns null so the readout can hold rather than spin.
+ * Convention under test: POSITIVE IS A POSITIVE ROTATION ABOUT HER
+ * FORWARD, which drops her LEFT side — the same sign the scene applies to
+ * `bodyBank + posture.roll`, where a LEFT turn banks positive, into the
+ * turn. Zero is feet-down level, ±180° is upside down, and a vertical
+ * forward returns null so the readout can hold rather than spin. The
+ * first contract test below is the one that settles arguments: it rolls
+ * a real up vector about a real forward, exactly as the scene does.
  */
 
 const deg = (r: number | null): number | null => (
   r === null ? null : Math.round((r * 180) / Math.PI)
 );
 
+/** Her up after the scene's own roll: rotate world-up about forward +z. */
+const rolledUp = (radians: number) => (
+  { x: -Math.sin(radians), y: Math.cos(radians), z: 0 }
+);
+
 describe('bankOf, the roll behind the readout', () => {
+  it('agrees with the rotation the scene actually applies', () => {
+    /* The contract: feed it an up vector rolled about forward by the
+     * rig's own positive rotation, and the same angle must come back
+     * with the same sign — at a gentle bank and most of the way round. */
+    const fwd = { x: 0, y: 0, z: 1 };
+    for (const a of [0.3, -0.3, 1.2, -1.2, 2.8, -2.8]) {
+      expect(deg(bankOf(fwd, rolledUp(a)))).toBe(Math.round((a * 180) / Math.PI));
+    }
+  });
+
   it('reads level when her up agrees with the world', () => {
     expect(deg(bankOf({ x: 0, y: 0, z: 1 }, { x: 0, y: 1, z: 0 }))).toBe(0);
   });
 
-  it('reads a right-side drop as positive', () => {
-    /* Facing north (+z), right is +x; up leaning toward +x is her right
-     * side going down. */
-    const s = Math.SQRT1_2;
-    expect(deg(bankOf({ x: 0, y: 0, z: 1 }, { x: s, y: s, z: 0 }))).toBe(45);
+  it('reads a left-side drop as positive', () => {
+    /* Facing north (+z), a positive roll carries her right flank toward
+     * her up — the left side is the one going down. */
+    expect(deg(bankOf({ x: 0, y: 0, z: 1 }, rolledUp(Math.PI / 4)))).toBe(45);
   });
 
-  it('reads a left-side drop as negative', () => {
-    const s = Math.SQRT1_2;
-    expect(deg(bankOf({ x: 0, y: 0, z: 1 }, { x: -s, y: s, z: 0 }))).toBe(-45);
+  it('reads a right-side drop as negative', () => {
+    expect(deg(bankOf({ x: 0, y: 0, z: 1 }, rolledUp(-Math.PI / 4)))).toBe(-45);
   });
 
   it('calls the ceiling of a loop upside down', () => {
@@ -42,7 +59,8 @@ describe('bankOf, the roll behind the readout', () => {
 
   it('is world-referenced, whatever the heading', () => {
     /* The same level attitude must read level facing any compass point. */
-    for (const [x, z] of [[1, 0], [-1, 0], [0, -1], [0.6, 0.8]]) {
+    const headings: Array<[number, number]> = [[1, 0], [-1, 0], [0, -1], [0.6, 0.8]];
+    for (const [x, z] of headings) {
       expect(deg(bankOf({ x, y: 0, z }, { x: 0, y: 1, z: 0 }))).toBe(0);
     }
   });
@@ -59,5 +77,12 @@ describe('bankOf, the roll behind the readout', () => {
      * degeneracy. */
     expect(bankOf({ x: 0, y: -1, z: 0 }, { x: 0, y: 0, z: 1 })).toBeNull();
     expect(bankOf({ x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: -1 })).toBeNull();
+  });
+
+  it('holds rather than display garbage', () => {
+    /* An instrument fed a NaN frame — mid-teleport, mid-fall, whatever —
+     * must go quiet, not spin. */
+    expect(bankOf({ x: NaN, y: 0, z: 1 }, { x: 0, y: 1, z: 0 })).toBeNull();
+    expect(bankOf({ x: 0, y: 0, z: 1 }, { x: 0, y: NaN, z: 0 })).toBeNull();
   });
 });
