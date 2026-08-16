@@ -239,6 +239,25 @@ for (const size of SIZES) {
     out.backToExplore = s.hudMode;
 
     /*
+     * AND THEN AS THE WORKER, which is the ant Joshua is actually playing
+     * and the crowded case this file never measured.
+     *
+     * The queen's rail is FIVE plates because her ability list has no
+     * sting. A worker's has one, so her explore rail is SIX — and six is
+     * where the cluster grows a row, which is the shape that has put the
+     * far end of the fan through the objective card twice before. Testing
+     * only the queen tested the easy one.
+     */
+    s.questStage = 1;
+    s.deepCarved = 1e9;
+    settle();
+    out.becameWorker = await s.becomeWorker().catch(() => false);
+    settle();
+    out.worker = up();
+    out.workerFit = { clash: clash(), touch: touching() };
+
+
+    /*
      * THE POSE RIGS, which are the ones that could strand somebody.
      *
      * TILT and RIDE moved into the DEV drawer, so `pose` is a mode with no
@@ -305,8 +324,19 @@ for (const size of SIZES) {
     say(seen[mode].length <= 6,
       `${mode} shows ${seen[mode].length} plates, not a carpet`);
   }
-  say(!seen.explore.includes('sting') && !seen.explore.includes('bite'),
-    'exploring does not offer a sting');
+  /*
+   * HER JAWS ARE ON THE RAIL WHILE EXPLORING, and this line used to assert
+   * the opposite. The change is deliberate and newer: "add bite and sting
+   * button available for the worker and major, only bite for queen" — the
+   * player wants the jaws to hand BEFORE the HUD decides a fight is on.
+   *
+   * What must still hold is the CASTE gate. The queen has no sting in her
+   * ability list, so her rail must not show one however the mode table
+   * reads; that is the part a stale assertion would have hidden.
+   */
+  say(seen.explore.includes('bite'), 'exploring offers her jaws');
+  say(!seen.explore.includes('sting'),
+    'and the queen is not offered a sting she does not have');
   say(!seen.dig.includes('bite'), 'digging does not offer a bite');
   /* THE ONE probe:hud STRUCTURALLY CANNOT SEE — it measures whichever mode
    * the island booted into, and that is always EXPLORE. */
@@ -326,6 +356,19 @@ for (const size of SIZES) {
     say(fit.touch.gap >= 0,
       `${mode}'s plates clear each other — tightest ${fit.touch.gap}px`
       + ` at ${fit.touch.pair}`);
+  }
+  if (seen.becameWorker) {
+    console.log(`    worker   ${seen.worker.length} plates: ${seen.worker.join(' ')}`);
+    say(seen.worker.includes('sting'),
+      'the worker IS offered the sting her list gives her');
+    say(seen.workerFit.clash === 0,
+      `the worker's fuller rail clears the objective card`
+      + (seen.workerFit.clash ? ` — OVERLAP ${seen.workerFit.clash}px` : ''));
+    say(seen.workerFit.touch.gap >= 0,
+      `the worker's plates clear each other — tightest ${seen.workerFit.touch.gap}px`
+      + ` at ${seen.workerFit.touch.pair}`);
+  } else {
+    console.log('  skip  the worker was not reachable in this run');
   }
   say(seen.tiltInDrawer === true, 'the posture rigs are reachable in the DEV drawer');
   say(seen.posed === 'pose', `arming TILT poses her (got ${seen.posed})`);

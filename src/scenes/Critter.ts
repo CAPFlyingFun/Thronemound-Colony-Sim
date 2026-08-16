@@ -114,13 +114,18 @@ const S_FLAT = new THREE.Vector3();
 const S_TURN = new THREE.Quaternion();
 
 /** One leg: the bone that swings, its rest pose, and its tripod phase. */
-interface Leg {
+export interface Leg {
   bone: THREE.Bone;
   rest: THREE.Quaternion;
   /** 0 or 1 — which half of the tripod it belongs to. */
   phase: number;
   /** The axis it swings about, in its parent's frame. */
   axis: THREE.Vector3;
+  /** Where its foot rests, in the creature's frame — for gait checking. */
+  seat: THREE.Vector3;
+  /** What `findLegs` decided, so a probe can check the DECISION. */
+  side: number;
+  rank: number;
 }
 
 /**
@@ -137,7 +142,7 @@ interface Leg {
  * rig is a different file with the same problem, and a table would need
  * hand-maintaining per model for no benefit.
  */
-function findLegs(root: THREE.Object3D): Leg[] {
+export function findLegs(root: THREE.Object3D): Leg[] {
   const tips: THREE.Bone[] = [];
   root.updateMatrixWorld(true);
   root.traverse((n) => {
@@ -147,8 +152,34 @@ function findLegs(root: THREE.Object3D): Leg[] {
     tips.push(b);
   });
   if (tips.length < 6) return [];
-  const at = (b: THREE.Bone): THREE.Vector3 =>
-    new THREE.Vector3().setFromMatrixPosition(b.matrixWorld);
+  /*
+   * IN THE CREATURE'S OWN FRAME, AND THAT IS THE WHOLE FIX.
+   *
+   * This used to ask for each bone's WORLD position, and every question it
+   * then asked of that position was the wrong question. "Is this foot on
+   * the left?" became "is this foot east of the world origin?" — and the
+   * island sits entirely at positive X, so the answer was YES for all six
+   * legs of every creature on it. Measured: `side` was 1 for all six on
+   * both the aphid and the housefly.
+   *
+   * The gait still looked like SOMETHING because the front-to-back rank,
+   * also taken from world Z, happened to interleave the mirrored pairs
+   * L, R, L, R — so the phases came out 1,0,1,0,1,0 and the animal walked
+   * its three left legs against its three right. That is the "all moving
+   * forward and back" Joshua saw: not a tripod, a breaststroke.
+   *
+   * Left/right and front/back are facts about the BODY, so they have to be
+   * read in the body's frame. The lowest-six test moves here too — a
+   * creature standing on a slope is tilted in world space, and "lowest"
+   * would start picking antennae.
+   */
+  const localOf = new Map<THREE.Bone, THREE.Vector3>();
+  for (const b of tips) {
+    localOf.set(b, root.worldToLocal(
+      new THREE.Vector3().setFromMatrixPosition(b.matrixWorld),
+    ));
+  }
+  const at = (b: THREE.Bone): THREE.Vector3 => localOf.get(b)!;
   /* Lowest six: the ones standing on the ground. */
   const feet = tips.sort((a, b) => at(a).y - at(b).y).slice(0, 6);
   const legs: Leg[] = [];
@@ -168,9 +199,26 @@ function findLegs(root: THREE.Object3D): Leg[] {
      * THE TRIPOD, from where the foot actually is. A real insect swings
      * front-left, middle-right and hind-left together; the pairing falls
      * straight out of the sign of X against the rank in Z.
+     *
+     * RANKED WITHIN ITS OWN SIDE, and getting that wrong is what made the
+     * gait read as "all moving forward and back" on the device.
+     *
+     * The first cut ranked each foot against ALL SIX. The legs sit in
+     * mirrored pairs at very nearly equal Z, so the counts came out 0, 0,
+     * 2, 2, 4, 4 — every one of them EVEN. `(side + rank) % 2` then
+     * reduces to `side`, and the animal walks its three left legs together
+     * against its three right: not a tripod at all, and the shuffling
+     * sideways gait Joshua saw.
+     *
+     * Counting only the feet on the same side gives the rank that was
+     * meant — 0 front, 1 middle, 2 hind — so the two tripods come out
+     * front-left/hind-left/middle-right against middle-left/front-right/
+     * hind-right, which is the real insect alternating tripod.
      */
     const side = p.x >= 0 ? 1 : 0;
-    const rank = feet.filter((o) => at(o).z < p.z).length;
+    const rank = feet.filter(
+      (o) => (at(o).x >= 0 ? 1 : 0) === side && at(o).z < p.z,
+    ).length;
     /*
      * IT SWINGS ABOUT A VERTICAL AXIS, and the rig's own screenshots are
      * what settled that.
@@ -197,6 +245,11 @@ function findLegs(root: THREE.Object3D): Leg[] {
       rest: bone.quaternion.clone(),
       phase: (side + rank) % 2,
       axis: up,
+      /* Kept so a probe can check the SEATING, not just that something
+       * moved — see `legReportForTest`. Already in the creature's frame. */
+      seat: p.clone(),
+      side,
+      rank,
     });
   }
   return legs;
@@ -241,8 +294,9 @@ export class Critter {
     readonly kind: CreatureKind,
     x: number, y: number, z: number,
     private readonly rand: () => number = Math.random,
-    readonly id = 0,
+    index = 0,
   ) {
+    this.id = `${kind.id}-${index}`;
     this.at.set(x, y, z);
     this.home.set(x, y, z);
     this.want.copy(this.at);
@@ -287,7 +341,111 @@ export class Critter {
    */
   get massMg(): number { return 12 * this.kind.size; }
 
+  /*
+   * ================================================================
+   * IT CAN BE FOUGHT, AND THEN CARRIED HOME
+   * ================================================================
+   *
+   * Reported: "I am not able to attack the Aphid and Fly yet."
+   *
+   * The reason was narrow and structural rather than a missing mechanic.
+   * `islandCombat` works on a `Quarry` and `islandCarry` on a `Portable`,
+   * and BOTH are structural interfaces — id, somewhere to be, a size, hit
+   * points — deliberately so, because that file "does no geometry and
+   * should not import a renderer". The only thing standing between a
+   * critter and a fight was that `quarryInReach` searched `this.quarry`,
+   * which holds beetles, and a critter is not one.
+   *
+   * So this is the shape rather than a system: four fields, and the jaws
+   * that already work on a beetle work on an aphid.
+   *
+   * HIT POINTS PROXY THE BRAIN rather than sitting beside it. `Combat`
+   * writes `hp` directly and the FSM reads `mind.health` to decide whether
+   * to run — two numbers for one fact would mean a creature bitten to
+   * within an inch of its life wandering about unbothered. One number,
+   * read and written through here.
+   *
+   * A FELLED ONE BECOMES CARGO, which is the beetle's own rule ("a live
+   * thing cannot be carried... this is what makes killing it the price of
+   * taking it"). Carrying was not asked for and is included anyway,
+   * because attacking something you then cannot pick up is a dead end: the
+   * fields `Portable` wants beyond `Quarry`'s are `massMg`, which was
+   * already here, and the protein below.
+   */
+
+  /** `Quarry` and `Portable` both want a string, and it has to be unique
+   *  across the island — the kind alone is not. */
+  readonly id: string;
+
+  get hp(): number { return this.mind.health; }
+
+  set hp(v: number) { this.mind.health = Math.max(0, v); }
+
+  get hpMax(): number { return this.kind.maxHealth; }
+
   get alive(): boolean { return this.mind.health > 0; }
+
+  /**
+   * Killing it is writing its health to nought, so the brain agrees.
+   *
+   * `Combat` sets `alive = false` the moment `hp` hits zero, and if that
+   * only flipped a flag here the FSM would carry on wandering a corpse
+   * about — `think` decides `dead` from `mind.health`, not from a boolean.
+   */
+  set alive(v: boolean) {
+    if (!v) { this.mind.health = 0; this.mind.behaviour = 'dead'; }
+  }
+
+  /** Venom sitting in it, and how fast it bleeds off — `Combat` owns both. */
+  venomLoad = 0;
+
+  venomRate = 0;
+
+  /**
+   * What the colony gets for it, milligrams of usable protein.
+   *
+   * GAME TUNING, scaled off the beetle's 27 mg by relative bulk so a
+   * bestiary stays consistent without a second table: an aphid is a fifth
+   * of a beetle and returns about a fifth. Meat is worth roughly half its
+   * wet mass here, which is the beetle's ratio and is stated so the number
+   * can be argued with rather than rediscovered.
+   */
+  get proteinMg(): number { return +(this.massMg * 0.5).toFixed(1); }
+
+  /** Set while she has it in her jaws — `Prop` carries the same flag. */
+  carried = false;
+
+  /**
+   * WHAT IT COSTS TO HOLD ON, and both come off the species table rather
+   * than being typed per creature — a bestiary whose fight numbers are
+   * hand-written per row drifts the moment a row is added.
+   *
+   * STRUGGLE is damage a second to the ant gripping it, and it is a
+   * QUARTER of what the animal hits for. That is the procedural beetle's
+   * own ratio (14 damage, 3.5 struggle), reused rather than reinvented, and
+   * it gives the right answer at the bottom of the range for free: an aphid
+   * and a housefly have `damage: 0` because neither can hurt an ant, so
+   * neither costs anything to hold. Grabbing one should be safe.
+   */
+  get struggle(): number { return this.kind.damage / 4; }
+
+  /**
+   * BREAK-FREE is the chance a second of throwing her off, and a small fast
+   * animal is the hard one to keep hold of — so it comes off the creature's
+   * own escape speed.
+   *
+   * The formula is a check on itself: at the beetle's 14 mm/s it returns
+   * 0.15 against the hand-tuned 0.16 the procedural beetle has carried
+   * since it was the only fight in the game. Reproducing a number that was
+   * chosen by feel is the evidence that this is not invented. A housefly at
+   * 30 mm/s comes out 0.23 — half again as slippery, which is the whole
+   * point of a fly — and an aphid at 5 mm/s barely wriggles at 0.10.
+   *
+   * GAME TUNING, not biology.
+   */
+  get breakFree(): number {
+    return Math.min(0.6, 0.08 + this.kind.chaseSpeedMm / 200);
+  }
 
   /**
    * One frame.
@@ -412,10 +570,26 @@ export class Critter {
    * The foot positions are the point. "Six legs were located" only says the
    * search ran; feet that MOVE between frames say the gait is driving them.
    */
-  legReportForTest(): { legs: number; feetY: number[] } {
+  legReportForTest(): {
+    legs: number; feetY: number[];
+    seats: { x: number; z: number; phase: number; side: number; rank: number }[];
+  } {
     this.root.updateMatrixWorld(true);
     return {
       legs: this.legs.length,
+      /*
+       * WHERE EACH LEG SITS AND WHICH HALF OF THE TRIPOD IT IS IN.
+       *
+       * `feetY` below proves the legs MOVE. It cannot prove they move in
+       * the right PATTERN, and that is the half that was wrong: reported
+       * from the device as "aren't walking tri-pod style for 6 legs and
+       * they are all moving forward and back". A gait check needs the
+       * seating, not just the motion.
+       */
+      seats: this.legs.map((l) => ({
+        x: +l.seat.x.toFixed(3), z: +l.seat.z.toFixed(3), phase: l.phase,
+        side: l.side, rank: l.rank,
+      })),
       feetY: this.legs.map((l) => {
         const p = new THREE.Vector3();
         /* The far end of the chain, not the joint — a joint at the body

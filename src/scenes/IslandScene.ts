@@ -159,7 +159,7 @@ import {
   FIRE_ANT, FIRE_ANT_WORKER, PLAYABLE_ABILITIES, type AbilityId, type AntKind,
 } from './antKinds';
 import { CASTE_MASS_MG } from './mandibleReach';
-import { Combat, necrosis } from './islandCombat';
+import { Combat, necrosis, type Quarry } from './islandCombat';
 import { Beetle } from './Beetle';
 import { resolveBulk, QUEEN_BULK_ID, type Bulk } from './islandBulk';
 import { Grit } from './islandGrit';
@@ -183,7 +183,7 @@ import { DEFAULT_TILT, strengthFor, TiltShift } from './islandTilt';
 import {
   buildQuarryBars, syncQuarryBars, type QuarryBarHost, type QuarryBars,
 } from './islandQuarryBar';
-import { Carry, emptyStores, withinNest } from './islandCarry';
+import { Carry, emptyStores, withinNest, type Portable } from './islandCarry';
 import {
   PROP_SCATTER, PROP_SPECS, Prop, type PropGround,
 } from './islandProps';
@@ -1080,18 +1080,29 @@ export class IslandScene {
     return best;
   }
 
-  private cargoInReach(): Beetle | null {
-    let best: Beetle | null = null;
+  /*
+   * AND THE SAME FOR CARGO. A felled aphid that could not be picked up
+   * would make killing it pointless — the whole reason `Portable.alive`
+   * exists is that "killing it is the price of taking it".
+   *
+   * The LIVE ones are still offered up, exactly as the beetles are, so
+   * `Carry.lift` can refuse them and the HUD says KILL IT FIRST rather
+   * than NOTHING TO CARRY.
+   */
+  private cargoInReach(): Portable | null {
+    let best: Portable | null = null;
     let bestGap = Infinity;
-    for (const q of this.quarry) {
-      if (this.carry.held === q) continue;
+    const offer = (q: Portable & { radius: number }): void => {
+      if (this.carry.held === q) return;
       const gap = Math.hypot(
         q.at.x - this.at.x, q.at.y - this.at.y, q.at.z - this.at.z,
       ) - q.radius;
-      if (gap > this.carry.reach || gap >= bestGap) continue;
+      if (gap > this.carry.reach || gap >= bestGap) return;
       best = q;
       bestGap = gap;
-    }
+    };
+    for (const q of this.quarry) offer(q);
+    for (const c of this.critters) { if (c.ready) offer(c); }
     return best;
   }
 
@@ -1104,16 +1115,35 @@ export class IslandScene {
    * control the player is stabbing at with a thumb turns a miss into a
    * mystery.
    */
-  private quarryInReach(): Beetle | null {
-    let best: Beetle | null = null;
+  /*
+   * EVERY LIVING THING IN REACH, not only the beetles.
+   *
+   * Reported: "I am not able to attack the Aphid and Fly yet." The jaws
+   * were never the problem — `Combat` takes a structural `Quarry` and a
+   * critter now satisfies it (see `Critter`). This loop was: it searched
+   * `this.quarry`, which is the beetle list, so an aphid standing on her
+   * foot was not a thing that existed as far as BITE was concerned.
+   *
+   * The dead are skipped here rather than left for `grip` to refuse,
+   * because a corpse in reach would otherwise shadow a live one standing
+   * just behind it — the plate would light and the bite would land on the
+   * thing already killed.
+   */
+  private quarryInReach(): Quarry | null {
+    let best: Quarry | null = null;
     let bestGap = Infinity;
-    for (const q of this.quarry) {
+    const offer = (q: Quarry): void => {
       const gap = Math.hypot(
         q.at.x - this.at.x, q.at.y - this.at.y, q.at.z - this.at.z,
       ) - q.radius;
-      if (gap > this.combat.reach || gap >= bestGap) continue;
+      if (gap > this.combat.reach || gap >= bestGap) return;
       best = q;
       bestGap = gap;
+    };
+    for (const q of this.quarry) offer(q);
+    for (const c of this.critters) {
+      if (!c.ready || !c.alive || c.carried) continue;
+      offer(c);
     }
     return best;
   }
