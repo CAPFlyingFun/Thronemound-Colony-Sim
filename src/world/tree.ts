@@ -88,6 +88,67 @@ export const PBR_BARKS: ReadonlySet<string> = new Set<BarkName>(BARKS);
  */
 export const TILING_BARKS: ReadonlySet<string> = new Set<BarkName>(['bark-ridged']);
 
+/**
+ * The barks whose roughness map is worth loading at all — which, measured,
+ * is none of them.
+ *
+ * Reported: "trees shouldn't be glossy." They were, and this is why.
+ *
+ * three.js MULTIPLIES: the shader's roughness is `material.roughness` times
+ * the map's green channel, so a roughness map is a scaling factor and never
+ * an override. Measured across the six shipped `_rough.jpg` files — mean
+ * green, and the spread between the darkest and lightest texel:
+ *
+ *     bark-craggy    0.750   (0.714 - 0.816)   spread 0.10
+ *     bark-fissured  0.764   (0.714 - 0.816)   spread 0.10
+ *     bark-grey      0.773   (0.722 - 0.827)   spread 0.11
+ *     bark-lichen    0.770   (0.729 - 0.820)   spread 0.09
+ *     bark-mossy     0.756   (0.714 - 0.835)   spread 0.12
+ *     bark-ridged    0.725   (0.306 - 0.996)   spread 0.69
+ *
+ * Five of the six are FLAT. They carried no detail worth having, and all
+ * they did was quietly scale the material's 0.95 down to about 0.71 — glossy
+ * bark, produced by a map that was added to stop bark looking like wallpaper.
+ *
+ * `bark-ridged` is the interesting one and it still goes. Its 0.69 spread is
+ * real authored detail, but a mean of 0.725 means a ridged trunk would stay
+ * glossier than the other five even after they were fixed, with its
+ * smoothest patches down at 0.31 — wet-looking bark, which is the reported
+ * defect. One bark's subtle variation does not outweigh that, and its normal
+ * map carries the relief regardless. Keeping the set (empty) rather than
+ * deleting the concept: if a bark ever ships a roughness map that is both
+ * detailed AND rough on average, this is where it goes back in.
+ *
+ * Measured in the running game from the report's own viewpoint, looking up
+ * the trunk — mean brightness of the trunk, of 255. One session, each state
+ * set from the same starting point rather than stacked on the last, because
+ * a first pass that stacked them reported a change twice its real size:
+ *
+ *     as it shipped (0.95 x a 0.75 map)    88.2
+ *     flat 0.95, no map                    77.8
+ *     flat 1.0, no map  <- what we do      76.8
+ *     specular lobe killed outright        68.9
+ *
+ * Everything the sheen could ever have been worth is the 19.3 between the
+ * first row and the last. Dropping the map alone takes 10.4 of it and going
+ * on to a flat 1 takes 11.4 — a shade under sixty per cent — while leaving
+ * bark with the small honest highlight a dielectric should have. See
+ * `BARK_ROUGHNESS` for why 1 rather than the old 0.95.
+ */
+export const DETAILED_ROUGH_BARKS: ReadonlySet<string> = new Set<BarkName>();
+
+/**
+ * How rough bark is: as rough as a dielectric gets.
+ *
+ * The old 0.95 was not measured against anything — and against the numbers
+ * above it leaves half the sheen in place. Bark is one of the least glossy
+ * surfaces in the natural world: dry, fibrous, deeply pitted, with no
+ * smooth microfacet population to speak of. There is no reading of it that
+ * wants a specular lobe, and the scene has no environment map, so this
+ * number is doing nothing but sizing the sun's own highlight.
+ */
+export const BARK_ROUGHNESS = 1;
+
 export interface TreeSpec {
   /** Trunk diameter at the ground, in world units. */
   girth: number;
@@ -980,7 +1041,13 @@ export function buildTree(
      */
     ...(maps.normalMap ? { normalMap: maps.normalMap } : {}),
     ...(maps.roughnessMap ? { roughnessMap: maps.roughnessMap } : {}),
-    roughness: 0.95, metalness: 0,
+    /*
+     * BARK IS NOT SHINY — see `BARK_ROUGHNESS`, and `DETAILED_ROUGH_BARKS`
+     * for the measurement that got us here. A roughness map, if one is ever
+     * kept again, MULTIPLIES this rather than replacing it.
+     */
+    roughness: BARK_ROUGHNESS,
+    metalness: 0,
     /*
      * NO FOG ON THE TREE. The island's fog starts at 1,200 units, which is
      * tuned for a fifty-six kilometre landscape and is six metres in a

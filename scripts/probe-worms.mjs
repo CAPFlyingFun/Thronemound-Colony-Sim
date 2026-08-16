@@ -45,6 +45,7 @@ await page.waitForFunction(
 const out = await page.evaluate(async (seconds) => {
   const s = window.islandScene;
   const MM = 5;
+  const WORM_BORE_MM = 6;
   const before = s.wormsForTest();
   if (before.length === 0) return { error: 'no worms on the island' };
 
@@ -90,20 +91,31 @@ const out = await page.evaluate(async (seconds) => {
    */
   const widths = [];
   let outOfWindow = 0;
-  for (const w of after) {
+  let tooShallow = 0;
+  const deepest = s.wormDeepestForTest();
+  after.forEach((w, i) => {
     /*
-     * AT THE LAST BITE, which is the one point its burrow is certainly at.
-     * A first cut sampled twelve millimetres behind the HEAD and read zero
-     * every time — not because the burrow was narrow but because a worm
-     * that has travelled 130 mm has dug its way out of the 192 mm window,
-     * so the field there is the coarse heightfield, which has never heard
-     * of the burrow. That is a real constraint, not a bad measurement, and
-     * it is counted below rather than hidden.
+     * AT THE DEEPEST POINT OF ITS OWN BURROW.
+     *
+     * Two earlier cuts got this wrong and both read as a narrow tunnel
+     * rather than as a bad measurement. The first sampled twelve
+     * millimetres behind the HEAD, which for a worm 130 mm along is outside
+     * the streamed window entirely. The second sampled at the last bite —
+     * fine until worms started coming up for air, at which point the last
+     * bite is often within a few millimetres of the grass, and a ray fired
+     * "across" the tunnel goes straight up into open sky. That reported the
+     * burrow as either infinitely wide or a fifth of a millimetre across,
+     * depending which axis you believed.
+     *
+     * The deepest remembered point is the one place a cross-section is all
+     * tunnel, and a worm with no such point is counted rather than guessed.
      */
-    const back = { x: w.bx, y: w.by, z: w.bz };
+    const deep = deepest[i];
+    if (!deep || deep.depthMm < WORM_BORE_MM) { tooShallow += 1; return; }
+    const back = { x: deep.x, y: deep.y, z: deep.z };
     if (s.lensQueryForTest(back.x, back.y, back.z).fine === 'unavailable') {
       outOfWindow += 1;
-      continue;
+      return;
     }
     /* Any two axes across the heading. */
     let ax = { x: w.dy, y: w.dz, z: w.dx };
@@ -118,7 +130,7 @@ const out = await page.evaluate(async (seconds) => {
     };
     widths.push(widthAt(back, ax.x, ax.y, ax.z));
     widths.push(widthAt(back, bx.x, bx.y, bx.z));
-  }
+  });
 
   /*
    * AND THE BODY LIES IN THE HOLE. Each bone's world position is asked of
@@ -149,12 +161,15 @@ const out = await page.evaluate(async (seconds) => {
     travelledMm: travelled.map((v) => +v.toFixed(1)),
     widthsMm: widths.map((v) => +v.toFixed(2)),
     outOfWindow,
+    tooShallow,
     bodies: bodies.length,
     bones: bodies.map((b) => b.bones),
     boneChecked: checked,
     boneInSoil: inSoil,
     /* And how deep they are, which says whether they stayed underground. */
     depthMm: after.map((w) => +((s.walkGroundAtForTest(w.x, w.z) - w.y) * MM).toFixed(1)),
+    moods: after.map((w) => w.mood),
+    deepestMm: deepest.map((d) => +d.depthMm.toFixed(1)),
   };
 }, SECONDS);
 
@@ -168,11 +183,14 @@ const mean = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
 const kept = out.widthsMm.filter((w) => w < 39);
 console.log(`\nTHE BURROW A WORM LEAVES — ${out.worms} worms, ${out.seconds} s of digging\n`);
 console.log(`  bites taken        ${out.bites.join(', ')}`);
+console.log(`  doing              ${out.moods.join(', ')}`);
+console.log(`  deepest burrow     ${out.deepestMm.join(', ')} mm below grade`);
 console.log(`  head travelled     ${out.travelledMm.join(', ')} mm`);
 console.log(`  depth below grade  ${out.depthMm.join(', ')} mm`);
 console.log(`\n  burrow width, measured across the field:`);
 console.log(`    samples          ${kept.length} of ${out.widthsMm.length}`
-  + ` (${out.outOfWindow} worm(s) had dug out of the streamed window)`);
+  + ` (${out.outOfWindow} out of the streamed window,`
+  + ` ${out.tooShallow} with no burrow deeper than a bore)`);
 if (kept.length) {
   console.log(`    narrowest        ${Math.min(...kept).toFixed(2)} mm`);
   console.log(`    mean             ${mean(kept).toFixed(2)} mm`);

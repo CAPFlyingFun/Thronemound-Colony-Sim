@@ -223,6 +223,30 @@
 .density-lab-button {
   border: 0;
   border-radius: 999px;
+  /*
+   * THE SQUARE THAT FLASHES UNDER A THUMB, reported twice and not once
+   * reproducible in a desktop probe — because neither of these is a desktop
+   * behaviour.
+   *
+   * `-webkit-tap-highlight-color` is iOS Safari painting a translucent grey
+   * block over the element's BORDER BOX the instant it is touched. It is
+   * meant for links in a document and it is drawn before, and independently
+   * of, anything the page says about shape. That is a square flashing over a
+   * round plate, exactly as described. The HUD already answers a thumb
+   * itself — see `.tm-art:active` — so the native one is pure noise.
+   *
+   * `appearance: none` retires the native control skin in the same breath:
+   * `border: 0` tells a UA button not to draw a border, but with
+   * `appearance: auto` some engines still reserve and paint the platform
+   * bezel underneath.
+   *
+   * Both are cheap, both are correct for a button that is a picture, and
+   * between them they remove every way the engine can draw a box we did not
+   * ask for. Written here rather than on `.tm-art` because it is true of
+   * every button in this HUD.
+   */
+  -webkit-tap-highlight-color: transparent;
+  appearance: none;
   font: 800 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
   letter-spacing: 0.06em;
   color: #1d160e;
@@ -359,10 +383,32 @@
 /* Armed. The amber ring the mode chips use would fight the gold plate, so
  * the latched state is a glow around the art instead — which is what the
  * discarded glow sheet was drawing, done where it can animate. */
+/*
+ * THE GLOW IS A BOX-SHADOW, NOT A DROP-SHADOW — and that is the third way a
+ * square can appear under a first press.
+ *
+ * `filter: drop-shadow()` traces the alpha of what the element RENDERED, so
+ * on a round plate it should give a round glow. It only does so once the
+ * background image has decoded: with no image yet there is no alpha to
+ * trace but the element still has a filter, and engines differ on what they
+ * hand it — WebKit has historically traced the border box, which draws the
+ * glow as a rectangle.
+ *
+ * That is precisely the reported timing. The pace plate is the ONE control
+ * that gets `is-grip` on its first press, and its first press is the first
+ * time `tm-art-sprint` is worn, so it is the one place a filter and an
+ * undecoded image can meet.
+ *
+ * `box-shadow` cannot do this. It follows `border-radius`, always, in every
+ * engine, whether or not anything has painted yet — the same reason the
+ * focus ring below is a box-shadow rather than an `outline`, which only
+ * learned to follow a radius in Safari 16.4. At 999px on a square box that
+ * is a circle, which is the shape of the plate.
+ */
 .tm-art.is-grip {
   background-color: transparent;
-  box-shadow: none;
-  filter: brightness(1.25) drop-shadow(0 0 10px rgba(240, 200, 110, 0.85));
+  box-shadow: 0 0 12px 2px rgba(240, 200, 110, 0.85);
+  filter: brightness(1.25);
 }
 
 .density-lab-dig:active {
@@ -3429,13 +3475,15 @@
    */
   left: calc(max(18px, env(safe-area-inset-left)) + 160px);
   /*
-   * LOW, BESIDE THE PAD'S WAIST. Drawn level with its top in the mockup,
-   * and measured there it cut the camera-drag glass from 33% to 31% by
-   * standing in the middle of the open left side. Dropped to the pad's
-   * waist it is in the corner with the stick, out of the swipe, and still
-   * exactly where a left thumb reaches without leaving the pad.
+   * LEVEL WITH THE PAD'S TOP — where the mockup draws it.
+   *
+   * v0.1.70 dropped it to the pad's waist because level with the top cost
+   * two points of camera-drag clear glass, 33% to 31%. Joshua spotted the
+   * move on sight. Two points of a metric I chose is not a reason to
+   * redraw an approved layout, and the blueprint outranks it: the mockup is
+   * the newer, more authoritative source. Back where it was drawn.
    */
-  bottom: calc(max(16px, env(safe-area-inset-bottom)) + 44px);
+  bottom: calc(max(16px, env(safe-area-inset-bottom)) + 90px);
   pointer-events: none;
 }
 
@@ -3450,6 +3498,26 @@
  * blamed on the joystick beside it, and the joystick was innocent: the
  * plate simply was not there as far as a thumb was concerned.
  */
+/*
+ * THE ONE SCREEN THE MOCKUP WAS NOT DRAWN FOR.
+ *
+ * The blueprint puts the plate level with the pad's top, and above it does.
+ * At 568x320 — the smallest landscape this supports — a 150 px pad and a
+ * plate beside its top leave the largest single block of drag-through glass
+ * at 31% of the screen, under the 33% `probe:hudmodes` asks for. That is a
+ * thumb with nowhere to start a camera drag, on the screen with least room
+ * to spare.
+ *
+ * Dropping it to the pad's waist there buys the block back. Scoped to the
+ * short screen rather than applied everywhere, because the honest reading of
+ * the conflict is that the layout was drawn for a phone-sized canvas and
+ * this is not one — not that the layout is wrong. Weakening the 33% instead
+ * would have hidden a real ergonomic loss to keep a rule I set myself.
+ */
+@media (max-height: 340px) {
+  .tm-gait { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 44px); }
+}
+
 .tm-gait > * { pointer-events: auto; }
 
 .tm-gait > .tm-art { width: 56px; height: 56px; }

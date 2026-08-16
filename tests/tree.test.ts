@@ -11,7 +11,8 @@ import { existsSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import {
-  BARKS, PBR_BARKS, buildTree, growTree, ringFactor, sidesAt, TreeSolid, type TreeSpec,
+  BARKS, BARK_ROUGHNESS, DETAILED_ROUGH_BARKS, PBR_BARKS, buildTree, growTree, ringFactor,
+  sidesAt, TreeSolid, type BuiltTree, type TreeSpec,
 } from '../src/world/tree';
 
 const SPEC: TreeSpec = { girth: 200, height: 5200, seed: 12345 };
@@ -519,5 +520,63 @@ describe('the wood she seats on contains the wood she sees', () => {
      * the factors themselves are both near one and comparing those hides it. */
     expect(ringFactor(sidesAt(3)) - 1).toBeGreaterThan((ringFactor(sidesAt(0)) - 1) * 8);
     expect(ringFactor(sidesAt(0))).toBeLessThan(1.002);
+  });
+});
+
+describe('bark roughness', () => {
+  /*
+   * "Trees shouldn't be glossy." They were, and the cause is that three.js
+   * MULTIPLIES a roughness map into `material.roughness` rather than letting
+   * it override — so a map averaging 0.75 turned the intended 0.95 into 0.71.
+   * Five of the six shipped maps are flat to within a tenth and were buying
+   * nothing but that gloss. Measured in the running game from the reported
+   * viewpoint, dropping them took the trunk's mean brightness from 85 of 255
+   * to 75; killing the specular lobe outright only reaches 68.
+   */
+  const tex = (): THREE.Texture => new THREE.Texture();
+
+  const woodOf = (t: BuiltTree): THREE.MeshStandardMaterial => {
+    let found: THREE.MeshStandardMaterial | undefined;
+    t.root.traverse((n) => {
+      const m = (n as THREE.Mesh).material as THREE.Material | undefined;
+      if (!m) return;
+      for (const one of Array.isArray(m) ? m : [m]) {
+        const s = one as THREE.MeshStandardMaterial;
+        if (s.isMeshStandardMaterial && s.map && !found) found = s;
+      }
+    });
+    if (!found) throw new Error('no wood material');
+    return found;
+  };
+
+  it('builds bark as rough as a dielectric gets', () => {
+    const bare = buildTree({ girth: 40, height: 400, seed: 3 }, tex(), 'bark-craggy');
+    const wood = woodOf(bare);
+    expect(wood.roughness).toBe(BARK_ROUGHNESS);
+    expect(BARK_ROUGHNESS).toBe(1);
+    expect(wood.metalness).toBe(0);
+    /* And nothing multiplying it back down — that WAS the bug. */
+    expect(wood.roughnessMap).toBeFalsy();
+    bare.dispose();
+  });
+
+  it('fetches no roughness map, because not one of them is worth it', () => {
+    /*
+     * Measured spreads: bark-ridged 0.69, every other bark 0.12 or less. The
+     * flat five were pure gloss multiplier. bark-ridged's detail is real but
+     * its MEAN is 0.725, so a ridged trunk would have stayed the glossiest
+     * tree on the island after the others were fixed — which is the reported
+     * defect, so it goes too. The set stays as the place to put one back.
+     */
+    expect(DETAILED_ROUGH_BARKS.size).toBe(0);
+    for (const b of BARKS) expect(DETAILED_ROUGH_BARKS.has(b)).toBe(false);
+  });
+
+  it('still ships the depth maps it does use', () => {
+    /* The normal map is untouched by any of this — it carries real relief on
+     * every bark, and measured, removing it changed the trunk by 0.1 of 255. */
+    for (const b of BARKS) {
+      expect(existsSync(`public/tree-tex/${b}_normal.jpg`)).toBe(true);
+    }
   });
 });

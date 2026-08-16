@@ -87,7 +87,8 @@ import { SENSE_EASE, makeSensed, type SenseUniforms } from './undergroundSense';
 import { IslandStream, type IslandScrollReport } from '../world/IslandStream';
 import { SurfaceWalker } from '../world/surfaceWalk';
 import {
-  BARKS, PBR_BARKS, TILING_BARKS, bakeTree, buildTree, sidesAt, trunkProfile,
+  BARKS, DETAILED_ROUGH_BARKS, PBR_BARKS, TILING_BARKS, bakeTree, buildTree,
+  sidesAt, trunkProfile,
   type BuiltTree, type TreeSpec,
   type TrunkProfile,
 } from '../world/tree';
@@ -162,7 +163,7 @@ import { Beetle } from './Beetle';
 import { resolveBulk, QUEEN_BULK_ID, type Bulk } from './islandBulk';
 import { Grit } from './islandGrit';
 import {
-  Worm, WORM_BORE_MM, WORM_COUNT, type WormSoil,
+  Worm, WORM_BORE_MM, WORM_COUNT, WORM_OUT_MM, type WormSoil,
 } from './islandWorm';
 import { WormBody } from './WormBody';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
@@ -547,10 +548,23 @@ export class IslandScene {
       const away = (18 + rand() * 26) / MM;
       const x = this.at.x + Math.cos(a) * away;
       const z = this.at.z + Math.sin(a) * away;
-      /* Under the surface by more than its own thickness, so it starts
-       * inside the ground rather than half out of it. */
-      const y = this.walkGroundAt(x, z) - (WORM_BORE_MM * 2) / MM;
-      this.worms.push(new Worm(x, y, z, rand));
+      /*
+       * THE FIRST ONE IS LYING ON THE GRASS WHEN SHE ARRIVES.
+       *
+       * Reported twice — "I don't see any worms" — and both times they were
+       * there, digging, entirely inside opaque ground. Three animals nobody
+       * could ever have seen. One at the surface from the first frame is
+       * what makes the feature exist for the player at all; the others come
+       * up on their own clock — see `WORM_DIG_S`.
+       */
+      const out = i === 0;
+      const grade = this.walkGroundAt(x, z);
+      /* At the mouth its head is just clear of the grass — the same ceiling
+       * every worm answers to. Otherwise under the surface by more than its
+       * own thickness, so it starts inside the ground rather than half out
+       * of it. */
+      const y = out ? grade + WORM_OUT_MM / MM : grade - (WORM_BORE_MM * 2) / MM;
+      this.worms.push(new Worm(x, y, z, rand, out ? 'out' : 'down'));
     }
     /*
      * AND THEIR BODIES, fetched once and cloned. Off the critical path —
@@ -2278,10 +2292,20 @@ export class IslandScene {
      * relief and not the tree.
      */
     const pbr = PBR_BARKS.has(bark);
+    /*
+     * THE ROUGHNESS MAP IS ONLY FETCHED WHERE IT SAYS ANYTHING.
+     *
+     * Five of the six are flat to within a tenth and did nothing but scale
+     * the trunk glossy — measured, see `DETAILED_ROUGH_BARKS`. Not loading
+     * one is the fix AND five fewer requests on a phone; the normal map is
+     * unaffected, since that one carries real relief on every bark.
+     */
     const [normalMap, roughnessMap] = pbr
       ? await Promise.all([
         loader.loadAsync(barkUrl('_normal')).catch(() => undefined),
-        loader.loadAsync(barkUrl('_rough')).catch(() => undefined),
+        DETAILED_ROUGH_BARKS.has(bark)
+          ? loader.loadAsync(barkUrl('_rough')).catch(() => undefined)
+          : Promise.resolve(undefined),
       ])
       : [undefined, undefined];
     /*
@@ -3793,17 +3817,47 @@ export class IslandScene {
     return this.wormBodies.map((b) => b.boneWorld());
   }
 
-  /** For probes: where each worm is, and how much it has eaten. */
+  /**
+   * For probes: the DEEPEST point on each worm's remembered burrow.
+   *
+   * Which is the only place a cross-section of the tube means anything.
+   * `probe:worms` used to sample at the last bite, and once worms started
+   * surfacing that was often within a few millimetres of the grass — so one
+   * of its two perpendicular rays shot straight up into open sky and the
+   * burrow measured as either infinitely wide or, from the other axis, a
+   * fifth of a millimetre. Neither was the tunnel.
+   */
+  wormDeepestForTest(): { x: number; y: number; z: number; depthMm: number }[] {
+    return this.worms.map((w) => {
+      let best = w.at;
+      let deep = -Infinity;
+      /* Only the stretch it really dug — the constructor fabricates the
+       * rest, and undug ground measures as a burrow a fifth of a
+       * millimetre wide. See `Worm.dug`. */
+      for (const p of w.burrow()) {
+        const d = this.walkGroundAt(p.x, p.z) - p.y;
+        if (d > deep) { deep = d; best = p; }
+      }
+      return { x: best.x, y: best.y, z: best.z, depthMm: deep * MM };
+    });
+  }
+
+  /** For probes: where each worm is, what it is doing, and how much it ate. */
   wormsForTest(): {
     x: number; y: number; z: number;
     dx: number; dy: number; dz: number;
     bx: number; by: number; bz: number; bites: number;
+    mood: string; depthMm: number;
   }[] {
     return this.worms.map((w) => ({
       x: w.at.x, y: w.at.y, z: w.at.z,
       dx: w.dir.x, dy: w.dir.y, dz: w.dir.z,
       bx: w.lastBite.x, by: w.lastBite.y, bz: w.lastBite.z,
       bites: w.bites,
+      /* Whether it is buried is the whole question — see `WORM_DIG_S`. A
+       * negative depth is a head out in the open where it can be SEEN. */
+      mood: w.mood,
+      depthMm: (this.walkGroundAt(w.at.x, w.at.z) - w.at.y) * MM,
     }));
   }
 

@@ -1,8 +1,12 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import {
-  WORM_BITE_S, WORM_BORE_MM, WORM_STEP_MM, WORM_UNDER_MM, Worm, wanderDir,
+  WORM_BITE_S, WORM_BORE_MM, WORM_OUT_MM, WORM_STEP_MM, WORM_UNDER_MM, Worm,
+  wanderDir,
 } from '../src/scenes/islandWorm';
+
+/** Millimetres per world unit — the project's own scale. */
+const MM = 5;
 
 /** Soil that records what was asked of it. */
 const soil = (over: { covers?: boolean; surface?: number } = {}) => {
@@ -140,5 +144,118 @@ describe('a worm digging', () => {
     const s = soil();
     expect(w.tick(0, s)).toBe(false);
     expect(s.cuts.length).toBe(0);
+  });
+});
+
+describe('a worm coming up for air', () => {
+  /*
+   * WHY THIS EXISTS AT ALL. Reported twice — "I don't see any worms" — and
+   * both times they were there and digging. They spawned twelve millimetres
+   * under the grass, and `wanderDir` turns a shallow worm DOWN, so nothing
+   * could ever bring one back up: three animals living their whole lives
+   * inside opaque ground. These tests pin the fix, because the failure mode
+   * is invisible by construction and no probe would have shouted about it.
+   */
+  it('does not stay buried forever', () => {
+    const w = new Worm(0, -4, 0, steady());
+    /* Grade at zero, so its depth is simply minus its own height. */
+    const s = soil({ surface: 0 });
+    expect(w.mood).toBe('down');
+    let surfaced = false;
+    for (let i = 0; i < 60 * 240 && !surfaced; i += 1) {
+      w.tick(1 / 60, s);
+      if (w.mood === 'out') surfaced = true;
+    }
+    expect(surfaced).toBe(true);
+    /* And its head really is out of the ground, not merely flagged so. */
+    expect(w.at.y).toBeGreaterThanOrEqual(0);
+  });
+
+  it('climbs upward once it has decided to, whatever the wander wanted', () => {
+    /* `wanderDir` biases a shallow worm DOWN — correct for digging and
+     * exactly what kept them buried. Surfacing has to outrank it. */
+    const w = new Worm(0, -20, 0, steady());
+    const s = soil({ surface: 0 });
+    for (let i = 0; i < 60 * 60 && w.mood === 'down'; i += 1) w.tick(1 / 60, s);
+    expect(w.mood).toBe('up');
+    /* Give the turn rate time to swing it over, then check it is rising. */
+    const from = w.at.y;
+    for (let i = 0; i < 60 * 30 && w.mood === 'up'; i += 1) w.tick(1 / 60, s);
+    expect(w.at.y).toBeGreaterThan(from);
+  });
+
+  it('lies still at the mouth rather than carving the sky', () => {
+    const w = new Worm(0, 0, 0, steady(), 'out');
+    const s = soil({ surface: 0 });
+    const from = w.at.clone();
+    for (let i = 0; i < 60 * 5; i += 1) w.tick(1 / 60, s);
+    expect(w.mood).toBe('out');
+    expect(s.cuts.length).toBe(0);
+    expect(from.distanceTo(w.at)).toBe(0);
+  });
+
+  it('goes back down after its spell at the mouth', () => {
+    const w = new Worm(0, 0, 0, steady(), 'out');
+    const s = soil({ surface: 0 });
+    for (let i = 0; i < 60 * 60 && w.mood === 'out'; i += 1) w.tick(1 / 60, s);
+    expect(w.mood).toBe('down');
+  });
+
+  it('never flies, however long its heading points at the sky', () => {
+    /*
+     * A BUG THIS FILE ALREADY HAD, which surfacing merely exposed.
+     * `wanderDir` biases downward only at the moment a heading is CHOSEN,
+     * and a heading lasts thirty to sixty seconds; the turn rate is a hard
+     * 0.12 rad/s, so a worm pointed up needed thirteen seconds to come about
+     * and travelled the whole time. Measured in the running game before the
+     * ceiling existed: heads 10, 23 and 28 mm above the ground.
+     *
+     * Started deliberately pointing straight up at the surface, which is the
+     * worst case the wander can produce.
+     */
+    const w = new Worm(0, 0, 0, steady());
+    w.dir.set(0, 1, 0);
+    const s = soil({ surface: 0 });
+    let highest = -Infinity;
+    for (let i = 0; i < 60 * 300; i += 1) {
+      w.tick(1 / 60, s);
+      /* HEIGHT ABOVE GRADE, which with the surface at zero is simply its
+       * own y. Written as `-at.y` first, which is DEPTH — the test then
+       * reported the deepest point it reached and called it flying. */
+      highest = Math.max(highest, w.at.y * MM);
+    }
+    /* Never more than its own allowance above grade, with a hair of slack
+     * for the step it is part-way through. */
+    expect(highest).toBeLessThanOrEqual(WORM_OUT_MM + 0.1);
+  });
+
+  it('lies with its body down the burrow and only its head out', () => {
+    /*
+     * The posture an anecic worm actually holds: head at the doorway, tail
+     * still anchored below. It falls out of the heading, because the body is
+     * laid BACKWARDS along it — so a worm at the mouth has to point UP or its
+     * body is drawn lying across the lawn.
+     */
+    const w = new Worm(0, 0, 0, steady(), 'out');
+    expect(w.dir.y).toBeGreaterThan(0.9);
+    const tail = w.trail[w.trail.length - 1]!;
+    expect(tail.y).toBeLessThan(w.at.y);
+  });
+
+  it('does not put three worms on one clock', () => {
+    /* Sharing a timer would have them surface, lie and dive together, which
+     * reads as a scripted event rather than as animals. */
+    const rand = steady();
+    const worms = [0, 1, 2].map(() => new Worm(0, -4, 0, rand));
+    const s = soil({ surface: 0 });
+    const surfacedAt = worms.map(() => -1);
+    for (let i = 0; i < 60 * 240; i += 1) {
+      worms.forEach((w, k) => {
+        w.tick(1 / 60, s);
+        if (surfacedAt[k] === -1 && w.mood === 'out') surfacedAt[k] = i;
+      });
+    }
+    expect(surfacedAt.every((t) => t >= 0)).toBe(true);
+    expect(new Set(surfacedAt).size).toBe(3);
   });
 });
