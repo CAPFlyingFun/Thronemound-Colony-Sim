@@ -16,7 +16,7 @@ import {
 const MODES = Object.keys(HUD_LAYOUTS) as HudMode[];
 
 const ALL_PARTS: HudPart[] = [
-  'dig', 'scoop', 'instruments', 'aim', 'heading', 'depth',
+  'dig', 'scoop', 'instruments', 'aim', 'roll', 'heading', 'depth',
   'view', 'dodge', 'bite', 'sting', 'carry', 'interact',
   'pace', 'ride', 'tilt', 'poseRow',
 ];
@@ -80,7 +80,7 @@ describe('what each mode shows', () => {
    * are the ones that fan.
    */
   it('never asks the cluster to hold more plates than it fits', () => {
-    const READOUTS = new Set(['instruments', 'aim', 'heading', 'depth', 'poseRow']);
+    const READOUTS = new Set(['instruments', 'aim', 'roll', 'heading', 'depth', 'poseRow']);
     for (const mode of Object.keys(HUD_LAYOUTS) as (keyof typeof HUD_LAYOUTS)[]) {
       const plates = partsIn(mode).filter((p) => !READOUTS.has(p));
       /* Named in the assertion so a failure says WHICH mode overflowed. */
@@ -89,19 +89,31 @@ describe('what each mode shows', () => {
   });
 
   /*
-   * VIEW IS REACHABLE FROM EVERY MODE A FIGHT CAN DROP YOU INTO.
+   * VIEW IS REACHABLE FROM EVERY MODE THE WORLD CAN DROP YOU INTO.
    *
    * Reported: "realized VIEW wasn't available when I was attacking the
    * beetle, but should allow both 1st and 3rd person." Combat is entered by
    * something ELSE walking up to her, so a camera she had a second ago must
-   * not vanish without her choosing it. `dig` and `pose` are the two she
-   * arms deliberately, and both carry VIEW anyway.
+   * not vanish without her choosing it. The same holds for CARRY and plain
+   * EXPLORE, and POSE keeps it as its hero.
+   *
+   * DIG IS THE DELIBERATE EXCEPTION, and this test used to demand the
+   * opposite. Arming the shovel IS choosing the first-person aiming eye —
+   * the look is the aim — so a VIEW plate there was a button whose only
+   * effect was to break the mode's own premise, and it left in the same
+   * trim that gave the row its roll instrument. The way out of first
+   * person is the way out of the dig: the DIG plate, pinned reachable by
+   * the test above.
    */
-  it('keeps VIEW reachable in every mode', () => {
-    for (const mode of Object.keys(HUD_LAYOUTS) as (keyof typeof HUD_LAYOUTS)[]) {
+  it('keeps VIEW reachable in every mode the world chooses', () => {
+    for (const mode of ['explore', 'combat', 'carry', 'pose'] as HudMode[]) {
       expect({ mode, view: partsIn(mode).includes('view') })
         .toEqual({ mode, view: true });
     }
+  });
+
+  it('and keeps it OUT of the dig, where the look is the aim', () => {
+    expect(rankOf('dig', 'view')).toBe('hidden');
   });
 
 
@@ -170,14 +182,17 @@ describe('the ways out, which are the ones that strand a player', () => {
 });
 
 describe('the dig instruments belong to the dig', () => {
-  it('shows the readouts while tunnelling', () => {
-    for (const part of ['instruments', 'aim', 'heading', 'depth'] as HudPart[]) {
+  it('shows the full attitude panel while tunnelling', () => {
+    /* Pitch, roll, heading, depth — the four that answer "am I actually
+     * going down?", which a loop-de-loop proved a player cannot answer
+     * from the picture alone. */
+    for (const part of ['instruments', 'aim', 'roll', 'heading', 'depth'] as HudPart[]) {
       expect(rankOf('dig', part)).toBe('secondary');
     }
   });
 
   it('and nowhere near ordinary walking about', () => {
-    for (const part of ['instruments', 'aim', 'heading', 'depth'] as HudPart[]) {
+    for (const part of ['instruments', 'aim', 'roll', 'heading', 'depth'] as HudPart[]) {
       expect(rankOf('explore', part)).toBe('hidden');
     }
   });

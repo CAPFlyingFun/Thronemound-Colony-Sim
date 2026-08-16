@@ -26,7 +26,7 @@ export type HudMode = 'explore' | 'dig' | 'combat' | 'carry' | 'pose';
 
 /** Every control the mode table may place. Names match the plate art. */
 export type HudPart =
-  | 'dig' | 'scoop' | 'instruments' | 'aim' | 'heading' | 'depth'
+  | 'dig' | 'scoop' | 'instruments' | 'aim' | 'roll' | 'heading' | 'depth'
   | 'view' | 'dodge' | 'bite' | 'sting' | 'carry' | 'interact'
   | 'pace' | 'ride' | 'tilt' | 'poseRow';
 
@@ -74,9 +74,24 @@ export const HUD_LAYOUTS: Record<HudMode, HudLayout> = {
   },
   dig: {
     primary: 'scoop',
-    /* The instruments are the dig's readouts — angle, bearing, depth. They
-     * are not clutter here; they are the reason the mode is legible. */
-    secondary: ['dig', 'view', 'instruments', 'aim', 'heading', 'depth'],
+    /*
+     * The instruments are the dig's readouts — pitch, roll, bearing,
+     * depth. They are not clutter here; they are the reason the mode is
+     * legible: reported from the device as thinking she was still heading
+     * DOWN while actually curling back up to the surface in a loop, which
+     * is exactly the blindness a full attitude panel exists to cure.
+     *
+     * AND VIEW HAS LEFT, which is a change of mind worth stating because
+     * the test used to demand it in every mode. That demand was written
+     * for COMBAT — a mode something ELSE drops her into, where a camera
+     * she had a second ago must not vanish unchosen. Dig is the opposite
+     * case: SHE armed it, arming it IS choosing the first-person aiming
+     * eye (the look is the aim — see `aimTo`), and a VIEW plate here is a
+     * button whose only effect is to break the mode's own premise. The
+     * way out of first person is the way out of the dig: the DIG plate,
+     * which stays.
+     */
+    secondary: ['dig', 'instruments', 'aim', 'roll', 'heading', 'depth'],
     contextual: [],
   },
   combat: {

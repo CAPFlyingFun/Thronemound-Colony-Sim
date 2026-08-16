@@ -137,6 +137,42 @@ export const POSTURE_SIGN = { pitch: 1, roll: 1 };
  * is, and how a pose eases toward its target are all decisions worth testing
  * without a browser in the way.
  */
+/**
+ * HOW FAR SHE IS BANKED, read against the world.
+ *
+ * The roll instrument's question is "which way is up?", and the honest
+ * answer comes from her actual body frame — the up her feet negotiated —
+ * measured against the up gravity insists on. Level for this heading is
+ * the world's up with the forward component removed; the bank is the
+ * signed angle from that to her own up, about her forward. Positive drops
+ * her RIGHT side, matching the posture rig's convention above.
+ *
+ * Null when she is plumb — nose straight up or down — because a vertical
+ * forward leaves no horizon to bank against, the same degeneracy the
+ * bearing holds its last value through. The caller keeps the old reading,
+ * which is what an instrument on a gimbal would do.
+ */
+export function bankOf(
+  fwd: { x: number; y: number; z: number },
+  up: { x: number; y: number; z: number },
+): number | null {
+  const fy = Math.max(-1, Math.min(1, fwd.y));
+  if (Math.abs(fy) > 0.99) return null;
+  /* World up, less its share along forward: "level" for this heading. */
+  const u0x = -fwd.x * fy;
+  const u0y = 1 - fy * fy;
+  const u0z = -fwd.z * fy;
+  const n = Math.hypot(u0x, u0y, u0z);
+  /* sin from cross(up, level)·fwd, cos from up·level — an atan2 pair, so
+   * the answer is honest all the way round to upside-down (±180°). */
+  const cx = up.y * u0z - up.z * u0y;
+  const cy = up.z * u0x - up.x * u0z;
+  const cz = up.x * u0y - up.y * u0x;
+  const sin = (cx * fwd.x + cy * fwd.y + cz * fwd.z) / n;
+  const cos = (up.x * u0x + up.y * u0y + up.z * u0z) / n;
+  return Math.atan2(sin, cos);
+}
+
 export class BodyPosture {
   /** Which control the stick is driving, if any. */
   mode: PostureMode = 'off';

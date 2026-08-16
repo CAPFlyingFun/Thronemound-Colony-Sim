@@ -2014,6 +2014,8 @@ export class IslandScene {
 
   private aimReadout: HTMLElement | null = null;
 
+  private rollReadout: HTMLElement | null = null;
+
   /** The ↕ and 🚁 chips, and the live pose numbers beside them. */
   private rideChip: HTMLButtonElement | null = null;
 

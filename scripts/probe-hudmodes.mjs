@@ -49,7 +49,7 @@ const PLATES = [
 const WANT_FREE = 0.33;
 
 const b = await chromium.launch({
-  executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
+  executablePath: process.env.CHROME_PATH ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
   args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'],
 });
 
@@ -149,6 +149,37 @@ for (const size of SIZES) {
     out.dig = up();
     out.digFit = { clash: clash() };
     out.digMode = s.hudMode;
+    /*
+     * THE ATTITUDE PANEL, read while the shovel is out. Four instruments —
+     * pitch, roll, heading, depth — because the loop-de-loop report was a
+     * player heading UP who believed she was heading down. The pitch swing
+     * is exercised the way the bug happened: aim driven below level, then
+     * above it, and the readout must change vocabulary (▼ to ▲), not just
+     * flip a minus a thumb cannot see.
+     */
+    const gauges = () => Array.from(
+      document.querySelectorAll('.tm-instruments .density-lab-aim-readout'),
+    ).filter((el) => el.getBoundingClientRect().width > 0)
+      .map((el) => el.textContent);
+    /*
+     * ON LEVEL FOOTING FIRST. The gauges are world-referenced — that is
+     * their whole value — so an ant clinging to a 27°-rolled slope reads
+     * a nose-down aim as ▲, and is RIGHT to: dug from there, that stroke
+     * climbs. A sign test needs a level ant, and a teleport-in-place is
+     * the documented way to one (it sets her down the right way up).
+     */
+    s.teleportMm(s.at.x * 5, s.at.z * 5);
+    settle();
+    /* Through `aimPitchForTest`, which writes the LOOK — on the island the
+     * look is the aim; the bore rig's own dial is the lab scene's. */
+    s.aimPitchForTest(-0.6);
+    settle();
+    out.gaugesDown = gauges();
+    s.aimPitchForTest(0.6);
+    settle();
+    out.gaugesUp = gauges();
+    s.aimPitchForTest(0);
+    settle();
     document.querySelector('.tm-art-dig')
       .dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
     settle();
@@ -194,6 +225,18 @@ for (const size of SIZES) {
   say(seen.digMode === 'dig', `DIG arms the dig mode (got ${seen.digMode})`);
   say(seen.backToExplore === 'explore',
     `and DIG is still there to disarm it (got ${seen.backToExplore})`);
+  /* The trimmed row: the look IS the aim, so digging offers no VIEW. */
+  say(!seen.dig.includes('view'), 'digging does not offer a VIEW plate');
+  /* Pitch, roll, heading, depth — all four on the panel, and the pitch
+   * arrow must actually turn over when the aim crosses level. */
+  say(seen.gaugesDown.length === 4,
+    `the dig panel shows four gauges (got ${seen.gaugesDown.join(' | ')})`);
+  say(seen.gaugesDown[0]?.includes('\u25bc'),
+    `aimed below level the pitch gauge points down (got ${seen.gaugesDown[0]})`);
+  say(seen.gaugesUp[0]?.includes('\u25b2'),
+    `aimed above level it points up (got ${seen.gaugesUp[0]})`);
+  say(!!seen.gaugesDown[1] && seen.gaugesDown[1].length > 0,
+    `the roll gauge reads something (got ${seen.gaugesDown[1]})`);
   /* THE REPORT, AS AN ASSERTION. Ten at once was the complaint. */
   for (const mode of ['explore', 'carry', 'combat', 'dig']) {
     say(seen[mode].length <= 6,

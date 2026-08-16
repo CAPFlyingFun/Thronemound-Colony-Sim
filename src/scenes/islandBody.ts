@@ -22,7 +22,7 @@ import {
   CLEARANCE_MM, GASTER_RIDE_MM, PROBES, posture,
   type Spine, type SpinePose, type SpineReading,
 } from '../anim/spine';
-import type { BodyPosture } from './bodyPosture';
+import { bankOf, type BodyPosture } from './bodyPosture';
 import { YAW_RATE, type BoreRig } from './BoreControl';
 import type { Dodge } from './dodge';
 import type { Vitals } from './islandVitals';
@@ -106,6 +106,7 @@ export interface BodyHost {
 
   /* --- the readouts it keeps current --- */
   aimReadout: HTMLElement | null;
+  rollReadout: HTMLElement | null;
   headingReadout: HTMLElement | null;
   depthReadout: HTMLElement | null;
 
@@ -473,6 +474,27 @@ export function refreshAim(host: BodyHost, ): void {
       host.depthReadout.textContent = depth;
       host.depthReadout.classList.toggle('is-steep', down >= QUEST_DEPTH_MM);
     }
+    if (host.rollReadout) {
+      /*
+       * ROLL, from the frame her feet actually negotiated — not the
+       * posture rig, which is an override dial and reads zero whenever
+       * the player has not armed it. Plumb (nose straight up or down)
+       * returns null and the readout HOLDS, exactly as the bearing above
+       * holds through the same degeneracy.
+       */
+      const bank = bankOf(host.fwd, host.up);
+      if (bank !== null) {
+        const rollDeg = Math.round((bank * 180) / Math.PI);
+        const roll = rollDeg === 0 ? 'level'
+          : `${rollDeg > 0 ? '\u25b6' : '\u25c0'} ${Math.abs(rollDeg)}\u00b0`;
+        if (host.rollReadout.textContent !== roll) {
+          host.rollReadout.textContent = roll;
+          /* Past a right angle she is closer to her back than her feet —
+           * the reading that answers "am I upside down?" with yes. */
+          host.rollReadout.classList.toggle('is-steep', Math.abs(rollDeg) >= 90);
+        }
+      }
+    }
   }
   if (!host.aimReadout) return;
   /*
@@ -486,7 +508,18 @@ export function refreshAim(host: BodyHost, ): void {
   const deg = Math.round(
     (Math.asin(Math.max(-1, Math.min(1, line.y))) * 180) / Math.PI,
   );
-  const text = `${deg > 0 ? '+' : ''}${deg}°`;
+  /*
+   * DIGGING, THE SIGN GROWS AN ARROW. "-30°" asks the player to remember
+   * which way the minus points while upside down in a loop — which is the
+   * player the report is about, the one who thought she was still heading
+   * down while curling back to the surface. ▼ and ▲ are the depth
+   * readout's own vocabulary and cannot be read backwards. Walking and
+   * posing keep the bare signed lean; those modes read it as a slope, not
+   * a course.
+   */
+  const text = host.digMode
+    ? (deg === 0 ? '0\u00b0' : `${deg < 0 ? '\u25bc' : '\u25b2'} ${Math.abs(deg)}\u00b0`)
+    : `${deg > 0 ? '+' : ''}${deg}\u00b0`;
   if (host.aimReadout.textContent !== text) host.aimReadout.textContent = text;
   host.aimReadout.classList.toggle('is-steep', deg <= -45);
 }

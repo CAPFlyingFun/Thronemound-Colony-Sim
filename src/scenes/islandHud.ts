@@ -95,6 +95,7 @@ export interface HudHost {
   /* --- the elements the scene keeps a handle on --- */
   aimChip: HTMLButtonElement | null;
   aimReadout: HTMLElement | null;
+  rollReadout: HTMLElement | null;
   headingReadout: HTMLElement | null;
   depthReadout: HTMLElement | null;
   poseReadout: HTMLElement | null;
@@ -257,6 +258,21 @@ export function buildControls(host: HudHost, ): void {
    * mode where it matters — and 29px of rail is the difference between
    * DIG clearing the MENU plate and climbing into it. */
   host.railPart(host.aimReadout, 'aim');
+
+  /*
+   * ROLL, between the angle and the bearing, because that is the order a
+   * pilot reads them: attitude first, then course. The angle says where
+   * the next stroke goes; roll says which way is UP while she cuts it —
+   * and in a bore that has looped, "up" is the fact she has lost.
+   * World-referenced like its neighbours, from her actual body frame
+   * rather than the posture rig's dial (the rig is an override and reads
+   * zero whenever the player has not armed it, which in dig mode is
+   * always — an instrument that always says level is a decoration).
+   */
+  host.rollReadout = document.createElement('div');
+  host.rollReadout.className = 'density-lab-aim-readout';
+  instruments.appendChild(host.rollReadout);
+  host.railPart(host.rollReadout, 'roll');
 
   /*
    * THE OTHER TWO INSTRUMENTS, while the shovel is out.
