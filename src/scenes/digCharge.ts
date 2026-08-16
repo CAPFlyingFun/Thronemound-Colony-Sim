@@ -18,8 +18,32 @@ import * as THREE from 'three';
 import { CELL_SIZE, MM } from '../world/worldScape';
 import {
   CHARGES_MAX, CHARGE_GRAVITY_MM, CHARGE_RADIUS_MM,
-  CHARGE_RANGE_MM, CHARGE_SPEED_MM,
+  CHARGE_RANGE_MM, CHARGE_SPEED_MM, NOSE_REACH,
 } from './islandTuning';
+
+/**
+ * WHERE A LOB LEAVES FROM — inside the span the miss scan PROVED empty,
+ * never beyond it.
+ *
+ * The first cut of this spawned a fixed nose-length ahead of the ray's
+ * origin, on the argument that the throw only happens because everything
+ * within reach sampled empty. But `clear` — the ray's own reach — is not
+ * always a nose-length: in first person the reach is charged for the
+ * eye's forward seat, so a full nose ahead of the LENS can sit a fraction
+ * of a millimetre past what was actually scanned, and a charge born
+ * inside unscanned soil detonates at her face instead of flying. So the
+ * offset is capped inside the proven span, and the point is asked one
+ * last solidity question anyway — belt after the braces — falling back
+ * to the ray's origin, which is her own lens or centre and therefore air.
+ */
+export function launchPoint(
+  origin: THREE.Vector3, aim: THREE.Vector3, clear: number,
+  solidAt: (x: number, y: number, z: number) => boolean,
+): THREE.Vector3 {
+  const out = new THREE.Vector3().copy(origin)
+    .addScaledVector(aim, Math.min(NOSE_REACH, clear * 0.8));
+  return solidAt(out.x, out.y, out.z) ? out.copy(origin) : out;
+}
 
 /** What a flight needs to know, and nothing else. */
 export interface ChargeWorld {

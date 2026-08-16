@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { DigCharges } from '../src/scenes/digCharge';
+import { DigCharges, launchPoint } from '../src/scenes/digCharge';
 import { chargeImpact, type DigHost } from '../src/scenes/islandDig';
 import {
-  CHARGES_MAX, CHARGE_RANGE_MM, SCOOP_DEEP_MM,
+  CHARGES_MAX, CHARGE_RANGE_MM, NOSE_REACH, SCOOP_DEEP_MM,
 } from '../src/scenes/islandTuning';
+import { CELL_SIZE } from '../src/world/worldScape';
 import { MM } from '../src/world/worldScape';
 
 /*
@@ -90,6 +91,43 @@ describe('the flight', () => {
     expect(end.distanceTo(origin)).toBeGreaterThan((CHARGE_RANGE_MM / MM) * 0.3);
   });
 
+  it('cannot tunnel through a wall thinner than one frame of travel', () => {
+    /* A wall barely one sample wide, hit with a whole HALF-SECOND frame
+     * — far more travel than the wall is thick. The half-cell sub-step
+     * march must still catch it; a charge popping on the far side of a
+     * tunnel wall would be the ghost's "confident hole over open air"
+     * mistake with a fuse on it. */
+    const wallZ = 2;
+    const { hits, fizzles, charges } = makeWorld(
+      (_x, _y, z) => z >= wallZ && z <= wallZ + CELL_SIZE * 0.6,
+    );
+    charges.lob(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 1));
+    charges.step(0.5);
+    expect(hits.length).toBe(1);
+    expect(fizzles.length).toBe(0);
+    expect(hits[0]!.at.z).toBeLessThan(wallZ + CELL_SIZE);
+  });
+
+  it('reuses a spent slot instead of growing the pool', () => {
+    const { scene, fizzles, charges } = makeWorld(() => false);
+    charges.lob(new THREE.Vector3(), new THREE.Vector3(0, 0, 1));
+    flyOut(charges);
+    charges.lob(new THREE.Vector3(), new THREE.Vector3(0, 0, 1));
+    flyOut(charges);
+    expect(fizzles.length).toBe(2);
+    /* One mesh served both throws — the pool is beads, not litter. */
+    expect(scene.added).toBe(1);
+  });
+
+  it('dispose takes every bead back out of the scene', () => {
+    const { scene, charges } = makeWorld(() => false);
+    charges.lob(new THREE.Vector3(), new THREE.Vector3(0, 0, 1));
+    charges.lob(new THREE.Vector3(), new THREE.Vector3(0, 0, 1));
+    charges.dispose();
+    expect(scene.removed).toBe(scene.added);
+    expect(charges.count()).toBe(0);
+  });
+
   it('caps how many fly at once, and says no to the rest', () => {
     const { charges } = makeWorld(() => false);
     for (let i = 0; i < CHARGES_MAX; i += 1) {
@@ -97,6 +135,31 @@ describe('the flight', () => {
     }
     expect(charges.lob(new THREE.Vector3(), new THREE.Vector3(0, 1, 0))).toBe(false);
     expect(charges.count()).toBe(CHARGES_MAX);
+  });
+});
+
+describe('the launch point', () => {
+  const origin = new THREE.Vector3(1, 1, 1);
+  const aim = new THREE.Vector3(0, 0, 1);
+
+  it('never leaves the span the miss scan proved empty', () => {
+    /* First person charges the reach for the eye's seat, so the clear
+     * span can be SHORTER than a nose-length — the regression that
+     * spawned a charge in unscanned soil at her face. */
+    const clear = NOSE_REACH * 0.5;
+    const at = launchPoint(origin, aim, clear, () => false);
+    expect(at.z - origin.z).toBeLessThanOrEqual(clear * 0.8 + 1e-9);
+    expect(at.z).toBeGreaterThan(origin.z);
+  });
+
+  it('spawns a nose ahead when the whole nose was scanned', () => {
+    const at = launchPoint(origin, aim, NOSE_REACH * 3, () => false);
+    expect(at.z - origin.z).toBeCloseTo(NOSE_REACH, 6);
+  });
+
+  it('falls back to the ray origin when the offset point is solid', () => {
+    const at = launchPoint(origin, aim, NOSE_REACH * 3, () => true);
+    expect(at.distanceTo(origin)).toBe(0);
   });
 });
 

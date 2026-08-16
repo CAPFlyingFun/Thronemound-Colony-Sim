@@ -188,7 +188,7 @@ import {
   bite, biteCentre, biteRay, boreAim, chargeImpact, enqueueBounds,
   updateAimDebug, type DigHost,
 } from './islandDig';
-import { DigCharges } from './digCharge';
+import { DigCharges, launchPoint } from './digCharge';
 import {
   readSpine, refreshAim, simulate, type BodyHost,
 } from './islandBody';
@@ -2929,17 +2929,19 @@ export class IslandScene {
   /**
    * THE OUT-OF-REACH PRESS, ANSWERED WITH A LOB — `bite()` hands the
    * stroke here when its aim met no soil inside her jaws. The bead is
-   * spawned a nose ahead of the ray's own origin, which is guaranteed
-   * air: the throw only happens because everything within reach along
-   * this line already sampled empty, and a charge born inside the lens
-   * would fill the first-person frame with yellow.
+   * spawned ahead of the ray's origin but always INSIDE the span the
+   * miss scan proved empty — see `launchPoint` — so it cannot be born
+   * in soil the scan never asked about, and it is not born in the lens,
+   * which would fill the first-person frame with yellow.
    *
    * The cooldown lives HERE and not in the flight, because it is a rule
    * about her — how often she can throw — not about how charges fly. A
    * press inside the cooldown does nothing on purpose: the bead already
    * mid-air IS the answer to that press.
    */
-  private throwCharge(origin: THREE.Vector3, aim: THREE.Vector3): void {
+  private throwCharge(
+    origin: THREE.Vector3, aim: THREE.Vector3, clear: number,
+  ): void {
     if (this.chargeCooldown > 0) return;
     if (!this.charges) {
       this.charges = new DigCharges(
@@ -2955,7 +2957,9 @@ export class IslandScene {
         () => this.biteMiss(),
       );
     }
-    const from = new THREE.Vector3().copy(origin).addScaledVector(aim, NOSE_REACH);
+    const from = launchPoint(
+      origin, aim, clear, (x, y, z) => this.groundSolidAt(x, y, z),
+    );
     if (this.charges.lob(from, aim)) this.chargeCooldown = CHARGE_COOLDOWN_S;
   }
 
@@ -4108,10 +4112,14 @@ export class IslandScene {
   biteForTest(): void { this.bite(); }
 
   /** Lob one down the current aim, cooldown waived — the probe's hand on
-   *  the throw itself, without having to stage a cliff to stand on. */
+   *  the throw itself, without having to stage a cliff to stand on. The
+   *  ray is the PRODUCTION ray — same origin, same reach `bite()` would
+   *  hand over — so what the probe flies is what the miss path throws. */
   lobForTest(): void {
     this.chargeCooldown = 0;
-    this.throwCharge(this.at.clone(), this.boreAim());
+    const aim = this.boreAim();
+    const ray = this.biteRay(aim);
+    this.throwCharge(ray.origin, aim, ray.reach);
   }
 
   /** For probes: how many worm bodies are drawn, and how many bones each. */

@@ -77,8 +77,10 @@ export interface DigHost {
    *  reach" instead of the silence that reads as a broken button. */
   biteMiss(): void;
   /** A stroke whose aim met no soil her jaws could reach — the scene's
-   *  chance to LOB a dig charge down the line instead of shrugging. */
-  throwCharge(origin: THREE.Vector3, aim: THREE.Vector3): void;
+   *  chance to LOB a dig charge down the line instead of shrugging.
+   *  `clear` is the ray's own reach: the span the miss scan proved
+   *  empty, inside which the launch point must stay. */
+  throwCharge(origin: THREE.Vector3, aim: THREE.Vector3, clear: number): void;
 }
 
 /** The way she is pointed AND pitched — the line the bore cuts and, while
@@ -211,7 +213,7 @@ export function bite(host: DigHost, ): void {
    */
   if (!seated) {
     host.biteTouched = false;
-    host.throwCharge(ray.origin, aim);
+    host.throwCharge(ray.origin, aim, ray.reach);
     return;
   }
 
