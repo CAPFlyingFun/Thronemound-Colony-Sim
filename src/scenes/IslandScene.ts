@@ -141,7 +141,7 @@ import {
   BODY_HALF_TALL, BODY_FLOOR_MARGIN, AIM_LIMIT, CHAMBER_CAM_FAR,
   CHAMBER_CAM_NEAR, COLONIST_SPEED, COLONIST_TURN, COLONIST_ARRIVE,
   COLONIST_ROAM, TROPHALLAXIS_REACH, TROPHALLAXIS_RATE, CARRY_DELIVER_REACH,
-  FIGHT_NOTICE,
+  FIGHT_NOTICE, CHARGE_COOLDOWN_S,
 } from './islandTuning';
 import { Colonist } from './Colonist';
 import { SoilQuery } from './soilQuery';
@@ -185,8 +185,10 @@ import {
   PROP_SCATTER, PROP_SPECS, Prop, type PropGround,
 } from './islandProps';
 import {
-  bite, biteCentre, biteRay, boreAim, enqueueBounds, updateAimDebug, type DigHost,
+  bite, biteCentre, biteRay, boreAim, chargeImpact, enqueueBounds,
+  updateAimDebug, type DigHost,
 } from './islandDig';
+import { DigCharges } from './digCharge';
 import {
   readSpine, refreshAim, simulate, type BodyHost,
 } from './islandBody';
@@ -341,6 +343,14 @@ export class IslandScene {
   /** Chips of soil thrown off a cut — see `islandGrit`. Built with the
    *  scene, because it is one instanced mesh that lives in it. */
   private grit: Grit | null = null;
+
+  /** Mini dig charges mid-air — see `digCharge`. Built on the first
+   *  throw, because most sessions never aim a scoop at open sky. */
+  private charges: DigCharges | null = null;
+
+  /** Seconds until the next lob is allowed — the guardrail that keeps a
+   *  held stroke over a canyon from carpeting the far wall. */
+  private chargeCooldown = 0;
 
   /** The island's other diggers — see `islandWorm`. */
   private readonly worms: Worm[] = [];
@@ -2892,7 +2902,13 @@ export class IslandScene {
     return this as unknown as BodyHost;
   }
 
-  private simulate(dt: number): void { simulate(this.bodyHost, dt); }
+  private simulate(dt: number): void {
+    simulate(this.bodyHost, dt);
+    /* Charges fly on the same clock the body walks, so a probe stepping
+     * the sim by hand flies them too. */
+    this.chargeCooldown = Math.max(0, this.chargeCooldown - dt);
+    this.charges?.step(dt);
+  }
 
   private refreshAim(): void { refreshAim(this.bodyHost); }
 
@@ -2909,6 +2925,42 @@ export class IslandScene {
   private boreAim(): THREE.Vector3 { return boreAim(this.digHost); }
 
   private bite(): void { bite(this.digHost); }
+
+  /**
+   * THE OUT-OF-REACH PRESS, ANSWERED WITH A LOB — `bite()` hands the
+   * stroke here when its aim met no soil inside her jaws. The bead is
+   * spawned a nose ahead of the ray's own origin, which is guaranteed
+   * air: the throw only happens because everything within reach along
+   * this line already sampled empty, and a charge born inside the lens
+   * would fill the first-person frame with yellow.
+   *
+   * The cooldown lives HERE and not in the flight, because it is a rule
+   * about her — how often she can throw — not about how charges fly. A
+   * press inside the cooldown does nothing on purpose: the bead already
+   * mid-air IS the answer to that press.
+   */
+  private throwCharge(origin: THREE.Vector3, aim: THREE.Vector3): void {
+    if (this.chargeCooldown > 0) return;
+    if (!this.charges) {
+      this.charges = new DigCharges(
+        {
+          scene: this.scene,
+          groundSolidAt: (x, y, z) => this.groundSolidAt(x, y, z),
+        },
+        /* A landing carves; a landing on bark carves NOTHING, and wood
+         * shrugging off the charge earns the same note a fizzle does. */
+        (at, dir) => {
+          if (chargeImpact(this.digHost, at, dir) === 0) this.biteMiss();
+        },
+        () => this.biteMiss(),
+      );
+    }
+    const from = new THREE.Vector3().copy(origin).addScaledVector(aim, NOSE_REACH);
+    if (this.charges.lob(from, aim)) this.chargeCooldown = CHARGE_COOLDOWN_S;
+  }
+
+  /** How many charges are mid-air — the probe's window. */
+  chargesForTest(): number { return this.charges?.count() ?? 0; }
 
   /** The hand that puts the miss note out — re-armed by every miss, so a
    *  held stroke over a drop keeps it lit rather than blinking. */
@@ -4055,6 +4107,13 @@ export class IslandScene {
   /** For probes: cut once, the way the DIG plate does. */
   biteForTest(): void { this.bite(); }
 
+  /** Lob one down the current aim, cooldown waived — the probe's hand on
+   *  the throw itself, without having to stage a cliff to stand on. */
+  lobForTest(): void {
+    this.chargeCooldown = 0;
+    this.throwCharge(this.at.clone(), this.boreAim());
+  }
+
   /** For probes: how many worm bodies are drawn, and how many bones each. */
   wormBodiesForTest(): { bones: number; visible: boolean; headMm: number[] }[] {
     return this.wormBodies.map((b) => ({
@@ -4822,6 +4881,8 @@ export class IslandScene {
     }
     this.statsPanel.dispose();
     this.designer?.dispose();
+    this.charges?.dispose();
+    this.charges = null;
     this.scene.traverse((node) => {
       const mesh = node as THREE.Mesh;
       if (mesh.geometry) mesh.geometry.dispose();

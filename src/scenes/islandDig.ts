@@ -19,7 +19,7 @@ import type { QueenModel } from '../anim/QueenModel';
 import type { IslandStream } from '../world/IslandStream';
 import { CELL_SIZE, MM } from '../world/worldScape';
 import {
-  AIM_DBG_LAG, AIM_LIMIT, CH, CHUNKS_XZ, CHUNKS_Y,
+  AIM_DBG_LAG, AIM_LIMIT, CH, CHARGE_POP_GRIT, CHUNKS_XZ, CHUNKS_Y,
   JAW_PAST_NOSE, NOSE_REACH, QUEST_DEPTH_MM, RIDE,
   SCOOP_DEEP_MM, SCOOP_TALL_MM, SCOOP_WIDE_MM,
   SMOOTH_MAX_SHIFT, SMOOTH_PASSES, SMOOTH_RADIUS_MM, SMOOTH_STRENGTH,
@@ -76,6 +76,9 @@ export interface DigHost {
   /** A stroke that removed nothing — the scene's chance to say "out of
    *  reach" instead of the silence that reads as a broken button. */
   biteMiss(): void;
+  /** A stroke whose aim met no soil her jaws could reach — the scene's
+   *  chance to LOB a dig charge down the line instead of shrugging. */
+  throwCharge(origin: THREE.Vector3, aim: THREE.Vector3): void;
 }
 
 /** The way she is pointed AND pitched — the line the bore cuts and, while
@@ -193,8 +196,48 @@ export function bite(host: DigHost, ): void {
    */
   const centre = new THREE.Vector3();
   const ray = biteRay(host, aim);
-  biteCentre(host, aim, ray.reach, centre, ray.origin);
+  const seated = biteCentre(host, aim, ray.reach, centre, ray.origin);
+  /*
+   * NOTHING HER JAWS CAN REACH — SO SHE THROWS.
+   *
+   * This used to be the stroke that subtracted air at arm's length and
+   * rang the miss note, which was honest and also all it was. The press
+   * still deserves an ACTION: a mini dig charge lobbed down the same aim
+   * line, which pops a scoop wherever it lands and rings the note itself
+   * if it lands nowhere. The note is not rung HERE any more — a throw is
+   * an answer, and flashing "OUT OF REACH" over a charge already in the
+   * air would be the screen contradicting itself. The scene owns the
+   * cooldown and the flight; see `throwCharge` and `digCharge.ts`.
+   */
+  if (!seated) {
+    host.biteTouched = false;
+    host.throwCharge(ray.origin, aim);
+    return;
+  }
 
+  const touched = carveScoop(host, centre, aim);
+  host.biteTouched = touched > 0;
+  /* The miss is TOLD, not swallowed — kept for the SEATED stroke that
+   * still removes nothing, which is real: `biteCentre` answers for
+   * ground (bark included, so she can be stopped by a tree) while the
+   * shovel edits only soil. A scoop seated on wood changes no samples,
+   * and that press failing belongs on the screen. */
+  if (touched === 0) host.biteMiss();
+}
+
+/**
+ * ONE MOUTHFUL TAKEN AT `centre`, ALONG `aim` — the cut itself, shared by
+ * the jaws and the thrown charge so "scoop-sized" is one fact, not two.
+ *
+ * Everything that must accompany a cut travels with it: the spoil burst,
+ * the one-way smoothing pass, the chamber-quest credit, and the
+ * synchronous remesh of every chunk touched. A caller that carved without
+ * these would reintroduce the stale-floor bug the remesh note below
+ * describes, which is why this is one function rather than advice.
+ */
+export function carveScoop(
+  host: DigHost, centre: THREE.Vector3, aim: THREE.Vector3, grit?: number,
+): number {
   let touched = 0;
   let minX = Infinity; let minY = Infinity; let minZ = Infinity;
   let maxX = -Infinity; let maxY = -Infinity; let maxZ = -Infinity;
@@ -218,15 +261,11 @@ export function bite(host: DigHost, ): void {
     minY = Math.min(minY, bb.minY); maxY = Math.max(maxY, bb.maxY);
     minZ = Math.min(minZ, bb.minZ); maxZ = Math.max(maxZ, bb.maxZ);
   }
-  host.biteTouched = touched > 0;
   /* SPOIL, and only when soil actually came out. A stroke that met air
    * cuts nothing, and throwing chips off it would be the ghost's own
    * "confident hole over open air" mistake in another form. */
-  if (touched > 0) host.grit?.burst(centre, aim);
-  /* The miss is TOLD, not swallowed. Which presses fail is physics —
-   * air ahead and air below it — but that they failed belongs on the
-   * screen, or the button reads as broken instead of short. */
-  if (touched === 0) { host.biteMiss(); return; }
+  if (touched === 0) return 0;
+  host.grit?.burst(centre, aim, grit);
   /*
    * AND SHAVE WHAT WAS JUST CUT, in the same stroke.
    *
@@ -283,6 +322,27 @@ export function bite(host: DigHost, ): void {
     }
   }
   host.reveal();
+  return touched;
+}
+
+/**
+ * WHERE A LANDED CHARGE CUTS — the flight's hand-off back to the shovel.
+ *
+ * `hit` is the first solid sample the arc met, so like the bite the scoop
+ * is seated a half-depth past it along the travel direction: near lip in
+ * the air, pocket in the hill. The pop is louder than a bite's burst on
+ * purpose — the cut happens away from her, and a distant hole with no
+ * fanfare reads as terrain glitching rather than a charge landing. A
+ * charge that lands on the tree changes no samples (wood is not in the
+ * diggable field) and returns 0, which the scene turns into the same
+ * "OUT OF REACH" note a fizzle earns.
+ */
+export function chargeImpact(
+  host: DigHost, hit: THREE.Vector3, dir: THREE.Vector3,
+): number {
+  const centre = new THREE.Vector3().copy(hit)
+    .addScaledVector(dir, SCOOP_DEEP_MM / 2 / MM);
+  return carveScoop(host, centre, dir, CHARGE_POP_GRIT);
 }
 
 /**

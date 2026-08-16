@@ -1,0 +1,134 @@
+/**
+ * THE MINI DIG CHARGE — a shovel for the soil her jaws cannot reach.
+ *
+ * One subject: a small bright bead, lobbed down the aim line, that flies a
+ * visible ballistic arc and either LANDS — handing the impact point back to
+ * the scene so a pocket can be carved there — or runs out of throw and
+ * fizzles, which the scene turns into the same "OUT OF REACH" note a dry
+ * stroke earns. Nothing in here edits terrain; this file is only the
+ * flight. The carve is `chargeImpact` in `islandDig.ts`, next to the bite
+ * whose scoop it borrows, so the two tools cannot drift apart in what a
+ * mouthful means.
+ *
+ * The world it needs is deliberately tiny — a scene to be visible in and
+ * one solidity question — so a test can fly charges over a floor described
+ * by a single function, the same way the bite's own tests do.
+ */
+import * as THREE from 'three';
+import { CELL_SIZE, MM } from '../world/worldScape';
+import {
+  CHARGES_MAX, CHARGE_GRAVITY_MM, CHARGE_RADIUS_MM,
+  CHARGE_RANGE_MM, CHARGE_SPEED_MM,
+} from './islandTuning';
+
+/** What a flight needs to know, and nothing else. */
+export interface ChargeWorld {
+  readonly scene: THREE.Scene;
+  groundSolidAt(x: number, y: number, z: number): boolean;
+}
+
+interface Charge {
+  live: boolean;
+  at: THREE.Vector3;
+  vel: THREE.Vector3;
+  /** Path length flown so far — the throw's budget, not a timer. */
+  gone: number;
+  mesh: THREE.Mesh;
+}
+
+const S_DIR = new THREE.Vector3();
+
+export class DigCharges {
+  private readonly pool: Charge[] = [];
+
+  constructor(
+    private readonly world: ChargeWorld,
+    private readonly onImpact: (at: THREE.Vector3, dir: THREE.Vector3) => void,
+    private readonly onFizzle: (at: THREE.Vector3) => void,
+  ) {}
+
+  /**
+   * Lob one from `origin` along `aim`. False when every slot is mid-air —
+   * the pool is a cap, not a queue, because a press whose answer is
+   * "later" reads as a press that did nothing.
+   */
+  lob(origin: THREE.Vector3, aim: THREE.Vector3): boolean {
+    let slot = this.pool.find((c) => !c.live) ?? null;
+    if (!slot) {
+      if (this.pool.length >= CHARGES_MAX) return false;
+      slot = {
+        live: false,
+        at: new THREE.Vector3(),
+        vel: new THREE.Vector3(),
+        gone: 0,
+        /* A small bright bead, unlit on purpose: down a tunnel there is no
+         * light to catch, and a charge you cannot see is a fizzle you
+         * cannot explain. */
+        mesh: new THREE.Mesh(
+          new THREE.SphereGeometry(CHARGE_RADIUS_MM / MM, 10, 8),
+          new THREE.MeshBasicMaterial({ color: 0xffd23f }),
+        ),
+      };
+      this.world.scene.add(slot.mesh);
+      this.pool.push(slot);
+    }
+    slot.live = true;
+    slot.gone = 0;
+    slot.at.copy(origin);
+    slot.vel.copy(aim).normalize().multiplyScalar(CHARGE_SPEED_MM / MM);
+    slot.mesh.position.copy(slot.at);
+    slot.mesh.visible = true;
+    return true;
+  }
+
+  /** How many are mid-air — a probe's window into the flight. */
+  count(): number {
+    return this.pool.reduce((n, c) => n + (c.live ? 1 : 0), 0);
+  }
+
+  step(dt: number): void {
+    for (const c of this.pool) {
+      if (!c.live) continue;
+      /*
+       * Marched in sub-steps no longer than half a cell, for the same
+       * reason `biteCentre` samples at that pitch: a charge moving most
+       * of a unit per frame would tunnel straight through a wall one
+       * sample wide and pop on the far side of it.
+       */
+      const speed = c.vel.length();
+      const n = Math.max(1, Math.ceil((speed * dt) / (CELL_SIZE * 0.5)));
+      const sub = dt / n;
+      for (let i = 0; i < n; i += 1) {
+        /* Gravity is the WORLD's, not hers — a lob from a wall still
+         * falls at the floor, which is what makes the arc legible. */
+        c.vel.y -= (CHARGE_GRAVITY_MM / MM) * sub;
+        c.at.addScaledVector(c.vel, sub);
+        c.gone += c.vel.length() * sub;
+        if (this.world.groundSolidAt(c.at.x, c.at.y, c.at.z)) {
+          c.live = false;
+          c.mesh.visible = false;
+          this.onImpact(c.at, S_DIR.copy(c.vel).normalize());
+          break;
+        }
+        if (c.gone > CHARGE_RANGE_MM / MM) {
+          /* Out of throw with nothing met: open air, open sky, or a drop
+           * deeper than the arc. The scene says so out loud. */
+          c.live = false;
+          c.mesh.visible = false;
+          this.onFizzle(c.at);
+          break;
+        }
+      }
+      if (c.live) c.mesh.position.copy(c.at);
+    }
+  }
+
+  dispose(): void {
+    for (const c of this.pool) {
+      this.world.scene.remove(c.mesh);
+      c.mesh.geometry.dispose();
+      (c.mesh.material as THREE.Material).dispose();
+    }
+    this.pool.length = 0;
+  }
+}

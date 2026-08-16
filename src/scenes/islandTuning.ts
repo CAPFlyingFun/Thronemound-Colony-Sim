@@ -580,6 +580,31 @@ export const SCOOP_TALL_MM = 5;
 export const SCOOP_DEEP_MM = 3;
 
 /**
+ * THE THROWN CHARGE 🧨 — what an out-of-reach press becomes.
+ *
+ * A press that found no soil inside her jaws used to end at a note saying
+ * so. The note stays honest, but the press now DOES something: she lobs a
+ * mini dig charge down the aim line, a visible arc that pops a scoop-sized
+ * pocket wherever it lands, and fizzles — note and all — when it lands
+ * nowhere.
+ *
+ * The numbers are theatre, not physics. Real gravity at ant scale would
+ * end the flight before a second frame drew it, so the arc is tuned to
+ * READ: fast enough to feel thrown, bent enough to be a lob rather than a
+ * laser. The range and the cooldown are the guardrails — one mouthful
+ * every so often can open a pocket at distance but cannot outrun jaws
+ * that cut every stroke, so walking up and biting stays the fast way to
+ * move soil.
+ */
+export const CHARGE_SPEED_MM = 260; //    mm/s down the aim line
+export const CHARGE_GRAVITY_MM = 480; //  mm/s² of stage gravity, world down
+export const CHARGE_RANGE_MM = 150; //    path length before a fizzle
+export const CHARGE_RADIUS_MM = 1.2; //   the bead the eye follows
+export const CHARGE_COOLDOWN_S = 1.1; //  slower than the jaws, on purpose
+export const CHARGES_MAX = 3; //          in flight at once, held press or not
+export const CHARGE_POP_GRIT = 18; //     spoil chips in the landing pop
+
+/**
  * How hard each stroke's own hole is relaxed afterwards, and how often.
  *
  * Halfway to the neighbourhood mean, twice — one gentle pass took the

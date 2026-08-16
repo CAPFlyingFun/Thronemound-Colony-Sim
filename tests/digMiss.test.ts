@@ -14,9 +14,16 @@ import { MM } from '../src/world/worldScape';
  * must NOT call it on a stroke that does.
  */
 
-/** A host over a world described by one solidity rule. */
-function makeHost(solid: (x: number, y: number, z: number) => boolean) {
-  const calls = { miss: 0, subtracted: 0, revealed: 0 };
+/** A host over a world described by one solidity rule — and, when the two
+ *  differ, a second rule for what the shovel can actually CUT (a tree is
+ *  solid to the walker but not in the diggable field). */
+function makeHost(
+  solid: (x: number, y: number, z: number) => boolean,
+  cuttable: (x: number, y: number, z: number) => boolean = solid,
+) {
+  const calls = {
+    miss: 0, subtracted: 0, revealed: 0, thrown: 0,
+  };
   const host = {
     grit: null,
     camera: new THREE.PerspectiveCamera(60, 2, 0.001, 10),
@@ -38,7 +45,7 @@ function makeHost(solid: (x: number, y: number, z: number) => boolean) {
     stream: {
       subtractEllipsoid: (at: THREE.Vector3) => {
         calls.subtracted += 1;
-        const hit = solid(at.x, at.y, at.z);
+        const hit = cuttable(at.x, at.y, at.z);
         return {
           changedSamples: hit ? 12 : 0,
           bounds: {
@@ -57,17 +64,23 @@ function makeHost(solid: (x: number, y: number, z: number) => boolean) {
     soilSolidAt: solid,
     groundSolidAt: solid,
     biteMiss: () => { calls.miss += 1; },
+    throwCharge: () => { calls.thrown += 1; },
   } as unknown as DigHost;
   return { host, calls };
 }
 
 describe('the stroke that meets nothing', () => {
-  it('tells the host it missed, exactly once per stroke', () => {
+  it('throws a charge instead of shrugging, and says nothing itself', () => {
+    /* Open air ahead AND below — the press her jaws cannot answer. The
+     * note is NOT rung here any more: the lob is the answer, and the
+     * note now belongs to the charge's own fizzle. Nothing is cut and
+     * nothing pretends to be. */
     const { host, calls } = makeHost(() => false);
     bite(host);
-    expect(calls.miss).toBe(1);
+    expect(calls.thrown).toBe(1);
+    expect(calls.miss).toBe(0);
+    expect(calls.subtracted).toBe(0);
     expect((host as { biteTouched: boolean }).biteTouched).toBe(false);
-    /* And it never pretended to draw a cut it did not make. */
     expect(calls.revealed).toBe(0);
   });
 
@@ -75,8 +88,22 @@ describe('the stroke that meets nothing', () => {
     const { host, calls } = makeHost(() => true);
     bite(host);
     expect(calls.miss).toBe(0);
+    expect(calls.thrown).toBe(0);
     expect((host as { biteTouched: boolean }).biteTouched).toBe(true);
     expect(calls.revealed).toBe(1);
+  });
+
+  it('still tells the miss on a seated stroke that cuts nothing (bark)', () => {
+    /* Ground says solid (the tree is unioned in so she can climb it) but
+     * the shovel's field has no wood in it: seated, subtracted, nothing
+     * changed. That press failing belongs on the screen — and it is a
+     * MISS, not a throw, because her jaws DID reach something. */
+    const { host, calls } = makeHost(() => true, () => false);
+    bite(host);
+    expect(calls.miss).toBe(1);
+    expect(calls.thrown).toBe(0);
+    expect(calls.subtracted).toBeGreaterThan(0);
+    expect((host as { biteTouched: boolean }).biteTouched).toBe(false);
   });
 
   it('biteCentre reports open air over a drop as a genuine miss', () => {
