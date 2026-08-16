@@ -164,9 +164,11 @@ import { resolveBulk, QUEEN_BULK_ID, type Bulk } from './islandBulk';
 import { Grit } from './islandGrit';
 import {
   Worm, WORM_BORE_MM, WORM_CEIL_MM, WORM_COUNT, WORM_DRAWN, WORM_FLOOR_MM,
-  type WormSoil,
+  WORM_REACH, type WormSoil,
 } from './islandWorm';
 import { dressCreature } from './creatureSkin';
+import { wound } from './creatureBrain';
+import { EARTHWORM } from './creatureKinds';
 import { WormBody } from './WormBody';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { warmHudArt } from './hudArt';
@@ -580,7 +582,7 @@ export class IslandScene {
       /* Anywhere in the band, so fifty worms are not fifty worms on one
        * plane. Weighted nowhere: the island decides where the soil is. */
       const y = floor + rand() * (ceil - floor);
-      this.worms.push(new Worm(x, y, z, rand));
+      this.worms.push(new Worm(x, y, z, rand, this.worms.length));
     }
     /*
      * AND THEIR BODIES — A POOL, not one each.
@@ -612,6 +614,48 @@ export class IslandScene {
   }
 
   /**
+   * A ROLLING STONE HURTS A WORM TOO.
+   *
+   * The crush rule already exists and is already measured — see
+   * `islandCrush`, written when Joshua asked for "HP loss if getting run
+   * over by a heavy rock". It was built for HER, and deferred for everything
+   * else until there were real models. There is one now, and it has health,
+   * so it takes the same rule from the same code rather than a second one.
+   */
+  private crushWorms(dt: number): void {
+    for (const w of this.worms) {
+      if (!w.alive) continue;
+      if (w.at.distanceToSquared(this.at) > WORM_REACH * WORM_REACH) continue;
+      for (const p of this.props) {
+        if (p.carried) continue;
+        const gap = Math.hypot(
+          p.at.x - w.at.x, p.at.y - w.at.y, p.at.z - w.at.z,
+        );
+        if (gap > w.radius + p.radius + CRUSH_REACH_SLACK) continue;
+        const hurt = crushDamage(p.massMg, p.speed, EARTHWORM.maxHealth);
+        if (hurt <= 0) continue;
+        /*
+         * THE SAME LATCH SHE GETS, keyed by the pair rather than the prop —
+         * a stone rolling down a slope over three worms is three separate
+         * events, and one shared key would let the first worm's timer spare
+         * the other two. Measured on her: without a latch one rock charged
+         * ten times for a single roll.
+         */
+        const key = `${p.id}:${w.id}`;
+        const left = this.crushedBy.get(key);
+        if (left !== undefined) {
+          const next = left - dt;
+          if (next <= 0) this.crushedBy.delete(key);
+          else this.crushedBy.set(key, Math.max(0, next));
+          continue;
+        }
+        this.crushedBy.set(key, CRUSH_AGAIN_AFTER);
+        wound(EARTHWORM, w.mind, hurt);
+      }
+    }
+  }
+
+  /**
    * The bottom of the diggable earth under a column.
    *
    * Sea level, because below that is water and these are not sea worms. It
@@ -639,7 +683,7 @@ export class IslandScene {
       const body = this.wormBodies[k]!;
       const pick = near[k];
       const worm = pick ? this.worms[pick.i] : undefined;
-      if (!worm) { body.root.visible = false; continue; }
+      if (!worm || !worm.alive) { body.root.visible = false; continue; }
       body.root.visible = true;
       body.layAlong(worm.trail);
     }
@@ -846,6 +890,7 @@ export class IslandScene {
      * that made it and must keep falling after DIG is let go. */
     this.grit?.tick(dt);
     for (const worm of this.worms) worm.tick(dt, this.wormSoil);
+    this.crushWorms(dt);
     /* And the bodies lie in the holes, which is the only place they fit: a
      * 150 mm animal drawn rigid would be mostly inside the wall of the 6 mm
      * tube it just made. A pool of them, handed to the nearest worms rather
@@ -3808,6 +3853,25 @@ export class IslandScene {
         carrier: p === held ? QUEEN_BULK_ID : undefined,
       });
     }
+    /*
+     * AND THE WORMS SHE CAN ACTUALLY REACH.
+     *
+     * Asked for: "no collision ... yet". A worm outnumbers her badly — a
+     * mature Lumbricus terrestris is 3-5 g against a fire-ant queen's few
+     * milligrams — so `resolveBulk` will have HER give way, which is the
+     * right way round and needs no special case.
+     *
+     * Only the near ones. This list is resolved pairwise every frame, and
+     * two hundred worms scattered over 56 metres would be 200 bodies of
+     * which 199 are metres away: quadratic work to discover that nothing
+     * touches. Culled by the same reach the drawn pool uses, so the ones
+     * you can collide with are exactly the ones you can see.
+     */
+    for (const w of this.worms) {
+      if (!w.alive) continue;
+      if (w.at.distanceToSquared(this.at) > WORM_REACH * WORM_REACH) continue;
+      out.push({ id: `worm-${w.id}`, at: w.at, radius: w.radius, massMg: w.massMg });
+    }
     return out;
   }
 
@@ -3926,6 +3990,25 @@ export class IslandScene {
       }
       return { x: best.x, y: best.y, z: best.z, depthMm: deep * MM };
     });
+  }
+
+  /** For probes: a worm's brain and stats, so the port can be measured. */
+  wormMindForTest(i: number): {
+    behaviour: string; health: number; stamina: number; hunger: number;
+  } | null {
+    const w = this.worms[i];
+    if (!w) return null;
+    return {
+      behaviour: w.mind.behaviour, health: w.mind.health,
+      stamina: w.mind.stamina, hunger: w.mind.hunger,
+    };
+  }
+
+  /** For probes: hurt a worm, to check the stats are real and wired. */
+  woundWormForTest(i: number, amount: number): boolean {
+    const w = this.worms[i];
+    if (!w) return false;
+    return wound(EARTHWORM, w.mind, amount);
   }
 
   /** For probes: where each worm is, what it is doing, and how much it ate. */

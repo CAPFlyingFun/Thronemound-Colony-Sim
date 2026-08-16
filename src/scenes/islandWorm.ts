@@ -46,6 +46,10 @@
  */
 import * as THREE from 'three';
 import { MM } from '../world/worldScape';
+import {
+  type CreatureMind, newMind, setBehaviour, speedMm, think, thinkDue, tickMind,
+} from './creatureBrain';
+import { EARTHWORM } from './creatureKinds';
 
 /** What a worm needs of the world, and nothing else. */
 export interface WormSoil {
@@ -109,7 +113,7 @@ export const WORM_STEP_MM = 3;
  *
  * The cost is drawing them, not simulating them — see `WORM_DRAWN`.
  */
-export const WORM_COUNT = 50;
+export const WORM_COUNT = 200;
 
 /**
  * How many worms have a BODY at any moment.
@@ -120,6 +124,19 @@ export const WORM_COUNT = 50;
  * which costs a sort of fifty items a frame and nothing else.
  */
 export const WORM_DRAWN = 6;
+
+/**
+ * How near a worm has to be to take part in the world, in world units.
+ *
+ * The shove list is resolved pairwise every frame. Two hundred worms spread
+ * over 56 metres would be two hundred bodies of which a hundred and
+ * ninety-nine are metres away — quadratic work to discover that nothing is
+ * touching anything. Culled at the same reach the drawn pool uses, so the
+ * worms she can bump into are exactly the worms she can see.
+ *
+ * Forty world units is 200 mm, a shade past the 192 mm streamed window.
+ */
+export const WORM_REACH = 40;
 
 /** Seconds on one heading before it picks another — Joshua's range. */
 export const WORM_HEADING_MIN_S = 30;
@@ -257,6 +274,9 @@ export class Worm {
   /** How many bites it has taken — for probes and for the record. */
   bites = 0;
 
+  /** Its name on the shove list. Stable for the life of the island. */
+  readonly id: number;
+
   /** Where its last bite landed. The one point its burrow is certainly at. */
   readonly lastBite = new THREE.Vector3();
 
@@ -276,7 +296,13 @@ export class Worm {
   constructor(
     x: number, y: number, z: number,
     private readonly rand: () => number = Math.random,
+    id = 0,
   ) {
+    this.id = id;
+    /* Its think clock is offset from its neighbours' by its own seeded draw
+     * — see `newMind`. Two hundred worms thinking on the same frame is a
+     * spike sixty times a second rather than a smooth load. */
+    this.mind = newMind(EARTHWORM, rand());
     this.at.set(x, y, z);
     this.untilTurn = WORM_HEADING_MIN_S
       + this.rand() * (WORM_HEADING_MAX_S - WORM_HEADING_MIN_S);
@@ -323,9 +349,62 @@ export class Worm {
     return this.trail.slice(0, this.dug);
   }
 
-  /** One frame. Returns whether it actually took a bite. */
+  /**
+   * ITS BRAIN AND ITS STATS — health, stamina, hunger, and what it is doing.
+   *
+   * Asked for as two things — "no collision or health/stats yet" and "bring
+   * the Beyond Extinction AI over" — which are one thing, because in that
+   * design the stats ARE the brain's data. See `creatureBrain`.
+   *
+   * A worm's whole behavioural repertoire is dig, or withdraw. `flee` here
+   * does not mean run away across open ground, which a worm cannot do: it
+   * means go DEEPER, which is the same instinct expressed through the only
+   * axis it has. Measured biology backs the instinct — Lumbricus terrestris
+   * retreats into its burrow on vibration (Catania 2008, PLoS ONE 3: e3472).
+   */
+  readonly mind: CreatureMind;
+
+  /** How far it reaches from its own centre, for the shove list. */
+  get radius(): number { return WORM_BORE_MM / 2 / MM; }
+
+  /**
+   * What it weighs, in milligrams.
+   *
+   * Measured biology: a mature Lumbricus terrestris runs 3-5 g, so 4,000 mg
+   * — which is a great deal more than the queen, and that is the point of
+   * putting it on the shove list at all. She gives way to a worm.
+   */
+  get massMg(): number { return 4000; }
+
+  /** Whether it is still alive to be drawn and simulated. */
+  get alive(): boolean { return this.mind.health > 0; }
+
+  /**
+   * One frame. Returns whether it actually took a bite.
+   *
+   * The brain decides at its own throttled rate — see `THINK_S` — while the
+   * body moves every frame. Nothing here stutters as a result: the decision
+   * changes maybe twice a minute, and what it changes is which way and how
+   * fast, not whether to move at all.
+   */
   tick(dt: number, soil: WormSoil): boolean {
     if (dt <= 0) return false;
+    if (!this.alive) return false;
+
+    /* Clocks first, and every frame — a cooldown that only advanced on think
+     * frames would be quantised to 0.15 s. */
+    tickMind(EARTHWORM, this.mind, dt, this.mind.behaviour === 'flee');
+    if (thinkDue(this.mind)) {
+      /*
+       * A worm senses nothing yet: no threat is reported to it, so the FSM
+       * settles on wander, which for a worm IS digging. The senses are
+       * wired here rather than faked — when there is something to be
+       * frightened of, this is the one line that changes.
+       */
+      setBehaviour(this.mind, think(EARTHWORM, this.mind, {
+        threat: null, prey: null, fromHomeMm: 0,
+      }));
+    }
 
     /*
      * WHERE THE WALLS ARE, right here. Both ends of the band are read every
@@ -407,8 +486,13 @@ export class Worm {
      * purpose: a worm that hits its ceiling should follow the contour along,
      * the way a shallow worm does, not stop dead at the foot of every rise.
      */
+    /* SPEED COMES FROM THE BRAIN NOW, not from the constant directly. They
+     * agree for a wandering worm — `EARTHWORM.wanderSpeedMm` is
+     * `WORM_STEP_MM`, and a test pins that — but a frightened one withdraws
+     * faster, which is the whole visible difference a brain makes here. */
+    const paceMm = speedMm(EARTHWORM, this.mind) || WORM_STEP_MM;
     S_STEP.copy(this.at).addScaledVector(
-      this.dir, (WORM_STEP_MM / MM / WORM_BITE_S) * dt,
+      this.dir, (paceMm / MM / WORM_BITE_S) * dt,
     );
     const ceilNext = soil.surfaceAt(S_STEP.x, S_STEP.z) - WORM_CEIL_MM / MM;
     const floorNext = soil.baseAt(S_STEP.x, S_STEP.z) + WORM_FLOOR_MM / MM;
