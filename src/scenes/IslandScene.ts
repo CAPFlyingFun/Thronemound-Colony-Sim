@@ -4805,6 +4805,13 @@ export class IslandScene {
 
   dispose(): void {
     cancelAnimationFrame(this.frame);
+    /* The miss note's hand comes off the timer with the scene — a scene
+     * left within 650 ms of a missed dig must not be held alive to tidy
+     * a HUD that is already gone. */
+    if (this.missTimer !== null) {
+      clearTimeout(this.missTimer);
+      this.missTimer = null;
+    }
     this.stopContextGuard?.();
     this.stopContextGuard = null;
     this.clearGpuNotice();
