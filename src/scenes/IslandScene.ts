@@ -3416,6 +3416,29 @@ export class IslandScene {
        * — see `readSpine`. */
       spine: readSpine(this.bodyHost, dt),
     });
+    /*
+     * AND THE QUEEN IN THE CHAMBER STILL BREATHES.
+     *
+     * Reported: "after the queen gets transferred to the worker, the queen
+     * still isn't playing the idle animation with the antennae moving."
+     *
+     * She was not being ticked at all. `becomeWorker` reassigns `this.queen`
+     * to the WORKER's rig and parks the old one in `queenNpc`, so the update
+     * above — the only one there was — has been driving the worker ever
+     * since, and the founder has stood frozen in her own nest since v0.1.63.
+     * Not a missing animation: a missing caller.
+     *
+     * Everything is zero on purpose. She is not walking, turning, digging or
+     * carrying; what a rig does with all of that at rest IS the idle, which
+     * is where the antennae live. Her spine and head are left alone rather
+     * than driven from the player's camera, because she is scenery with a
+     * history now and should not be looking wherever you look.
+     */
+    if (this.queenNpc && this.queenNpc !== this.queen) {
+      this.queenNpc.update(dt, {
+        speed: 0, turn: 0, digging: 0, carrying: 0, headYaw: 0, headPitch: 0,
+      });
+    }
     /* And her FEET are solved in that frame too. The solver has always
      * taken one; the island had been passing `undefined` and letting it
      * measure every foot as a height above sea level, which on a wall asks
@@ -4262,6 +4285,13 @@ export class IslandScene {
       kind: c.kind.id, ready: c.ready, behaviour: c.mind.behaviour,
       x: c.at.x, y: c.at.y, z: c.at.z, health: c.mind.health,
     }));
+  }
+
+  /** For probes: how many legs a creature found, and where its feet are —
+   *  the two things that say whether the gait is real or compiling. */
+  critterLegsForTest(kind: string): { legs: number; feetY: number[] } | null {
+    const one = this.critters.find((c) => c.kind.id === kind && c.ready);
+    return one ? one.legReportForTest() : null;
   }
 
   /** For probes: how big a drawn creature actually is, in millimetres —

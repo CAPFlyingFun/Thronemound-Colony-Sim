@@ -38,10 +38,34 @@
  * is a real piece of work, because the rigs name their bones `Bone_000`
  * and the leg chains have to be identified by geometry rather than name.
  *
- * So what is here is a BODY gait and not a leg gait: the animal leans into
- * its travel and bobs at a rate set by its own speed, and holds still when
- * the brain says idle. It reads as alive at ant scale and it is not
- * pretending to be more than it is — see `pose`.
+ * The legs are found by GEOMETRY, because the rigs do not name anything.
+ * Every bone in `aphid.glb` is called `Bone_0NN`, so there is no "leg" to
+ * look up. What there is instead is structure, and it is unambiguous once
+ * measured: twelve bone tips, of which six sit at ground height in three
+ * mirrored ±X pairs — front, middle and hind — while the rest are antennae
+ * (high, off the head hub) and mouthparts (clustered at the front). See
+ * `findLegs`, which reads that and nothing else.
+ *
+ * The gait is a TRIPOD, which is what a six-legged insect actually walks:
+ * front-left, middle-right and hind-left swing together while the other
+ * three carry, then they swap. It is driven by DISTANCE travelled rather
+ * than by time, so a creature that slows down does not moonwalk.
+ *
+ * ## What the rig captures settled, and what they left approximate
+ *
+ * Joshua's aphid and housefly rig screenshots decided the swing axis. The
+ * legs splay LATERALLY on both, so protraction and retraction happen about
+ * a roughly VERTICAL axis at the body — an earlier cut swung them about X,
+ * which lifts and drops a sideways leg instead of stepping with it.
+ *
+ * The housefly's front pair is the honest exception: it sweeps FORWARD
+ * rather than out, so a vertical swing moves those two side to side rather
+ * than fore and aft. Four legs of six are right and two are approximate.
+ * Fixing it properly means a per-leg axis taken from the limb's own rest
+ * direction, which is worth doing and is not what this is.
+ *
+ * The wings are safely ignored by construction rather than by a special
+ * case: they are dorsal, and the search takes the six LOWEST tips.
  */
 import * as THREE from 'three';
 import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
@@ -62,18 +86,121 @@ const DWELL_MAX_S = 6;
 /** How fast it swings onto a new heading, radians a second. */
 const TURN = 2.2;
 
-/**
- * The gait's bob, as a fraction of the animal's own height, and how many
- * strides it takes per body length travelled.
- *
- * Tied to DISTANCE rather than to time, so a creature that slows down does
- * not moonwalk — the same reason the ant's legs are driven by travel.
- */
+/** The body's own bob, as a fraction of the animal's height. */
 const BOB_SHARE = 0.06;
+
+/**
+ * How far a leg swings, in radians, and how many full strides it takes per
+ * body length travelled.
+ *
+ * GAME TUNING, but measured rather than eyeballed — `legReportForTest`
+ * reports each foot's travel IN THE CREATURE'S OWN FRAME, which is the only
+ * way to see the leg rather than the journey. At 0.22 the aphid's foot
+ * covers about a fifth of its body length per stride and the housefly's
+ * about two fifths, which reads as walking. At 0.42 the fly's stride was
+ * two thirds of its body and it flailed; these rigs are posed splayed and
+ * do not take the arc a real insect does.
+ */
+const LEG_SWING = 0.22;
 const STRIDES_PER_LENGTH = 1.8;
+
+/** The idle's breath: how far the legs stir when it is standing still. */
+const IDLE_STIR = 0.02;
+/** And how fast, in cycles a second — slow enough to read as alive. */
+const IDLE_RATE = 0.55;
 
 const S_WANT = new THREE.Vector3();
 const S_FLAT = new THREE.Vector3();
+const S_TURN = new THREE.Quaternion();
+
+/** One leg: the bone that swings, its rest pose, and its tripod phase. */
+interface Leg {
+  bone: THREE.Bone;
+  rest: THREE.Quaternion;
+  /** 0 or 1 — which half of the tripod it belongs to. */
+  phase: number;
+  /** The axis it swings about, in its parent's frame. */
+  axis: THREE.Vector3;
+}
+
+/**
+ * THE SIX LEGS, FOUND WITHOUT A SINGLE NAME.
+ *
+ * Measured on `aphid.glb`: 57 bones, two branch hubs, twelve tips. Six of
+ * those tips sit at ground height in mirrored ±X pairs spread along Z —
+ * front, middle, hind. The others are antennae (high on Y, off the head
+ * hub) and the mouthpart cluster. So the legs are the six LOWEST tips, and
+ * the bone that swings each one is the topmost bone of its chain — the
+ * joint at the body, which is what a coxa is.
+ *
+ * Written as a measurement rather than a lookup table on purpose: the fly's
+ * rig is a different file with the same problem, and a table would need
+ * hand-maintaining per model for no benefit.
+ */
+function findLegs(root: THREE.Object3D): Leg[] {
+  const tips: THREE.Bone[] = [];
+  root.updateMatrixWorld(true);
+  root.traverse((n) => {
+    const b = n as THREE.Bone;
+    if (!b.isBone) return;
+    if (b.children.some((c) => (c as THREE.Bone).isBone)) return;
+    tips.push(b);
+  });
+  if (tips.length < 6) return [];
+  const at = (b: THREE.Bone): THREE.Vector3 =>
+    new THREE.Vector3().setFromMatrixPosition(b.matrixWorld);
+  /* Lowest six: the ones standing on the ground. */
+  const feet = tips.sort((a, b) => at(a).y - at(b).y).slice(0, 6);
+  const legs: Leg[] = [];
+  for (const foot of feet) {
+    /* Up to the joint at the body — the last bone before the chain stops
+     * being a single file, which is where a leg meets a thorax. */
+    let bone: THREE.Bone = foot;
+    for (;;) {
+      const up = bone.parent as THREE.Bone | null;
+      if (!up?.isBone) break;
+      const kin = up.children.filter((c) => (c as THREE.Bone).isBone);
+      if (kin.length > 1) break;
+      bone = up;
+    }
+    const p = at(foot);
+    /*
+     * THE TRIPOD, from where the foot actually is. A real insect swings
+     * front-left, middle-right and hind-left together; the pairing falls
+     * straight out of the sign of X against the rank in Z.
+     */
+    const side = p.x >= 0 ? 1 : 0;
+    const rank = feet.filter((o) => at(o).z < p.z).length;
+    /*
+     * IT SWINGS ABOUT A VERTICAL AXIS, and the rig's own screenshots are
+     * what settled that.
+     *
+     * A first cut swung each leg about the body's X, reasoning about a
+     * leg that points forward. Joshua's top-down rig capture shows these
+     * legs splay LATERALLY — six long limbs out to the sides, the way an
+     * aphid actually stands. Protraction and retraction of a sideways leg
+     * is rotation about a roughly VERTICAL axis at the joint, not a
+     * fore-and-aft one; swinging such a leg about X lifts and drops it
+     * instead of stepping with it.
+     *
+     * Taken in the bone's PARENT frame, because that is where its own
+     * quaternion is applied — the armature carries a transform of its own
+     * and assuming an identity frame is a mistake this codebase has
+     * already made once, in `WormBody`.
+     */
+    const parent = (bone.parent ?? root);
+    const up = new THREE.Vector3(0, 1, 0)
+      .applyQuaternion(parent.getWorldQuaternion(new THREE.Quaternion()).invert())
+      .normalize();
+    legs.push({
+      bone,
+      rest: bone.quaternion.clone(),
+      phase: (side + rank) % 2,
+      axis: up,
+    });
+  }
+  return legs;
+}
 
 export class Critter {
   readonly root = new THREE.Object3D();
@@ -102,6 +229,13 @@ export class Critter {
 
   /** Its own height in world units, measured off the model once it lands. */
   private tall = 0.2;
+
+  /** The six that carry it, found by geometry — see `findLegs`. */
+  private legs: Leg[] = [];
+
+  /** Seconds alive, for the idle's breath. A TIME cycle rather than a
+   *  distance one, because a standing animal covers no ground. */
+  private aliveFor = 0;
 
   constructor(
     readonly kind: CreatureKind,
@@ -138,6 +272,8 @@ export class Critter {
      * relative bulk and not a length. */
     const box = new THREE.Box3().setFromObject(body);
     this.tall = Math.max(0.05, box.max.y - box.min.y);
+    /* Its legs, found by geometry — the rigs name nothing. */
+    this.legs = findLegs(body);
     this.ready = true;
   }
 
@@ -161,6 +297,7 @@ export class Critter {
   step(dt: number, groundAt: (x: number, z: number) => number): void {
     if (dt <= 0 || !this.alive) return;
 
+    this.aliveFor += dt;
     tickMind(this.kind, this.mind, dt, this.mind.behaviour === 'flee');
     if (thinkDue(this.mind)) {
       /*
@@ -226,13 +363,81 @@ export class Critter {
   private pose(moving: boolean): void {
     this.root.position.copy(this.at);
     this.root.rotation.y = this.facing;
-    if (!moving) {
-      this.root.position.y = this.at.y;
+    this.root.position.y = this.at.y;
+
+    /*
+     * WALKING IS A TRIPOD; IDLING IS A BREATH.
+     *
+     * The walk is driven by DISTANCE travelled, so a creature that slows
+     * does not moonwalk — the same rule the ant's legs follow. The idle is
+     * driven by TIME, and it has to be: a standing animal covers no ground,
+     * so a distance-driven idle would be perfectly frozen, which is exactly
+     * what made these read as models rather than animals.
+     */
+    if (moving) {
+      const strides = (this.gone / Math.max(0.01, this.tall)) * STRIDES_PER_LENGTH;
+      const t = strides * Math.PI * 2;
+      const bob = Math.abs(Math.sin(strides * Math.PI)) * this.tall * BOB_SHARE;
+      this.root.position.y = this.at.y + bob;
+      for (const leg of this.legs) {
+        /* Half of them a half-cycle out: front-left, middle-right and
+         * hind-left swing while the other three carry. */
+        this.swingLeg(leg, Math.sin(t + leg.phase * Math.PI) * LEG_SWING);
+      }
       return;
     }
-    const strides = (this.gone / Math.max(0.01, this.tall)) * STRIDES_PER_LENGTH;
-    const bob = Math.abs(Math.sin(strides * Math.PI)) * this.tall * BOB_SHARE;
-    this.root.position.y = this.at.y + bob;
+    for (const leg of this.legs) {
+      this.swingLeg(leg, Math.sin(
+        this.aliveFor * IDLE_RATE * Math.PI * 2 + leg.phase * Math.PI,
+      ) * IDLE_STIR);
+    }
+  }
+
+  /**
+   * Turn one leg by `angle` FROM ITS REST POSE, never from where it was.
+   *
+   * Composing onto the live quaternion accumulates: a leg driven that way
+   * winds further round every frame and the animal ties itself in a knot
+   * within seconds. Every frame is an offset from the pose the rig shipped
+   * in — the same reason `QueenModel` keeps a `rest` map.
+   */
+  private swingLeg(leg: Leg, angle: number): void {
+    S_TURN.setFromAxisAngle(leg.axis, angle);
+    leg.bone.quaternion.copy(leg.rest).multiply(S_TURN);
+  }
+
+  /**
+   * For probes: how many legs it found and where their feet are right now.
+   *
+   * The foot positions are the point. "Six legs were located" only says the
+   * search ran; feet that MOVE between frames say the gait is driving them.
+   */
+  legReportForTest(): { legs: number; feetY: number[] } {
+    this.root.updateMatrixWorld(true);
+    return {
+      legs: this.legs.length,
+      feetY: this.legs.map((l) => {
+        const p = new THREE.Vector3();
+        /* The far end of the chain, not the joint — a joint at the body
+         * barely moves however hard the leg is swinging. */
+        let tip: THREE.Object3D = l.bone;
+        while (tip.children.some((c) => (c as THREE.Bone).isBone)) {
+          tip = tip.children.find((c) => (c as THREE.Bone).isBone)!;
+        }
+        /*
+         * IN THE CREATURE'S OWN FRAME, not the world's.
+         *
+         * A first cut returned world positions and measured the animal
+         * WALKING: every foot translates with the body, so it reported a
+         * 6.5 mm fly swinging its feet 22 mm and barely changed when the
+         * swing was cut fourfold. Local space isolates the leg from the
+         * journey, which is the only thing this is asking about.
+         */
+        p.setFromMatrixPosition(tip.matrixWorld);
+        this.root.worldToLocal(p);
+        return +p.z.toFixed(4);
+      }),
+    };
   }
 
   dispose(): void {
