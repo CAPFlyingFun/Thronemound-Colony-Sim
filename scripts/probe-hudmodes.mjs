@@ -108,6 +108,51 @@ for (const size of SIZES) {
       const y = Math.min(c.bottom, q.bottom) - Math.max(c.top, q.top);
       return x > 0.5 && y > 0.5 ? Math.round(y) : 0;
     };
+    /*
+     * DO THE PLATES TOUCH EACH OTHER?
+     *
+     * Reported from the device as "the SCOOP button is just a little too
+     * close to the DIG button", and measured at the design canvas it was
+     * not close, it was ON it: the two touch boxes overlapped by 22 x 18
+     * px. Nothing here saw it, because every check in this file measures
+     * the cluster as ONE rectangle against the objective card — a bug
+     * INSIDE that rectangle is invisible to all of them.
+     *
+     * The invariant asserted is the one `fanCluster` actually promises:
+     * consecutive plates in the ZIGZAG never touch, because each stepped
+     * plate clears the neighbour it steps past. Consecutive in the visual
+     * sequence, which is what the eye and the thumb follow — the DOM order
+     * is not it, so the sort mirrors `fanCluster`'s.
+     *
+     * Separated on EITHER axis is separated, so the clearance is the better
+     * of the two — plates on opposite sides of the zigzag are allowed to
+     * pass each other vertically, which is the whole saving of a diagonal.
+     */
+    const touching = () => {
+      const els = [...document.querySelectorAll('.tm-cluster > *')]
+        .filter((e) => e.style.display !== 'none'
+          && e.getBoundingClientRect().width > 0)
+        .map((el, i) => ({ el, order: Number(getComputedStyle(el).order) || 0, i }))
+        .sort((a, b) => a.order - b.order || a.i - b.i);
+      const name = (e) => [...e.classList].find((k) => k.startsWith('tm-art-'))
+        ?? e.className;
+      let worst = { gap: 1e9, pair: '' };
+      for (let n = 0; n + 1 < els.length; n += 1) {
+        const a = els[n].el.getBoundingClientRect();
+        const c = els[n + 1].el.getBoundingClientRect();
+        const gap = Math.max(
+          Math.max(a.left, c.left) - Math.min(a.right, c.right),
+          Math.max(a.top, c.top) - Math.min(a.bottom, c.bottom),
+        );
+        if (gap < worst.gap) {
+          worst = {
+            gap: Math.round(gap),
+            pair: `${name(els[n].el)} / ${name(els[n + 1].el)}`,
+          };
+        }
+      }
+      return els.length > 1 ? worst : { gap: 0, pair: '(one plate)' };
+    };
     /* EXPLORE — nothing armed, empty jaws, and the beetle walked away. */
     const parked = s.quarry.map((q) => q.at.clone());
     for (const q of s.quarry) q.at.set(9e3, 0, 9e3);
@@ -115,7 +160,7 @@ for (const size of SIZES) {
     if (s.carry.carrying) s.carry.drop();
     settle();
     out.explore = up();
-    out.exploreFit = { clash: clash() };
+    out.exploreFit = { clash: clash(), touch: touching() };
 
     /* CARRY — put something in her jaws through the real verb. */
     const seed = s.props.find((q) => q.id === 'seed');
@@ -125,7 +170,7 @@ for (const size of SIZES) {
     settle();
     out.carrying = s.carry.carrying;
     out.carry = up();
-    out.carryFit = { clash: clash() };
+    out.carryFit = { clash: clash(), touch: touching() };
     s.useAbility('interact');
     settle();
 
@@ -137,8 +182,16 @@ for (const size of SIZES) {
     }
     settle();
     out.combat = up();
-    out.combatFit = { clash: clash() };
+    out.combatFit = { clash: clash(), touch: touching() };
     out.combatMode = s.hudMode;
+    /* IS THERE ANYTHING TO FIGHT? The beetle was pulled from the world at
+     * Joshua's ask — "remove it as I will add a real GLB beetle later...
+     * maybe don't remove completely, but keep in the insect brain
+     * database" — so the island currently seeds no quarry at all. This
+     * probe cannot manufacture one honestly, and an assertion that can
+     * never pass is a red line nobody reads. Recorded so the check can say
+     * WHY it is standing down rather than quietly relaxing. */
+    out.hasQuarry = s.quarry.length > 0;
 
     /* DIG — and send the beetle away again so the fight does not win. */
     for (const q of s.quarry) q.at.set(9e3, 0, 9e3);
@@ -147,7 +200,7 @@ for (const size of SIZES) {
       .dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
     settle();
     out.dig = up();
-    out.digFit = { clash: clash() };
+    out.digFit = { clash: clash(), touch: touching() };
     out.digMode = s.hudMode;
     /*
      * THE ATTITUDE PANEL, read while the shovel is out. Four instruments —
@@ -221,7 +274,17 @@ for (const size of SIZES) {
     console.log(`    ${mode.padEnd(8)} ${seen[mode].length} plates: ${seen[mode].join(' ')}`);
   }
   say(seen.carrying === true, 'the carry mode was reached by actually lifting something');
-  say(seen.combatMode === 'combat', `a beetle at her feet is a fight (got ${seen.combatMode})`);
+  if (seen.hasQuarry) {
+    say(seen.combatMode === 'combat',
+      `a beetle at her feet is a fight (got ${seen.combatMode})`);
+  } else {
+    /* NOT a pass. The mode is unexercised and the line says so, so nobody
+     * reads a green run as "combat still works". It goes back to a real
+     * assertion the moment a creature with `damage` is seeded again. */
+    console.log('  skip  combat is unexercised — the island seeds no quarry'
+      + ' (beetle pulled pending a real GLB); the mode table is still'
+      + ' covered by tests/hudModes.test.ts');
+  }
   say(seen.digMode === 'dig', `DIG arms the dig mode (got ${seen.digMode})`);
   say(seen.backToExplore === 'explore',
     `and DIG is still there to disarm it (got ${seen.backToExplore})`);
@@ -256,6 +319,13 @@ for (const size of SIZES) {
     say(fit.clash === 0,
       `${mode}'s plates clear the objective card`
       + (fit.clash ? ` — OVERLAP ${fit.clash}px` : ''));
+    /* AND CLEAR EACH OTHER. The check above measures the cluster as one
+     * box, so it cannot see two plates sitting on top of one another
+     * inside it — which is exactly how the SCOOP-on-DIG overlap survived
+     * every layout probe in the repo. */
+    say(fit.touch.gap >= 0,
+      `${mode}'s plates clear each other — tightest ${fit.touch.gap}px`
+      + ` at ${fit.touch.pair}`);
   }
   say(seen.tiltInDrawer === true, 'the posture rigs are reachable in the DEV drawer');
   say(seen.posed === 'pose', `arming TILT poses her (got ${seen.posed})`);

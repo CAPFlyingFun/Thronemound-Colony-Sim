@@ -30,11 +30,46 @@ describe('picking it up', () => {
     const c = new Carry();
     expect(c.lift(prey(), rich)).toBeNull();
     expect(c.carrying).toBe(true);
-    /* Measured against the DRAG limit, which is the heaviest thing she can
-     * move at all — so a beetle reads as most of what she can shift rather
-     * than pegging the bar the moment she stops carrying and starts
-     * hauling. */
-    expect(c.load).toBeCloseTo(45 / STRENGTH.queen.dragMg, 3);
+    /* A beetle is a DRAG — 45 mg against a 20 mg carry limit and a 60 mg
+     * drag limit — so it reads in the meter's upper half, five eighths of
+     * the way from her carrying limit to what will not move at all. */
+    expect(c.load).toBeCloseTo(0.8125, 4);
+    /* And what it costs her is still the plain fraction of what she can
+     * shift, unchanged by the meter's curve. */
+    expect(c.strain).toBeCloseTo(45 / STRENGTH.queen.dragMg, 3);
+  });
+
+  it('spends the whole bar, not its bottom third', () => {
+    /*
+     * THE FIX, PINNED. Reported as "the carry bar isn't being filled
+     * correctly like the HP bar or other stats", and measured in the
+     * running game: every prop she can actually CARRY sat under 14% —
+     * a twig 13.3% — because the reading was mass over the DRAG limit, so
+     * two thirds of the channel could only be reached by hauling.
+     *
+     * Half the bar to each limit, and the join is the landmark: half-full
+     * is exactly the heaviest thing she can carry, which is also where
+     * `loadColour`'s amber stop sits.
+     */
+    const at = (massMg: number): number => {
+      const c = new Carry();
+      c.lift(prey({ massMg }), rich);
+      return c.load;
+    };
+    expect(at(STRENGTH.queen.carryMg)).toBeCloseTo(0.5, 6);
+    /* The twig, which is the one Joshua was holding. */
+    expect(at(8)).toBeCloseTo(0.2, 6);
+    /* The pebble — a drag, and it must not jump BACKWARDS across the join
+     * for being one gram heavier than a carry. */
+    expect(at(22)).toBeGreaterThan(at(20));
+    expect(at(22)).toBeCloseTo(0.525, 6);
+    /* Monotonic the whole way up, so heavier never reads lighter. */
+    let last = -1;
+    for (let mg = 0; mg <= STRENGTH.queen.dragMg; mg += 1) {
+      const now = at(mg);
+      expect(now).toBeGreaterThanOrEqual(last);
+      last = now;
+    }
   });
 
   it('drags a beetle rather than carrying it', () => {
@@ -145,7 +180,10 @@ describe('carrying costs something', () => {
     c.lift(prey(), rich);
     let spent = 0;
     c.tick(1, (cost) => { spent += cost; return true; });
-    expect(spent).toBeCloseTo(FIRE_ANT_CARRY.ladenDrain * c.load, 5);
+    /* `strain`, not `load`: the drain is proportional to the fraction of
+     * her strength the thing uses, and the meter's curve is not that. This
+     * assertion is what stops a future HUD tweak retuning her stamina. */
+    expect(spent).toBeCloseTo(FIRE_ANT_CARRY.ladenDrain * c.strain, 5);
   });
 
   it('costs nothing at all when her jaws are empty', () => {

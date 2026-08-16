@@ -961,13 +961,36 @@ export const COLONIST_ROAM = 12;
  * chosen against the same terrain.
  */
 /**
- * HOW FAR THE ZIGZAG STEPS ACROSS, in CSS pixels.
+ * HOW FAR THE ZIGZAG STEPS ACROSS, in CSS pixels — the FLOOR, not the
+ * whole answer. See `CLUSTER_AIR` and `fanCluster`.
  *
  * A whole plate (56) plus the cluster's own air (6), so a plate never
  * touches the one below it whichever side it is on. A first cut used 52 and
  * the cluster read as a heap rather than a diagonal — see `fanCluster`.
  */
 export const CLUSTER_STEP = 62;
+
+/**
+ * THE AIR BETWEEN A STEPPED PLATE AND THE ONE IT STEPS PAST.
+ *
+ * Reported from the device: "the SCOOP button is just a little too close to
+ * the DIG button." Measured at the design canvas, it was worse than close —
+ * their touch boxes OVERLAPPED by 22 x 18 px, which is a mis-tap waiting to
+ * happen on the one control pair you hold together.
+ *
+ * The cause is that 62 above is a whole plate plus air for a 56 px plate,
+ * and the HERO is 84. In every mode where DIG is the hero, DIG is the
+ * plate that steps ACROSS and clears its 56 px neighbour fine. In DIG mode
+ * the hero is SCOOP, so DIG becomes the flush one — and a 62 px step
+ * cannot clear an 84 px plate. It poked 22 px through, exactly the
+ * difference.
+ *
+ * So `fanCluster` now measures the neighbour it actually has to clear and
+ * adds this, with 62 kept as the floor so a uniform row is unchanged.
+ * Encoding the hero's width here instead would be a second copy of a number
+ * the stylesheet already owns, and the stylesheet changes it per screen.
+ */
+export const CLUSTER_AIR = 6;
 
 export const COLONIST_STEP_UP = 1.1 / MM;
 export const COLONIST_STEP_DOWN = 1.4 / MM;

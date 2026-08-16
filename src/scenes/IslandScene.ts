@@ -137,7 +137,7 @@ import {
   LOOK_HOLD_S, LOOK_RETURN_RATE, CHASE_PITCH, CHASE_PITCH_MIN,
   CHASE_PITCH_MAX, CHASE_GROUND_CLEAR, CHASE_REACH, SHELL_REACH,
   SHELL_SHARE, RISE_RATE, NOSE_REACH, BORE_HUG_WIDE,
-  BODY_FIT_SCALE, CLUSTER_STEP, QUEST_DEPTH_MM, QUEST_CHAMBER_SAMPLES, JAW_PAST_NOSE,
+  BODY_FIT_SCALE, CLUSTER_AIR, CLUSTER_STEP, QUEST_DEPTH_MM, QUEST_CHAMBER_SAMPLES, JAW_PAST_NOSE,
   BODY_HALF_TALL, BODY_FLOOR_MARGIN, AIM_LIMIT, CHAMBER_CAM_FAR,
   CHAMBER_CAM_NEAR, COLONIST_SPEED, COLONIST_TURN, COLONIST_ARRIVE,
   COLONIST_ROAM, TROPHALLAXIS_REACH, TROPHALLAXIS_RATE, CARRY_DELIVER_REACH,
@@ -1283,12 +1283,36 @@ export class IslandScene {
        * This loop has already sorted by (order, position), which is the
        * sequence the eye actually sees, so `n` is the only honest index.
        *
-       * Every other one steps in from the right edge by a whole plate plus
-       * air, so no plate ever touches the one below it. Written as a style
-       * rather than a class because it is a POSITION in a sequence, and a
-       * class would need one per seat.
+       * Every other one steps in from the right edge far enough to clear
+       * the plates it passes, so no plate ever touches the one below it.
+       * Written as a style rather than a class because it is a POSITION in
+       * a sequence, and a class would need one per seat.
+       *
+       * MEASURED RATHER THAN ASSUMED, and that is the fix for "the SCOOP
+       * button is just a little too close to the DIG button". The old step
+       * was the constant 62 — one 56 px plate plus air — but the hero is 84
+       * px wide. Where the hero is the STEPPED plate (DIG in explore) 62
+       * clears its neighbour fine; where the hero is the FLUSH one (DIG in
+       * dig mode, whose hero is SCOOP) an 84 px plate poked 22 px back
+       * through the step, and the two touch boxes overlapped by 22 x 18.
+       *
+       * The plates it must clear are its neighbours in the zigzag, both of
+       * which sit flush right — so the step is the wider of those two plus
+       * air, floored at the old constant so a row of equals is untouched.
+       * Reading `offsetWidth` keeps the stylesheet the single owner of
+       * plate size, including the per-screen shrinks it applies; this runs
+       * on a mode change, not on a frame, so the layout it forces is
+       * affordable.
        */
-      p.el.style.marginRight = n % 2 === 0 ? `${CLUSTER_STEP}px` : '';
+      if (n % 2 === 0) {
+        const wide = Math.max(
+          up[n - 1]?.el.offsetWidth ?? 0, up[n + 1]?.el.offsetWidth ?? 0,
+        );
+        p.el.style.marginRight =
+          `${Math.max(CLUSTER_STEP, wide + CLUSTER_AIR)}px`;
+      } else {
+        p.el.style.marginRight = '';
+      }
     });
   }
 

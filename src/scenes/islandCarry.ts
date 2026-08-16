@@ -125,14 +125,52 @@ export class Carry {
   get reach(): number { return this.tuning.reach; }
 
   /**
-   * 0 empty, 1 at the heaviest thing she could move at all. Measured
-   * against the DRAG limit rather than the carry one, so the meter has a
-   * top: a bar that pegged the moment she stopped carrying and started
-   * dragging would report the same thing for a pebble and for a beetle.
+   * WHAT THE LOAD PHYSICALLY COSTS HER: 0 empty, 1 at the heaviest thing
+   * she could move at all. Measured against the DRAG limit rather than the
+   * carry one because that is the true ceiling — past it she cannot shift
+   * the thing in any fashion.
+   *
+   * This is the number the stamina drain is tuned against and it has not
+   * moved. `load` below is the READOUT, and the two are deliberately
+   * separate now: a meter that reads well and a drain that plays well want
+   * different curves, and making one serve both means a HUD change quietly
+   * retunes how long she can hold a twig.
+   */
+  get strain(): number {
+    if (!this.held) return 0;
+    return Math.min(1, this.held.massMg / STRENGTH[this.strength].dragMg);
+  }
+
+  /**
+   * WHAT THE METER SHOWS — and the whole bar is now reachable, which is the
+   * fix.
+   *
+   * Reported: "the carry bar isn't being filled correctly like the HP bar
+   * or other stats." Measured in the running game before touching anything,
+   * with the queen's 20 mg carry limit against her 60 mg drag limit: seed
+   * 5%, leaf 6.7%, crumb 8.3%, twig 13.3%. The CSS was innocent — the bar
+   * draws 0 to 131.5px exactly — but `strain` alone meant the heaviest
+   * thing she can CARRY reads one third, so two thirds of the channel could
+   * only ever be reached by dragging and the colour ramp never left green.
+   * A bar whose top two thirds are unreachable in normal play is a bar that
+   * looks broken, and it was fair to call it that.
+   *
+   * So the two limits get half the bar each, and the join is a landmark
+   * rather than an arbitrary bend: HALF-FULL IS EXACTLY THE HEAVIEST SHE
+   * CAN CARRY. `loadColour`'s middle stop sits at 0.5 too, so the amber
+   * means that and nothing else — green is a load she walks off with, amber
+   * is her carrying limit, red is a drag nearing what will not move at all.
+   *
+   * Monotonic in mass across the join, so nothing jumps backwards when a
+   * carry becomes a drag: same queen, twig 20%, pebble 52.5%.
    */
   get load(): number {
     if (!this.held) return 0;
-    return Math.min(1, this.held.massMg / STRENGTH[this.strength].dragMg);
+    const s = STRENGTH[this.strength];
+    const mg = this.held.massMg;
+    if (mg <= s.carryMg) return Math.max(0, mg / s.carryMg) * 0.5;
+    const over = (mg - s.carryMg) / (s.dragMg - s.carryMg);
+    return Math.min(1, 0.5 + over * 0.5);
   }
 
   /** Carrying it, dragging it, or empty-jawed. */
@@ -214,16 +252,21 @@ export class Carry {
    */
   tick(dt: number, spend: (cost: number) => boolean): void {
     if (!(dt > 0) || !this.held) return;
-    if (!spend(this.tuning.ladenDrain * this.load * dt)) this.drop('fumbled');
+    /* `strain`, NOT `load` — the drain is tuned against the physical
+     * fraction of her strength the thing is using, and `load` is now the
+     * meter's curve. Reading the meter here would have made a readout fix
+     * into a stamina rebalance. */
+    if (!spend(this.tuning.ladenDrain * this.strain * dt)) this.drop('fumbled');
   }
 
   report(): {
-    carrying: string; load: number; laden: boolean;
+    carrying: string; load: number; strain: number; laden: boolean;
     mode: string; pace: number;
   } {
     return {
       carrying: this.held?.id ?? '',
       load: +this.load.toFixed(3),
+      strain: +this.strain.toFixed(3),
       laden: this.tooLadenToRun,
       mode: this.mode ?? '',
       pace: +this.speedFactor.toFixed(3),
