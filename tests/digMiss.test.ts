@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { bite, biteCentre, type DigHost } from '../src/scenes/islandDig';
-import { NOSE_REACH, JAW_PAST_NOSE, SCOOP_DEEP_MM } from '../src/scenes/islandTuning';
+import {
+  NOSE_REACH, JAW_PAST_NOSE, SCOOP_DEEP_MM, SCOOP_BALL_MM, SCOOP_WIDE_MM,
+  SCOOP_TALL_MM, BODY_HALF_TALL, BORE_HUG_WIDE,
+} from '../src/scenes/islandTuning';
 import { MM } from '../src/world/worldScape';
 
 /*
@@ -124,5 +127,41 @@ describe('the stroke that meets nothing', () => {
     expect(biteCentre(host, aim, NOSE_REACH + JAW_PAST_NOSE, out)).toBe(true);
     expect(out.z).toBeGreaterThan(wallZ - 1e-6);
     expect(out.z).toBeLessThan(wallZ + SCOOP_DEEP_MM / MM);
+  });
+});
+
+/**
+ * THE BRUSH IS A BALL, and it has to stay one.
+ *
+ * Asked directly: "what is the dig radius and is it a round shape? I was
+ * thinking make it a 6x6x6mm ball/sphere." It was not round — it was an
+ * ellipsoid 10 wide, 5 tall and 3 deep — and the shape mattered more than
+ * it looked, because the brush is drawn in HER frame: the 3 mm depth axis
+ * is the one pointing wherever she digs. Measured in the running game,
+ * one stroke aimed straight down opened a saucer 2 mm deep. The ball opens
+ * a 6 mm hole in every direction, which is three and a half times the soil
+ * on the one heading the founding is built around.
+ *
+ * Pinned here rather than left to the constants because three separate
+ * exports that must agree are three chances for one of them to be edited
+ * alone — which is exactly how it stopped being round the first time.
+ */
+describe('the shovel is a ball', () => {
+  it('is the same across every axis', () => {
+    expect(SCOOP_WIDE_MM).toBe(SCOOP_BALL_MM);
+    expect(SCOOP_TALL_MM).toBe(SCOOP_BALL_MM);
+    expect(SCOOP_DEEP_MM).toBe(SCOOP_BALL_MM);
+  });
+
+  it('is the 6 mm across that was asked for', () => {
+    expect(SCOOP_BALL_MM).toBe(6);
+  });
+
+  it('still clears her body in the passage it cuts', () => {
+    /* A round tunnel is only worth having if she fits in it. Half the
+     * brush against the half-extents she is fitted to — see `BODY_FIT`
+     * and `BORE_HUG_WIDE` in `islandTuning`. */
+    expect(SCOOP_BALL_MM / 2 / MM).toBeGreaterThan(BODY_HALF_TALL);
+    expect(SCOOP_BALL_MM / 2 / MM).toBeGreaterThan(BORE_HUG_WIDE / 2);
   });
 });

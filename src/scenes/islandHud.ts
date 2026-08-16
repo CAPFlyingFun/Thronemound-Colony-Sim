@@ -29,7 +29,7 @@ import type { DebugStatsPanel } from './DebugStatsPanel';
 import type { HudPart } from './hudModes';
 import { MM, WINDOW_BYTES, WINDOW_MM } from '../world/worldScape';
 import {
-  AIM_LIMIT, PACE_NAMES, SCOOP_DEEP_MM, SCOOP_TALL_MM, SCOOP_WIDE_MM,
+  AIM_LIMIT, PACE_NAMES, SCOOP_BALL_MM,
   SMOOTH_RADIUS_MM, stickCurve,
 } from './islandTuning';
 
@@ -1143,7 +1143,7 @@ export function updateStatus(host: HudHost, ): void {
     terrain ${host.terrainVerts.toLocaleString()} v / ${host.terrainTris.toLocaleString()} t
     · elevation ${elevM} m<br>
     aim ${((host.aimPitch * 180) / Math.PI).toFixed(0)}° ·
-    scoop ${SCOOP_WIDE_MM} x ${SCOOP_TALL_MM} x ${SCOOP_DEEP_MM} mm<br>
+    scoop \u2300${SCOOP_BALL_MM} mm ball<br>
     soil window ${WINDOW_MM} mm · ${(WINDOW_BYTES / 1048576).toFixed(1)} MB ·
     chunks ${host.chunkMeshes.size} · queued ${host.queue.length} ·
     dug ${host.stream?.editedSamples ?? 0}<br>

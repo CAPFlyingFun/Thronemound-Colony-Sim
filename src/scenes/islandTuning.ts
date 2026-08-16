@@ -570,14 +570,44 @@ export const SCROLL_COOLDOWN_MS = 600;
  * the aim, because spheres are what the field subtracts.
  */
 /**
- * ONE MOUTHFUL, as asked: 10 mm wide, 5 mm tall, 3 mm deep.
+ * ONE MOUTHFUL, AND IT IS A BALL — 6 mm across, as asked.
  *
- * Wide and low, which is what a walking tunnel wants — a floor broader
- * than her stride and a roof just clear of her back.
+ * Asked directly: "what is the dig radius and is it a round shape? I was
+ * thinking make it a 6x6x6mm ball/sphere." The honest answer to the first
+ * half was that it was NOT round — it was an ellipsoid 10 wide, 5 tall and
+ * 3 deep, wide and low on the reasoning that a walking tunnel wants a floor
+ * broader than her stride and a roof just clear of her back.
+ *
+ * A ball is the better shape for a reason that reasoning missed, and the
+ * measurement is worse than the argument: the brush is drawn in HER frame,
+ * so its 3 mm DEPTH axis is the one that points where she is digging.
+ * Aimed straight down, one stroke of the old brush opened a saucer 6.8 by
+ * 7.2 mm across and TWO MILLIMETRES deep — a scrape, not a shaft. The ball
+ * opens 6.0 x 6.4 x 7.2, and 2024 samples against 603: three and a half
+ * times the soil, for the one direction the founding spends its whole
+ * first act digging.
+ *
+ * (Both measured in the running game by sampling the density field either
+ * side of a single stroke, not computed from these numbers. The naive
+ * volume ratio — 113 mm³ against 79 — badly understates it, because it
+ * averages over directions rather than looking at the one that matters.)
+ *
+ * ONE NUMBER, THREE NAMES. The field subtracts ellipsoids and the thrown
+ * charge shares this brush, so the three axes stay as separate exports and
+ * every call site is unchanged — but they are now derived rather than
+ * typed, so the brush cannot go quietly non-spherical again by somebody
+ * editing one line of three.
+ *
+ * Walking level it is narrower across the floor (6 against 10) and taller
+ * under the roof (6 against 5). Both still clear her comfortably —
+ * `BODY_HALF_TALL` is 1.6 mm and `BORE_HUG_WIDE` 2.4 — so the passage she
+ * walks in loses nothing that matters and the shaft she sinks gains a
+ * great deal.
  */
-export const SCOOP_WIDE_MM = 10;
-export const SCOOP_TALL_MM = 5;
-export const SCOOP_DEEP_MM = 3;
+export const SCOOP_BALL_MM = 6;
+export const SCOOP_WIDE_MM = SCOOP_BALL_MM;
+export const SCOOP_TALL_MM = SCOOP_BALL_MM;
+export const SCOOP_DEEP_MM = SCOOP_BALL_MM;
 
 /**
  * THE THROWN CHARGE 🧨 — what an out-of-reach press becomes.

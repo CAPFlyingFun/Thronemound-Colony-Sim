@@ -245,9 +245,14 @@ export function carveScoop(
   let maxX = -Infinity; let maxY = -Infinity; let maxZ = -Infinity;
   /*
    * Two scoops, one at the face and one a depth further in, so a HELD
-   * stroke cuts a continuous tube rather than a string of beads — the
-   * brush is only three millimetres deep and her stride outruns a
-   * single one on the first step.
+   * stroke cuts a continuous tube rather than a string of beads — one
+   * brush-width is shorter than her stride, so a single ball per stroke
+   * leaves gaps on the first step.
+   *
+   * The step is one brush depth, which for the 6 mm ball means the two
+   * spheres are exactly tangent — the same relationship the old 3 mm-deep
+   * ellipsoid had, so the tube's topology is unchanged and only its size
+   * moved. The smoothing pass below rounds off the waist where they meet.
    */
   for (let i = 0; i < 2; i += 1) {
     const at = S_CENTER.copy(centre).addScaledVector(aim, (i * SCOOP_DEEP_MM) / MM);
