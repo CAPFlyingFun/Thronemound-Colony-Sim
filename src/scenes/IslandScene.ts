@@ -3703,7 +3703,10 @@ export class IslandScene {
      * probes a frame. Twelve probes get the same answer to well inside the
      * clearance the guard is enforcing.
      */
-    const GUARD_REACH = RIDE * 2;
+    /* Her own reach, like the IK band in `solveFeet` — a queen-sized
+     * recovery shove on a worker throws her clear of ground she could
+     * honestly have kept. */
+    const GUARD_REACH = this.legRide * 2;
     const lift = this.queen.groundGuard((x, y, z) => {
       if (!this.soilSolidAt(x, y, z)) return 0;
       let lo = 0;
@@ -4918,7 +4921,11 @@ export class IslandScene {
   teleportMm(xMm: number, zMm: number): void {
     this.at.x = xMm / MM;
     this.at.z = zMm / MM;
-    this.at.y = this.walkGroundAt(this.at.x, this.at.z) + RIDE;
+    /* HER ride height, not the global constant — a worker set down a
+     * queen's ride off the ground arrives standing on stilts and her
+     * replanted feet reach for ground a body length below her. `legRide`
+     * IS the constant until a drive has measured better. */
+    this.at.y = this.walkGroundAt(this.at.x, this.at.z) + this.legRide;
     this.velocity.set(0, 0, 0);
     this.underground = false;
     this.enclosed = false;
@@ -5209,6 +5216,12 @@ export class IslandScene {
 
   dispose(): void {
     cancelAnimationFrame(this.frame);
+    /* The quest-card watcher closes over this scene — left connected it
+     * would keep a disposed scene alive and keep re-fanning a HUD that is
+     * already gone. */
+    this.questWatch?.disconnect();
+    this.questWatch = null;
+    this.questWatched = null;
     /* The miss note's hand comes off the timer with the scene — a scene
      * left within 650 ms of a missed dig must not be held alive to tidy
      * a HUD that is already gone. */

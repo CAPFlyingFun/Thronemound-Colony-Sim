@@ -95,7 +95,7 @@
 
 import * as THREE from 'three';
 import {
-  CORNER_TUNING, CornerTurn, rowsFromHomes,
+  CORNER_TUNING, CornerTurn, type CornerTuning, rowsFromHomes,
   type CornerGround, type CornerReport, type SurfaceContact,
 } from './cornerTurn';
 
@@ -545,8 +545,25 @@ export class LegDrive {
     /* Rows from the MEASURED homes, leading first — so "the front pair" is a
      * fact about this animal rather than a list of names, and a caste with a
      * different number of legs rows up the same way. */
-    this.corner = new CornerTurn(rowsFromHomes(this.legs));
+    /*
+     * THE CORNER'S MILLIMETRES SCALE WITH HER TOO. `browLift` (1 mm) and
+     * `lookAhead` (12 mm) were measured on the queen exactly like the
+     * stride tables above — a 4 mm worker probing 12 mm ahead is looking
+     * three body lengths out, and a brow standoff of a full queen
+     * millimetre holds her homes a quarter of her own length off the wall.
+     * The angles, counts and clocks in the tuning are hers at any size and
+     * stay untouched.
+     */
+    this.cornerTune = scale === 1 ? CORNER_TUNING : {
+      ...CORNER_TUNING,
+      browLift: CORNER_TUNING.browLift * scale,
+      lookAhead: CORNER_TUNING.lookAhead * scale,
+    };
+    this.corner = new CornerTurn(rowsFromHomes(this.legs), this.cornerTune);
   }
+
+  /** The corner tuning THIS animal probes with — see the constructor. */
+  private readonly cornerTune: CornerTuning;
 
   /** The lean the last step SETTLED ON — see the hold-plane cap in `step`. */
   private leanShare = 0;
@@ -985,7 +1002,7 @@ export class LegDrive {
       if (hold) {
         for (const leg of holdLegs) {
           this.homeWorld(leg, probe, home);
-          if (home.sub(hold.point).dot(hold.normal) < CORNER_TUNING.browLift) return false;
+          if (home.sub(hold.point).dot(hold.normal) < this.cornerTune.browLift) return false;
         }
       }
       return true;
@@ -1026,7 +1043,7 @@ export class LegDrive {
           .addScaledVector(LEAN_PROBE.up, -forward0.dot(LEAN_PROBE.up)).normalize();
         for (const leg of holdLegs) {
           this.homeWorld(leg, LEAN_PROBE, home);
-          if (home.sub(hold.point).dot(hold.normal) < CORNER_TUNING.browLift) return false;
+          if (home.sub(hold.point).dot(hold.normal) < this.cornerTune.browLift) return false;
         }
         return true;
       };
