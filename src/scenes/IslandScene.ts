@@ -4468,6 +4468,38 @@ export class IslandScene {
    * on a loaded phone, and neither is worth taking a running game down for.
    * The caller says so instead.
    */
+  /**
+   * The exact text `saveToStorage` would write, without writing it.
+   *
+   * For probes, and it has to build the SAME object rather than an estimate
+   * — the whole question is how big the real thing has grown.
+   */
+  saveBlobForTest(): string | null {
+    return this.stream ? JSON.stringify(this.buildSave()) : null;
+  }
+
+  /** The packed edit bytes themselves, for measuring what they compress to. */
+  saveEditsRawForTest(): Uint8Array | null {
+    return this.stream ? this.stream.serializeEdits() : null;
+  }
+
+  /** How many bytes of terrain edits the save is carrying. */
+  saveEditBytesForTest(): number | null {
+    return this.stream ? this.stream.serializeEdits().length : null;
+  }
+
+  private buildSave(): IslandSave {
+    return {
+      v: ISLAND_SAVE_V,
+      when: Date.now(),
+      at: [this.at.x, this.at.y, this.at.z],
+      up: [this.up.x, this.up.y, this.up.z],
+      fwd: [this.fwd.x, this.fwd.y, this.fwd.z],
+      facing: this.facing,
+      dug: toBase64(this.stream!.serializeEdits()),
+    };
+  }
+
   saveToStorage(): boolean {
     if (!this.stream) return false;
     const save: IslandSave = {

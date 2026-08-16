@@ -60,6 +60,7 @@
     "probe:scale": "node scripts/probe-scale.mjs",
     "probe:worms": "node scripts/probe-worms.mjs",
     "probe:brain": "node scripts/probe-brain.mjs",
+    "probe:save-size": "node scripts/probe-save-size.mjs",
     "gen:meter-mask": "node scripts/make-meter-mask.mjs",
     "gen:meter-fill": "node scripts/make-meter-fill.mjs"
   },
