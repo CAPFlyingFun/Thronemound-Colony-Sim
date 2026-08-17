@@ -1081,11 +1081,37 @@ export function buildControls(host: HudHost, ): void {
      * so there is nothing to clear. Only the lit state comes off. */
     host.stickEl.classList.remove('is-live');
   };
+  /*
+   * AND LETTING GO OF THE LOOK HAS TO BE UNCONDITIONAL TOO — the half of
+   * `dropStick`'s own lesson that was never applied to the camera.
+   *
+   * Reported: "after digging down and working my way back up, the camera
+   * ended up locking up and I was no longer able to pan or pitch in 1st or
+   * 3rd person view." Reproduced exactly, and it is not about digging at
+   * all — digging is simply where a phone is most likely to interrupt a
+   * touch.
+   *
+   * `lookPointer` is the id of the finger currently driving the camera, and
+   * a new stroke is only accepted when it is null. It was cleared in ONE
+   * place: a `pointerup` whose id matched. Every other way a finger can
+   * stop existing — a `pointercancel` when the browser takes the gesture
+   * over, a palm, a notification, the tab going away — left it set to an id
+   * that will never be seen again, and from that moment the camera could
+   * not be moved for the rest of the session. The stick was fixed for this
+   * exact failure, twice; the look sat next to it and was not.
+   *
+   * So it gets its own unconditional drop, and everything that could mean
+   * "the finger is gone" calls both.
+   */
+  const dropLook = (): void => {
+    host.lookPointer = null;
+    host.stroke.travel = 0;
+  };
   const release = (e: PointerEvent) => {
     if (host.designer?.isOpen) { host.designer.handlePointerUp(e); return; }
     if (e.pointerId === host.stickPointer) dropStick();
     if (e.pointerId === host.lookPointer) {
-      host.lookPointer = null;
+      dropLook();
       /*
        * A FLICK IS READ ON RELEASE, NEVER DURING THE DRAG.
        *
@@ -1123,13 +1149,23 @@ export function buildControls(host: HudHost, ): void {
   };
   /* The belt and braces: a pointer that vanishes without a pointerup, a
    * window that loses focus, a tab that goes to the background. */
-  window.addEventListener('pointercancel', dropStick);
-  window.addEventListener('blur', () => { dropStick(); host.input.dig = false; });
+  window.addEventListener('pointercancel', () => { dropStick(); dropLook(); });
+  window.addEventListener('blur', () => {
+    dropStick();
+    dropLook();
+    host.input.dig = false;
+  });
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { dropStick(); host.input.dig = false; }
+    if (document.hidden) { dropStick(); dropLook(); host.input.dig = false; }
   });
   canvas.addEventListener('pointerup', release);
   canvas.addEventListener('pointercancel', release);
+  /* AND CAPTURE BEING TAKEN AWAY, which is the third way a finger stops
+   * existing and the one that fires no up and no cancel. SCOOP already
+   * guards it — see `stopDig` above — and the camera has more to lose:
+   * a held button that misses its release stops one action, a look that
+   * misses its release stops the camera for the rest of the session. */
+  canvas.addEventListener('lostpointercapture', release);
   window.addEventListener('pointerup', release);
 }
 
