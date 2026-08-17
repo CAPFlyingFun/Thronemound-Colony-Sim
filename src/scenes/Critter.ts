@@ -75,6 +75,7 @@ import {
   think, thinkDue, tickMind,
 } from './creatureBrain';
 import { CREATURES } from './creatureScale';
+import { aimRotation, footTarget } from '../anim/legIk';
 
 /** How far it may stray from where it was put, in millimetres. */
 const ROAM_MM = 60;
@@ -109,6 +110,70 @@ const IDLE_STIR = 0.02;
 /** And how fast, in cycles a second — slow enough to read as alive. */
 const IDLE_RATE = 0.55;
 
+/**
+ * PUTTING SIX FEET ON THE GROUND — the numbers, and what each is for.
+ *
+ * Reported from the device: "some of the insects did not stay actually on
+ * the ground mesh, but was like maybe doing the average of the mesh."
+ *
+ * Measured before touching anything, on the island's own soil: a housefly's
+ * six feet ran from 5.51 mm BURIED to 5.77 mm in the AIR — an 11.28 mm
+ * spread on a 6.5 mm animal, so the error was larger than the insect. The
+ * body was seated exactly right (0.00 mm off the soil at its centre); the
+ * legs simply never asked where the ground was. That is the "average" look:
+ * one sample under the body, and six feet hanging wherever the swing left
+ * them.
+ */
+
+/** How far the drawn claw is held off the surface, as a share of the
+ *  creature's height — the same idea as `sole` on the queen, which exists
+ *  because a target of exactly the surface lands a hair under it about half
+ *  the time in float32. */
+const FOOT_CLEAR = 0.02;
+
+/*
+ * THERE IS NO BAND, AND THAT IS DELIBERATE — the phase already knows.
+ *
+ * `QueenModel` uses a band to tell a stance foot from a swinging one: a foot
+ * within a band of the ground is trying to stand and gets planted, anything
+ * clearly higher is mid-step and is left alone. It has to guess that way,
+ * because its gait poses legs without saying which are carrying.
+ *
+ * Here the gait is `pose`, and it knows exactly which half of the tripod is
+ * swinging — that is what `Leg.phase` is. So a stance foot is planted
+ * HOWEVER HIGH it starts, and only the swinging half is left up.
+ *
+ * Guessing by height was measured and it is not good enough: a housefly's
+ * bind pose splays its legs so far that three of its six feet sat more than
+ * 3 mm above the soil while it was standing perfectly still, and a band
+ * wide enough to catch those would also drag down every foot mid-step.
+ * Asking the gait costs nothing and cannot be wrong.
+ */
+
+/** How high the swinging half of the tripod lifts, as a share of height.
+ *  Without it every foot is always in stance — the legs would grip the
+ *  ground and the body would glide, which reads as a table on castors. */
+const STEP_LIFT = 0.13;
+
+/**
+ * CCD passes per foot per frame.
+ *
+ * Measured across 4,500 aphid and 2,700 housefly foot samples, mean error
+ * from the soil: 3 passes 0.264 / 0.527 mm, 6 passes 0.246 / 0.484, 10
+ * passes 0.238 / 0.464. Four hundredths of a millimetre for twice the work
+ * and two hundredths for three times it — so the residue is the limb not
+ * quite REACHING with its coxa held by the gait, not the solver failing to
+ * converge, and more passes cannot buy what the geometry will not give.
+ */
+const IK_PASSES = 3;
+
+const S_FOOT = new THREE.Vector3();
+const S_JOINT = new THREE.Vector3();
+const S_TARGET = new THREE.Vector3();
+const S_AXIS = new THREE.Vector3();
+const S_SPIN = new THREE.Quaternion();
+const S_PARENT = new THREE.Quaternion();
+
 const S_WANT = new THREE.Vector3();
 const S_FLAT = new THREE.Vector3();
 const S_TURN = new THREE.Quaternion();
@@ -123,6 +188,17 @@ export interface Leg {
   axis: THREE.Vector3;
   /** Where its foot rests, in the creature's frame — for gait checking. */
   seat: THREE.Vector3;
+  /**
+   * THE WHOLE LIMB, coxa first and foot last, with the pose it shipped in.
+   *
+   * The gait turns `bone` (the coxa) and nothing else. Planting a foot on
+   * real ground needs the joints BELOW that to bend, which means keeping
+   * them — and keeping their rest pose, because IK that composes onto last
+   * frame's result winds the leg up over a few seconds exactly the way
+   * `swingLeg` warns about. Every frame starts from the bind pose.
+   */
+  chain: THREE.Bone[];
+  chainRest: THREE.Quaternion[];
   /** What `findLegs` decided, so a probe can check the DECISION. */
   side: number;
   rank: number;
@@ -240,8 +316,17 @@ export function findLegs(root: THREE.Object3D): Leg[] {
     const up = new THREE.Vector3(0, 1, 0)
       .applyQuaternion(parent.getWorldQuaternion(new THREE.Quaternion()).invert())
       .normalize();
+    /* Coxa down to the tip — the joints the plant is allowed to bend. */
+    const chain: THREE.Bone[] = [];
+    for (let n: THREE.Bone | null = bone; n; ) {
+      chain.push(n);
+      if (n === foot) break;
+      n = (n.children.find((c) => (c as THREE.Bone).isBone) ?? null) as THREE.Bone | null;
+    }
     legs.push({
       bone,
+      chain,
+      chainRest: chain.map((b) => b.quaternion.clone()),
       rest: bone.quaternion.clone(),
       phase: (side + rank) % 2,
       axis: up,
@@ -506,6 +591,119 @@ export class Critter {
     /* And it stands on the SOIL, which is the caller's to answer. */
     this.at.y = groundAt(this.at.x, this.at.z);
     this.pose(pace > 0);
+    this.plantFeet(groundAt, pace > 0);
+  }
+
+  /**
+   * PUT EACH FOOT WHERE THE GROUND ACTUALLY IS.
+   *
+   * `pose` above turns each coxa about a vertical axis, which swings the leg
+   * fore and aft and says nothing at all about height. That is why the feet
+   * floated and sank: the body was seated on the soil at one sample and the
+   * six legs were drawn wherever the swing left them, which on any slope or
+   * lump is nowhere near it.
+   *
+   * The rule is the queen's, reused rather than reinvented — `footTarget`
+   * decides the height a foot wants and `aimRotation` is one step of cyclic
+   * coordinate descent toward it. What is different here is only the shape
+   * of the animal: a critter stands on world up, where she walks walls and
+   * carries her own up vector, so the whole surface-frame apparatus that
+   * makes `QueenModel` complicated is not needed.
+   *
+   * ## Every frame starts from the bind pose
+   *
+   * The chain is reset before the gait and the plant run, for the reason
+   * `swingLeg` already gives: IK composed onto its own last answer winds the
+   * limb further round every frame and ties the animal in a knot within
+   * seconds. The coxa gets its swing from `pose`, and these bend under it.
+   *
+   * ## The swinging tripod lifts
+   *
+   * Without a lift every foot is permanently in stance — planted, and
+   * sliding as the body moves, which reads as a table on castors rather
+   * than an insect. The half of the tripod that is swinging is raised, and
+   * `footTarget`'s band then leaves it alone precisely because it is high.
+   * So the lift and the plant are the same rule seen from two sides.
+   */
+  private plantFeet(
+    groundAt: (x: number, z: number) => number, moving: boolean,
+  ): void {
+    if (this.legs.length === 0) return;
+    const clear = this.tall * FOOT_CLEAR;
+    const lift = this.tall * STEP_LIFT;
+    /* The stride's phase, so the two tripods alternate — the same cycle
+     * `pose` swings them on, read here rather than recomputed. */
+    const strides = (this.gone / Math.max(0.01, this.tall)) * STRIDES_PER_LENGTH;
+    this.root.updateMatrixWorld(true);
+
+    for (const leg of this.legs) {
+      const foot = leg.chain[leg.chain.length - 1];
+      if (!foot || leg.chain.length < 2) continue;
+      foot.getWorldPosition(S_FOOT);
+      const ground = groundAt(S_FOOT.x, S_FOOT.z);
+      /* A swinging foot is asked to be off the ground; a stance foot is
+       * asked to be on it. `footTarget` does both from one number. */
+      const swinging = moving
+        && Math.sin(strides * Math.PI * 2 + leg.phase * Math.PI) > 0;
+      /*
+       * EVERY FOOT IS PLACED, stance on the soil and swing a little above
+       * it — so the band is unbounded in both cases and `footTarget`
+       * reduces to its resting height. It is still worth calling rather
+       * than inlining: the clearance rule it carries is the reason a foot
+       * does not land a hair UNDER the surface half the time in float32.
+       *
+       * Leaving a swinging foot where the gait put it was tried and
+       * measured: the housefly's bind pose splays its legs so wide that a
+       * swinging foot sat up to 7.19 mm above the soil on a 6 mm animal —
+       * a leg waving in the air rather than taking a step. The gait here
+       * only yaws the coxa, so it never had a sensible height to leave
+       * alone in the first place.
+       */
+      const wanted = footTarget(
+        S_FOOT.y, ground + (swinging ? lift : 0), clear, Infinity,
+      );
+      if (Math.abs(wanted - S_FOOT.y) < 1e-6) continue;
+      S_TARGET.set(S_FOOT.x, wanted, S_FOOT.z);
+
+      /*
+       * TIP-FIRST. CCD converges from either end, and starting at the joint
+       * nearest the foot spends the correction on the smallest bones, which
+       * keeps the limb's silhouette close to the one the gait posed.
+       *
+       * The coxa is excluded — index 0 — because the gait owns it. Bending
+       * it here would fight `swingLeg` for the same joint and the leg would
+       * buzz between the two answers.
+       */
+      for (let pass = 0; pass < IK_PASSES; pass += 1) {
+        for (let j = leg.chain.length - 2; j >= 1; j -= 1) {
+          const joint = leg.chain[j]!;
+          joint.getWorldPosition(S_JOINT);
+          foot.getWorldPosition(S_FOOT);
+          const turn = aimRotation(
+            [S_JOINT.x, S_JOINT.y, S_JOINT.z],
+            [S_FOOT.x, S_FOOT.y, S_FOOT.z],
+            [S_TARGET.x, S_TARGET.y, S_TARGET.z],
+          );
+          if (turn.angle < 1e-6) continue;
+          /*
+           * The rotation is worked out in WORLD space and a bone stores a
+           * LOCAL one, so it is conjugated by the parent's world rotation on
+           * the way in. Applying a world quaternion straight to a local one
+           * is correct only for a bone whose parents are unrotated — true of
+           * every one of these in the bind pose and of none of them once the
+           * animal turns.
+           */
+          S_AXIS.set(turn.axis[0], turn.axis[1], turn.axis[2]);
+          S_SPIN.setFromAxisAngle(S_AXIS, turn.angle);
+          if (joint.parent) joint.parent.getWorldQuaternion(S_PARENT);
+          else S_PARENT.identity();
+          joint.quaternion.premultiply(
+            S_PARENT.clone().invert().multiply(S_SPIN).multiply(S_PARENT),
+          );
+          joint.updateMatrixWorld(true);
+        }
+      }
+    }
   }
 
   /**
@@ -522,6 +720,9 @@ export class Critter {
     this.root.position.copy(this.at);
     this.root.rotation.y = this.facing;
     this.root.position.y = this.at.y;
+    /* Bind pose first — the gait below and the plant after it both compose
+     * from rest rather than from last frame. See `plantFeet`. */
+    this.restLimbs();
 
     /*
      * WALKING IS A TRIPOD; IDLING IS A BREATH.
@@ -559,10 +760,27 @@ export class Critter {
    * within seconds. Every frame is an offset from the pose the rig shipped
    * in — the same reason `QueenModel` keeps a `rest` map.
    */
+  /** Back to the bind pose, so neither the gait nor the plant composes onto
+   *  its own last answer. See `plantFeet`. */
+  private restLimbs(): void {
+    for (const leg of this.legs) {
+      for (let i = 0; i < leg.chain.length; i += 1) {
+        leg.chain[i]!.quaternion.copy(leg.chainRest[i]!);
+      }
+    }
+  }
+
   private swingLeg(leg: Leg, angle: number): void {
     S_TURN.setFromAxisAngle(leg.axis, angle);
     leg.bone.quaternion.copy(leg.rest).multiply(S_TURN);
   }
+
+  /** For probes: the legs themselves, so a probe can ask where each foot
+   *  actually is against the soil rather than in the creature's own frame. */
+  get legsForTest(): readonly Leg[] { return this.legs; }
+
+  /** For probes: its own height in world units. */
+  get tallForTest(): number { return this.tall; }
 
   /**
    * For probes: how many legs it found and where their feet are right now.

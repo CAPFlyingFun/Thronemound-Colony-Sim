@@ -120,6 +120,66 @@ const out = await page.evaluate(() => {
      * left-three against right-three — and neither can be satisfied by a
      * gait that merely wiggles.
      */
+    /*
+     * DO THEIR FEET TOUCH THE GROUND?
+     *
+     * Reported from the device: "some of the insects did not stay actually
+     * on the ground mesh, but was like maybe doing the average of the
+     * mesh." Measured before the fix, a housefly's six feet ran from 5.5 mm
+     * BURIED to 5.8 mm in the AIR — a bigger error than the animal. The
+     * body was seated correctly; the legs never asked where the soil was.
+     *
+     * SAMPLED OVER TIME, not from one frame. A creature wanders and its
+     * gait cycles, so a single reading says where one foot was at one
+     * instant — which is how three runs of identical code produced three
+     * different answers while this was being fixed.
+     *
+     * The soil is asked the same question `plantFeet` asks: what is under
+     * this foot, searched from the BODY's height. Searching from the foot's
+     * own height is a different question once the foot is inside soil, and
+     * getting that wrong reports buried feet that are not there.
+     */
+    footing: (() => {
+      const V = s.at.constructor;
+      const tally = {};
+      for (let f = 0; f < 480; f += 1) {
+        s.stepForTest(1 / 60, 1);
+        if (f % 4) continue;
+        for (const c of s.critters) {
+          /*
+           * THE LIVING, UNCARRIED ONES ONLY, and that is the question
+           * rather than a convenience. A dead critter returns early from
+           * `step`, so its legs keep the pose it died in — which is right,
+           * an insect on its back does not stand up — and one in her jaws
+           * is being carried, not standing at all. This probe kills and
+           * hauls one a moment earlier, so both were in the sample and a
+           * corpse's stray foot was being read as the walkers sinking.
+           */
+          if (!c.ready || !c.alive || c.carried || !c.legsForTest?.length) continue;
+          c.root.updateMatrixWorld(true);
+          const t = tally[c.kind.id] ??= { n: 0, sum: 0, high: 0, deep: 0, sunk: 0 };
+          for (const leg of c.legsForTest) {
+            const tip = leg.chain[leg.chain.length - 1];
+            const w = new V();
+            w.setFromMatrixPosition(tip.matrixWorld);
+            const gap = (w.y - s.footingFrom(w.x, w.z, c.at.y)) * 5;
+            t.n += 1;
+            t.sum += Math.abs(gap);
+            t.high = Math.max(t.high, gap);
+            t.deep = Math.min(t.deep, gap);
+            if (gap < -0.25) t.sunk += 1;
+          }
+        }
+      }
+      return Object.entries(tally).map(([kind, t]) => ({
+        kind, samples: t.n,
+        meanMm: +(t.sum / t.n).toFixed(3),
+        highMm: +t.high.toFixed(2),
+        deepMm: +t.deep.toFixed(2),
+        sunkPct: +((100 * t.sunk) / t.n).toFixed(2),
+      }));
+    })(),
+
     gait: ['aphid', 'housefly'].map((kind) => {
       const r = s.critterLegsForTest(kind);
       if (!r || r.legs !== 6) return { kind, ok: false, why: 'no six-legged one ready' };
@@ -179,6 +239,35 @@ say(f.hurt === true, 'the bite actually costs it health');
 say(f.killed === true, 'it can be killed');
 say(f.stopped === true, 'and the corpse stops walking about');
 say(f.carried === true, 'a felled one can be carried home');
+for (const f of out.footing) {
+  console.log(`  ${f.kind.padEnd(9)} feet: mean ${f.meanMm} mm off the soil,`
+    + ` highest ${f.highMm}, deepest ${f.deepMm}, sunk ${f.sunkPct}%`
+    + `  (${f.samples} samples)`);
+  /*
+   * NOTHING SINKS — as a RATE, not as a single worst frame.
+   *
+   * The clearance in `plantFeet` holds every planted foot a hair above the
+   * surface, so a foot meaningfully below it means the IK did not run or
+   * could not reach. But the soil STREAMS: the window recentres as the
+   * player moves, and for the frame it does, the ground under a foot can
+   * move out from under an answer computed against the old field. Measured
+   * undisturbed, 0.00% of aphid feet and 0.04% of housefly feet are past a
+   * quarter of a millimetre under; measured in this probe, which drags the
+   * window about by teleporting to hunt, the worst single sample reaches
+   * -0.65 mm while the rate stays about the same.
+   *
+   * A single-frame streaming transient and "the feet do not touch the
+   * ground" are different faults, and asserting on the worst sample cannot
+   * tell them apart. The rate can. The deepest is still printed above, so a
+   * real regression is visible to a reader either way.
+   */
+  say(f.sunkPct < 1, `the ${f.kind}'s feet keep out of the ground (${f.sunkPct}% sunk)`);
+  /* AND NOTHING WAVES. A swinging foot is lifted deliberately and lands
+   * around a tenth of the animal's height up; metres of air means the leg
+   * was left wherever the bind pose splayed it, which is the bug. */
+  say(f.highMm < 3.5, `the ${f.kind}'s feet stay near the ground while it walks`);
+  say(f.meanMm < 1, `the ${f.kind} stands on the soil rather than near it`);
+}
 for (const g of out.gait) {
   say(g.ok, `the ${g.kind} walks an alternating tripod`
     + (g.ok ? ` — ${g.tripodA} / ${g.tripodB}` : ` — ${g.why ?? `${g.tripodA} / ${g.tripodB}`}`));
