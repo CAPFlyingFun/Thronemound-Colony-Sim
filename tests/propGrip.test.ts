@@ -708,3 +708,107 @@ describe('the round things still roll, and still settle', () => {
     }
   });
 });
+
+/**
+ * SHE HOLDS IT WHERE SHE TOOK HOLD OF IT.
+ *
+ * Reported: "when the player ant or AI ant goes to grab something, it needs
+ * to grab onto where on that object you actually connected on. Like in this
+ * image, I grabbed at the end, but it snapped to the middle point."
+ */
+describe('where a carried thing is held', () => {
+  const jawAt = (x: number, y: number, z: number): THREE.Vector3 =>
+    new THREE.Vector3(x, y, z);
+
+  /* Laid along Z with no spawn yaw. The constructor turns each prop by a
+   * hash of its mass so a scatter does not look stamped out, which is right
+   * in the world and only noise here — these are about the HOLD. */
+  const laidTwig = (): Prop => {
+    const p = new Prop('twig', PROP_SPECS.twig!, 0, 0, 0);
+    p.root.quaternion.identity();
+    return p;
+  };
+
+  it('carries a twig by the end it was grabbed by', () => {
+    const p = laidTwig();
+    /* Her jaws at one end of it — the twig lies along Z and is 11 mm long,
+     * so its far end is 5.5 mm out, which is 1.1 world units. */
+    const jaw = jawAt(0, 0, 1.0);
+    p.takeGrip(new THREE.Quaternion(), jaw);
+    p.carried = true;
+    const centre = new THREE.Vector3();
+    p.carriedCentre(jaw, new THREE.Quaternion(), centre);
+    /*
+     * The twig's CENTRE ends up a half-length back from her jaws, which is
+     * the whole fix: snapped to the middle this distance would be nought,
+     * because the centre would BE at her jaws.
+     */
+    expect(centre.distanceTo(jaw)).toBeGreaterThan(0.8);
+    /* And back along the stick, not out to one side. */
+    expect(centre.z).toBeLessThan(jaw.z - 0.8);
+  });
+
+  it('carries it by the OTHER end if that is the end she reached', () => {
+    /*
+     * Reaching the far end must put the twig on the far side of her jaws,
+     * not the near one. Both grips leave the centre a half-length away —
+     * what changes is WHICH WAY, and a version that snapped to the middle
+     * would have the centre at her jaws in both cases and no direction at
+     * all.
+     */
+    const p = laidTwig();
+    const centre = new THREE.Vector3();
+    const nearJaw = jawAt(0, 0, 1.0);
+    p.takeGrip(new THREE.Quaternion(), nearJaw);
+    p.carriedCentre(nearJaw, new THREE.Quaternion(), centre);
+    expect(centre.z - nearJaw.z).toBeLessThan(-0.8);
+
+    const farJaw = jawAt(0, 0, -1.0);
+    p.takeGrip(new THREE.Quaternion(), farJaw);
+    p.carriedCentre(farJaw, new THREE.Quaternion(), centre);
+    expect(centre.z - farJaw.z).toBeGreaterThan(0.8);
+  });
+
+  it('still centres a small thing, where centre and grip are the same place', () => {
+    /* A seed is 2.2 mm across. There is no meaningful "end" of one, and
+     * the old behaviour was already right for it. */
+    const p = new Prop('seed', PROP_SPECS.seed!, 0, 0, 0);
+    const jaw = jawAt(0, 0, 0.2);
+    p.takeGrip(new THREE.Quaternion(), jaw);
+    const centre = new THREE.Vector3();
+    p.carriedCentre(jaw, new THREE.Quaternion(), centre);
+    expect(centre.distanceTo(jaw)).toBeLessThan(PROP_SPECS.seed!.halfMm / MM + 0.05);
+  });
+
+  it('keeps holding the same end as she turns', () => {
+    /*
+     * The hold is stored in the PROP's frame, so it survives her turning —
+     * grab the far end of a twig, walk in a circle, and it is still the far
+     * end in her jaws rather than the stick swapping round.
+     */
+    const p = laidTwig();
+    const jaw = jawAt(0, 0, 1.0);
+    p.takeGrip(new THREE.Quaternion(), jaw);
+    const centre = new THREE.Vector3();
+    for (const deg of [0, 90, 180, 270]) {
+      const her = new THREE.Quaternion()
+        .setFromAxisAngle(new THREE.Vector3(0, 1, 0), (deg * Math.PI) / 180);
+      p.carriedCentre(jaw, her, centre);
+      /* However she is turned, the centre stays a half-length from her
+       * jaws — the distance is the invariant, the direction rotates. */
+      expect(centre.distanceTo(jaw), `${deg}°`).toBeGreaterThan(0.8);
+      expect(centre.distanceTo(jaw), `${deg}°`).toBeLessThan(1.3);
+    }
+  });
+
+  it('grabs nothing in particular when she was given no jaw position', () => {
+    /* The old two-argument call still works and still centres, so a caller
+     * that has no jaw anchor is not silently broken. */
+    const p = laidTwig();
+    p.takeGrip(new THREE.Quaternion());
+    const centre = new THREE.Vector3();
+    const jaw = jawAt(3, 1, 2);
+    p.carriedCentre(jaw, new THREE.Quaternion(), centre);
+    expect(centre.distanceTo(jaw)).toBeCloseTo(0, 6);
+  });
+});

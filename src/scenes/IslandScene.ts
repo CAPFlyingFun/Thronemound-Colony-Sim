@@ -854,7 +854,19 @@ export class IslandScene {
         /* The angle it was taken at, remembered in HER frame — so a twig
          * picked up sideways is carried sideways instead of swinging
          * through her as she turns. See `Prop.grip`. */
-        if (!no) prop.takeGrip(this.queen.root.quaternion);
+        if (!no) {
+          /* Her jaws, so the prop can record WHERE on itself she reached
+           * it — see `Prop.takeGrip`. The same anchor the load is carried
+           * at, so the point she grabbed lands exactly there. */
+          if (!(this.queenReady && this.queen.jawPosition(S_JAW))) {
+            S_JAW.set(
+              this.at.x + this.fwd.x * JAW_PAST_NOSE,
+              this.at.y,
+              this.at.z + this.fwd.z * JAW_PAST_NOSE,
+            );
+          }
+          prop.takeGrip(this.queen.root.quaternion, S_JAW);
+        }
         if (no === 'too-heavy') this.toastCombat('TOO HEAVY TO SHIFT');
         else if (no === 'too-tired') this.toastCombat('TOO TIRED TO LIFT');
         else if (no) this.toastCombat('JAWS FULL');
@@ -1070,11 +1082,31 @@ export class IslandScene {
           this.at.z + this.fwd.z * JAW_PAST_NOSE,
         );
       }
+      /*
+       * HELD WHERE SHE TOOK HOLD OF IT, not by its middle.
+       *
+       * Reported: "it needs to grab onto where on that object you actually
+       * connected on. Like in this image, I grabbed at the end, but it
+       * snapped to the middle point." This was the line that did it — the
+       * load's CENTRE was written straight to her jaw position, which for a
+       * seed is invisible and for an eleven-millimetre twig is the whole
+       * complaint.
+       *
+       * Anything that knows where it was grabbed answers for itself; see
+       * `Prop.carriedCentre`, which works it out from the hull point
+       * nearest her jaws at the moment of the lift. Anything that does not
+       * — an aphid, a beetle, all of them small and roughly round — keeps
+       * the old behaviour, which for those is already right.
+       */
       /* Component-wise, because `Portable.at` is a plain {x,y,z} — the
        * carry model deliberately owns no THREE types. */
-      load.at.x = S_JAW.x;
-      load.at.y = S_JAW.y;
-      load.at.z = S_JAW.z;
+      if (load.carriedCentre) {
+        load.carriedCentre(S_JAW, this.queen.root.quaternion, load.at);
+      } else {
+        load.at.x = S_JAW.x;
+        load.at.y = S_JAW.y;
+        load.at.z = S_JAW.z;
+      }
     }
 
     /*

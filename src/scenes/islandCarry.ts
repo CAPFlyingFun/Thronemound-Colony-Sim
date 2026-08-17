@@ -47,6 +47,24 @@ export interface Portable {
    * taking it.
    */
   alive: boolean;
+  /**
+   * WHERE ITS CENTRE GOES so the point she grabbed sits at her jaws.
+   *
+   * Optional, because most things she picks up are small enough that their
+   * centre IS where she is holding them — a seed, an aphid. It exists for
+   * the long ones: a twig taken by the end must be carried by the end, not
+   * snap its middle into her mouth. Implemented by `Prop`, whose hull knows
+   * its own surface.
+   *
+   * Typed loosely on purpose. This file does no geometry and owns no THREE
+   * types — see the note on `at` — so the shapes here are structural and
+   * the caller passes whatever vector it already has.
+   */
+  carriedCentre?(
+    jaw: { x: number; y: number; z: number },
+    holder: unknown,
+    into: { x: number; y: number; z: number },
+  ): void;
 }
 
 export interface CarryTuning {

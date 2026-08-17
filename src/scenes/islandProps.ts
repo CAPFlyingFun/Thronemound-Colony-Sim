@@ -232,6 +232,7 @@ const SLEEP_POLL = 0.2; //    seconds between a sleeper's footing checks
 
 const TIP_LEVER = new THREE.Vector3();
 const TIP_AXIS = new THREE.Vector3();
+const HOLD_Q = new THREE.Quaternion();
 const TIP_TORQUE = new THREE.Vector3();
 const TIP_Q = new THREE.Quaternion();
 
@@ -434,6 +435,9 @@ export class Prop implements Portable {
 
   /** Where it is rolling, in world units a second. See `tick`. */
   private readonly roll = new THREE.Vector3();
+
+  /** Where on it she took hold, in its own frame. See `takeGrip`. */
+  private readonly hold = new THREE.Vector3();
 
   /** How fast it turned last frame, radians a second — for the sleep test.
    *  Angular things only; see `tipOver`. */
@@ -1038,8 +1042,57 @@ export class Prop implements Portable {
    * Called by the scene on a successful lift. Her rotation inverted times
    * its own is its pose in HER frame; see `grip`.
    */
-  takeGrip(holder: THREE.Quaternion): void {
+  takeGrip(holder: THREE.Quaternion, jaw?: THREE.Vector3): void {
     this.grip.copy(holder).invert().multiply(this.root.quaternion);
+    /*
+     * AND WHERE ON IT SHE TOOK HOLD.
+     *
+     * Reported: "when the player ant or AI ant goes to grab something, it
+     * needs to grab onto where on that object you actually connected on.
+     * Like in this image, I grabbed at the end, but it snapped to the
+     * middle point."
+     *
+     * It did, and the reason was one line in `carryTick`: the load's CENTRE
+     * was written to her jaw position. For a seed that is invisible and for
+     * an eleven-millimetre twig it is the whole complaint — walk up to one
+     * end, close your jaws, and the stick jumps sideways until its middle
+     * is in your mouth.
+     *
+     * The hull already knows the answer. It is the shape's own surface, so
+     * the nearest hull point to her jaws IS the place she reached it, and
+     * storing it in the prop's OWN frame means it survives the thing
+     * turning: grab the far end of a twig, walk in a circle, and it is
+     * still the far end she is holding.
+     */
+    this.hold.set(0, 0, 0);
+    if (!jaw) return;
+    let best = Infinity;
+    for (let i = 0; i < this.hull.length; i += 3) {
+      HULL_P.set(this.hull[i]!, this.hull[i + 1]!, this.hull[i + 2]!)
+        .applyQuaternion(this.root.quaternion)
+        .add(this.at);
+      const gap = HULL_P.distanceToSquared(jaw);
+      if (gap >= best) continue;
+      best = gap;
+      this.hold.set(this.hull[i]!, this.hull[i + 1]!, this.hull[i + 2]!);
+    }
+  }
+
+  /**
+   * Where its CENTRE has to sit so that the point she took hold of is at
+   * her jaws — the other half of `takeGrip`.
+   *
+   * The centre stays the centre throughout, which is what stops a prop
+   * jumping the moment she lets go: `at` means the same thing carried and
+   * dropped, and only where it is put changes.
+   */
+  carriedCentre(
+    jaw: { x: number; y: number; z: number },
+    holder: THREE.Quaternion,
+    into: THREE.Vector3,
+  ): void {
+    into.copy(this.hold).applyQuaternion(HOLD_Q.copy(holder).multiply(this.grip));
+    into.set(jaw.x - into.x, jaw.y - into.y, jaw.z - into.z);
   }
 
   /**
