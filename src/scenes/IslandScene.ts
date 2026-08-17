@@ -167,7 +167,7 @@ import {
   Worm, WORM_BORE_MM, WORM_CEIL_MM, WORM_COUNT, WORM_DRAWN, WORM_FLOOR_MM,
   WORM_REACH, TRAIL_POINTS, TRAIL_STEP_MM, type WormSoil,
 } from './islandWorm';
-import { dressCreature } from './creatureSkin';
+import { dressCreature, PROP_ROUGHNESS } from './creatureSkin';
 import { dropSave, getSave, putSave, readMark } from './islandStore';
 import { wound, type CreatureKind } from './creatureBrain';
 import { APHID, EARTHWORM, HOUSEFLY } from './creatureKinds';
@@ -759,6 +759,40 @@ export class IslandScene {
       this.scene.add(prop.root);
       this.props.push(prop);
     }
+    /*
+     * AND THEN THEIR REAL BODIES — "replace the procedural objects with the
+     * real glb models now like the twig, rock, dirt, etc."
+     *
+     * ONE FETCH PER FILE, not per prop: the pebble and the stone are the
+     * same rock at two sizes, so a naive loop would download it twice to
+     * build two copies of one geometry. Keyed on the file name for that
+     * reason rather than on the prop.
+     *
+     * DRESSED ON THE TEMPLATE before anything is cloned, for the reason
+     * `creatureSkin` exists: glTF packs metalness and roughness into one
+     * image and three.js MULTIPLIES by both, so an untouched export comes
+     * out wet-looking. That is the same fault as the glossy trees, and
+     * these are stone, soil and dead wood — the three most matte things on
+     * the island. Doing it on the template also means one pass fixes every
+     * clone, because `Object3D.clone` shares materials.
+     */
+    const files = new Set(
+      this.props.map((p) => p.spec.model).filter((f): f is string => !!f),
+    );
+    for (const file of files) {
+      void new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}models/${file}`)
+        .then((gltf) => {
+          dressCreature(gltf.scene, PROP_ROUGHNESS);
+          for (const p of this.props) {
+            if (p.spec.model === file) p.dress(gltf.scene);
+          }
+        })
+        .catch(() => {
+          /* It keeps the stand-in shape and stays collidable. A prop that
+           * vanished on a failed fetch would be a thing she can walk into
+           * and no longer see. */
+        });
+    }
   }
 
   /**
@@ -984,6 +1018,16 @@ export class IslandScene {
 
     const load = this.carry.held;
     for (const q of this.quarry) q.carried = q === load;
+    /*
+     * AND THE CREATURES, now that a felled one is cargo.
+     *
+     * `carried` is not decoration: `quarryInReach` and `cargoInReach` both
+     * skip a thing already in her jaws, the shove list leaves it alone, and
+     * the crush check reads it to know a load is not something she has just
+     * trodden on. A critter that was carried without the flag set was being
+     * hauled home and simultaneously treated as loose scenery.
+     */
+    for (const c of this.critters) c.carried = c === load;
     for (const p of this.props) {
       p.carried = p === load;
       /* Her rotation, so a carried thing keeps the grip it was taken with

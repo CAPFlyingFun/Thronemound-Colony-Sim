@@ -98,21 +98,15 @@ const PROP_FALL_MAX = 6;
  * the right balance on the ground".
  *
  * A seed is a squashed sphere and a rock is a dodecahedron; both are round
- * enough that resting on a slope looks wrong. A leaf and a twig are not —
- * a twig on a slope stays put, and a rolling leaf would look sillier than a
- * still one. Kept as a set rather than a flag on every spec because it is a
- * fact about the SHAPE, and the shape is what `kind` already names.
+ * enough that resting on a slope looks wrong. A twig is not — it stays put.
+ * Kept as a set rather than a flag on every spec because it is a fact about
+ * the SHAPE, and the shape is what `kind` already names.
+ *
+ * A CLOD DOES NOT ROLL, and that is the honest reading of what it is: a
+ * lump of damp soil that fell out of a tunnel wall, not a pebble. It lands
+ * where it lands.
  */
 const ROLLS = new Set<PropSpec['kind']>(['seed', 'rock']);
-
-/**
- * WHICH THINGS ARE A SURFACE RATHER THAN A SOLID — and so have a back.
- *
- * A leaf is one disc of geometry. Everything else here is closed, and a
- * closed shape must stay single-sided: its inside is never visible, so
- * drawing it is fill rate spent on nothing.
- */
-const FLAT = new Set<PropSpec['kind']>(['leaf']);
 
 /**
  * Below this slope it has found its balance and stays there.
@@ -199,11 +193,22 @@ import { MM } from '../world/worldScape';
 
 /** The kinds the island seeds, and what each weighs in milligrams. */
 export interface PropSpec {
-  kind: 'seed' | 'crumb' | 'twig' | 'leaf' | 'rock';
+  kind: 'seed' | 'crumb' | 'twig' | 'clod' | 'rock';
   massMg: number;
   /** Rough half-extent, mm — its footprint and its grab radius. */
   halfMm: number;
   colour: number;
+  /**
+   * The GLB under `public/models`, for the ones that have real art.
+   *
+   * Asked for: "can you replace the procedural objects with the real glb
+   * models now like the twig, rock, dirt, etc." Where a model is named the
+   * prop wears it; where one is not, the procedural shape stands, and it
+   * stands anyway until the file arrives (and if it never does) — see
+   * `Prop.dress`. A prop that vanished on a failed fetch would be a thing
+   * she can still trip over and no longer see.
+   */
+  model?: string;
 }
 
 /*
@@ -211,14 +216,32 @@ export interface PropSpec {
  * today rather than to decorate. A queen carries the first four and drags
  * the two rocks; the 120mg rock she cannot move at all, which is the only
  * way `immobile` is ever taught before there is a second caste to teach it.
+ *
+ * THE LEAF HAS GONE, at Joshua's ask: "can drop the leaf until I get a real
+ * model." It was the one prop whose procedural shape was a flat disc, which
+ * is why it needed the double-sided special case — that has gone with it and
+ * will come back as a fact about the model rather than about a circle.
+ *
+ * THE CLOD IS NEW, and it is the "dirt" of the ask. It is also the heaviest
+ * thing she can still CARRY rather than drag, which is a gap the set did not
+ * cover: seed, crumb and twig are all comfortably inside her 20 mg limit and
+ * the pebble at 22 is just outside it, so nothing sat at the top of the
+ * carry band where the pace taper actually bites.
  */
 export const PROP_SPECS: Record<string, PropSpec> = {
   seed: { kind: 'seed', massMg: 3, halfMm: 1.1, colour: 0xb99a5c },
   crumb: { kind: 'crumb', massMg: 5, halfMm: 1.2, colour: 0xa8793e },
-  leaf: { kind: 'leaf', massMg: 4, halfMm: 4.4, colour: 0x5f7a34 },
-  twig: { kind: 'twig', massMg: 8, halfMm: 5.5, colour: 0x77563a },
-  pebble: { kind: 'rock', massMg: 22, halfMm: 2.4, colour: 0x8d8d94 },
-  stone: { kind: 'rock', massMg: 120, halfMm: 4.4, colour: 0x7d7d86 },
+  twig: { kind: 'twig', massMg: 8, halfMm: 5.5, colour: 0x77563a, model: 'twig-model.glb' },
+  /*
+   * 3.2 mm across and 13 mg. Soil runs about 1.5 mg per cubic millimetre
+   * wet, and the model's box at this size holds roughly nine — so the mass
+   * is the volume rather than a number picked to feel right. GAME TUNING in
+   * that the density is a textbook figure and not a measurement of this
+   * island's dirt.
+   */
+  clod: { kind: 'clod', massMg: 13, halfMm: 1.6, colour: 0x6b5138, model: 'dirt-clod.glb' },
+  pebble: { kind: 'rock', massMg: 22, halfMm: 2.4, colour: 0x8d8d94, model: 'rock-model.glb' },
+  stone: { kind: 'rock', massMg: 120, halfMm: 4.4, colour: 0x7d7d86, model: 'rock-model.glb' },
 };
 
 /**
@@ -292,6 +315,9 @@ export class Prop implements Portable {
    */
   private readonly hull: number[] = [];
 
+  /** The stand-in shape, kept so `dress` can take it away again. */
+  private drawn: THREE.Mesh | null = null;
+
   constructor(
     readonly id: string,
     readonly spec: PropSpec,
@@ -302,33 +328,25 @@ export class Prop implements Portable {
     this.root.position.copy(this.at);
 
     /*
-     * A FLAT THING HAS TWO SIDES. Reported: "leaf works, but only shows
-     * 1-sided."
+     * THE PROCEDURAL SHAPE, which is now the FALLBACK rather than the
+     * finished article for anything with a `model` — see `dress`. It is
+     * built either way and deliberately: a prop that drew nothing until a
+     * fetch came back would be a thing she can walk into and cannot see,
+     * and if the fetch fails it would stay that way.
      *
-     * Every other prop here is a closed solid — a sphere, a dodecahedron, a
-     * cylinder — and for those the default is not just fine but wanted: you
-     * can never see the inside of a rock, so drawing it is fill rate spent
-     * on nothing. A leaf is a single disc of geometry with all its normals
-     * facing one way, so from underneath there is simply nothing there. She
-     * picks it up, turns, and it vanishes.
-     *
-     * Kept as a question about the SHAPE rather than a flag on the spec,
-     * for the same reason `ROLLS` is: whether a thing has an underside is a
-     * fact about its geometry, and `kind` already names the geometry.
+     * Every shape here is a closed solid, so single-sided is not just fine
+     * but wanted: you can never see the inside of a rock, and drawing it is
+     * fill rate spent on nothing. The one exception was the leaf, a single
+     * disc whose underside was missing until it was made double-sided —
+     * that has gone with the leaf, and when a leaf MODEL arrives its
+     * sidedness will be a fact about the mesh rather than about a circle.
      */
-    const mat = new THREE.MeshLambertMaterial({
-      color: spec.colour,
-      side: FLAT.has(spec.kind) ? THREE.DoubleSide : THREE.FrontSide,
-    });
+    const mat = new THREE.MeshLambertMaterial({ color: spec.colour });
     const r = spec.halfMm / MM;
     let geo: THREE.BufferGeometry;
     if (spec.kind === 'twig') {
       geo = new THREE.CylinderGeometry(r * 0.12, r * 0.15, r * 2, 8);
       geo.rotateX(Math.PI / 2);
-    } else if (spec.kind === 'leaf') {
-      geo = new THREE.CircleGeometry(r, 16);
-      geo.scale(1, 1.4, 1);
-      geo.rotateX(-Math.PI / 2);
     } else if (spec.kind === 'seed') {
       geo = new THREE.SphereGeometry(r, 10, 8);
       geo.scale(1, 0.7, 1.5);
@@ -338,10 +356,93 @@ export class Prop implements Portable {
     const mesh = new THREE.Mesh(geo, mat);
     mesh.castShadow = false;
     this.root.add(mesh);
+    this.drawn = mesh;
     this.buildHull(geo);
     /* A stone is not a sphere sitting on a plane; it is bedded in. Half a
      * radius down looks planted rather than balanced. */
     this.root.rotation.y = (spec.massMg * 1.7) % Math.PI;
+  }
+
+  /**
+   * GIVE IT ITS REAL BODY — the GLB in place of the stand-in shape.
+   *
+   * Asked for: "can you replace the procedural objects with the real glb
+   * models now like the twig, rock, dirt, etc."
+   *
+   * The template is fetched ONCE per file by the scene and handed here, so
+   * two rocks are one download and one geometry; `Object3D.clone` shares
+   * both, which is exactly what is wanted for scenery.
+   *
+   * ## The fit is measured, not tabled
+   *
+   * `creatureScale` carries a hand-computed `fit` per creature because a
+   * creature's size is a biological claim that has to reproduce exactly.
+   * A prop's is not: `halfMm` already says how big the thing is, so the
+   * scale is just whatever makes the model that size, and computing it from
+   * the template's own box means re-exporting a model at a different scale
+   * cannot silently resize the prop. There is no number here to go stale.
+   *
+   * ## And the hull is rebuilt, which is the part that matters
+   *
+   * The collision points come off the MESH — asked for directly: "could do
+   * it mesh instead of shape for the collisions and would naturally be the
+   * right shape." Dressing a prop without re-hulling it would leave a twig
+   * that looks like a twig and collides like a cylinder, which is the
+   * same class of bug as standing on the stale heightfield: the picture and
+   * the physics describing different objects.
+   */
+  dress(template: THREE.Object3D): void {
+    const body = template.clone(true);
+    const box = new THREE.Box3().setFromObject(body);
+    const size = box.getSize(new THREE.Vector3());
+    const longest = Math.max(size.x, size.y, size.z);
+    if (!(longest > 0)) return;
+    /* `halfMm` is a HALF-extent, so the whole thing is twice it. */
+    const fit = (this.spec.halfMm * 2) / MM / longest;
+    /*
+     * A LONG THING LIES ALONG Z, because that is the convention the rest of
+     * this file already uses — the procedural twig is a cylinder rotated
+     * onto Z, and `grip` records a carried pose relative to that. The twig
+     * model is modelled along X, so without this it would be carried and
+     * dropped across her rather than in front of her.
+     *
+     * Only for shapes that are genuinely elongated. Measured on the three
+     * models: the twig is 1.90 against 0.47 on its next axis, while the
+     * rock (1.90 / 1.69) and the clod (1.89 / 1.56) are within half again
+     * of round — turning those would be turning a rock for no reason.
+     */
+    const axes = [size.x, size.y, size.z];
+    const next = axes.slice().sort((a, b) => b - a)[1] ?? longest;
+    if (longest > next * 1.5) {
+      if (longest === size.x) body.rotation.y = Math.PI / 2;
+      else if (longest === size.y) body.rotation.x = Math.PI / 2;
+    }
+    body.scale.setScalar(fit);
+    body.updateMatrixWorld(true);
+    if (this.drawn) {
+      this.root.remove(this.drawn);
+      this.drawn.geometry.dispose();
+    }
+    this.root.add(body);
+    this.drawn = null;
+    /*
+     * RE-HULLED IN THE PROP'S OWN FRAME. `buildHull` reads a geometry's raw
+     * vertices, which for a scaled and turned clone are not where the thing
+     * actually is — so the points are taken through the clone's world
+     * matrix relative to the prop's root instead.
+     */
+    this.hull.length = 0;
+    const toLocal = new THREE.Matrix4().copy(this.root.matrixWorld).invert();
+    this.root.updateMatrixWorld(true);
+    body.traverse((n) => {
+      const m = n as THREE.Mesh;
+      if (!m.isMesh || !m.geometry) return;
+      const geo2 = m.geometry.clone();
+      geo2.applyMatrix4(new THREE.Matrix4()
+        .multiplyMatrices(toLocal, m.matrixWorld));
+      this.buildHull(geo2);
+      geo2.dispose();
+    });
   }
 
   /**
@@ -608,8 +709,14 @@ export class Prop implements Portable {
   /** Where its centre rests above the ground it sits on. */
   private get rest(): number {
     const r = this.spec.halfMm / MM;
-    if (this.spec.kind === 'leaf') return r * 0.08;
+    /* A twig is thin, so its centre sits close to the ground; a clod is
+     * flattish and sits lower than a rock without lying flat. Measured off
+     * each model's own box against its longest axis: the twig 0.25, the
+     * clod 0.51, the rock 1.14 — halved, because this is a centre height
+     * rather than a thickness, and scaled to `halfMm` like everything else
+     * on this class. */
     if (this.spec.kind === 'twig') return r * 0.14;
+    if (this.spec.kind === 'clod') return r * 0.26;
     return r * 0.7;
   }
 
@@ -632,7 +739,7 @@ export class Prop implements Portable {
 export const PROP_SCATTER: { key: string; dxMm: number; dzMm: number }[] = [
   { key: 'seed', dxMm: 34, dzMm: -18 },
   { key: 'crumb', dxMm: -26, dzMm: 30 },
-  { key: 'leaf', dxMm: 48, dzMm: 26 },
+  { key: 'clod', dxMm: 48, dzMm: 26 },
   { key: 'twig', dxMm: -40, dzMm: -34 },
   { key: 'pebble', dxMm: 22, dzMm: 52 },
   { key: 'stone', dxMm: -56, dzMm: 12 },

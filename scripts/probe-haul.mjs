@@ -24,6 +24,12 @@ p.on('console', (m) => { if (m.type() === 'error') errs.push(`console: ${m.text(
 await p.goto(URL, { waitUntil: 'domcontentloaded' });
 await p.waitForFunction(() => window.islandScene?.ready === true, null, { timeout: 180000 });
 await p.waitForFunction(() => document.querySelector('.tm-loading-root') === null, null, { timeout: 180000 });
+/* The creatures are fetched off the critical path, and this probe now hunts
+ * one — so wait for a body rather than for a stopwatch. */
+await p.waitForFunction(
+  () => window.islandScene.crittersForTest().some((c) => c.ready),
+  null, { timeout: 90000 },
+).catch(() => { /* reported as the probe's own failure below */ });
 await p.waitForTimeout(600);
 
 const out = await p.evaluate(async () => {
@@ -46,20 +52,43 @@ const out = await p.evaluate(async () => {
       label: el.getAttribute('aria-label') } : null;
   };
 
-  const beetle = s.quarry[0];
-  if (!beetle) return { fail: 'no beetle on the island' };
+  /*
+   * THE PREY IS A HOUSEFLY NOW, not the beetle.
+   *
+   * This probe has been dead since the beetle was pulled from the island
+   * ("remove it as I will add a real GLB beetle later") — it opened with
+   * `s.quarry[0]` and bailed out at the first line, taking the whole food
+   * loop's only coverage with it. Nothing else checks that a kill turns
+   * into protein in the larder.
+   *
+   * The fly is the biggest thing on the island that can be hunted, and
+   * `Critter` satisfies both `Quarry` and `Portable` now, so every step
+   * below is the same step against a different animal.
+   */
+  const preyOf = () => s.critters.find((c) => c.kind.id === 'housefly' && c.ready)
+    ?? s.critters.find((c) => c.ready);
+  const prey = preyOf();
+  if (!prey) return { fail: 'no walking creature on the island' };
 
-  /* 1. LIVE BEETLE MUST REFUSE. The reach test offers it up on purpose so
+  /* 1. A LIVE ONE MUST REFUSE. The reach test offers it up on purpose so
    *    the HUD can say KILL IT FIRST rather than NOTHING TO CARRY. */
-  s.teleportMm(beetle.at.x * 5, beetle.at.z * 5);
+  s.teleportMm(prey.at.x * 5, prey.at.z * 5);
   s.stepForTest(1 / 60, 4);
   s.useAbility('carry');
-  log.push(['live beetle refused', s.carry.carrying === false]);
+  log.push(['a live one is refused', s.carry.carrying === false]);
 
-  /* 2. FELL IT and lift it. */
-  beetle.alive = false;
-  beetle.hp = 0;
-  s.stepForTest(1 / 60, 4);
+  /* 2. FELL IT and lift it. Through the real jaws rather than by writing
+   *    its health, so the fight is exercised too — it flees and breaks
+   *    free, so this is a chase, bounded so a failure reports. */
+  for (let n = 0; n < 60 && prey.alive; n += 1) {
+    s.teleportMm(prey.at.x * 5, prey.at.z * 5);
+    if (s.combat.phase === 'free') s.useAbility('bite');
+    s.stepForTest(1 / 60, 70);
+  }
+  log.push(['she can kill it with her jaws', prey.alive === false]);
+  if (s.combat.phase !== 'free') s.useAbility('bite');
+  s.teleportMm(prey.at.x * 5, prey.at.z * 5);
+  s.stepForTest(1 / 60, 6);
   const beforeStamina = s.vitals.stamina;
   s.useAbility('carry');
   const lifted = s.carry.carrying;
@@ -76,20 +105,46 @@ const out = await p.evaluate(async () => {
   const pl = plate();
   log.push(['plate wears DROP while loaded', pl?.drop === true && pl?.carry === false]);
 
-  /* 3. THE RUN IS GONE while she is under it. */
+  /*
+   * 3. THE RUN IS GONE UNDER A DRAG — and the fly is not one.
+   *
+   * `tooLadenToRun` is about DRAGGING, and a 9 mg housefly is well inside
+   * a queen's 20 mg carry limit, so she can quite properly run with it.
+   * The beetle used to serve both purposes at 45 mg; now the two questions
+   * need two objects, which is more honest anyway — one asks about prey
+   * and this one asks about weight.
+   */
   s.pace = 2;
   s.applyPace();
   s.stepForTest(1 / 60, 4);
-  log.push(['too laden to run', s.carry.tooLadenToRun === true]);
+  log.push(['she can still run under something this light',
+    s.carry.tooLadenToRun === false]);
+  const wasHeld = s.carry.held;
+  s.carry.drop();
+  const pebble = s.props.find((q) => q.id === 'pebble');
+  s.teleportMm(pebble.at.x * 5, pebble.at.z * 5);
+  s.stepForTest(1 / 60, 6);
+  s.useAbility('interact');
+  s.stepForTest(1 / 60, 4);
+  log.push(['a pebble is a drag, not a carry', s.carry.mode === 'drag']);
+  log.push(['and a drag takes the run away', s.carry.tooLadenToRun === true]);
+  s.useAbility('interact');
+  s.stepForTest(1 / 60, 4);
+  /* Back under the carcass for the haul home. */
+  s.teleportMm(wasHeld.at.x * 5, wasHeld.at.z * 5);
+  s.stepForTest(1 / 60, 6);
+  s.useAbility('carry');
+  s.stepForTest(1 / 60, 4);
+  log.push(['picked the carcass back up', s.carry.carrying === true]);
 
   /* 4. IT FOLLOWS HER JAWS rather than staying on the ground. */
-  const wasAt = { x: beetle.at.x, z: beetle.at.z };
+  const wasAt = { x: prey.at.x, z: prey.at.z };
   s.input.walk = 1;
   s.stepForTest(1 / 60, 90);
   s.input.walk = 0;
-  const moved = Math.hypot(beetle.at.x - wasAt.x, beetle.at.z - wasAt.z);
-  log.push(['the beetle travelled with her', moved > 0.05]);
-  log.push(['it is flagged as cargo', beetle.carried === true]);
+  const moved = Math.hypot(prey.at.x - wasAt.x, prey.at.z - wasAt.z);
+  log.push(['the carcass travelled with her', moved > 0.05]);
+  log.push(['it is flagged as cargo', prey.carried === true]);
 
   /* 5. NO COLONY, NO DELIVERY — there is nobody to hand it to yet. */
   const noColony = s.colony.length === 0;

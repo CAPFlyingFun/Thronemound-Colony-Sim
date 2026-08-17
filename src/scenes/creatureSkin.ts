@@ -61,6 +61,17 @@ export const CREATURE_ROUGHNESS = 0.72;
 export const CHITIN_ROUGHNESS = 0.55;
 
 /**
+ * AND THE LOOSE THINGS ON THE GROUND ARE MATTE — stone, soil and dead wood.
+ *
+ * Fully rough, the same as `BARK_ROUGHNESS`, and for the same reported
+ * reason: "trees shouldn't be glossy". A chitinous insect has a real
+ * sheen and gets one; a pebble, a clod of dirt and a dry twig have none at
+ * all, and the exporter's packed metal-roughness map gives every one of
+ * them a wet highlight until it is cleared.
+ */
+export const PROP_ROUGHNESS = 1;
+
+/**
  * Put a loaded creature into this island's material language.
  *
  * Call it once on the LOADED TEMPLATE, before cloning: `SkeletonUtils.clone`

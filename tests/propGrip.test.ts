@@ -1,7 +1,13 @@
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 
-import { Prop, PROP_SPECS, type PropGround } from '../src/scenes/islandProps';
+import { carryVerdict } from '../src/scenes/mandibleReach';
+
+import {
+  Prop, PROP_SCATTER, PROP_SPECS, type PropGround,
+} from '../src/scenes/islandProps';
 
 /**
  * A CARRIED THING KEEPS THE ANGLE IT WAS PICKED UP AT, in HER frame.
@@ -302,17 +308,28 @@ describe('how a loose thing is drawn', () => {
     return side;
   };
 
-  it('draws a leaf from both sides, because a leaf has a back', () => {
-    expect(sideOf(new Prop('leaf', PROP_SPECS.leaf!, 0, 0, 0))).toBe(THREE.DoubleSide);
-  });
-
-  it('leaves the closed shapes single-sided', () => {
+  /*
+   * THE LEAF HAS GONE, and with it the only double-sided case. Asked for:
+   * "can drop the leaf until I get a real model." It was the one prop whose
+   * stand-in shape was a flat disc, which is why it needed the rule at all.
+   *
+   * The test is not deleted so much as inverted: what has to hold now is
+   * that NOTHING is drawn two-sided, because every remaining shape is
+   * closed. When a leaf model arrives its sidedness will be a fact about
+   * the mesh rather than about a circle, and this is where that gets said.
+   */
+  it('leaves every shape single-sided, now they are all closed', () => {
     /* You can never see the inside of a rock, so drawing it is fill rate
      * spent on nothing. The rule is about the SHAPE, not about props. */
-    for (const key of ['seed', 'crumb', 'twig', 'pebble', 'stone']) {
+    for (const key of Object.keys(PROP_SPECS)) {
       const spec = PROP_SPECS[key]!;
       expect(sideOf(new Prop(key, spec, 0, 0, 0))).toBe(THREE.FrontSide);
     }
+  });
+
+  it('has no leaf to draw', () => {
+    expect(PROP_SPECS.leaf).toBeUndefined();
+    expect(PROP_SCATTER.some((p) => p.key === 'leaf')).toBe(false);
   });
 });
 
@@ -399,5 +416,88 @@ describe('the collision is the object\'s own shape', () => {
       expect({ key, some: n > 3 }).toEqual({ key, some: true });
       expect({ key, capped: n <= 14 }).toEqual({ key, capped: true });
     }
+  });
+});
+
+/**
+ * THE LOOSE THINGS WEAR REAL ART NOW.
+ *
+ * Asked for: "can you replace the procedural objects with the real glb
+ * models now like the twig, rock, dirt, etc. Can drop the leaf for now
+ * until I get a real model."
+ *
+ * What is testable without a browser is the WIRING — that every model named
+ * is a file that exists, that the two rocks share one download, and that
+ * the ones with no art still have a shape to fall back on. The dressing
+ * itself needs a GL context and is measured by `probe:props`.
+ */
+describe('the props that have models', () => {
+  const models = Object.entries(PROP_SPECS)
+    .filter(([, s]) => !!s.model);
+
+  it('names a file that is actually in the build', () => {
+    expect(models.length).toBeGreaterThan(0);
+    for (const [key, spec] of models) {
+      const path = resolve(__dirname, '..', 'public', 'models', spec.model!);
+      expect(existsSync(path), `${key} -> ${spec.model}`).toBe(true);
+    }
+  });
+
+  it('fetches one file per model, not one per prop', () => {
+    /* The pebble and the stone are the same rock at two sizes. A loop that
+     * downloaded per PROP would fetch it twice and build two copies of one
+     * geometry — see the `Set` in `spawnProps`. */
+    expect(PROP_SPECS.pebble!.model).toBe(PROP_SPECS.stone!.model);
+    const files = new Set(models.map(([, s]) => s.model));
+    expect(files.size).toBeLessThan(models.length);
+  });
+
+  it('still builds a stand-in shape for every one of them', () => {
+    /* The model arrives over the network and may never arrive at all. A
+     * prop that drew nothing until it did would be a thing she can walk
+     * into and cannot see. */
+    for (const [key, spec] of Object.entries(PROP_SPECS)) {
+      const p = new Prop(key, spec, 0, 0, 0);
+      let meshes = 0;
+      p.root.traverse((n) => { if ((n as THREE.Mesh).isMesh) meshes += 1; });
+      expect(meshes, key).toBeGreaterThan(0);
+      /* And it collides, on its own shape, before any art lands. */
+      expect(p.hullForTest.length, key).toBeGreaterThan(0);
+    }
+  });
+
+  it('scatters every kind it defines, and only kinds it defines', () => {
+    for (const { key } of PROP_SCATTER) {
+      expect(PROP_SPECS[key], key).toBeDefined();
+    }
+    /* The clod took the leaf's place on the ground rather than the set
+     * quietly shrinking by one. */
+    expect(PROP_SCATTER.some((p) => p.key === 'clod')).toBe(true);
+  });
+});
+
+/**
+ * THE CLOD IS THE HEAVIEST THING SHE CAN STILL CARRY.
+ *
+ * Not decoration: the set had a gap. Seed, crumb and twig are all well
+ * inside a queen's 20 mg carry limit and the pebble at 22 is just outside
+ * it, so nothing sat at the top of the carry band where the pace taper
+ * actually bites and where the meter's amber stop now sits.
+ */
+describe('the dirt clod', () => {
+  it('is carried, not dragged, by a queen', () => {
+    expect(carryVerdict(PROP_SPECS.clod!.massMg, 'queen').mode).toBe('carry');
+  });
+
+  it('is the heaviest thing on the island that is', () => {
+    const carried = Object.values(PROP_SPECS)
+      .filter((s) => carryVerdict(s.massMg, 'queen').mode === 'carry');
+    expect(Math.max(...carried.map((s) => s.massMg))).toBe(PROP_SPECS.clod!.massMg);
+  });
+
+  it('is too much for a worker, who has to drag it', () => {
+    /* A worker carries 6 mg. The same object being a carry for the queen
+     * and a drag for a worker is the caste table doing its job. */
+    expect(carryVerdict(PROP_SPECS.clod!.massMg, 'worker').mode).toBe('drag');
   });
 });
