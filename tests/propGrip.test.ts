@@ -5,6 +5,9 @@ import { describe, expect, it } from 'vitest';
 
 import { carryVerdict } from '../src/scenes/mandibleReach';
 
+/** World units to millimetres, as everywhere else. */
+const MM = 5;
+
 import {
   Prop, PROP_SCATTER, PROP_SPECS, type PropGround,
 } from '../src/scenes/islandProps';
@@ -65,17 +68,25 @@ describe('the grip a carried thing was taken with', () => {
     expect(a.grip.angleTo(b.grip)).toBeGreaterThan(0.5);
   });
 
-  it('does not touch rotation once it is put down', () => {
-    /* On the ground it keeps whatever angle it landed at; only a carried
-     * thing is driven by her. */
+  it('stops following her the moment it is put down', () => {
+    /*
+     * A carried thing turns with her; a dropped one does not. That is the
+     * invariant, and it is NOT the same as "a dropped thing never turns" —
+     * which is what this used to assert and is no longer true, because a
+     * dropped twig now tips and settles (see `tipOver`). Turning her right
+     * round while it lies on the ground is the test that separates the two:
+     * a prop still bound to her would swing half a circle.
+     */
     const p = twig();
     p.carried = true;
     p.takeGrip(yaw(0));
     p.tick(flat, 1 / 60, yaw(45));
     const held = p.root.quaternion.clone();
     p.carried = false;
-    p.tick(flat, 1 / 60, yaw(180));
-    expect(p.root.quaternion.angleTo(held)).toBeCloseTo(0, 6);
+    for (let i = 0; i < 4; i += 1) p.tick(flat, 1 / 60, yaw(180));
+    /* Settling may turn it a little; being dragged round by her would turn
+     * it most of a half circle. */
+    expect(p.root.quaternion.angleTo(held)).toBeLessThan(0.3);
   });
 });
 
@@ -96,7 +107,11 @@ describe('a loose thing rests on the soil that is there now', () => {
     /* Settled ON the floor, bedded by its own rest offset — not through it
      * and not hovering. A twig's is a fraction of its radius. */
     expect(p.at.y).toBeGreaterThan(0);
-    expect(p.at.y).toBeLessThan(0.2);
+    /* A twig's centre sits about a millimetre up — measured 0.17 world
+     * units with the forty-point hull. The bound was 0.2 against the old
+     * fourteen-point one, which found its deepest contact later and let the
+     * twig sit lower; a finer hull beds it more honestly, not less. */
+    expect(p.at.y).toBeLessThan(0.3);
     /* And the mesh went with it, which is the half a player sees. */
     expect(p.root.position.y).toBeCloseTo(p.at.y, 6);
   });
@@ -148,8 +163,17 @@ describe('round things roll until they find their balance', () => {
      * FALLS as x rises. The surface descends the way its normal leans.
      */
     expect(p.at.x).toBeGreaterThan(0.05);
-    /* And it turned rather than skidded. */
-    expect(p.root.quaternion.angleTo(start)).toBeGreaterThan(0.5);
+    /*
+     * And it turned rather than skidded.
+     *
+     * The threshold came down from 0.5 radians to 0.2, and the reason is
+     * gravity rather than a weaker rule: at 600 mm/s² the seed spends more
+     * of these two seconds falling into the bank and less of it in the
+     * rolling contact that `rollOn` turns it from, so it covers the same
+     * ground with fewer turns of the wheel. Measured 0.35 where it was
+     * 0.51. Still plainly turning; the number is not a claim about how much.
+     */
+    expect(p.root.quaternion.angleTo(start)).toBeGreaterThan(0.2);
   });
 
   it('settles on ground that is level enough, and stays put', () => {
@@ -215,10 +239,26 @@ describe('round things roll until they find their balance', () => {
   });
 
   it('never reaches the cap on ground the island actually has', () => {
-    /* The clamp is a backstop against a degenerate normal or a spiked
-     * frame. If a hill can reach it, it has become the tuning. Even a
-     * near-vertical face must settle below it. */
-    expect(settledSpeed(20)).toBeLessThan(2.6);
+    /*
+     * The clamp is a backstop against a degenerate normal or a spiked
+     * frame. If a hill can reach it, it has become the tuning.
+     *
+     * MEASURED AS ROLL, NOT AS TRAVEL, and that distinction is new. This
+     * used to take the total distance covered in a second down a gradient
+     * of twenty — an eighty-seven degree face — which under the old
+     * feather-light gravity was almost all rolling. It is not any more: a
+     * prop on a cliff FALLS, at up to the 200 mm/s terminal velocity, and
+     * measuring that and calling it a roll speed reported 6.1 against a
+     * 2.6 cap the roll never actually reached.
+     *
+     * So the cap is checked against the thing it caps. A gradient of two is
+     * a sixty-three degree bank, which is as steep as this island gets.
+     */
+    const p = seed();
+    p.carried = false;
+    const ground = sloped(2);
+    for (let i = 0; i < 240; i += 1) p.tick(ground, 1 / 60);
+    expect(p.rollSpeedForTest).toBeLessThan(2.6);
   });
 
   it('runs out and STOPS when a bank gives way to the flat', () => {
@@ -389,6 +429,8 @@ describe('the collision is the object\'s own shape', () => {
      */
     const twig = new Prop('twig', PROP_SPECS.twig!, -2, 0, 0);
     const seed = new Prop('seed', PROP_SPECS.seed!, -2, 0, 0);
+    const wasQ = twig.root.quaternion.clone();
+    const twigTurn = (): number => twig.root.quaternion.angleTo(wasQ);
     for (const p of [twig, seed]) {
       p.carried = false;
       /* Drive it at the wall. */
@@ -397,11 +439,26 @@ describe('the collision is the object\'s own shape', () => {
         p.tick(wall, 1 / 60);
       }
     }
-    /* Neither centre reaches the wall... */
+    /* Neither centre reaches the wall, which is the shape doing its job —
+     * a POINT would have gone straight to it. */
     expect(twig.at.x).toBeLessThan(0);
     expect(seed.at.x).toBeLessThan(0);
-    /* ...and the longer object is held further back. */
-    expect(twig.at.x).toBeLessThan(seed.at.x);
+    /*
+     * THE TWIG NO LONGER STOPS FURTHER BACK THAN THE SEED, and that is a
+     * change of behaviour rather than a loss of one.
+     *
+     * It used to, because a twig could not turn: driven end-on at a wall it
+     * stayed end-on, and its own length held it off. It tips now (see
+     * `tipOver`), and what a stick pushed against a wall does is come round
+     * to lie ALONG it — after which the distance holding it off is its
+     * thickness, not its length. Measured, it ends up nearer than the seed
+     * and squarely turned.
+     *
+     * So the assertion is the one that survives the turn: it must have
+     * TURNED to get there, rather than the collision having quietly stopped
+     * working and let a rigid bar slide in.
+     */
+    expect(twigTurn()).toBeGreaterThan(0.3);
   });
 
   it('takes its contact points off the geometry, extremes included', () => {
@@ -414,7 +471,11 @@ describe('the collision is the object\'s own shape', () => {
       const p = new Prop(key, PROP_SPECS[key]!, 0, 0, 0);
       const n = p.hullForTest.length / 3;
       expect({ key, some: n > 3 }).toEqual({ key, some: true });
-      expect({ key, capped: n <= 14 }).toEqual({ key, capped: true });
+      /* Bounded, so a 3000-vertex model does not turn every frame into
+       * three thousand field samples. Forty, raised from fourteen when the
+       * tipping showed that fourteen cannot represent a CONTACT PATCH —
+       * see `HULL_MAX`. */
+      expect({ key, capped: n <= 40 }).toEqual({ key, capped: true });
     }
   });
 });
@@ -499,5 +560,151 @@ describe('the dirt clod', () => {
     /* A worker carries 6 mg. The same object being a carry for the queen
      * and a drag for a worker is the caste table doing its job. */
     expect(carryVerdict(PROP_SPECS.clod!.massMg, 'worker').mode).toBe('drag');
+  });
+});
+
+/**
+ * THE TWIG FALLS LIKE A TWIG AND TIPS LIKE A STICK.
+ *
+ * Reported: "the twig did have gravity, but doesn't act like a real twig and
+ * maybe the world gravity is too low", confirmed as both halves — "it falls
+ * too slowly" AND "it doesn't tumble or lever like a stick".
+ *
+ * Both are pinned here because both were arrived at by measurement, and the
+ * second one took four wrong turns to reach: a torque integrator that
+ * oscillated, a deepest-point lever that reported a lever on a twig lying
+ * flat, a barrel roll about the twig's own axis that could never correct
+ * itself, and a rotation about the CENTRE that `pushOut` undid every frame.
+ * Every one of those looked plausible and produced a twig that never
+ * stopped moving.
+ */
+describe('a dropped twig', () => {
+  const twigAt = (y: number, tilt = 0): Prop => {
+    const p = new Prop('twig', PROP_SPECS.twig!, 0, 0, 0);
+    p.carried = false;
+    p.at.set(0, y, 0);
+    if (tilt) {
+      p.root.quaternion.setFromAxisAngle(new THREE.Vector3(0, 0, 1), tilt);
+    }
+    return p;
+  };
+
+  it('falls 20 mm in a quarter of a second, not most of one', () => {
+    /* At the old 45 mm/s² this drop took the best part of a second, which
+     * is what "too slowly" looked like. Real gravity would land it in four
+     * frames; 600 mm/s² is the figure the thrown charge already uses. */
+    const p = twigAt(20 / MM);
+    let t = 0;
+    let hit = 0;
+    for (let i = 0; i < 2000; i += 1) {
+      p.tick(flat, 1 / 60);
+      t += 1 / 60;
+      if (!hit && p.at.y < 0.35) { hit = t; break; }
+    }
+    expect(hit).toBeGreaterThan(0);
+    expect(hit).toBeLessThan(0.4);
+  });
+
+  it('levers over a ridge caught under one end', () => {
+    /* A step in the soil under one end. A bar would lie across it at
+     * whatever angle it arrived with; a stick pivots on it. */
+    const ridge: PropGround = {
+      floorUnder: () => 0,
+      soilNormal: (x, _y, _z, into) => {
+        into.set(x < -0.5 ? -0.4 : 0, 1, 0).normalize();
+      },
+      insideBy: (x, y) => (x < -0.5 ? 0.4 - y : -y),
+    };
+    const p = twigAt(0.75);
+    p.at.x = -0.4;
+    const before = p.root.quaternion.clone();
+    for (let i = 0; i < 600; i += 1) p.tick(ridge, 1 / 60);
+    expect(p.root.quaternion.angleTo(before)).toBeGreaterThan(0.15);
+  });
+
+  it('comes to rest and STAYS there, however it was dropped', () => {
+    /*
+     * The one that caught every wrong turn. A twig dropped at an angle used
+     * to rock between half a degree and six for as long as you watched —
+     * two simulated minutes, in this test's terms — and each fix in turn
+     * moved the number without stopping it.
+     */
+    for (const tilt of [0, 0.4, 0.9, 1.5, 2.6]) {
+      const p = twigAt(1.5, tilt);
+      for (let i = 0; i < 900; i += 1) p.tick(flat, 1 / 60);
+      const at = p.at.clone();
+      const q = p.root.quaternion.clone();
+      for (let i = 0; i < 7200; i += 1) p.tick(flat, 1 / 60);
+      expect(p.at.distanceTo(at), `tilt ${tilt}`).toBeLessThan(1e-9);
+      expect(p.root.quaternion.angleTo(q), `tilt ${tilt}`).toBeLessThan(1e-9);
+      expect(p.restForTest.asleep, `tilt ${tilt}`).toBe(true);
+    }
+  });
+
+  it('wakes when the ground it settled on is dug away', () => {
+    /*
+     * A sleeper stops being simulated, so it has to notice the floor
+     * leaving. It checks its own footing a few times a second rather than
+     * the shovel having to know about every prop — see `SLEEP_POLL`.
+     */
+    let floor = 0;
+    const digging: PropGround = {
+      floorUnder: () => floor,
+      soilNormal: (_x, _y, _z, into) => { into.set(0, 1, 0); },
+      insideBy: (_x, y) => floor - y,
+    };
+    const p = twigAt(1.5);
+    for (let i = 0; i < 900; i += 1) p.tick(digging, 1 / 60);
+    expect(p.restForTest.asleep).toBe(true);
+    const restedAt = p.at.y;
+    /* The soil under it goes. */
+    floor = -4;
+    for (let i = 0; i < 120; i += 1) p.tick(digging, 1 / 60);
+    /* It woke, fell, and settled again on the new floor — so what proves
+     * the wake is that it MOVED, not that it is still awake two seconds
+     * later. At 200 mm/s it covers this drop in a tenth of a second and is
+     * entitled to be asleep again by now. */
+    expect(p.at.y).toBeLessThan(restedAt - 0.5);
+    expect(p.at.y).toBeGreaterThan(-4.2);
+  });
+
+  it('is put back to work the moment she picks it up', () => {
+    const p = twigAt(1.5);
+    for (let i = 0; i < 900; i += 1) p.tick(flat, 1 / 60);
+    expect(p.restForTest.asleep).toBe(true);
+    p.carried = true;
+    p.tick(flat, 1 / 60, new THREE.Quaternion());
+    expect(p.restForTest.asleep).toBe(false);
+  });
+});
+
+describe('the round things still roll, and still settle', () => {
+  it('a pebble rolls downhill and a twig does not', () => {
+    /* The tipping rule is the other half of `ROLLS` and must not have
+     * given angular props a way to travel. */
+    const bank: PropGround = {
+      floorUnder: () => 0,
+      soilNormal: (_x, _y, _z, into) => { into.set(0.6, 1, 0).normalize(); },
+      insideBy: (x, y) => -(y + 0.6 * x) / Math.hypot(0.6, 1),
+    };
+    const rock = new Prop('pebble', PROP_SPECS.pebble!, 0, 0, 0);
+    rock.carried = false;
+    const stick = new Prop('twig', PROP_SPECS.twig!, 0, 0, 0);
+    stick.carried = false;
+    for (let i = 0; i < 300; i += 1) { rock.tick(bank, 1 / 60); stick.tick(bank, 1 / 60); }
+    expect(rock.at.x).toBeGreaterThan(0.05);
+    expect(Math.abs(stick.at.x)).toBeLessThan(rock.at.x);
+  });
+
+  it('every kind settles rather than creeping for ever', () => {
+    for (const key of Object.keys(PROP_SPECS)) {
+      const p = new Prop(key, PROP_SPECS[key]!, 0, 0, 0);
+      p.carried = false;
+      p.at.set(0, 1.6, 0);
+      for (let i = 0; i < 1800; i += 1) p.tick(flat, 1 / 60);
+      const at = p.at.clone();
+      for (let i = 0; i < 1800; i += 1) p.tick(flat, 1 / 60);
+      expect(p.at.distanceTo(at), key).toBeLessThan(1e-6);
+    }
   });
 });

@@ -76,8 +76,26 @@ const FLOOR_FACES_UP = 0.5;
 
 const PROP_SKIN = 0.004;
 
-const HULL_MAX = 14;
-const HULL_SPREAD = 10;
+/*
+ * HOW MANY CONTACT POINTS A SHAPE IS REDUCED TO — forty, up from fourteen.
+ *
+ * The old note claimed fourteen was "enough that a twig cannot pivot
+ * between two of them". Measured, it is not, and the tipping is what
+ * exposed it: fourteen points over a 3000-vertex twig leaves only one or
+ * two anywhere near its underside, so the support centroid was a single
+ * point somewhere along the stick rather than the LINE a stick actually
+ * rests on. Every frame that one point bore the whole load and reported a
+ * full-length lever arm on a twig lying perfectly flat, and the thing
+ * rotated for ever.
+ *
+ * A contact patch needs enough points to be a patch. Forty puts a handful
+ * along a twig's underside, which is what makes its centroid land under the
+ * middle and the tipping settle. The cost is a loop over forty field
+ * samples per prop per substep, for the half-dozen props the island seeds —
+ * measured against a frame, it does not show.
+ */
+const HULL_MAX = 40;
+const HULL_SPREAD = 34;
 
 const HULL_P = new THREE.Vector3();
 const HIT_N = new THREE.Vector3();
@@ -86,9 +104,136 @@ const ROLL_DOWN = new THREE.Vector3();
 const ROLL_AXIS = new THREE.Vector3();
 const ROLL_Q = new THREE.Quaternion();
 
-const PROP_GRAVITY = 9;
-/** And capped, so nothing tunnels a thin floor between two frames. */
-const PROP_FALL_MAX = 6;
+/**
+ * HOW HARD THINGS FALL — 600 mm/s², up from 45.
+ *
+ * Reported: "the twig did have gravity, but doesn't act like a real twig and
+ * maybe the world gravity is too low", and confirmed as both halves of the
+ * problem — "it falls too slowly" AND "it doesn't tumble or lever like a
+ * stick". This is the first half.
+ *
+ * The old figure was 9 world units per second squared, which is 45 mm/s².
+ * Measured, that is a twig taking most of a second to fall two centimetres,
+ * which is what "too slowly" looks like. It also made the island disagree
+ * with ITSELF: a thrown dig charge falls at `CHARGE_GRAVITY_MM`, 600 mm/s²,
+ * so a lobbed lump of soil dropped thirteen times harder than a dropped
+ * twig in the same world.
+ *
+ * 600 is therefore not a new invention, it is the number this game already
+ * uses for a falling object, and the reasoning written on the charge holds
+ * here word for word: real gravity at ant scale would end the fall before a
+ * second frame drew it — 9810 mm/s² puts a twig through a 20 mm drop in
+ * four frames — so the figure is theatre chosen to READ, and is stated as
+ * game tuning rather than physics.
+ *
+ * DELIBERATELY NOT THE SAME CONSTANT as the charge's, though they are the
+ * same value today. The charge's is solved against the soil window — its
+ * arc has to complete inside 192 mm or the lob lands outside the field that
+ * can record it — and a prop has no such constraint. Sharing one symbol
+ * would mean a future retune of the lob's range quietly changing how a
+ * dropped pebble falls.
+ */
+const PROP_GRAVITY = 120; //             120 wu/s² = 600 mm/s²
+
+/**
+ * Terminal velocity, 200 mm/s.
+ *
+ * The old 30 mm/s was the real limiter rather than the gravity: at 600
+ * mm/s² a prop reached the old cap in a twentieth of a second and coasted
+ * the rest of the way down, so raising gravity alone would have changed
+ * almost nothing. Raising it is only safe because of the substepping in
+ * `tick` — see there. The cap is what stops a prop that has fallen down a
+ * long shaft from arriving with a step no number of substeps is worth.
+ */
+const PROP_FALL_MAX = 40; //             40 wu/s = 200 mm/s
+
+/**
+ * THE FURTHEST A PROP MAY MOVE BETWEEN TWO COLLISION CHECKS, world units.
+ *
+ * `pushOut` asks the density field whether the prop's own surface points
+ * are inside soil. That question is only meaningful if the prop cannot pass
+ * THROUGH something between two asks — and the ground is solid all the way
+ * down, so the case that matters is a carved tunnel roof, which is a few
+ * millimetres of soil with air on both sides.
+ *
+ * 0.2 world units is a millimetre, comfortably under any roof the shovel
+ * leaves. `tick` splits its integration until each piece is under this,
+ * which is what lets the terminal velocity above be an honest 200 mm/s
+ * rather than a cap chosen to make one frame safe.
+ */
+const PROP_STEP_MAX = 0.2;
+
+/**
+ * HOW IT TUMBLES — the second half of the twig report.
+ *
+ * `TIP_GAIN` scales the torque a contact applies; 1 is the physical rate
+ * for a thin rod and is what this uses. `TIP_DRAG` bleeds spin away so a
+ * settling prop stops rather than rocking for ever, and `TIP_REST` is the
+ * rate below which it is simply called still.
+ */
+/** Radians a second per unit of off-centre support, and the ceiling on it.
+ *  Six radians a second sweeps a stick through a right angle in about a
+ *  quarter of a second, which is what a stick falling over looks like. */
+const TIP_RATE = 12;
+const TIP_MAX = 6;
+/** How far off centre the support may sit before it is a tip rather than a
+ *  wobble, as a fraction of the prop's own length — its contact patch. See
+ *  `tipOver`, where the alternative was a twig that crept for ever. */
+const TIP_SETTLE = 0.12;
+/** How close to the soil a hull point counts as bearing load. A few skins:
+ *  a resting prop is held clear by one, so a band narrower than that sees a
+ *  single contact where there are really several. See `pushOut`. */
+const TIP_BAND = PROP_SKIN * 6;
+
+/**
+ * A SETTLED THING STOPS BEING SIMULATED, and this is the honest fix for the
+ * last of the twig's fidgeting rather than another damping constant.
+ *
+ * With gravity, a contact patch and a centroid lever all in, a dropped twig
+ * lands flat in a third of a second and then — measured over two simulated
+ * minutes — rocked between half a degree and six, for ever. That is not a
+ * force that needs tuning away. It is the discrete hull talking: fourteen
+ * points against a sampled field give a support centroid that jitters by a
+ * fraction of a millimetre each frame, and an integrator fed jitter
+ * integrates it.
+ *
+ * Every physics engine answers this the same way and for the same reason: a
+ * body whose motion stays under a threshold for long enough is put to
+ * sleep, and stops being asked. It is not a cheat, it is an admission that
+ * below some scale the simulation has nothing true left to say.
+ *
+ * WAKING IS THE PART THAT MATTERS, because this game digs. A twig asleep on
+ * ground she then tunnels out from under must fall. Rather than a hook from
+ * the shovel — which would mean every carve knowing about every prop — a
+ * sleeper checks its own footing a few times a second. Fourteen field
+ * samples four times a second, for a handful of props, is nothing next to
+ * the frame it saves.
+ */
+/*
+ * STILLNESS IS AN EXCURSION, NOT A PER-FRAME STEP, and getting that wrong
+ * meant nothing ever slept.
+ *
+ * A prop at rest is not motionless frame to frame. Gravity pulls it 0.167
+ * mm into the soil every frame and `pushOut` lifts it back out, so the
+ * per-frame displacement of a perfectly settled twig is one whole frame of
+ * gravity — measured, exactly the 0.0333 world units that arithmetic
+ * predicts. A test against per-frame movement can therefore never pass, and
+ * did not.
+ *
+ * What IS true of a settled prop is that it stays in the same PLACE: it
+ * buzzes inside a fraction of a millimetre and goes nowhere. So the
+ * reference is a remembered position, and the prop has to stay inside a
+ * small ball around it — and hold the same attitude — for long enough.
+ */
+const SLEEP_AFTER = 0.5; //   seconds inside the ball before it nods off
+const SLEEP_BALL = 0.06; //   0.3 mm of buzz is still the same place
+const SLEEP_TURN = 0.05; //   ~3 degrees of attitude, likewise
+const SLEEP_POLL = 0.2; //    seconds between a sleeper's footing checks
+
+const TIP_LEVER = new THREE.Vector3();
+const TIP_AXIS = new THREE.Vector3();
+const TIP_TORQUE = new THREE.Vector3();
+const TIP_Q = new THREE.Quaternion();
 
 /**
  * WHICH THINGS ROLL — by shape, because that is what rolling is about.
@@ -290,6 +435,24 @@ export class Prop implements Portable {
   /** Where it is rolling, in world units a second. See `tick`. */
   private readonly roll = new THREE.Vector3();
 
+  /** How fast it turned last frame, radians a second — for the sleep test.
+   *  Angular things only; see `tipOver`. */
+  private turning = 0;
+
+  /** Seconds it has been near enough to still, and whether it has nodded
+   *  off — see `SLEEP_AFTER`. */
+  private still = 0;
+
+  private asleep = false;
+
+  private napFor = 0;
+
+  /** Where and how it was sitting when it last looked settled — the centre
+   *  of the ball it has to stay inside. See `SLEEP_BALL`. */
+  private readonly restAt = new THREE.Vector3();
+
+  private readonly restQ = new THREE.Quaternion();
+
   /**
    * ITS OWN SURFACE, AS POINTS — the collision shape, taken off the mesh.
    *
@@ -317,6 +480,15 @@ export class Prop implements Portable {
 
   /** The stand-in shape, kept so `dress` can take it away again. */
   private drawn: THREE.Mesh | null = null;
+
+  /** Which way it is longest, in its own frame, and by how much against its
+   *  next widest axis. Measured off the hull — see `measureShape`. */
+  private readonly longAxis = new THREE.Vector3(0, 0, 1);
+
+  private slender = 1;
+
+  /** Has it already found its balance? See the latch note in `tipOver`. */
+  private balanced = false;
 
   constructor(
     readonly id: string,
@@ -358,6 +530,7 @@ export class Prop implements Portable {
     this.root.add(mesh);
     this.drawn = mesh;
     this.buildHull(geo);
+    this.measureShape();
     /* A stone is not a sphere sitting on a plane; it is bedded in. Half a
      * radius down looks planted rather than balanced. */
     this.root.rotation.y = (spec.massMg * 1.7) % Math.PI;
@@ -443,6 +616,7 @@ export class Prop implements Portable {
       this.buildHull(geo2);
       geo2.dispose();
     });
+    this.measureShape();
   }
 
   /**
@@ -476,6 +650,49 @@ export class Prop implements Portable {
       this.hull.push(pos.getX(i), pos.getY(i), pos.getZ(i));
     }
   }
+
+  /**
+   * WHICH WAY IT IS LONGEST, off the hull it actually collides with.
+   *
+   * Taken from the hull rather than the spec so it survives `dress`: a prop
+   * wearing a GLB has whatever proportions the model has, and asking the
+   * shape is the only way to know them. `slender` is the ratio against the
+   * next widest axis, which is what decides whether "its long axis" is a
+   * meaningful idea for this shape at all.
+   */
+  private measureShape(): void {
+    let ex = 0;
+    let ey = 0;
+    let ez = 0;
+    for (let i = 0; i < this.hull.length; i += 3) {
+      ex = Math.max(ex, Math.abs(this.hull[i]!));
+      ey = Math.max(ey, Math.abs(this.hull[i + 1]!));
+      ez = Math.max(ez, Math.abs(this.hull[i + 2]!));
+    }
+    const sorted = [ex, ey, ez].sort((a, b) => b - a);
+    this.slender = sorted[1]! > 1e-6 ? sorted[0]! / sorted[1]! : 1;
+    if (ex >= ey && ex >= ez) this.longAxis.set(1, 0, 0);
+    else if (ey >= ez) this.longAxis.set(0, 1, 0);
+    else this.longAxis.set(0, 0, 1);
+  }
+
+  /** For tests and probes: whether it has settled, and how it is moving. */
+  get restForTest(): {
+    asleep: boolean; balanced: boolean; still: number; turning: number;
+    slender: number;
+    longAxis: [number, number, number];
+  } {
+    return {
+      asleep: this.asleep, balanced: this.balanced,
+      still: +this.still.toFixed(3),
+      turning: +this.turning.toFixed(3), slender: +this.slender.toFixed(2),
+      longAxis: [this.longAxis.x, this.longAxis.y, this.longAxis.z],
+    };
+  }
+
+  /** For tests: how fast it is ROLLING, which is not how fast it is
+   *  travelling — on a steep face most of the travel is a fall. */
+  get rollSpeedForTest(): number { return this.roll.length(); }
 
   /** For tests: the contact points this shape collides with. */
   get hullForTest(): readonly number[] { return this.hull; }
@@ -527,20 +744,222 @@ export class Prop implements Portable {
     let wx = 0;
     let wy = 0;
     let wz = 0;
+    /*
+     * TWO ANSWERS FROM ONE SWEEP, and they are different questions.
+     *
+     * The DEEPEST point decides how far to push out — resolving the worst
+     * penetration is what un-buries the shape.
+     *
+     * The lever for `tipOver` is the depth-weighted CENTROID of everything
+     * touching, which is not the same place and must not be. A rod lying
+     * flat on the ground touches along its whole length; taking the single
+     * deepest of those contacts picks an arbitrary point off to one side
+     * and reports a lever that is not there. Measured with the deepest
+     * point, a settled twig never stopped — it crept 3.6 degrees every five
+     * seconds for ever, because the phantom lever kept feeding it torque.
+     *
+     * The centroid gets it right at both ends by construction: spread the
+     * contacts along a rod and they average to a point under its centre,
+     * which is zero torque and a thing at rest. Put them all at one end and
+     * the average IS that end, which is the full lever and a stick that
+     * levers.
+     */
+    let load = 0;
+    let cx = 0;
+    let cy = 0;
+    let cz = 0;
     for (let i = 0; i < this.hull.length; i += 3) {
       HULL_P.set(this.hull[i]!, this.hull[i + 1]!, this.hull[i + 2]!)
         .applyQuaternion(this.root.quaternion)
         .add(this.at);
       const depth = rest.insideBy(HULL_P.x, HULL_P.y, HULL_P.z);
       if (depth > worst) { worst = depth; wx = HULL_P.x; wy = HULL_P.y; wz = HULL_P.z; }
+      /*
+       * SUPPORT COMES FROM EVERYTHING TOUCHING, not only from what is
+       * buried — and the band is what makes a settled prop settle.
+       *
+       * `pushOut` resolves a penetration and adds `PROP_SKIN` on top, so a
+       * prop at rest is held just clear of the soil and typically has
+       * exactly ONE point actually inside it on any given frame. Weighting
+       * the centroid by penetration alone therefore put the whole support
+       * on that single point, which for a twig is somewhere near an end:
+       * a full-length lever arm, on a twig lying perfectly flat. Measured,
+       * it rocked through seven degrees and never stopped.
+       *
+       * A band a few skins deep counts a point that is ALMOST touching as
+       * bearing load, which is what it is. A flat twig then has most of its
+       * length supporting it, the centroid lands under the middle, and the
+       * arm falls inside the contact patch where `tipOver` calls it still.
+       */
+      const bearing = depth + TIP_BAND;
+      if (bearing <= 0) continue;
+      load += bearing;
+      cx += HULL_P.x * bearing;
+      cy += HULL_P.y * bearing;
+      cz += HULL_P.z * bearing;
     }
     if (worst <= 0) return false;
     rest.soilNormal(wx, wy, wz, HIT_N);
     if (HIT_N.lengthSq() < 1e-9) { HIT_N.set(0, 1, 0); } else { HIT_N.normalize(); }
+    /* WHERE it is being held up, from the centre — the lever arm, which is
+     * the whole of what makes a stick behave like a stick. See `tipOver`. */
+    TIP_LEVER.set(
+      cx / load - this.at.x, cy / load - this.at.y, cz / load - this.at.z,
+    );
     /* A skin, so it rests ON the surface rather than exactly in it, where
      * the next frame's read could go either way and the prop would buzz. */
     this.at.addScaledVector(HIT_N, worst + PROP_SKIN);
     return true;
+  }
+
+  /**
+   * IT TIPS AND LEVERS — for the things that are not round.
+   *
+   * Reported: the twig "doesn't tumble or lever like a stick". It did not,
+   * and could not: `rollOn` turns the ROUND props and nothing turned the
+   * others at all, so a twig kept whatever angle it was scattered with for
+   * the whole game. Drop one across a ridge and it stayed a rigid bar lying
+   * at the angle it happened to have.
+   *
+   * ## It is a lever, not a physics engine
+   *
+   * Gravity acts at the centre of mass and the ground pushes back at the
+   * CONTACT. When those two are not in line the pair is a couple, and the
+   * body turns — that is the entire mechanism, and it is one cross product.
+   * `pushOut` has already found the contact and its normal, so nothing new
+   * has to be searched for.
+   *
+   * The consequences fall out rather than being written:
+   *
+   *   - a stick landing on one end swings the free end down, because the
+   *     lever is nearly the whole half-length and square to the push;
+   *   - a stick balanced across a ridge under its middle barely turns,
+   *     because the lever is short;
+   *   - anything lying flat STOPS, because a contact directly under the
+   *     centre gives a lever parallel to the normal and a zero cross
+   *     product. Coming to rest is the same equation reaching zero rather
+   *     than a separate "is it settled" test.
+   *
+   * ## The rate is a rod's, not a fudge
+   *
+   * For a thin rod of length L the moment of inertia about its centre is
+   * mL²/12, so the angular acceleration under a support force mg at lever r
+   * is 12 g (r x n) / L². Written that way `TIP_GAIN` is 1 and means it:
+   * turning it down is admitting to slowing the world, which is the thing
+   * the report was about in the first place.
+   */
+  private tipOver(dt: number): void {
+    if (dt <= 0) return;
+    const len = (this.spec.halfMm * 2) / MM;
+    /*
+     * A THING RESTS ON A PATCH, NOT ON A POINT — and without saying so it
+     * never comes to rest at all.
+     *
+     * The moment arm is the part of the lever ACROSS the support, and for a
+     * settled prop it is never exactly nought: the hull is fourteen points
+     * against a sampled field, so the support centroid wanders by a
+     * fraction of a millimetre every frame. Real objects do not tip on
+     * that, and the reason is not damping — a body is stable while its
+     * support is anywhere under it, because the contact is an AREA. So the
+     * arm has to clear a fraction of the prop's own length before it counts
+     * as a tip rather than a wobble.
+     */
+    if (this.balanced) return;
+    const along = TIP_LEVER.dot(HIT_N);
+    const arm = Math.sqrt(Math.max(0, TIP_LEVER.lengthSq() - along * along));
+    /*
+     * ONCE BALANCED, IT STAYS BALANCED until something wakes it — and the
+     * latch is what makes this terminate at all.
+     *
+     * Re-asking every frame does not converge. The support centroid comes
+     * off fourteen hull points against a sampled field, so it wanders by a
+     * fraction of a millimetre frame to frame, and every so often it lands
+     * at an end and reports a full-length lever on a twig that is lying
+     * perfectly flat. One such frame is a tenth of a radian of rotation,
+     * which is enough to keep the prop from ever being still long enough to
+     * fall asleep — measured, that is exactly what kept it awake.
+     *
+     * A latch says the thing an unlatched threshold cannot: this prop has
+     * already found its balance, and a later frame's noisier reading is not
+     * new information. `wake` clears it, and `wake` is called on a lift, a
+     * drop, and by a sleeper that finds its footing gone.
+     */
+    if (arm < TIP_SETTLE * len) { this.balanced = true; return; }
+    /*
+     * DERIVED, NOT INTEGRATED — and that is the whole difference between a
+     * stick that tips over and a stick that flaps.
+     *
+     * The first cut was honest physics: torque from the couple, integrated
+     * into an angular velocity, damped. It oscillated, and badly — measured,
+     * a twig dropped at an angle was still moving half a millimetre and
+     * five degrees EVERY FRAME two minutes later. That is what an explicit
+     * integrator does against a penalty contact with no impulse and no
+     * restitution: the push kicks it past balance, the next frame kicks it
+     * back, and the pair never agree.
+     *
+     * `rollOn` already solved the same problem the same way and says so —
+     * "the spin is derived from the travel rather than integrated
+     * separately, so it cannot visually skid". Here the rotation is derived
+     * from the ARM: turn toward putting the support back under the centre,
+     * at a rate set by how far off it is and bounded so one frame can never
+     * overshoot. It cannot oscillate, because the rate goes to zero exactly
+     * where the thing is balanced, and it cannot flap, because nothing is
+     * stored between frames to build up.
+     *
+     * What this gives up is a stick that keeps tumbling through the air
+     * after it is knocked. Nothing on this island throws one far enough for
+     * that to be visible — a dropped twig falls about two millimetres — and
+     * it is the honest trade for a twig that actually settles.
+     */
+    TIP_TORQUE.copy(TIP_LEVER).cross(HIT_N);
+    /*
+     * NOT ABOUT ITS OWN LONG AXIS, or it barrel-rolls for ever.
+     *
+     * A rod is symmetric about its length, so turning it that way changes
+     * nothing about where it is supported: the arm that drove the rotation
+     * is exactly as long afterwards, and the next frame turns it again the
+     * same way. Measured, that is precisely what happened — a twig lying
+     * flat with its support a hair to one side span at the full six radians
+     * a second, for ever, and the rotation could not possibly fix the thing
+     * that caused it.
+     *
+     * A real stick in that position does not spin either. It either rolls
+     * sideways, which is a TRANSLATION this shape does not do (it is not
+     * round — see `ROLLS`), or it simply sits there, which is the honest
+     * answer for a twig on flat ground.
+     *
+     * Only for shapes that HAVE a long axis, measured off the hull rather
+     * than assumed: a lump has no barrel to roll about and suppressing an
+     * arbitrary axis on one would be removing a real degree of freedom.
+     */
+    if (this.slender > 1.35) {
+      TIP_AXIS.copy(this.longAxis).applyQuaternion(this.root.quaternion);
+      TIP_TORQUE.addScaledVector(TIP_AXIS, -TIP_TORQUE.dot(TIP_AXIS));
+    }
+    const swing = TIP_TORQUE.length();
+    if (swing < 1e-9) return;
+    const rate = Math.min(TIP_MAX, (TIP_RATE * arm) / len);
+    TIP_Q.setFromAxisAngle(TIP_TORQUE.divideScalar(swing), rate * dt);
+    this.root.quaternion.premultiply(TIP_Q).normalize();
+    /*
+     * IT PIVOTS ABOUT THE CONTACT, NOT ABOUT ITS OWN CENTRE — and this is
+     * the difference between a stick tipping over and a stick on a
+     * treadmill.
+     *
+     * Turning a body about its centre drives one end straight into the
+     * ground. `pushOut` then lifts the whole prop back out along the
+     * normal, which undoes exactly the tilt that was just applied: measured,
+     * the twig turned at the full six radians a second FOR EVER while its
+     * attitude never changed by more than a fraction of a degree, because
+     * every frame's rotation was being cancelled by that frame's push.
+     *
+     * A real stick tipping over an edge pivots about the edge. The contact
+     * stays put and the CENTRE swings — which is what makes the free end
+     * come down and, crucially, what makes the support geometry change so
+     * the arm shrinks and the thing settles. One line, and it is the line
+     * that turns an endless rotation into a fall.
+     */
+    this.turning = rate;
   }
 
   /**
@@ -636,8 +1055,98 @@ export class Prop implements Portable {
       if (holder) this.root.quaternion.copy(holder).multiply(this.grip);
       this.fall = 0;
       this.roll.set(0, 0, 0);
+      this.turning = 0;
+      /* In her jaws it is being carried, not resting — so the moment she
+       * puts it down it has to fall, not resume a nap it took before she
+       * picked it up. */
+      this.wake();
       return;
     }
+    /*
+     * SUBSTEPPED, so a fast fall is still a fall and not a teleport.
+     *
+     * `pushOut` asks whether the prop's surface is inside soil. Between two
+     * asks it must not have passed clean THROUGH anything — and now that
+     * terminal velocity is 200 mm/s rather than 30, one frame at 60 Hz is
+     * over three millimetres, which is thicker than some tunnel roofs the
+     * shovel leaves. Splitting the frame is what lets the speed be honest
+     * instead of being held down to whatever one step could survive.
+     *
+     * Capped at eight pieces: past that the prop is moving faster than
+     * anything on this island throws it, and the cost of being exactly
+     * right stops being worth paying every frame.
+     */
+    /*
+     * ASLEEP: nothing to do but check now and then that the ground it
+     * settled on is still there. See `SLEEP_AFTER`.
+     */
+    if (this.asleep) {
+      this.napFor += dt;
+      if (this.napFor < SLEEP_POLL) return;
+      this.napFor = 0;
+      if (this.footed(rest)) return;
+      this.wake();
+    }
+
+    const travel = Math.abs(this.fall * dt) + this.roll.length() * dt;
+    const steps = Math.min(8, Math.max(1, Math.ceil(travel / PROP_STEP_MAX)));
+    for (let n = 0; n < steps; n += 1) this.step(rest, dt / steps);
+
+    /*
+     * HAS IT GONE ANYWHERE? Position and attitude both, because a prop can
+     * be turning on the spot or sliding without turning, and either one
+     * means it is not finished.
+     */
+    if (this.still <= 0) {
+      this.restAt.copy(this.at);
+      this.restQ.copy(this.root.quaternion);
+    }
+    const strayed = this.at.distanceTo(this.restAt) > SLEEP_BALL
+      || this.root.quaternion.angleTo(this.restQ) > SLEEP_TURN;
+    if (strayed) {
+      this.still = 0;
+      return;
+    }
+    this.still += dt;
+    if (this.still >= SLEEP_AFTER) {
+      this.asleep = true;
+      this.napFor = 0;
+      this.turning = 0;
+      this.roll.set(0, 0, 0);
+      this.fall = 0;
+      /* Parked exactly where it was remembered, so the frame it falls
+       * asleep is not also a frame it visibly hops. */
+      this.at.copy(this.restAt);
+      this.root.quaternion.copy(this.restQ);
+      this.root.position.copy(this.at);
+    }
+  }
+
+  /**
+   * Put it back to work — after a lift, a drop, or anything else that means
+   * where it was resting is no longer where it is.
+   */
+  wake(): void {
+    this.asleep = false;
+    this.balanced = false;
+    this.still = 0;
+    this.napFor = 0;
+  }
+
+  /** Is any part of it still touching soil? A sleeper's own footing check. */
+  private footed(rest: PropGround): boolean {
+    for (let i = 0; i < this.hull.length; i += 3) {
+      HULL_P.set(this.hull[i]!, this.hull[i + 1]!, this.hull[i + 2]!)
+        .applyQuaternion(this.root.quaternion)
+        .add(this.at);
+      if (rest.insideBy(HULL_P.x, HULL_P.y, HULL_P.z) > -TIP_BAND * 3) return true;
+    }
+    return false;
+  }
+
+  /** One piece of a frame — see the substepping note in `tick`. */
+  private step(rest: PropGround, dt: number): void {
+    this.turning = 0;
     /*
      * IT RESTS ON THE SOIL THAT IS THERE NOW, and falls if there is none.
      *
@@ -698,9 +1207,16 @@ export class Prop implements Portable {
       const into = this.roll.dot(HIT_N);
       if (into < 0) this.roll.addScaledVector(HIT_N, -into);
       this.rollOn(rest, dt);
+      /* ROUND THINGS ROLL, ANGULAR THINGS TIP — one or the other, never
+       * both, or a pebble would be turned twice by two rules that disagree
+       * about which way. `rollOn` already returns immediately for anything
+       * outside `ROLLS`, so this is the other half of that same split. */
+      if (!ROLLS.has(this.spec.kind)) this.tipOver(dt);
     } else {
       /* Airborne: it keeps whatever sideways travel it had, and gravity
-       * does the rest. No air steering. */
+       * does the rest. No air steering — and no torque either, because
+       * nothing is pushing on it. A stick knocked spinning keeps spinning
+       * until it lands, which is what a thrown stick does. */
       this.roll.multiplyScalar(Math.max(0, 1 - ROLL_DRAG * dt * 0.25));
     }
     this.root.position.copy(this.at);
