@@ -29,8 +29,8 @@ import type { DebugStatsPanel } from './DebugStatsPanel';
 import type { HudPart } from './hudModes';
 import { MM, WINDOW_BYTES, WINDOW_MM } from '../world/worldScape';
 import {
-  AIM_LIMIT, PACE_NAMES, SCOOP_BALL_MM,
-  SMOOTH_RADIUS_MM, stickCurve,
+  AIM_LIMIT, DOUBLE_TAP_MS, DOUBLE_TAP_PX, PACE_NAMES, SCOOP_BALL_MM,
+  SMOOTH_RADIUS_MM, TAP_MS, TAP_TRAVEL_PX, stickCurve,
 } from './islandTuning';
 
 /** Everything a control on the rail may reach, and nothing else. */
@@ -99,6 +99,9 @@ export interface HudHost {
   headingReadout: HTMLElement | null;
   depthReadout: HTMLElement | null;
   traceCanvas: HTMLCanvasElement | null;
+  /** A double-tap landed on the glass — the scene decides whether it was
+   *  ON the queen, and toggles her following. See `queenDoubleTap`. */
+  queenDoubleTap(clientX: number, clientY: number): void;
   poseReadout: HTMLElement | null;
   paceChip: HTMLButtonElement | null;
   rideChip: HTMLButtonElement | null;
@@ -1120,10 +1123,35 @@ export function buildControls(host: HudHost, ): void {
     host.lookPointer = null;
     host.stroke.travel = 0;
   };
+  /*
+   * THE DOUBLE-TAP, read the same way the flick is: on release, off the
+   * stroke's own record, so a pan can never be mistaken for one. A tap is
+   * a stroke that went nowhere and lasted no time; two of them close
+   * together in time and place are handed to the scene, which decides
+   * whether they landed ON the queen. Nothing here knows what a queen is.
+   */
+  let tapAt = 0;
+  let tapX = 0;
+  let tapY = 0;
   const release = (e: PointerEvent) => {
     if (host.designer?.isOpen) { host.designer.handlePointerUp(e); return; }
     if (e.pointerId === host.stickPointer) dropStick();
     if (e.pointerId === host.lookPointer) {
+      /* Read before `dropLook` wipes the stroke. */
+      const wasTap = host.stroke.travel < TAP_TRAVEL_PX
+        && performance.now() - host.stroke.at < TAP_MS;
+      if (wasTap) {
+        const now = performance.now();
+        if (now - tapAt < DOUBLE_TAP_MS
+          && Math.hypot(e.clientX - tapX, e.clientY - tapY) < DOUBLE_TAP_PX) {
+          tapAt = 0;
+          host.queenDoubleTap(e.clientX, e.clientY);
+        } else {
+          tapAt = now;
+          tapX = e.clientX;
+          tapY = e.clientY;
+        }
+      }
       dropLook();
       /*
        * A FLICK IS READ ON RELEASE, NEVER DURING THE DRAG.

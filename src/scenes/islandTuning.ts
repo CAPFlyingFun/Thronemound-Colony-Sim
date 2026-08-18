@@ -1036,6 +1036,28 @@ export const COLONIST_ARRIVE = 1.2;
 /** How far from her birthplace a colonist will wander, in world units. */
 export const COLONIST_ROAM = 12;
 
+/*
+ * THE QUEEN, WALKING AGAIN — asked for from the device: "I would like the
+ * Queen able to move... randomly move around in a 2mm radius around that
+ * point so that way it doesn't look too fake."
+ *
+ * The 2 mm is HIS number and the wander leash honours it exactly. Her pace
+ * is game tuning: physogastric queens barely walk at all, and half a
+ * worker's stride reads as heavy without reading as broken. The standoff
+ * is roughly one queen length, so following she walks BEHIND the player
+ * instead of standing in the player's mandibles. The tap radius is
+ * deliberately generous — she is twelve millimetres long and a thumb on a
+ * phone is not a cursor.
+ */
+export const QUEEN_ROAM = 2 / 5; //        his 2 mm, in world units (MM = 5)
+export const QUEEN_PACE = 0.5; //          of COLONIST_SPEED
+export const QUEEN_STANDOFF = 12 / 5; //   one queen length back, in wu
+export const QUEEN_TAP_WU = 3; //          how near a tap ray must pass
+export const TAP_MS = 300; //              longer is a hold, not a tap
+export const TAP_TRAVEL_PX = 12; //        further is a drag, not a tap
+export const DOUBLE_TAP_MS = 400; //       between the two taps
+export const DOUBLE_TAP_PX = 48; //        how far apart they may land
+
 /**
  * WHAT A COLONIST MAY WALK ONTO, and what she does when it is not there.
  *

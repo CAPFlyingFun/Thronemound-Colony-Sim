@@ -44,6 +44,24 @@ class Colonist {
 
   ready = false;
 
+  /**
+   * SOMEONE TO WALK BEHIND. Set, her wander is suspended and she makes for
+   * this point instead — read live each step, so a moving target is
+   * followed rather than chased to where it was. `standoff` is how close
+   * she comes before she is content; nought means COLONIST_ARRIVE.
+   *
+   * Null is the wander, and the wander is the default: following is a
+   * MODE someone put her in, not what a colonist is.
+   */
+  follow: THREE.Vector3 | null = null;
+
+  standoff = 0;
+
+  /** Her stride against a worker's. A queen is twice the animal at half
+   *  the hurry, and one multiplier keeps that a fact about her rather
+   *  than a second speed constant. */
+  pace = 1;
+
   readonly at = new THREE.Vector3();
 
   readonly up = new THREE.Vector3(0, 1, 0);
@@ -74,16 +92,35 @@ class Colonist {
   readonly id: number;
 
   constructor(
-    readonly caste: 'worker' | 'major',
+    readonly caste: 'queen' | 'worker' | 'major',
     private readonly rand: () => number,
     id = 0,
+    /**
+     * AN EXISTING RIG TO ADOPT, already loaded and already in the scene —
+     * the parked founder's. `becomeWorker` hands the player the worker's
+     * body and leaves the queen's standing in her chamber; giving her legs
+     * back means driving THAT rig, not fetching a copy of it. The adopted
+     * model is not re-loaded, not re-added and not disposed of here — it
+     * was hers before this class saw it.
+     */
+    adopt?: QueenModel,
   ) {
     this.id = id;
-    this.model = new QueenModel(caste);
-    this.model.root.visible = false;
+    if (adopt) {
+      this.model = adopt;
+      this.adopted = true;
+      this.ready = true;
+      this.buildDrive();
+    } else {
+      this.model = new QueenModel(caste);
+      this.model.root.visible = false;
+    }
   }
 
+  private adopted = false;
+
   async load(): Promise<boolean> {
+    if (this.adopted) return this.ready;
     const ok = await this.model.load();
     this.ready = ok;
     this.model.root.visible = ok;
@@ -121,7 +158,7 @@ class Colonist {
     if (!this.ready) return;
 
     this.dwell -= dt;
-    if (this.dwell <= 0) {
+    if (this.dwell <= 0 && !this.follow) {
       /* Somewhere else within reach of where she hatched — a colonist with
        * no leash is over the horizon in a minute. */
       const a = this.rand() * Math.PI * 2;
@@ -130,12 +167,23 @@ class Colonist {
       this.dwell = 3 + this.rand() * 5;
     }
 
-    const dx = this.want.x - this.at.x;
-    const dz = this.want.z - this.at.z;
+    /* Following, the goal is wherever the leader IS — and content means
+     * standing off, not standing on. The wander's own goal otherwise.
+     *
+     * "ARRIVED" SCALES WITH THE LEASH. The queen's whole 2 mm roam sits
+     * INSIDE the worker arrive radius, so with one fixed radius every
+     * goal she could ever roll was already reached and she stood for
+     * ever — measured: 0 mm walked in 30 s. A quarter of the leash keeps
+     * the same proportions the workers have at theirs. */
+    const goal = this.follow ?? this.want;
+    const near = Math.min(COLONIST_ARRIVE, Math.max(0.02, roam * 0.25));
+    const arrive = this.follow ? Math.max(COLONIST_ARRIVE, this.standoff) : near;
+    const dx = goal.x - this.at.x;
+    const dz = goal.z - this.at.z;
     const far = Math.hypot(dx, dz);
     let yaw = 0;
     let walk = 0;
-    if (far > COLONIST_ARRIVE) {
+    if (far > arrive) {
       /*
        * Which side her target is on, about her OWN up.
        *
@@ -154,8 +202,8 @@ class Colonist {
       yaw = Math.max(-1, Math.min(1, side * 3));
       /* Walk once she is roughly pointed at it, and ease off as she lands,
        * or she paces back and forth across the spot for ever. */
-      walk = ahead > 0.3 ? Math.min(1, far / (COLONIST_ARRIVE * 3)) : 0;
-    } else {
+      walk = ahead > 0.3 ? Math.min(1, (far - arrive) / (COLONIST_ARRIVE * 3) + 0.3) : 0;
+    } else if (!this.follow) {
       this.dwell = Math.min(this.dwell, 0);
     }
 
@@ -166,7 +214,7 @@ class Colonist {
       {
         walk,
         yaw,
-        speed: COLONIST_SPEED,
+        speed: COLONIST_SPEED * this.pace,
         yawRate: COLONIST_TURN,
         settle: false,
         /*
@@ -264,5 +312,6 @@ class Colonist {
     );
   }
 
-  dispose(): void { this.model.dispose(); }
+  /** An adopted rig is not hers to destroy — see the constructor. */
+  dispose(): void { if (!this.adopted) this.model.dispose(); }
 }

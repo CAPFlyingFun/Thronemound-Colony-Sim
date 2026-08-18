@@ -141,7 +141,8 @@ import {
   BODY_HALF_TALL, BODY_FLOOR_MARGIN, AIM_LIMIT, CHAMBER_CAM_FAR,
   CHAMBER_CAM_NEAR, COLONIST_SPEED, COLONIST_TURN, COLONIST_ARRIVE,
   COLONIST_ROAM, TROPHALLAXIS_REACH, TROPHALLAXIS_RATE, CARRY_DELIVER_REACH,
-  FIGHT_NOTICE, ROUTE_FORGET_MM,
+  FIGHT_NOTICE, ROUTE_FORGET_MM, QUEEN_ROAM, QUEEN_PACE, QUEEN_STANDOFF,
+  QUEEN_TAP_WU,
 } from './islandTuning';
 import { Colonist } from './Colonist';
 import { SoilQuery } from './soilQuery';
@@ -209,6 +210,12 @@ import {
 /* Re-exported so the scene stays the one import a probe needs. The table
  * itself lives in `hudModes.ts`, which knows nothing about the DOM. */
 export type { HudMode } from './hudModes';
+
+/* The queen double-tap's own scratch — an NDC point and a ray, once each. */
+const S_TAP = new THREE.Vector2();
+const S_RAY = new THREE.Raycaster();
+/* Her name on the shove list, clear of the colonists' small integers. */
+const QUEEN_NPC_ID = 9001;
 
 export class IslandScene {
   /** Every 'is there soil here' in one place. See `soilQuery.ts`. */
@@ -339,8 +346,22 @@ export class IslandScene {
   private queen = new QueenModel('queen');
 
   /* The queen, once she has stopped being the player — parked where the
-   * founding finished and no longer driven by anything. */
+   * founding finished. Her LEGS are `queenWalk`'s now; this keeps the rig
+   * itself, which the scene still owns and disposes. */
   private queenNpc: QueenModel | null = null;
+
+  /** Her legs and her errand, once she is scenery — a `Colonist` wearing
+   *  her own adopted rig. See `becomeWorker` and `queenTick`. */
+  private queenWalk: Colonist | null = null;
+
+  /** The chamber point she wanders around — "create like a marker/sphere
+   *  for the Queen... randomly move around in a 2mm radius around that
+   *  point". Where the founding parked her, which IS her chamber. */
+  private readonly queenAnchor = new THREE.Vector3();
+
+  /** Double-tap toggles this: she walks behind the player, or she keeps
+   *  to her chamber. */
+  private queenFollow = false;
 
   /** Chips of soil thrown off a cut — see `islandGrit`. Built with the
    *  scene, because it is one instanced mesh that lives in it. */
@@ -3702,28 +3723,12 @@ export class IslandScene {
       spine: readSpine(this.bodyHost, dt),
     });
     /*
-     * AND THE QUEEN IN THE CHAMBER STILL BREATHES.
-     *
-     * Reported: "after the queen gets transferred to the worker, the queen
-     * still isn't playing the idle animation with the antennae moving."
-     *
-     * She was not being ticked at all. `becomeWorker` reassigns `this.queen`
-     * to the WORKER's rig and parks the old one in `queenNpc`, so the update
-     * above — the only one there was — has been driving the worker ever
-     * since, and the founder has stood frozen in her own nest since v0.1.63.
-     * Not a missing animation: a missing caller.
-     *
-     * Everything is zero on purpose. She is not walking, turning, digging or
-     * carrying; what a rig does with all of that at rest IS the idle, which
-     * is where the antennae live. Her spine and head are left alone rather
-     * than driven from the player's camera, because she is scenery with a
-     * history now and should not be looking wherever you look.
+     * AND THE QUEEN IN THE CHAMBER LIVES — breathing first (v0.1.63 left
+     * her untic­ked and frozen; the fix was a caller), and WALKING now:
+     * `queenTick` drives her adopted rig around her chamber anchor, or
+     * behind the player when a double-tap has asked her to follow.
      */
-    if (this.queenNpc && this.queenNpc !== this.queen) {
-      this.queenNpc.update(dt, {
-        speed: 0, turn: 0, digging: 0, carrying: 0, headYaw: 0, headPitch: 0,
-      });
-    }
+    this.queenTick(dt);
     /* And her FEET are solved in that frame too. The solver has always
      * taken one; the island had been passing `undefined` and letting it
      * measure every foot as a height above sea level, which on a wall asks
@@ -4204,6 +4209,61 @@ export class IslandScene {
    * queen's carried across, because she is a different animal and arriving
    * half-spent from someone else's founding would be nonsense.
    */
+  /**
+   * ONE FRAME OF THE QUEEN'S OWN LIFE, once she is not the player.
+   *
+   * Asked for from the device: "I would like the Queen able to move
+   * (thinking add double tap to have follow active player ant, DT again
+   * to disable)... randomly move around in a 2mm radius around that point
+   * so that way it doesn't look too fake... also, the idle animation
+   * needs to play when not moving and crawl/walk when it does."
+   *
+   * All four parts live in the Colonist she adopted: the anchor is where
+   * the founding parked her, the 2 mm leash is `QUEEN_ROAM`, following is
+   * the colonist's `follow` pointed at the player, and idle-versus-crawl
+   * is what `hexapod` already does with an honest speed — the antennae
+   * sweep hardest at rest by design.
+   *
+   * Grounded by `footingFrom` at HER height, not `walkGroundAt` — she
+   * lives in a chamber, and the heightfield would seat her on the lawn
+   * above it. The fourth time this repo has had to say so.
+   */
+  private queenTick(dt: number): void {
+    const walk = this.queenWalk;
+    if (!walk || !this.walker || this.queenNpc === this.queen) return;
+    walk.follow = this.queenFollow ? this.at : null;
+    walk.step(
+      dt,
+      this.queenAnchor,
+      QUEEN_ROAM,
+      (x, z) => this.footingFrom(x, z, walk.at.y),
+      (p, into) => { this.walker!.normalAt(p, into); },
+      this.groundForLegs,
+    );
+  }
+
+  /**
+   * A DOUBLE-TAP ON THE QUEEN toggles her following the player. The HUD
+   * hands every double-tap on the glass here; whether it was ON her is
+   * this side's question, and it is answered generously — nearest point
+   * of the tap's ray against her position, within `QUEEN_TAP_WU` — since
+   * she is twelve millimetres long and a thumb is not a cursor.
+   */
+  queenDoubleTap(clientX: number, clientY: number): void {
+    const npc = this.queenNpc;
+    if (!npc || npc === this.queen || !this.queenWalk) return;
+    const r = this.host.getBoundingClientRect();
+    S_TAP.set(
+      ((clientX - r.left) / r.width) * 2 - 1,
+      -(((clientY - r.top) / r.height) * 2 - 1),
+    );
+    S_RAY.setFromCamera(S_TAP, this.camera);
+    const hit = S_RAY.ray.distanceToPoint(npc.root.position) <= QUEEN_TAP_WU;
+    if (!hit) return;
+    this.queenFollow = !this.queenFollow;
+    this.toastCombat(this.queenFollow ? 'THE QUEEN FOLLOWS' : 'THE QUEEN STAYS');
+  }
+
   async becomeWorker(): Promise<boolean> {
     if (this.antKind === FIRE_ANT_WORKER) return true;
     const worker = new QueenModel('worker');
@@ -4211,9 +4271,17 @@ export class IslandScene {
     const ok = await worker.load();
     if (!ok) { worker.dispose(); return false; }
 
-    /* She stops here, standing, and is left alone from now on. */
+    /* She stops here — but not as a statue any more. Her rig is adopted
+     * by a Colonist, so she keeps her legs, and where she stopped becomes
+     * the anchor she wanders her 2 mm around. */
     this.queenNpc = this.queen;
     this.queenNpc.root.visible = true;
+    this.queenAnchor.copy(this.at);
+    this.queenWalk = new Colonist('queen', Math.random, QUEEN_NPC_ID, this.queenNpc);
+    this.queenWalk.pace = QUEEN_PACE;
+    this.queenWalk.standoff = QUEEN_STANDOFF;
+    this.queenWalk.at.copy(this.at);
+    this.queenFollow = false;
 
     this.scene.add(worker.root);
     worker.root.visible = true;
@@ -4483,6 +4551,30 @@ export class IslandScene {
 
   /** For probes: cut once, the way the DIG plate does. */
   biteForTest(): void { this.bite(); }
+
+  /** For probes: the parked queen's errand — where she is, where her
+   *  chamber anchor is, and whether she is following the player. */
+  queenForTest(): {
+    parked: boolean; follow: boolean; atMm: [number, number, number];
+    anchorMm: [number, number, number]; fromAnchorMm: number; fromPlayerMm: number;
+  } | null {
+    const walk = this.queenWalk;
+    if (!walk || this.queenNpc === this.queen) return null;
+    const dx = walk.at.x - this.queenAnchor.x;
+    const dz = walk.at.z - this.queenAnchor.z;
+    return {
+      parked: true,
+      follow: this.queenFollow,
+      atMm: [walk.at.x * MM, walk.at.y * MM, walk.at.z * MM],
+      anchorMm: [
+        this.queenAnchor.x * MM, this.queenAnchor.y * MM, this.queenAnchor.z * MM,
+      ],
+      fromAnchorMm: +(Math.hypot(dx, dz) * MM).toFixed(2),
+      fromPlayerMm: +(Math.hypot(
+        walk.at.x - this.at.x, walk.at.z - this.at.z,
+      ) * MM).toFixed(2),
+    };
+  }
 
   /** For probes: the route trace's own account of the tunnel. */
   routeForTest(): { points: number; lengthMm: number; upMm: number } {
@@ -5322,6 +5414,7 @@ export class IslandScene {
     this.grit?.dispose();
     this.queen.dispose();
     for (const one of this.colony) one.dispose();
+    this.queenWalk?.dispose();
     for (const q of this.quarry) q.dispose();
     this.renderer.dispose();
     this.host.replaceChildren();
