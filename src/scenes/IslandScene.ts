@@ -141,7 +141,7 @@ import {
   BODY_HALF_TALL, BODY_FLOOR_MARGIN, AIM_LIMIT, CHAMBER_CAM_FAR,
   CHAMBER_CAM_NEAR, COLONIST_SPEED, COLONIST_TURN, COLONIST_ARRIVE,
   COLONIST_ROAM, TROPHALLAXIS_REACH, TROPHALLAXIS_RATE, CARRY_DELIVER_REACH,
-  FIGHT_NOTICE,
+  FIGHT_NOTICE, ROUTE_FORGET_MM,
 } from './islandTuning';
 import { Colonist } from './Colonist';
 import { SoilQuery } from './soilQuery';
@@ -193,6 +193,7 @@ import {
 import {
   readSpine, refreshAim, simulate, type BodyHost,
 } from './islandBody';
+import { RouteTrace, drawRouteTrace } from './routeTrace';
 import {
   boreFrame, buildIsland, footingFrom, groundHeightAt, growForest,
   regrowScrub, type LandHost,
@@ -996,6 +997,7 @@ export class IslandScene {
      * a signature check and writes nothing on a frame where nothing
      * changed. */
     this.applyHudMode();
+    this.routeTick(dt);
   }
 
   /**
@@ -1313,6 +1315,7 @@ export class IslandScene {
   private applyHudMode(): void {
     const mode = pickMode({
       digging: this.digMode,
+      underground: this.underground,
       posed: this.posture.armed,
       fighting: this.inAFight(),
       carrying: this.carry.carrying,
@@ -2323,6 +2326,24 @@ export class IslandScene {
 
   private depthReadout: HTMLElement | null = null;
 
+  /** The underground panel — see `routeTrace.ts` and the `digDeep` row. */
+  private traceCanvas: HTMLCanvasElement | null = null;
+
+  /** The route she has cut this excursion, sampled below grade. */
+  private readonly route = new RouteTrace();
+
+  /** Where she was last frame, for the route's travel step. */
+  private readonly routeWas = new THREE.Vector3();
+
+  private routeWasOk = false;
+
+  /** mm of travel spent above grade — past `ROUTE_FORGET_MM` the trace
+   *  clears, so a graze of daylight does not wipe a tunnel mid-dig. */
+  private routeUpMm = 0;
+
+  /** Redraw throttle: the profile changes at walking pace, not at 60 Hz. */
+  private traceClock = 0;
+
   constructor(host: HTMLElement, private readonly boot: IslandBoot = {}) {
     this.host = host;
     host.classList.add('density-lab-host');
@@ -3204,6 +3225,51 @@ export class IslandScene {
   }
 
   private refreshAim(): void { refreshAim(this.bodyHost); }
+
+  /**
+   * ONE FRAME OF THE ROUTE TRACE — sample below grade, draw when shown.
+   *
+   * The travel step is the full 3D distance she moved: horizontal-only
+   * would record a plumb shaft as no route at all. `RouteTrace` itself
+   * refuses a single step longer than a stride's worth (a teleport, a
+   * load, a probe's hand), so the line is only ever ground she walked.
+   *
+   * The trace is THIS EXCURSION's. It clears once she has spent real
+   * travel above grade — travel, not seconds, because the probe clock
+   * runs slow under SwiftShader and a timer would wipe it mid-test —
+   * so grazing daylight through a vent does not cost her the map.
+   */
+  private routeTick(dt: number): void {
+    const stepMm = this.routeWasOk ? this.routeWas.distanceTo(this.at) * MM : 0;
+    this.routeWas.copy(this.at);
+    this.routeWasOk = true;
+    if (this.underground) {
+      this.routeUpMm = 0;
+      this.route.add(stepMm, this.depthMm());
+    } else if (this.route.samples.length > 0) {
+      this.routeUpMm += stepMm;
+      if (this.routeUpMm > ROUTE_FORGET_MM) this.route.clear();
+    }
+
+    /* Drawn only while its panel is up, and at reading pace rather than
+     * frame pace — the profile changes at her walking speed. */
+    if (this.hudMode !== 'digDeep' || !this.traceCanvas) return;
+    this.traceClock += dt;
+    if (this.traceClock < 0.2) return;
+    this.traceClock = 0;
+    const cw = this.traceCanvas.clientWidth;
+    const chh = this.traceCanvas.clientHeight;
+    if (cw === 0 || chh === 0) return;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    if (this.traceCanvas.width !== Math.round(cw * dpr)) {
+      this.traceCanvas.width = Math.round(cw * dpr);
+      this.traceCanvas.height = Math.round(chh * dpr);
+    }
+    const ctx = this.traceCanvas.getContext('2d');
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawRouteTrace(ctx, cw, chh, this.route, this.depthMm());
+  }
 
   /* ------------------------------------------------------------ the jaws */
 
@@ -4417,6 +4483,15 @@ export class IslandScene {
 
   /** For probes: cut once, the way the DIG plate does. */
   biteForTest(): void { this.bite(); }
+
+  /** For probes: the route trace's own account of the tunnel. */
+  routeForTest(): { points: number; lengthMm: number; upMm: number } {
+    return {
+      points: this.route.samples.length,
+      lengthMm: +this.route.lengthMm.toFixed(1),
+      upMm: +this.routeUpMm.toFixed(1),
+    };
+  }
 
   /** For probes: how many worm bodies are drawn, and how many bones each. */
   wormBodiesForTest(): { bones: number; visible: boolean; headMm: number[] }[] {

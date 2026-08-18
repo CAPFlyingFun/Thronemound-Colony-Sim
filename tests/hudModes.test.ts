@@ -17,12 +17,14 @@ const MODES = Object.keys(HUD_LAYOUTS) as HudMode[];
 
 const ALL_PARTS: HudPart[] = [
   'dig', 'scoop', 'instruments', 'aim', 'roll', 'heading', 'depth',
+  'trace',
   'view', 'dodge', 'bite', 'sting', 'carry', 'interact',
   'pace', 'ride', 'tilt', 'poseRow',
 ];
 
 const quiet = {
-  digging: false, posed: false, fighting: false, carrying: false,
+  digging: false, underground: false, posed: false, fighting: false,
+  carrying: false,
 };
 
 describe('which mode she is in', () => {
@@ -35,6 +37,16 @@ describe('which mode she is in', () => {
      * must not yank the shovel out of her jaws mid-tunnel. */
     expect(pickMode({ ...quiet, digging: true, fighting: true })).toBe('dig');
     expect(pickMode({ ...quiet, posed: true, fighting: true })).toBe('pose');
+  });
+
+  it('swaps the dig panel below grade, and back above it', () => {
+    /* Same shovel, different blindness: underground the gauges have
+     * nothing to be read against, so the mode itself changes and the
+     * table swaps the instruments for the route trace. */
+    expect(pickMode({ ...quiet, digging: true, underground: true })).toBe('digDeep');
+    expect(pickMode({ ...quiet, digging: true })).toBe('dig');
+    /* Below grade WITHOUT the shovel armed is not a dig mode at all. */
+    expect(pickMode({ ...quiet, underground: true })).toBe('explore');
   });
 
   it('puts a fight ahead of a load', () => {
@@ -196,10 +208,9 @@ describe('the ways out, which are the ones that strand a player', () => {
 });
 
 describe('the dig instruments belong to the dig', () => {
-  it('shows the full attitude panel while tunnelling', () => {
+  it('shows the full attitude panel while tunnelling above grade', () => {
     /* Pitch, roll, heading, depth — the four that answer "am I actually
-     * going down?", which a loop-de-loop proved a player cannot answer
-     * from the picture alone. */
+     * going down?" while there is still a world to read them against. */
     for (const part of ['instruments', 'aim', 'roll', 'heading', 'depth'] as HudPart[]) {
       expect(rankOf('dig', part)).toBe('secondary');
     }
@@ -209,6 +220,19 @@ describe('the dig instruments belong to the dig', () => {
     for (const part of ['instruments', 'aim', 'roll', 'heading', 'depth'] as HudPart[]) {
       expect(rankOf('explore', part)).toBe('hidden');
     }
+  });
+
+  it('below grade the gauges GIVE WAY to the route trace', () => {
+    /* Reported: "the display of the pitch, roll, and heading is confusing
+     * when you're underground and just see arrows." The answer is not a
+     * fifth gauge beside four — the contextual-HUD rule replaces them. */
+    expect(rankOf('digDeep', 'trace')).toBe('secondary');
+    for (const part of ['aim', 'roll', 'heading', 'depth'] as HudPart[]) {
+      expect(rankOf('digDeep', part)).toBe('hidden');
+    }
+    /* And the trace has no business above ground, where the gauges work. */
+    expect(rankOf('dig', 'trace')).toBe('hidden');
+    expect(rankOf('explore', 'trace')).toBe('hidden');
   });
 });
 

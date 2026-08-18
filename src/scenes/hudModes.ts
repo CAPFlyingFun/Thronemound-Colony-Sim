@@ -22,11 +22,12 @@
  */
 
 /** The situations the HUD dresses for. */
-export type HudMode = 'explore' | 'dig' | 'combat' | 'carry' | 'pose';
+export type HudMode = 'explore' | 'dig' | 'digDeep' | 'combat' | 'carry' | 'pose';
 
 /** Every control the mode table may place. Names match the plate art. */
 export type HudPart =
   | 'dig' | 'scoop' | 'instruments' | 'aim' | 'roll' | 'heading' | 'depth'
+  | 'trace'
   | 'view' | 'dodge' | 'bite' | 'sting' | 'carry' | 'interact'
   | 'pace' | 'ride' | 'tilt' | 'poseRow';
 
@@ -110,6 +111,25 @@ export const HUD_LAYOUTS: Record<HudMode, HudLayout> = {
     secondary: ['dig', 'instruments', 'aim', 'roll', 'heading', 'depth'],
     contextual: [],
   },
+  /*
+   * THE SAME SHOVEL, BELOW GRADE — and the gauges give way to the TRACE.
+   *
+   * Reported: "the display of the pitch, roll, and heading is confusing
+   * when you're underground and just see arrows." The four gauges were
+   * built for exactly this blindness, and they answer it with numbers the
+   * player must integrate into a tunnel in their head; underground there
+   * is nothing to check them against. Asked what would help, Joshua chose
+   * a depth/route trace — the tunnel's own side-on profile, her position
+   * on it — and the contextual-HUD rule says it REPLACES the gauges here
+   * rather than crowding in beside them: above ground the arrows read
+   * against a world you can see and they stay; below it they do not and
+   * they go. One panel per blindness.
+   */
+  digDeep: {
+    primary: 'scoop',
+    secondary: ['dig', 'instruments', 'trace'],
+    contextual: [],
+  },
   combat: {
     primary: 'bite',
     /*
@@ -178,6 +198,10 @@ export const HUD_LAYOUTS: Record<HudMode, HudLayout> = {
 export interface HudSignals {
   /** The shovel is armed. An explicit choice, so it outranks everything. */
   digging: boolean;
+  /** She is below grade — `islandBody` keeps it live off the drawn
+   *  island. Only consulted while digging: it picks WHICH dig panel,
+   *  never whether the mode is hers. */
+  underground: boolean;
   /** A posture rig is armed. Also explicit. */
   posed: boolean;
   /** Something worth fighting is close enough to matter. */
@@ -197,7 +221,7 @@ export interface HudSignals {
  * that reason).
  */
 export function pickMode(s: HudSignals): HudMode {
-  if (s.digging) return 'dig';
+  if (s.digging) return s.underground ? 'digDeep' : 'dig';
   if (s.posed) return 'pose';
   if (s.fighting) return 'combat';
   if (s.carrying) return 'carry';

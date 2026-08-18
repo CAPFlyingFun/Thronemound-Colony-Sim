@@ -1,7 +1,7 @@
 {
   "name": "thronemound-colony-sim",
   "private": true,
-  "version": "0.1.98",
+  "version": "0.1.99",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -60,6 +60,7 @@
     "probe:models": "node scripts/probe-models.mjs",
     "probe:props": "node scripts/probe-props.mjs",
     "probe:hold": "node scripts/probe-hold.mjs",
+    "probe:trace": "node scripts/probe-trace.mjs",
     "probe:lookstuck": "node scripts/probe-lookstuck.mjs",
     "probe:worm": "node scripts/probe-worm.mjs",
     "probe:scale": "node scripts/probe-scale.mjs",

@@ -3132,6 +3132,20 @@
 }
 
 /*
+ * THE ROUTE TRACE — the underground panel, one canvas where the four
+ * gauges stood. Wider than a chip because it is a PICTURE; still shorter
+ * than a plate, so dig mode's rail costs no more glass below grade than
+ * above it. Same chip dress as its neighbours.
+ */
+.tm-instruments .tm-routetrace {
+  width: 128px;
+  height: 38px;
+  border-radius: 8px;
+  background: rgba(20, 15, 10, 0.72);
+  pointer-events: none;
+}
+
+/*
  * A SHORT LANDSCAPE PHONE — 375px tall is a real device, and dig mode is
  * the rail's fullest state.
  *
@@ -3144,6 +3158,7 @@
   .tm-art-dig { width: 76px; height: 76px; background-size: 64px 64px; }
   .tm-art-scoop { width: 58px; height: 58px; background-size: 48px 48px; }
   .tm-instruments .density-lab-aim-readout { font-size: 11px; padding: 4px 6px; }
+  .tm-instruments .tm-routetrace { width: 106px; height: 32px; }
 
   /*
    * THE QUEST CARD, ON THE SCREEN THAT HAS NO ROOM FOR IT.

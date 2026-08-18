@@ -746,6 +746,14 @@ export const EMBER_COLOR = 0xff7a2a; //   the chips — ember orange, unlit
 export const FIRE_CORE = 0xffd23f; //     the bead's hot centre
 export const FIRE_FLARE = 0xff4f1f; //    what it flickers towards
 
+/*
+ * THE ROUTE TRACE forgets a tunnel once she has clearly LEFT it: this much
+ * travel spent above grade. Travel rather than seconds, so a slow probe
+ * frame cannot wipe it, and long enough that crossing a vent's daylight
+ * does not cost her the map of the dig she is still in. See `routeTrace.ts`.
+ */
+export const ROUTE_FORGET_MM = 60;
+
 /**
  * How hard each stroke's own hole is relaxed afterwards, and how often.
  *

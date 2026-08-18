@@ -98,6 +98,7 @@ export interface HudHost {
   rollReadout: HTMLElement | null;
   headingReadout: HTMLElement | null;
   depthReadout: HTMLElement | null;
+  traceCanvas: HTMLCanvasElement | null;
   poseReadout: HTMLElement | null;
   paceChip: HTMLButtonElement | null;
   rideChip: HTMLButtonElement | null;
@@ -292,6 +293,18 @@ export function buildControls(host: HudHost, ): void {
   host.depthReadout.className = 'density-lab-aim-readout';
   instruments.appendChild(host.depthReadout);
   host.railPart(host.depthReadout, 'depth');
+
+  /*
+   * THE ROUTE TRACE — the underground panel. Same row, other blindness:
+   * below grade the four gauges above give way to this one canvas, the
+   * tunnel's own side-on profile. The MODE decides which set is up —
+   * `digDeep` in `hudModes` — so this is just the element; the scene
+   * samples the route and draws it. See `routeTrace.ts`.
+   */
+  host.traceCanvas = document.createElement('canvas');
+  host.traceCanvas.className = 'tm-routetrace';
+  instruments.appendChild(host.traceCanvas);
+  host.railPart(host.traceCanvas, 'trace');
 
 
   /* The PLAN button is gone: the shovel is how tunnels get made now.
