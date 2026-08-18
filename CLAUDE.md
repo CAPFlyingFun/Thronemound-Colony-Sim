@@ -248,6 +248,24 @@ Follow the current Trello workflow and the user's instruction.
 
 ---
 
+## Trello ownership tags
+
+Work ownership on the board is marked with LABELS, one per collaborator
+(Claude, ChatGPT, and the human helpers by name — read the board's label
+list for the current roster rather than trusting this sentence).
+
+- Claiming a card = attaching your label to it. Do not take a card that
+  wears someone else's label without checking with Joshua.
+- When Claude moves a card from **Coding** to **Testing**, attach
+  **Joshua's label alongside Claude's** — everything in Testing is
+  waiting on his device pass, and the pair of labels says so at a glance.
+  (Joshua's standing instruction, 2026-08-18.)
+- Trello card COMMENTS do not reach Claude through the current connector.
+  Notes meant for Claude belong in the card's DESCRIPTION, or with Joshua
+  directly.
+
+---
+
 ## Working rule for ambiguity
 
 When two sources disagree:
