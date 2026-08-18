@@ -32,11 +32,20 @@ const HEIGHTS = new Float64Array(WINDOW_CELLS + 1);
 /** Edit key packing: absolute Y (mm, < 4096) in the low bits. */
 const Y_SPAN = 4096;
 
-/** How far below the window's lowest surface the band floor sits. */
-const FLOOR_BELOW_MM = 176;
+/**
+ * How far below the window's lowest surface the band floor sits.
+ *
+ * EXPORTED because it is a budget as well as a setting: anything placed
+ * into the soil at authoring time — see `nest/colonyNest.ts` — can only go
+ * as deep as the band that will be there to hold it. One number, read by
+ * both, rather than a depth limit written down twice.
+ */
+export const FLOOR_BELOW_MM = 176;
 
-/** Re-anchor only when the floor would drift this far from ideal. */
-const REBASE_SLACK_MM = 56;
+/** Re-anchor only when the floor would drift this far from ideal. Exported
+ *  for the same reason: the guaranteed depth is this much less than the
+ *  ideal one, because the band is allowed to drift by it before moving. */
+export const REBASE_SLACK_MM = 56;
 
 export interface IslandScrollReport {
   tilesX: number;

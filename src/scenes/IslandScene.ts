@@ -44,7 +44,10 @@ import { buildNestView, type NestView } from '../nest/nestView';
 import { NestDesigner } from '../nest/NestDesigner';
 import { planBounds } from '../nest/nestCarve';
 import { addNode } from '../nest/nestEdit';
-import { type NestPlan } from '../nest/nestPlan';
+import { validatePlan, type NestPlan } from '../nest/nestPlan';
+import {
+  colonyFaults, colonyNest, type Colony, type ColonySite,
+} from '../nest/colonyNest';
 import { chamberBox, chamberNorm, type ChamberBox } from './ChamberMovement';
 import { BoreRig, YAW_RATE } from './BoreControl';
 import { Dodge, readFlick, readNudge } from './dodge';
@@ -2715,16 +2718,7 @@ export class IslandScene {
      * the fine window redraws the real mound shape whenever you are close
      * enough to care — the world room's macro/fine split, in data.
      */
-    const r = this.soil.reject;
-    for (let row = Math.max(0, Math.floor(r.min[2] / STEP_MM));
-      row <= Math.min(N - 1, Math.ceil(r.max[2] / STEP_MM)); row += 1) {
-      for (let col = Math.max(0, Math.floor(r.min[0] / STEP_MM));
-        col <= Math.min(N - 1, Math.ceil(r.max[0] / STEP_MM)); col += 1) {
-        const natural = this.heights[row * N + col]! / 10;
-        const top = this.soil.moundTopMm(col * STEP_MM, row * STEP_MM, natural);
-        if (top > natural) this.heights[row * N + col] = Math.round(top * 10);
-      }
-    }
+    this.liftMounds();
 
     this.buildIsland();
     this.loading.setStatus('Streaming the soil…');
@@ -2807,6 +2801,27 @@ export class IslandScene {
       /* The curtain is up: a waiting update may now take the app, because
        * from here a reload costs nothing but the load it already finished. */
       markLoaded();
+      /*
+       * `?colony=1` — WAKE UP IN A COLONY THAT WAS ALREADY THERE.
+       *
+       * The opening card 06 describes, reachable before the prologue that
+       * will make it the default (cards 08 and 09) exists. Here rather than
+       * beside the other query switches because it needs the queen settled:
+       * `stampColony` hands her rig over to an NPC, and doing that to a
+       * model still in flight would park an empty skeleton in the throne
+       * room.
+       *
+       * A switch and not a setting, for the same reason `?blur=off` is one:
+       * the game is tested from a live deploy on a phone, and a thing you
+       * cannot reach without a console is a thing that does not get tested.
+       */
+      if (new URLSearchParams(
+        typeof location === 'undefined' ? '' : location.search,
+      ).get('colony') === '1') {
+        void this.stampColony(this.colonySiteAt(
+          'debug', this.at.x * MM, this.at.z * MM,
+        ));
+      }
     });
   }
 
@@ -3697,6 +3712,156 @@ export class IslandScene {
     this.nestView.root.scale.setScalar(1 / MM);
     this.nestView.root.visible = this.showPlan && !this.designer?.isOpen;
     this.scene.add(this.nestView.root);
+  }
+
+  /**
+   * THE ANTHILL, PUT INTO THE COARSE GRID.
+   *
+   * The island mesh and the far view are built from `heights`, one sample
+   * every 55 mm; the fine window redraws the real mound shape whenever you
+   * are close enough to care. That is the world room's macro/fine split
+   * expressed in data, and it means a heap only exists at distance if it is
+   * written here as well as carved there.
+   *
+   * Was inline in `load`, which was fine while the only nest was one the
+   * player dug in front of themselves. A colony STAMPED somewhere else has
+   * a mound too, and a hill that appears only once you walk into the window
+   * is a hill that is not on the map.
+   */
+  private liftMounds(): void {
+    if (!this.soil || !this.heights) return;
+    const r = this.soil.reject;
+    for (let row = Math.max(0, Math.floor(r.min[2] / STEP_MM));
+      row <= Math.min(N - 1, Math.ceil(r.max[2] / STEP_MM)); row += 1) {
+      for (let col = Math.max(0, Math.floor(r.min[0] / STEP_MM));
+        col <= Math.min(N - 1, Math.ceil(r.max[0] / STEP_MM)); col += 1) {
+        const natural = this.heights[row * N + col]! / 10;
+        const top = this.soil.moundTopMm(col * STEP_MM, row * STEP_MM, natural);
+        if (top > natural) this.heights[row * N + col] = Math.round(top * 10);
+      }
+    }
+  }
+
+  /* ------------------------------------------------ a colony already here */
+
+  /**
+   * A SITE, READ OFF THE ISLAND — the ground height filled in for you.
+   *
+   * The one number a caller must not guess. An entrance is placed on the
+   * DRAWN surface, not the bilinear one, because a mouth has to sit on the
+   * ground the player can see; this repo has learned that particular
+   * lesson enough times to have written it into `CLAUDE.md`.
+   */
+  /** The colony most recently stamped here, if any. For probes and, later,
+   *  for the save — a premade home is a fact about the world, not a dig. */
+  private stamped: Colony | null = null;
+
+  colonySiteAt(id: string, xMm: number, zMm: number, facing = 0): ColonySite {
+    return { id, xMm, zMm, groundMm: this.renderedHeightAtMm(xMm, zMm), facing };
+  }
+
+  /**
+   * STAMP AN ESTABLISHED COLONY HERE — the card's DONE WHEN, as one call.
+   *
+   * "One function/data plan can stamp an established colony at a chosen
+   * world position with a living Queen and valid player hatch point."
+   *
+   * The three words in that sentence that do the work:
+   *
+   *   ESTABLISHED — it is carved, mound and all, before anybody sees it.
+   *   No founding, no digging, no waiting. `colonyNest` draws it and
+   *   `applyPlan` is the same route the designer's DONE takes, so a
+   *   premade colony and a player-dug one are the same kind of thing to
+   *   every system downstream.
+   *
+   *   LIVING — she is a `Colonist` on her own legs at the throne's anchor,
+   *   not a statue. Everything v0.1.100 built for her (the 2 mm wander,
+   *   the double-tap follow, idle-versus-crawl) works unchanged, because
+   *   all this does is choose the anchor she was already wandering.
+   *
+   *   VALID — the hatch point is checked against the field the soil is
+   *   carved FROM before she is put there, and a colony with any fault is
+   *   refused whole rather than stamped broken. A home that half-exists is
+   *   worse than one that reports why it does not.
+   *
+   * NOT WIRED TO THE OPENING YET, deliberately. The hatch prologue is
+   * cards 08 and 09 and the map's colony sites are card 07; this is the
+   * piece they both call. What it gives them today is a colony you can
+   * stand in, reachable from a probe and from `?colony=1`.
+   */
+  async stampColony(site: ColonySite): Promise<Colony | null> {
+    if (!this.soil || !this.stream || !this.ready) return null;
+    const colony = colonyNest(site);
+    const faults = [
+      ...validatePlan(colony.plan).map((f) => `${f.kind}: ${f.detail}`),
+      ...colonyFaults(colony).map((f) => `${f.kind}: ${f.detail}`),
+    ];
+    if (faults.length) {
+      /* REFUSED WHOLE. The alternative — carve it anyway and let the player
+       * find the room with no way into it — is the failure this check was
+       * written to make impossible. */
+      console.warn(`colony ${site.id} refused:\n  ${faults.join('\n  ')}`);
+      return null;
+    }
+
+    this.applyPlan(colony.plan);
+    /* The heap has to reach the coarse grid too, or the anthill is invisible
+     * from anywhere but on top of it. */
+    this.liftMounds();
+
+    /* SHE IS NOT THE PLAYER HERE. `becomeWorker` is the existing handover —
+     * it parks the queen's rig as an NPC and loads the player a worker —
+     * and it is awaited because a colony whose queen has not arrived is not
+     * yet the thing this method promises to have made. */
+    if (this.playerCaste !== FIRE_ANT_WORKER.id) await this.becomeWorker();
+
+    /*
+     * THE PLAYER MOVES IN FIRST, and the order is load-bearing rather than
+     * arbitrary. Seating anybody underground needs the fine field to be
+     * describing that soil, and the field follows the PLAYER — so the
+     * teleport is what brings the window to the colony, and everyone
+     * seated before it would be placed against soil nobody was streaming.
+     * Measured on the queen when this ran the other way round: she was
+     * lowered onto the lawn above her own throne room.
+     *
+     * You wake up in the NURSERY. Seated from the hatch point's own height
+     * through the soil — never `walkGroundAt`, which is the original
+     * heightfield and knows nothing of anything dug since.
+     */
+    const hatch = colony.hatchMm;
+    this.teleportMm(hatch.x, hatch.z, hatch.y);
+    /* The depth trace is a record of a journey she has not made. */
+    this.route.clear();
+
+    /* HER CHAMBER, chosen rather than inherited: `becomeWorker` anchors her
+     * wherever the founding finished, which for a premade colony is
+     * wherever the player happened to be standing. */
+    const throne = colony.queenAnchorMm;
+    this.queenAnchor.set(throne.x / MM, throne.y / MM, throne.z / MM);
+    if (this.queenWalk) {
+      this.queenWalk.place(
+        this.queenAnchor.x, this.queenAnchor.z,
+        (x, z) => this.footingFrom(x, z, this.queenAnchor.y),
+      );
+      this.queenFollow = false;
+    }
+
+    /*
+     * THE FOUNDING IS NOT AHEAD OF HER — it is generations behind her.
+     *
+     * Left running, the quest card sits over an established colony telling
+     * the player to dig in and hollow a chamber for a queen who has had one
+     * since before they hatched. Marking it finished is simply true: the
+     * stage means "the colony exists", and it does.
+     *
+     * What this deliberately does NOT do is write the new opening's words.
+     * The hatch prologue and its tutorial are cards 08 and 09; inventing
+     * copy for them here would be guessing at somebody else's card.
+     */
+    this.questStage = 3;
+
+    this.stamped = colony;
+    return colony;
   }
 
   /** Her drawn body's pitch on her planted feet, radians, nose-down positive. */
@@ -5260,14 +5425,54 @@ export class IslandScene {
     this.walker?.squareForward({ at: this.at, up: this.up, forward: this.fwd });
   }
 
-  teleportMm(xMm: number, zMm: number): void {
+  /**
+   * Set her down somewhere else, whole: velocity cleared, attitude squared,
+   * feet replanted, window recentred.
+   *
+   * `yMm` IS THE DIFFERENCE BETWEEN A HILLSIDE AND A CHAMBER. Left out, she
+   * lands on the heightfield, which is right for every teleport this method
+   * was written for — they all put her on open ground. Given, the floor is
+   * searched from that height through the SOIL instead, because
+   * `walkGroundAt` is the original heightfield and knows nothing about
+   * anything dug since: it would set a hatching worker down on the lawn
+   * above her own colony. That mistake has been made in this repo four
+   * times; this parameter exists so the fifth caller does not have to
+   * rediscover it.
+   */
+  teleportMm(xMm: number, zMm: number, yMm?: number): void {
     this.at.x = xMm / MM;
     this.at.z = zMm / MM;
+    /*
+     * THE WINDOW MOVES FIRST, and it has to.
+     *
+     * This used to be the last thing the method did, which was harmless
+     * while every teleport landed on open ground: `walkGroundAt` reads the
+     * island's heightfield and does not care where the fine field is
+     * looking. The moment a teleport could land UNDERGROUND that ordering
+     * became the bug — measured, a worker asked to hatch 240 mm away
+     * arrived 85 mm above her own nursery, standing on the lawn.
+     *
+     * Because `footingFrom` is `floorBelow(...) ?? walkGroundAt(...)`, and
+     * `floorBelow` answers null outside the streamed window. Landing
+     * further than the window is wide, it asked about soil nobody was
+     * describing yet, got null, and fell back to the surface — silently,
+     * which is what made it worth a comment rather than a one-line move.
+     *
+     * `recentreOn` regenerates the field synchronously, so by the next line
+     * the soil under her new feet is real. Only the MESH is queued behind
+     * it, and the mesh is not what she stands on.
+     */
+    if (this.stream) {
+      const scroll = this.stream.recentreOn(this.at.x, this.at.z);
+      if (scroll) this.onScroll(scroll);
+    }
     /* HER ride height, not the global constant — a worker set down a
      * queen's ride off the ground arrives standing on stilts and her
      * replanted feet reach for ground a body length below her. `legRide`
      * IS the constant until a drive has measured better. */
-    this.at.y = this.walkGroundAt(this.at.x, this.at.z) + this.legRide;
+    this.at.y = (yMm === undefined
+      ? this.walkGroundAt(this.at.x, this.at.z)
+      : this.footingFrom(this.at.x, this.at.z, yMm / MM)) + this.legRide;
     this.velocity.set(0, 0, 0);
     this.underground = false;
     this.enclosed = false;
@@ -5286,10 +5491,6 @@ export class IslandScene {
     this.drive?.plantAll(
       { at: this.at, up: this.up, forward: this.fwd }, this.groundForLegs,
     );
-    if (this.stream) {
-      const scroll = this.stream.recentreOn(this.at.x, this.at.z);
-      if (scroll) this.onScroll(scroll);
-    }
   }
 
   /* ------------------------------------------------------------ the save */
@@ -5474,6 +5675,52 @@ export class IslandScene {
     if (x < 0 || x > WINDOW_CELLS || z < 0 || z > WINDOW_CELLS
       || y < 0 || y >= SAMPLES_Y) return null;
     return stream.field.get(x, y, z) > 0;
+  }
+
+  /**
+   * For probes: the stamped colony's landmarks, in island millimetres.
+   *
+   * Deliberately NOT called `colonyForTest` — that name is taken by the
+   * nestmate roster, and two things called the colony is how a probe ends
+   * up measuring the wrong one and passing.
+   */
+  stampedColonyForTest(): {
+    id: string;
+    depthMm: number;
+    entranceMm: { x: number; y: number; z: number };
+    queenAnchorMm: { x: number; y: number; z: number };
+    hatchMm: { x: number; y: number; z: number };
+    rooms: { id: string; nodeId: string; centreMm: { x: number; y: number; z: number } }[];
+    edges: { id: string; from: string; to: string; radiusMm: number }[];
+  } | null {
+    const c = this.stamped;
+    if (!c) return null;
+    return {
+      id: c.site.id,
+      depthMm: c.depthMm,
+      entranceMm: c.entranceMm,
+      queenAnchorMm: c.queenAnchorMm,
+      hatchMm: c.hatchMm,
+      rooms: Object.entries(c.rooms).map(([id, r]) => ({
+        id, nodeId: r.nodeId, centreMm: r.centreMm,
+      })),
+      edges: c.plan.edges.map((e) => ({
+        id: e.id, from: e.from, to: e.to, radiusMm: e.radiusMm,
+      })),
+    };
+  }
+
+  /** For probes: stamp one on demand, anywhere. */
+  async stampColonyForTest(xMm: number, zMm: number, facing = 0): Promise<boolean> {
+    const got = await this.stampColony(this.colonySiteAt('probe', xMm, zMm, facing));
+    return got !== null;
+  }
+
+  /** For probes: where the parked Queen actually IS, in island mm. */
+  queenAtForTest(): { x: number; y: number; z: number } | null {
+    const walk = this.queenWalk;
+    if (!walk) return null;
+    return { x: walk.at.x * MM, y: walk.at.y * MM, z: walk.at.z * MM };
   }
 
   planForTest(): { id: string; x: number; y: number; z: number }[] {
