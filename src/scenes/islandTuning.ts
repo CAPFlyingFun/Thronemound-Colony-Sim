@@ -631,6 +631,12 @@ export const SCOOP_DEEP_MM = SCOOP_BALL_MM;
  * worker ~2 s per body length, measured off the real rigs. The duration
  * IS the cooldown — one bore at a time, nothing extra after.
  */
+/* Arming DIG drops into first person at this wide working lens so the
+ * tunnel mouth and the instruments share the frame — a tool requirement,
+ * deliberately NOT the player's FOV preference. `lensTick` owns applying
+ * it and handing the lens back on disarm. */
+export const DIG_LENS_DEG = 100;
+
 export const DIG_RATE_MM3_S = 30;
 export const DIG_BEAT_S = 0.5;
 export const BORE_WIDEN = 1.5; //   of her standing height, diameter

@@ -33,6 +33,9 @@ export interface PauseMenuActions {
    */
   onSave: () => boolean | Promise<boolean>;
   onMainMenu: () => void;
+  /** Open the shared SettingsPanel — the same component the front menu
+   *  opens. Optional so a host without one keeps the dimmed placeholder. */
+  onSettings?: () => void;
   /** Toggle the DEV drawer, returning whether it is now open. Optional: a
    *  build without instrumentation simply does not draw the handle. */
   onDev?: () => boolean;
@@ -161,19 +164,19 @@ export class PauseMenu {
     });
 
     /*
-     * SETTINGS IS DRAWN AND DIMMED, and that is a statement rather than a
-     * gap. The card asks for the pause menu to share the front menu's
-     * settings UI; there ISN'T one — `MainMenu` declares `onSettings` and
-     * nothing in the repo implements it, so the front menu draws that
-     * button greyed too. Inventing a second settings screen here to satisfy
-     * the wording would be the exact thing the card warns against, and
-     * hiding it would tell the player less than the front door does. When a
-     * shared panel exists this takes an action and lights up; until then it
-     * says "coming", in the same voice as an unbuilt ability plate.
+     * SETTINGS IS LIVE NOW — the shared panel this button was drawn dimmed
+     * waiting for exists (`SettingsPanel`, the Foundation Pass), and the
+     * host hands the SAME opener to the front menu, which is the whole
+     * "one component, no duplicate settings logic" rule. The panel stacks
+     * ABOVE this menu (z 70 over 60) and its BACK reveals the pause
+     * exactly as it was. A host that passes no opener keeps the dimmed
+     * placeholder, in the same voice as an unbuilt ability plate.
      */
-    const settings = this.button('SETTINGS', () => {});
-    settings.disabled = true;
-    settings.title = 'not yet';
+    const settings = this.button('SETTINGS', () => this.actions.onSettings?.());
+    if (!this.actions.onSettings) {
+      settings.disabled = true;
+      settings.title = 'not yet';
+    }
 
     /*
      * THE DEV DRAWER'S HANDLE, REHOMED.

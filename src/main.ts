@@ -157,8 +157,10 @@ if (host) {
       import('./scenes/IslandScene'),
       import('./scenes/LoadingOverlay'),
       import('./ui/PauseMenu'),
+      import('./ui/SettingsPanel'),
     ]).then(([
       { MainMenu }, { IslandScene }, { LoadingOverlay, QuietCurtain }, { PauseMenu },
+      { SettingsPanel },
     ]) => {
       /*
        * TWO MENUS, ONE ISLAND. The front menu answers "what would you like
@@ -236,6 +238,27 @@ if (host) {
         waiting = run;
       };
 
+      /*
+       * ONE SETTINGS PANEL FOR BOTH DOORS — the Foundation Pass rule, "one
+       * component, no duplicate settings logic." Constructed fresh on each
+       * open like the pause menu, and every change is handed live to the
+       * island so the world answers while the slider is still moving. The
+       * island also loads the same store at boot, so a player who never
+       * opens the panel still gets what they set last session.
+       */
+      let settings: InstanceType<typeof SettingsPanel> | null = null;
+      const openSettings = (): void => {
+        /* Guarded by the DOM, not the instance: RESET rebuilds the panel
+         * inside its own click handler, so the tracked instance can be a
+         * disposed shell while a live panel stands. The document cannot
+         * be stale about whether one is up. */
+        if (settings?.isUp || document.querySelector('.tm-settings')) return;
+        settings = new SettingsPanel(host, {
+          onChange: (p) => island?.applyPrefs(p),
+          onClose: () => { settings = null; },
+        });
+      };
+
       const build = (): void => {
         menu = new MainMenu(host, {
           onStart: () => enter(),
@@ -263,6 +286,9 @@ if (host) {
           /* A promise now: the saved world lives in IndexedDB, which is
            * asynchronous. `enter` already awaits what it is given. */
           onResume: () => enter(async () => (await island?.resumeFromStorage()) ?? false),
+          /* The entry MainMenu has drawn greyed since it was written —
+           * live the moment an opener exists. */
+          onSettings: openSettings,
           onDev: () => { window.location.search = '?scene=poseedit'; },
         });
         /*
@@ -313,6 +339,7 @@ if (host) {
         pause = new PauseMenu(host, {
           onResume: () => { pause = null; island?.setPaused(false); },
           onSave: async () => (await island?.saveToStorage()) ?? false,
+          onSettings: openSettings,
           onDev: () => island?.toggleDev() ?? false,
           /*
            * LEAVING IS A SCENE SWAP NOW, not a reload. The island keeps

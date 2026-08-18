@@ -104,6 +104,8 @@ export interface HudHost {
   queenDoubleTap(clientX: number, clientY: number): void;
   boreRadius(): number;
   boreLength(): number;
+  /** The player's own knobs — look speed and invert live here. */
+  prefs: { lookSens: number; invertY: boolean };
   poseReadout: HTMLElement | null;
   paceChip: HTMLButtonElement | null;
   rideChip: HTMLButtonElement | null;
@@ -187,12 +189,11 @@ export function buildControls(host: HudHost, ): void {
     host.applyHudMode();
     if (!host.digMode) host.input.dig = false;
     /* Digging is aiming, and aiming is done down her own eyes: arming
-     * DIG drops into first person with a wide 100° field so the tunnel
-     * mouth and the instruments share the frame. Disarming narrows the
-     * lens back; the VIEW chip still switches freely either way. */
+     * DIG drops into first person. The LENS is not written here any
+     * more — `lensTick` on the scene owns it, choosing the dig's wide
+     * working field or the player's own FOV preference per view, so the
+     * settings panel and this toggle can never fight over one camera. */
     if (host.digMode) host.firstPerson = true;
-    host.camera.fov = host.digMode ? 100 : 60;
-    host.camera.updateProjectionMatrix();
   });
   actions.appendChild(dig);
   host.railPart(dig, 'dig');
@@ -1025,7 +1026,7 @@ export function buildControls(host: HudHost, ): void {
          * off it and applies it about her own up, so a look-drag on a
          * ceiling turns her along the ceiling. Writing `facing` here as
          * well would fight that for a frame. */
-        host.bore.turn(-e.movementX * 0.004);
+        host.bore.turn(-e.movementX * 0.004 * host.prefs.lookSens);
         /*
          * PITCH IS A LOOK, and a look comes home. It used to write
          * `aimPitch` directly, which is the shovel's angle and has no
@@ -1035,7 +1036,8 @@ export function buildControls(host: HudHost, ): void {
          * still exactly the aim when it needs to be.
          */
         host.lookPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
-          host.lookPitch - e.movementY * 0.004));
+          host.lookPitch - e.movementY * 0.004 * host.prefs.lookSens
+            * (host.prefs.invertY ? -1 : 1)));
         host.lookIdle = 0;
       } else {
         // Third person: the drag pans the view — above ground a full
@@ -1054,9 +1056,10 @@ export function buildControls(host: HudHost, ): void {
          * seconds after the finger lifts.
          */
         host.lookYaw = Math.max(-Math.PI, Math.min(Math.PI,
-          host.lookYaw - e.movementX * 0.005));
+          host.lookYaw - e.movementX * 0.005 * host.prefs.lookSens));
         host.lookPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
-          host.lookPitch - e.movementY * 0.004));
+          host.lookPitch - e.movementY * 0.004 * host.prefs.lookSens
+            * (host.prefs.invertY ? -1 : 1)));
         host.lookIdle = 0;
       }
     }

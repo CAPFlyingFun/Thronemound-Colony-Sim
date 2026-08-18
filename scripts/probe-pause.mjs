@@ -82,8 +82,8 @@ const pressed = await p.evaluate(() => ({
   paused: window.islandScene?.isPaused === true,
   frontMenu: !!document.querySelector('.main-menu'),
   labels: [...document.querySelectorAll('.tm-pause button')].map((x) => x.textContent),
-  settingsSoon: [...document.querySelectorAll('.tm-pause button')]
-    .find((x) => x.textContent === 'SETTINGS')?.disabled === true,
+  settingsLive: [...document.querySelectorAll('.tm-pause button')]
+    .find((x) => x.textContent === 'SETTINGS')?.disabled === false,
   build: document.querySelector('.tm-pause-build')?.textContent ?? '',
 }));
 ok('the page did not reload', pressed.sentinel === 'before-menu');
@@ -94,9 +94,10 @@ ok('the front menu is NOT what came up', pressed.frontMenu === false);
 ok('it offers resume, save, settings, dev tools and a way out',
   pressed.labels.join('|')
     === 'RESUME|SAVE GAME|SETTINGS|DEV TOOLS|MAIN MENU');
-/* Drawn and dimmed rather than missing — there is no settings panel in the
- * repo yet and the front menu greys the same button. See PauseMenu.ts. */
-ok('SETTINGS is dimmed, not hidden', pressed.settingsSoon === true);
+/* LIVE now — the shared SettingsPanel exists (Foundation Pass) and both
+ * doors open the same one. The button shipped dimmed waiting for exactly
+ * this; probe:settings drives the panel itself end to end. */
+ok('SETTINGS is live, no longer dimmed', pressed.settingsLive === true);
 /* The build, where a screenshot of a paused game still dates itself. It
  * came off the STATS chip on the playing screen in v0.1.35. */
 ok(`the build is on it (${pressed.build})`, /^v\d+\.\d+\.\d+$/.test(pressed.build));
@@ -159,10 +160,22 @@ const saved = await p.evaluate(async () => {
   const say = () => document.querySelector('.tm-pause-say')?.textContent ?? '';
   [...document.querySelectorAll('.tm-pause button')]
     .find((x) => x.textContent === 'SAVE GAME').click();
-  await new Promise((r) => setTimeout(r, 120));
-  return { said: say(), stored: !!window.localStorage.getItem('thronemound.island.v1') };
+  /*
+   * THE PAYLOAD LIVES IN INDEXEDDB NOW — a dug nest outgrew localStorage,
+   * see `islandStore` — and only the MARK stays behind as a key. This
+   * check read the OLD key and waited a flat 120 ms for an asynchronous
+   * write, so it failed on a save that was working; polled against the
+   * menu's own 'Saved' and the real mark instead.
+   */
+  for (let waited = 0; waited < 8000 && say() !== 'Saved'; waited += 200) {
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return {
+    said: say(),
+    stored: !!window.localStorage.getItem('thronemound.island.mark.v1'),
+  };
 });
-ok('SAVE wrote a save', saved.stored);
+ok('SAVE wrote a save (the mark is down)', saved.stored);
 ok('and said so', saved.said === 'Saved');
 ok('without leaving the pause menu', await p.evaluate(
   () => !!document.querySelector('.tm-pause'),

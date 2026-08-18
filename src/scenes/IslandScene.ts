@@ -142,7 +142,7 @@ import {
   CHAMBER_CAM_NEAR, COLONIST_SPEED, COLONIST_TURN, COLONIST_ARRIVE,
   COLONIST_ROAM, TROPHALLAXIS_REACH, TROPHALLAXIS_RATE, CARRY_DELIVER_REACH,
   FIGHT_NOTICE, ROUTE_FORGET_MM, QUEEN_ROAM, QUEEN_PACE, QUEEN_STANDOFF,
-  QUEEN_TAP_WU, BORE_MIN_MM, BORE_WIDEN, DIG_BEAT_S,
+  QUEEN_TAP_WU, BORE_MIN_MM, BORE_WIDEN, DIG_BEAT_S, DIG_LENS_DEG,
 } from './islandTuning';
 import { Colonist } from './Colonist';
 import { SoilQuery } from './soilQuery';
@@ -196,6 +196,7 @@ import {
   readSpine, refreshAim, simulate, type BodyHost,
 } from './islandBody';
 import { RouteTrace, drawRouteTrace } from './routeTrace';
+import { loadPrefs, type DevicePrefs } from './devicePrefs';
 import {
   boreFrame, buildIsland, footingFrom, groundHeightAt, growForest,
   regrowScrub, type LandHost,
@@ -1020,6 +1021,7 @@ export class IslandScene {
      * changed. */
     this.applyHudMode();
     this.routeTick(dt);
+    this.lensTick();
   }
 
   /**
@@ -2082,6 +2084,32 @@ export class IslandScene {
    */
   private readonly pixelCap = Math.min(window.devicePixelRatio, 3);
 
+  /**
+   * THE PLAYER'S OWN KNOBS — loaded once at boot, replaced live whenever
+   * the SettingsPanel writes. See `devicePrefs.ts` for what each field
+   * is; what each field DOES lives at its consumption site: the lens in
+   * `lensTick`, the drag speed in `islandHud`'s look handlers, and the
+   * render scale below, multiplied into every `setPixelRatio`.
+   */
+  readonly prefs: DevicePrefs = loadPrefs();
+
+  /**
+   * What the renderer is actually asked for: the adaptive scaler's rung
+   * TIMES the player's own resolution preference. The scaler keeps
+   * reasoning in its own units — its ceilings and rungs never see the
+   * preference — so the two cannot fight: the player scales the OUTPUT,
+   * the scaler picks the rung the frame rate can afford.
+   */
+  private renderScale(): number { return this.pixelRatioNow * this.prefs.resScale; }
+
+  /** The new preferences, applied while the panel is still open. */
+  applyPrefs(p: DevicePrefs): void {
+    Object.assign(this.prefs, p);
+    this.renderer.setPixelRatio(this.renderScale());
+    this.resize();
+    /* The lens follows on the next simulated frame — see `lensTick`. */
+  }
+
   private pixelRatioNow = Math.min(window.devicePixelRatio, 2);
 
   /**
@@ -2394,7 +2422,7 @@ export class IslandScene {
       host.addEventListener(name, this.refuseGesture, { passive: false });
     }
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(this.pixelRatioNow);
+    this.renderer.setPixelRatio(this.renderScale());
     host.appendChild(this.renderer.domElement);
     this.watchContext();
 
@@ -3265,6 +3293,27 @@ export class IslandScene {
    * runs slow under SwiftShader and a timer would wipe it mid-test —
    * so grazing daylight through a vent does not cost her the map.
    */
+  /**
+   * THE LENS FOLLOWS THE VIEW — and the SETTINGS own the resting widths.
+   *
+   * Three states, one authority: DIG armed keeps its wide 100° working
+   * lens (a tool requirement — the tunnel mouth and the instruments have
+   * to share the frame — and deliberately NOT a preference); otherwise
+   * first person wears `fov1` and third person `fov3`, the two dials the
+   * Foundation Pass settings panel exposes. Checked every simulated
+   * frame because the states flip from three different places (the DIG
+   * plate, the VIEW plate, the panel), and one comparison a frame is
+   * cheaper than three call sites that must never forget each other.
+   */
+  private lensTick(): void {
+    const want = this.digMode
+      ? DIG_LENS_DEG
+      : (this.firstPerson ? this.prefs.fov1 : this.prefs.fov3);
+    if (this.camera.fov === want) return;
+    this.camera.fov = want;
+    this.camera.updateProjectionMatrix();
+  }
+
   private routeTick(dt: number): void {
     const stepMm = this.routeWasOk ? this.routeWas.distanceTo(this.at) * MM : 0;
     this.routeWas.copy(this.at);
@@ -3946,7 +3995,7 @@ export class IslandScene {
         /* This rung is too expensive. Remember that, and stop aiming at it. */
         this.pixelCeiling = Math.max(1, this.pixelRatioNow - 0.25);
         this.pixelRatioNow = this.pixelCeiling;
-        this.renderer.setPixelRatio(this.pixelRatioNow);
+        this.renderer.setPixelRatio(this.renderScale());
         this.pixelChangedAt = now;
         this.goodSeconds = 0;
         this.resize();
@@ -3955,7 +4004,7 @@ export class IslandScene {
         const roof = Math.min(this.pixelCap, this.pixelCeiling);
         if (this.goodSeconds >= 3 && this.pixelRatioNow < roof && !cooling) {
           this.pixelRatioNow = Math.min(roof, this.pixelRatioNow + 0.25);
-          this.renderer.setPixelRatio(this.pixelRatioNow);
+          this.renderer.setPixelRatio(this.renderScale());
           this.pixelChangedAt = now;
           this.goodSeconds = 0;
           this.resize();
