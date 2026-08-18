@@ -25,7 +25,7 @@ function makeHost(
   cuttable: (x: number, y: number, z: number) => boolean = solid,
 ) {
   const calls = {
-    miss: 0, subtracted: 0, revealed: 0, thrown: 0,
+    miss: 0, subtracted: 0, revealed: 0,
   };
   const host = {
     grit: null,
@@ -67,21 +67,21 @@ function makeHost(
     soilSolidAt: solid,
     groundSolidAt: solid,
     biteMiss: () => { calls.miss += 1; },
-    throwCharge: () => { calls.thrown += 1; },
   } as unknown as DigHost;
   return { host, calls };
 }
 
 describe('the stroke that meets nothing', () => {
-  it('throws a charge instead of shrugging, and says nothing itself', () => {
-    /* Open air ahead AND below — the press her jaws cannot answer. The
-     * note is NOT rung here any more: the lob is the answer, and the
-     * note now belongs to the charge's own fizzle. Nothing is cut and
-     * nothing pretends to be. */
+  it('tells the miss out loud, and does not throw anything', () => {
+    /* Open air ahead AND below — the press her jaws cannot answer. For a
+     * while this lobbed a fireball down the aim line; Joshua pulled fire
+     * out of digging (v0.1.98 — it becomes the fire ant's combat
+     * signature), so the press is back to the honest answer it had
+     * before the charge existed: the OUT OF REACH note, and nothing cut
+     * or pretending to be. */
     const { host, calls } = makeHost(() => false);
     bite(host);
-    expect(calls.thrown).toBe(1);
-    expect(calls.miss).toBe(0);
+    expect(calls.miss).toBe(1);
     expect(calls.subtracted).toBe(0);
     expect((host as { biteTouched: boolean }).biteTouched).toBe(false);
     expect(calls.revealed).toBe(0);
@@ -91,7 +91,6 @@ describe('the stroke that meets nothing', () => {
     const { host, calls } = makeHost(() => true);
     bite(host);
     expect(calls.miss).toBe(0);
-    expect(calls.thrown).toBe(0);
     expect((host as { biteTouched: boolean }).biteTouched).toBe(true);
     expect(calls.revealed).toBe(1);
   });
@@ -104,7 +103,6 @@ describe('the stroke that meets nothing', () => {
     const { host, calls } = makeHost(() => true, () => false);
     bite(host);
     expect(calls.miss).toBe(1);
-    expect(calls.thrown).toBe(0);
     expect(calls.subtracted).toBeGreaterThan(0);
     expect((host as { biteTouched: boolean }).biteTouched).toBe(false);
   });

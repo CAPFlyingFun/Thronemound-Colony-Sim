@@ -19,7 +19,7 @@ import type { QueenModel } from '../anim/QueenModel';
 import type { IslandStream } from '../world/IslandStream';
 import { CELL_SIZE, MM } from '../world/worldScape';
 import {
-  AIM_DBG_LAG, AIM_LIMIT, CH, CHARGE_POP_GRIT, CHUNKS_XZ, CHUNKS_Y,
+  AIM_DBG_LAG, AIM_LIMIT, CH, CHUNKS_XZ, CHUNKS_Y,
   JAW_PAST_NOSE, NOSE_REACH, QUEST_DEPTH_MM, RIDE,
   SCOOP_DEEP_MM, SCOOP_TALL_MM, SCOOP_WIDE_MM,
   SMOOTH_MAX_SHIFT, SMOOTH_PASSES, SMOOTH_RADIUS_MM, SMOOTH_STRENGTH,
@@ -76,11 +76,6 @@ export interface DigHost {
   /** A stroke that removed nothing — the scene's chance to say "out of
    *  reach" instead of the silence that reads as a broken button. */
   biteMiss(): void;
-  /** A stroke whose aim met no soil her jaws could reach — the scene's
-   *  chance to LOB a dig charge down the line instead of shrugging.
-   *  `clear` is the ray's own reach: the span the miss scan proved
-   *  empty, inside which the launch point must stay. */
-  throwCharge(origin: THREE.Vector3, aim: THREE.Vector3, clear: number): void;
 }
 
 /** The way she is pointed AND pitched — the line the bore cuts and, while
@@ -200,20 +195,21 @@ export function bite(host: DigHost, ): void {
   const ray = biteRay(host, aim);
   const seated = biteCentre(host, aim, ray.reach, centre, ray.origin);
   /*
-   * NOTHING HER JAWS CAN REACH — SO SHE THROWS.
+   * NOTHING HER JAWS CAN REACH — THE MISS IS TOLD, NOT THROWN.
    *
-   * This used to be the stroke that subtracted air at arm's length and
-   * rang the miss note, which was honest and also all it was. The press
-   * still deserves an ACTION: a mini dig charge lobbed down the same aim
-   * line, which pops a scoop wherever it lands and rings the note itself
-   * if it lands nowhere. The note is not rung HERE any more — a throw is
-   * an answer, and flashing "OUT OF REACH" over a charge already in the
-   * air would be the screen contradicting itself. The scene owns the
-   * cooldown and the flight; see `throwCharge` and `digCharge.ts`.
+   * For a while this press lobbed a mini dig charge down the aim line — a
+   * fireball that popped a scoop wherever it landed. Joshua's call: "it's
+   * hot but it goes too far and not very antlike" — fire is being remade
+   * as the fire ant's COMBAT signature (see the species-abilities card on
+   * Trello) and digging is her jaws alone: the 6 mm ball at the bottom of
+   * her jaw bone, unchanged. So the out-of-reach stroke is back to the
+   * honest answer it had before the charge existed: the OUT OF REACH note
+   * and the crosshair blush. `digCharge.ts` and `digBurn.ts` keep their
+   * flight and their fire for the combat ability to reuse.
    */
   if (!seated) {
     host.biteTouched = false;
-    host.throwCharge(ray.origin, aim, ray.reach);
+    host.biteMiss();
     return;
   }
 
@@ -330,26 +326,6 @@ export function carveScoop(
   }
   host.reveal();
   return touched;
-}
-
-/**
- * WHERE A LANDED CHARGE CUTS — the flight's hand-off back to the shovel.
- *
- * `hit` is the first solid sample the arc met, so like the bite the scoop
- * is seated a half-depth past it along the travel direction: near lip in
- * the air, pocket in the hill. The pop is louder than a bite's burst on
- * purpose — the cut happens away from her, and a distant hole with no
- * fanfare reads as terrain glitching rather than a charge landing. A
- * charge that lands on the tree changes no samples (wood is not in the
- * diggable field) and returns 0, which the scene turns into the same
- * "OUT OF REACH" note a fizzle earns.
- */
-export function chargeImpact(
-  host: DigHost, hit: THREE.Vector3, dir: THREE.Vector3,
-): number {
-  const centre = new THREE.Vector3().copy(hit)
-    .addScaledVector(dir, SCOOP_DEEP_MM / 2 / MM);
-  return carveScoop(host, centre, dir, CHARGE_POP_GRIT);
 }
 
 /**

@@ -701,6 +701,14 @@ export const CHARGE_POP_GRIT = 18; //     spoil chips in the landing pop
 /**
  * THE CHARGE IS A FIREBALL 🔥 — she is, after all, some kind of fire ant.
  *
+ * PARKED, NOT DEAD — v0.1.98. The fireball no longer fires from the DIG
+ * miss path: Joshua's call was "hot but it goes too far and not very
+ * antlike" as a digging tool, and fire is being remade as the fire ant's
+ * COMBAT signature (see the species-abilities card on Trello). Nothing
+ * below is wired to digging any more; `digCharge.ts` and `digBurn.ts`
+ * keep the flight and the fire, and these numbers keep the tuned feel
+ * the combat ability starts from.
+ *
  * Three ideas, all theatre and one of them mechanical:
  *
  * THE BEAD BURNS. The flat yellow dot reads as a pebble; a bead that

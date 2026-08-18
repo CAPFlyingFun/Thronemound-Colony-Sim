@@ -1,10 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { DigCharges, launchPoint } from '../src/scenes/digCharge';
-import { chargeImpact, type DigHost } from '../src/scenes/islandDig';
 import {
   CHARGES_MAX, CHARGE_RANGE_MM, CHARGE_REACH_MM, EMBER_TRAIL_GAP_MM,
-  NOSE_REACH, SCOOP_DEEP_MM,
+  NOSE_REACH,
 } from '../src/scenes/islandTuning';
 import {
   CAP_PLANES, CELL_MM, CELL_SIZE, MM, TILE_CELLS,
@@ -199,75 +198,14 @@ describe('the launch point', () => {
   });
 });
 
-describe('the landing', () => {
-  /** The bite tests' fake host, trimmed to what a landed charge touches. */
-  function makeHost(cuttable: boolean) {
-    const calls = { subtracted: 0, revealed: 0 };
-    const host = {
-      grit: null,
-      queue: [] as { cx: number; cy: number; cz: number }[],
-      queued: new Set<string>(),
-      deepCarved: 0,
-      stream: {
-        subtractEllipsoid: () => {
-          calls.subtracted += 1;
-          return {
-            changedSamples: cuttable ? 12 : 0,
-            bounds: {
-              minX: 10, minY: 10, minZ: 10, maxX: 12, maxY: 12, maxZ: 12,
-            },
-          };
-        },
-        boxAround: () => ({
-          minX: 10, minY: 10, minZ: 10, maxX: 12, maxY: 12, maxZ: 12,
-        }),
-        smoothBox: () => null,
-      },
-      key: (cx: number, cy: number, cz: number) => `${cx},${cy},${cz}`,
-      meshChunk: () => {},
-      reveal: () => { calls.revealed += 1; },
-      depthMm: () => 0,
-    } as unknown as DigHost;
-    return { host, calls };
-  }
-
-  it('a landed charge changes terrain and draws it now', () => {
-    const { host, calls } = makeHost(true);
-    const touched = chargeImpact(
-      host, new THREE.Vector3(1, 0.3, 3), new THREE.Vector3(0, -0.5, 1).normalize(),
-    );
-    expect(touched).toBeGreaterThan(0);
-    expect(calls.subtracted).toBeGreaterThan(0);
-    /* Drawn synchronously, like the bite — a remote hole that lags the
-     * queue would read as terrain glitching at a distance. */
-    expect(calls.revealed).toBe(1);
-  });
-
-  it('seats the pocket past the surface it struck, like the bite does', () => {
-    const hit = new THREE.Vector3(2, 1, 2);
-    const dir = new THREE.Vector3(0, 0, 1);
-    let seenAt: THREE.Vector3 | null = null;
-    const { host } = makeHost(true);
-    const stream = (host as unknown as {
-      stream: { subtractEllipsoid: (at: THREE.Vector3) => unknown };
-    }).stream;
-    const inner = stream.subtractEllipsoid.bind(stream);
-    stream.subtractEllipsoid = (at: THREE.Vector3) => {
-      if (!seenAt) seenAt = at.clone();
-      return inner(at);
-    };
-    chargeImpact(host, hit, dir);
-    expect(seenAt!.z).toBeCloseTo(hit.z + SCOOP_DEEP_MM / 2 / MM, 5);
-  });
-
-  it('reports a landing that cut nothing, so the scene can say so', () => {
-    const { host } = makeHost(false);
-    const touched = chargeImpact(
-      host, new THREE.Vector3(1, 1, 1), new THREE.Vector3(0, 0, 1),
-    );
-    expect(touched).toBe(0);
-  });
-});
+/*
+ * THE LANDING TESTS LEFT WITH THE DIG. `chargeImpact` was the glue that
+ * carved a scoop where a charge struck, and it went when the fireball
+ * stopped being a digging tool — Joshua's call, v0.1.98: fire belongs to
+ * the fire ant's COMBAT signature, digging is her jaws alone. The FLIGHT
+ * above and the RANGE below are the halves the combat ability will reuse,
+ * so their promises stay pinned here.
+ */
 
 describe('how far a charge may be thrown', () => {
   /*

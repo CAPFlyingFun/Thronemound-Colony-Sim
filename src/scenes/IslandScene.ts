@@ -141,8 +141,7 @@ import {
   BODY_HALF_TALL, BODY_FLOOR_MARGIN, AIM_LIMIT, CHAMBER_CAM_FAR,
   CHAMBER_CAM_NEAR, COLONIST_SPEED, COLONIST_TURN, COLONIST_ARRIVE,
   COLONIST_ROAM, TROPHALLAXIS_REACH, TROPHALLAXIS_RATE, CARRY_DELIVER_REACH,
-  FIGHT_NOTICE, CHARGE_COOLDOWN_S, CHARGE_RANGE_MM, CHARGE_REACH_MM,
-  BURN_EMBERS, EMBER_COLOR,
+  FIGHT_NOTICE,
 } from './islandTuning';
 import { Colonist } from './Colonist';
 import { SoilQuery } from './soilQuery';
@@ -188,11 +187,9 @@ import {
   PROP_SCATTER, PROP_SPECS, Prop, type PropGround,
 } from './islandProps';
 import {
-  bite, biteCentre, biteRay, boreAim, carveScoop, chargeImpact,
+  bite, biteCentre, biteRay, boreAim,
   enqueueBounds, updateAimDebug, type DigHost,
 } from './islandDig';
-import { DigCharges, launchPoint } from './digCharge';
-import { Smolders } from './digBurn';
 import {
   readSpine, refreshAim, simulate, type BodyHost,
 } from './islandBody';
@@ -347,22 +344,6 @@ export class IslandScene {
   /** Chips of soil thrown off a cut — see `islandGrit`. Built with the
    *  scene, because it is one instanced mesh that lives in it. */
   private grit: Grit | null = null;
-
-  /** Mini dig charges mid-air — see `digCharge`. Built on the first
-   *  throw, because most sessions never aim a scoop at open sky. */
-  private charges: DigCharges | null = null;
-
-  /** Seconds until the next lob is allowed — the guardrail that keeps a
-   *  held stroke over a canyon from carpeting the far wall. */
-  private chargeCooldown = 0;
-
-  /** Ember chips — the fireball's trail and the smoulder's puffs. A
-   *  second Grit in ember orange, so the whole fire is one draw call. */
-  private embers: Grit | null = null;
-
-  /** Fires still eating where charges landed — see `digBurn`. Lazy for
-   *  the same reason the charges are. */
-  private burns: Smolders | null = null;
 
   /** The island's other diggers — see `islandWorm`. */
   /**
@@ -993,7 +974,6 @@ export class IslandScene {
      * world rather than with the dig, because a chip outlives the stroke
      * that made it and must keep falling after DIG is let go. */
     this.grit?.tick(dt);
-    this.embers?.tick(dt);
     /* The walkers, on the SOIL — `footingFrom`, not the stale heightfield.
      * See the note at the top of `Critter`. */
     for (const one of this.critters) {
@@ -3221,12 +3201,6 @@ export class IslandScene {
 
   private simulate(dt: number): void {
     simulate(this.bodyHost, dt);
-    /* Charges fly on the same clock the body walks, so a probe stepping
-     * the sim by hand flies them too. */
-    this.chargeCooldown = Math.max(0, this.chargeCooldown - dt);
-    this.charges?.step(dt);
-    /* And the fires still eating where charges landed. */
-    this.burns?.step(dt);
   }
 
   private refreshAim(): void { refreshAim(this.bodyHost); }
@@ -3244,119 +3218,6 @@ export class IslandScene {
   private boreAim(): THREE.Vector3 { return boreAim(this.digHost); }
 
   private bite(): void { bite(this.digHost); }
-
-  /**
-   * THE OUT-OF-REACH PRESS, ANSWERED WITH A LOB — `bite()` hands the
-   * stroke here when its aim met no soil inside her jaws. The bead is
-   * spawned ahead of the ray's origin but always INSIDE the span the
-   * miss scan proved empty — see `launchPoint` — so it cannot be born
-   * in soil the scan never asked about, and it is not born in the lens,
-   * which would fill the first-person frame with yellow.
-   *
-   * The cooldown lives HERE and not in the flight, because it is a rule
-   * about her — how often she can throw — not about how charges fly. A
-   * press inside the cooldown does nothing on purpose: the bead already
-   * mid-air IS the answer to that press.
-   */
-  private throwCharge(
-    origin: THREE.Vector3, aim: THREE.Vector3, clear: number,
-  ): void {
-    if (this.chargeCooldown > 0) return;
-    if (!this.charges) {
-      this.charges = new DigCharges(
-        {
-          scene: this.scene,
-          groundSolidAt: (x, y, z) => this.groundSolidAt(x, y, z),
-          /* The soil is streamed into a window centred on HER, so a charge
-           * that flies past its edge lands where nothing can be carved. */
-          at: this.at,
-          /* The trail — sparks shed backwards off the flying bead. */
-          ember: (at, along) => { this.emberGrit().burst(at, along, 1); },
-        },
-        /* A landing carves; a landing on bark carves NOTHING, and wood
-         * shrugging off the charge earns the same note a fizzle does.
-         * A landing that DID carve stays alight — the smoulder keeps
-         * eating along the line of flight for a few beats more. */
-        (at, dir) => {
-          if (chargeImpact(this.digHost, at, dir) === 0) this.biteMiss();
-          /* The glow bead is skipped when the landing is at her nose —
-           * a steep lob onto the ground in front of her would otherwise
-           * park a flickering ember centimetres from the first-person
-           * lens and fill the frame with yellow. The burn is unchanged;
-           * its ember puffs still mark the spot. */
-          else {
-            this.smolders().start(
-              at, dir,
-              this.camera.position.distanceToSquared(at)
-                > (NOSE_REACH * 2) ** 2,
-            );
-          }
-        },
-        () => this.biteMiss(),
-      );
-    }
-    const from = launchPoint(
-      origin, aim, clear, (x, y, z) => this.groundSolidAt(x, y, z),
-    );
-    if (this.charges.lob(from, aim)) this.chargeCooldown = CHARGE_COOLDOWN_S;
-  }
-
-  /**
-   * The smoulder pool, built the first time a charge actually lands on
-   * something it can burn. Each tick is a scoop cut by the same shared
-   * carve the jaws use — no grit count passed, so a burn tick's chips are
-   * a bite's quiet handful; the EMBERS are its fanfare.
-   */
-  private smolders(): Smolders {
-    if (!this.burns) {
-      this.burns = new Smolders(
-        this.scene,
-        (at, dir) => {
-          /*
-           * THE FIRE OBEYS THE SAME EDGE THE FLIGHT DOES. `CHARGE_REACH_
-           * MM` is where the streamed window stops answering and — the
-           * quieter failure — where `TerrainStream.remember` stops
-           * RECORDING, so a scoop cut past it would vanish on reload.
-           * The flight checks it every sub-step; a burn lives 1.65 s
-           * during which she can walk and drag the window with her, so
-           * each tick asks again from her CURRENT position. Past the
-           * edge is not an error, it is just no fuel: zero, fire out.
-           */
-          if (Math.hypot(at.x - this.at.x, at.z - this.at.z)
-            > CHARGE_REACH_MM / MM) return 0;
-          return carveScoop(this.digHost, at, dir);
-        },
-        (at, along) => { this.emberGrit().burst(at, along, BURN_EMBERS); },
-      );
-    }
-    return this.burns;
-  }
-
-  /**
-   * The ember chips, built on the first spark rather than with the scene:
-   * a session that never throws a fireball should not pay an instanced
-   * mesh's matrix upload every frame for chips it will never see.
-   */
-  private emberGrit(): Grit {
-    if (!this.embers) {
-      this.embers = new Grit(Math.random, EMBER_COLOR);
-      this.scene.add(this.embers.mesh);
-    }
-    return this.embers;
-  }
-
-  /** How many charges are mid-air — the probe's window. */
-  chargesForTest(): number { return this.charges?.count() ?? 0; }
-
-  /** How many landed fires are still eating — the probe's other window. */
-  burnsForTest(): number { return this.burns?.count() ?? 0; }
-
-  /** Ember chips in the air — flight trail and smoulder puffs alike. */
-  embersLiveForTest(): number { return this.embers?.live ?? 0; }
-
-  /** For probes: the throw's own range, so a report cannot quote a stale
-   *  constant it was written beside. */
-  chargeRangeForTest(): number { return CHARGE_RANGE_MM; }
 
   /** The hand that puts the miss note out — re-armed by every miss, so a
    *  held stroke over a drop keeps it lit rather than blinking. */
@@ -4557,17 +4418,6 @@ export class IslandScene {
   /** For probes: cut once, the way the DIG plate does. */
   biteForTest(): void { this.bite(); }
 
-  /** Lob one down the current aim, cooldown waived — the probe's hand on
-   *  the throw itself, without having to stage a cliff to stand on. The
-   *  ray is the PRODUCTION ray — same origin, same reach `bite()` would
-   *  hand over — so what the probe flies is what the miss path throws. */
-  lobForTest(): void {
-    this.chargeCooldown = 0;
-    const aim = this.boreAim();
-    const ray = this.biteRay(aim);
-    this.throwCharge(ray.origin, aim, ray.reach);
-  }
-
   /** For probes: how many worm bodies are drawn, and how many bones each. */
   wormBodiesForTest(): { bones: number; visible: boolean; headMm: number[] }[] {
     return this.wormBodies.map((b) => ({
@@ -5377,8 +5227,6 @@ export class IslandScene {
     }
     this.statsPanel.dispose();
     this.designer?.dispose();
-    this.charges?.dispose();
-    this.charges = null;
     this.scene.traverse((node) => {
       const mesh = node as THREE.Mesh;
       if (mesh.geometry) mesh.geometry.dispose();
@@ -5397,8 +5245,6 @@ export class IslandScene {
     this.nestView?.dispose();
     for (const b of this.wormBodies) b.dispose();
     this.grit?.dispose();
-    this.embers?.dispose();
-    this.burns?.dispose();
     this.queen.dispose();
     for (const one of this.colony) one.dispose();
     for (const q of this.quarry) q.dispose();
