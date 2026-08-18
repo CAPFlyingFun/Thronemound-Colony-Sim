@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { bite, biteCentre, type DigHost } from '../src/scenes/islandDig';
 import {
-  NOSE_REACH, JAW_PAST_NOSE, SCOOP_DEEP_MM, SCOOP_BALL_MM, SCOOP_WIDE_MM,
-  SCOOP_TALL_MM, BODY_HALF_TALL, BORE_HUG_WIDE,
+  bite, biteCentre, digJobTick, type DigHost,
+} from '../src/scenes/islandDig';
+import {
+  NOSE_REACH, JAW_PAST_NOSE, BODY_HALF_TALL, BORE_HUG_WIDE, BORE_MIN_MM,
+  BORE_WIDEN,
 } from '../src/scenes/islandTuning';
 import { MM } from '../src/world/worldScape';
 
@@ -67,8 +69,18 @@ function makeHost(
     soilSolidAt: solid,
     groundSolidAt: solid,
     biteMiss: () => { calls.miss += 1; },
+    /* The bore is a job now — see digJob.ts. A queen-sized shovel. */
+    digJob: null,
+    boreLength: () => 9 / MM,
+    boreRadius: () => 2.25 / MM,
   } as unknown as DigHost;
   return { host, calls };
+}
+
+/** Press, then let the whole bore run — the shape most tests want. */
+function pressAndEat(host: DigHost): void {
+  bite(host);
+  digJobTick(host, 60, true);
 }
 
 describe('the stroke that meets nothing', () => {
@@ -88,11 +100,14 @@ describe('the stroke that meets nothing', () => {
   });
 
   it('stays quiet when soil actually came out', () => {
+    /* A press starts the JOB — the cylinder eaten over seconds — so the
+     * soil leaves as the beats land, not on the button. Run the whole
+     * bore and the press was a success: no miss, chips flew. */
     const { host, calls } = makeHost(() => true);
-    bite(host);
+    pressAndEat(host);
     expect(calls.miss).toBe(0);
     expect((host as { biteTouched: boolean }).biteTouched).toBe(true);
-    expect(calls.revealed).toBe(1);
+    expect(calls.revealed).toBeGreaterThanOrEqual(1);
   });
 
   it('still tells the miss on a seated stroke that cuts nothing (bark)', () => {
@@ -101,10 +116,33 @@ describe('the stroke that meets nothing', () => {
      * changed. That press failing belongs on the screen — and it is a
      * MISS, not a throw, because her jaws DID reach something. */
     const { host, calls } = makeHost(() => true, () => false);
-    bite(host);
+    pressAndEat(host);
     expect(calls.miss).toBe(1);
     expect(calls.subtracted).toBeGreaterThan(0);
     expect((host as { biteTouched: boolean }).biteTouched).toBe(false);
+  });
+
+  it('a press mid-bore does nothing — the eating IS the cooldown', () => {
+    const { host, calls } = makeHost(() => true);
+    bite(host);
+    const job = (host as { digJob: unknown }).digJob;
+    expect(job).not.toBeNull();
+    bite(host);
+    expect((host as { digJob: unknown }).digJob).toBe(job);
+    expect(calls.miss).toBe(0);
+  });
+
+  it('releasing the press abandons the rest, and what was cut stays', () => {
+    const { host, calls } = makeHost(() => true);
+    bite(host);
+    const before = calls.subtracted;
+    expect(before).toBeGreaterThan(0);
+    digJobTick(host, 1, false);
+    expect((host as { digJob: unknown }).digJob).toBeNull();
+    digJobTick(host, 60, true);
+    expect(calls.subtracted).toBe(before);
+    /* And no miss: an abandoned mouthful is a choice, not a failure. */
+    expect(calls.miss).toBe(0);
   });
 
   it('biteCentre reports open air over a drop as a genuine miss', () => {
@@ -117,49 +155,43 @@ describe('the stroke that meets nothing', () => {
     expect(out.z).toBeCloseTo(host.at.z + reach, 5);
   });
 
-  it('biteCentre seats the scoop half a depth past the first soil it meets', () => {
+  it('biteCentre seats the face one bore radius past the first soil', () => {
     const wallZ = 0.5 + 2 / MM; // a face 2 mm out along the aim
     const { host } = makeHost((_x, _y, z) => z >= wallZ);
     const out = new THREE.Vector3();
     const aim = new THREE.Vector3(0, 0, 1);
     expect(biteCentre(host, aim, NOSE_REACH + JAW_PAST_NOSE, out)).toBe(true);
     expect(out.z).toBeGreaterThan(wallZ - 1e-6);
-    expect(out.z).toBeLessThan(wallZ + SCOOP_DEEP_MM / MM);
+    expect(out.z).toBeLessThan(wallZ + host.boreRadius() * 2);
   });
 });
 
 /**
- * THE BRUSH IS A BALL, and it has to stay one.
+ * THE BORE FITS ITS DIGGER, BY CONSTRUCTION — the rule that replaced
+ * "the shovel is a 6 mm ball".
  *
- * Asked directly: "what is the dig radius and is it a round shape? I was
- * thinking make it a 6x6x6mm ball/sphere." It was not round — it was an
- * ellipsoid 10 wide, 5 tall and 3 deep — and the shape mattered more than
- * it looked, because the brush is drawn in HER frame: the 3 mm depth axis
- * is the one pointing wherever she digs. Measured in the running game,
- * one stroke aimed straight down opened a saucer 2 mm deep. The ball opens
- * a 6 mm hole in every direction, which is three and a half times the soil
- * on the one heading the founding is built around.
- *
- * Pinned here rather than left to the constants because three separate
- * exports that must agree are three chances for one of them to be edited
- * alone — which is exactly how it stopped being round the first time.
+ * Joshua's blueprint made the cut a cylinder read off the ant's own body:
+ * diameter = her standing height widened by `BORE_WIDEN`, floored at
+ * `BORE_MIN_MM`. The widen is what buys the antenna sweep and the gait's
+ * lift their headroom, and the floor is what keeps the smallest worker's
+ * tunnel above the carve field's own resolution. Pinned so neither can
+ * be edited into a bore an ant cannot walk.
  */
-describe('the shovel is a ball', () => {
-  it('is the same across every axis', () => {
-    expect(SCOOP_WIDE_MM).toBe(SCOOP_BALL_MM);
-    expect(SCOOP_TALL_MM).toBe(SCOOP_BALL_MM);
-    expect(SCOOP_DEEP_MM).toBe(SCOOP_BALL_MM);
+describe('the bore fits its digger', () => {
+  it('is always wider than the ant is tall', () => {
+    expect(BORE_WIDEN).toBeGreaterThanOrEqual(1.5);
+    for (const heightMm of [1.1, 1.3, 3.0, 6.0]) {
+      const diaMm = Math.max(BORE_MIN_MM, heightMm * BORE_WIDEN);
+      expect(diaMm).toBeGreaterThan(heightMm);
+    }
   });
 
-  it('is the 6 mm across that was asked for', () => {
-    expect(SCOOP_BALL_MM).toBe(6);
+  it('never goes below the floor a camera and the field can live with', () => {
+    expect(BORE_MIN_MM).toBeGreaterThanOrEqual(4);
   });
 
-  it('still clears her body in the passage it cuts', () => {
-    /* A round tunnel is only worth having if she fits in it. Half the
-     * brush against the half-extents she is fitted to — see `BODY_FIT`
-     * and `BORE_HUG_WIDE` in `islandTuning`. */
-    expect(SCOOP_BALL_MM / 2 / MM).toBeGreaterThan(BODY_HALF_TALL);
-    expect(SCOOP_BALL_MM / 2 / MM).toBeGreaterThan(BORE_HUG_WIDE / 2);
+  it('the queen-sized test bore still clears the fitted body extents', () => {
+    expect(2.25 / MM).toBeGreaterThan(BODY_HALF_TALL);
+    expect(2.25 / MM).toBeGreaterThan(BORE_HUG_WIDE / 2);
   });
 });

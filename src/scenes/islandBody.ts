@@ -123,6 +123,7 @@ export interface BodyHost {
     surface: (x: number, y: number, z: number) => number;
   };
   bite(): void;
+  digJobTick(dt: number): void;
   depthMm(): number;
   key(cx: number, cy: number, cz: number): string;
   meshChunk(cx: number, cy: number, cz: number): void;
@@ -349,6 +350,10 @@ export function simulate(host: BodyHost, dt: number): void {
     // Soil leaves at the bottom of the stroke, not on the button — and
     // which stroke it is depends on which tool the shovel is holding.
     if (bore.bite) host.bite();
+    /* And the bore already being eaten, on the same clock — so a probe
+     * stepping the sim by hand chips it too. Held is the SCOOP press;
+     * released, the job abandons its remainder inside. */
+    host.digJobTick(dt);
 
     /* The builder digs on a BUTTON, not on a frame: `digPiece` is called
      * straight from the palette's chips. Nothing to do per-frame here. */

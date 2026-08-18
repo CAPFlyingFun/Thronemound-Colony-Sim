@@ -18,10 +18,10 @@ import type { Grit } from './islandGrit';
 import type { QueenModel } from '../anim/QueenModel';
 import type { IslandStream } from '../world/IslandStream';
 import { CELL_SIZE, MM } from '../world/worldScape';
+import { DigJob } from './digJob';
 import {
   AIM_DBG_LAG, AIM_LIMIT, CH, CHUNKS_XZ, CHUNKS_Y,
   JAW_PAST_NOSE, NOSE_REACH, QUEST_DEPTH_MM, RIDE,
-  SCOOP_DEEP_MM, SCOOP_TALL_MM, SCOOP_WIDE_MM,
   SMOOTH_MAX_SHIFT, SMOOTH_PASSES, SMOOTH_RADIUS_MM, SMOOTH_STRENGTH,
   S_BITE_JAW, S_CENTER, S_DBG_CENTRE, S_DBG_DIR, S_DBG_END,
   S_DBG_HEAD, S_DBG_JAW, S_DBG_REL, S_DBG_RIGHT, S_DBG_UP,
@@ -53,6 +53,13 @@ export interface DigHost {
   brushMm: number;
   deepCarved: number;
   stream: IslandStream | null;
+  /** The bore being eaten right now, if any — see `digJob.ts`. One at a
+   *  time, and its duration is the cooldown; that is the whole rule. */
+  digJob: DigJob | null;
+  /** One body length, off her own rig — the bore's length. */
+  boreLength(): number;
+  /** Half of max(her height x BORE_WIDEN, BORE_MIN) — the bore's radius. */
+  boreRadius(): number;
 
   /* --- the debug rig's own handles --- */
   aimDebug: boolean;
@@ -127,135 +134,111 @@ export function boreAim(host: DigHost, ): THREE.Vector3 {
 }
 
 /**
- * ONE STROKE OF THE SHOVEL: a mouthful 10 mm wide, 5 mm tall and 3 mm
- * deep, taken at her jaws, along the way she is pointed.
+ * ONE STROKE OF THE SHOVEL — and a stroke is a CYLINDER now, not a
+ * mouthful.
  *
- * Wider than she is, and that is the point — a stroke opens something
- * she can WALK into rather than something she has to be threaded
- * through. It is what let the body capsule go: nothing needs to check
- * whether she fits, because at ten millimetres across a nine-millimetre
- * ant always does.
+ * Joshua's blueprint (drawn, 2026-08-18): a bore one BODY LENGTH long,
+ * its diameter off her own standing height, starting at the thorax and
+ * running out past the head along the aim. It is not carved on the press:
+ * the press starts a `DigJob` that chips the cylinder away on a steady
+ * half-second beat over `volume / DIG_RATE_MM3_S` seconds rounded up —
+ * his own arithmetic, "143/30=4.767 seconds" — and that duration IS the
+ * cooldown. A press while a job runs does nothing on purpose: the bore
+ * being eaten is the answer to that press. Held past the end, the next
+ * stroke starts a new bore from wherever she stands now, which is how a
+ * long tunnel is one held button.
+ *
+ * WHY: "popcorn tunnel as each bite." The old stroke dropped two 6 mm
+ * spheres exactly tangent, and tangent spheres leave a waist — every
+ * press a discrete pocket the walls remembered. The job sweeps deeply
+ * overlapping spheres down one line instead, which is how the worms cut
+ * and why their tunnels look right. And because the bore is HER length
+ * and HER height widened, a small ant digs a small fast tunnel and a big
+ * ant a big slow one, with nothing per-caste written anywhere.
  */
 export function bite(host: DigHost, ): void {
+  /* One bore at a time — the duration is the cooldown, by decree. */
+  if (host.digJob) return;
   const aim = boreAim(host);
   /*
-   * AT HER JAWS, or at the front of her while the model is still
-   * loading. `jawPosition` is the real mandible tip where the rigger
-   * gave her one; the fallback is a nose-length along the aim, so the
-   * first frames of a session dig where every frame after them does.
-   */
-  /*
-   * ON THE AIM LINE THROUGH HER CENTRE — never on the jaw BONE.
-   *
-   * The bone is the obvious anchor and it is the wrong one, twice over.
-   * It rides the visual model, which sits above her centre-line and
-   * lags her by a frame of easing, so the cut opened ABOVE where the
-   * crosshair pointed — reported as aiming high, and settling onto the
-   * crosshair only once the model had bedded into the tunnel and its
-   * jaw had come down to the line. And the same offset means a bone-
-   * anchored tunnel runs parallel to her path a few millimetres aside,
-   * which is its own old bug.
-   *
-   * So the bone is allowed to say how FAR along the aim her jaws are,
-   * and nothing else. The cut is centred on the ray the camera looks
-   * down, so what the crosshair covers is what disappears.
-   */
-  /*
-   * AND THE RAY STARTS AT THE LENS, IN HER OWN EYES.
-   *
-   * The DIRECTION was already the crosshair's — `boreAim` returns
-   * `lookDir` in first person, which is the vector the frame was built
-   * on. The ORIGIN was not: the march ran from `host.at`, her body
-   * centre, which sits below and behind the lens. Two rays with the same
-   * direction and different origins hit different soil, and how
-   * different depends entirely on the angle — level, they agree; steep,
-   * they do not. Reported at -77 degrees, where they disagree most:
-   * "it's too low and not exactly at my crosshair aiming location".
-   * From her belly a steep ray meets the floor almost at once, directly
-   * beneath her, while the crosshair is pointing somewhere out in front.
-   *
-   * Firing from the lens makes the crosshair a laser: the ray the player
-   * is sighting down IS the ray the soil is taken from, at every angle,
-   * because it is numerically the same ray.
-   *
-   * It also lands the intent from way back — "digging should originate
-   * from the queen's mandibles/jaw/head rig, not from the queen's body
-   * centre" — WITHOUT re-introducing the bug that moved it to the centre
-   * line in the first place. That fix was escaping a jaw BONE that rides
-   * the animation: above the centre line, a frame of easing behind, so
-   * the cut opened high and settled only after the model bedded in. The
-   * lens is not the bone. It is placed on the eye anchor and filtered,
-   * so it is the stable head-mounted origin that note asked for and the
-   * animation cannot drag it around.
-   *
-   * Third person keeps her centre: there the crosshair is hidden and the
-   * shovel's line is the body's, not the camera's.
+   * SEATED THE WAY EVERY STROKE HAS BEEN: the ray from the lens (her
+   * centre in third person) walked to the first soil it meets, with the
+   * hillside scrape as the fallback — see `biteCentre`. The seat is the
+   * FACE the bore starts eating at; the job's origin steps half a radius
+   * back onto the air side so the mouth's lip opens on this side of it.
    */
   const centre = new THREE.Vector3();
   const ray = biteRay(host, aim);
   const seated = biteCentre(host, aim, ray.reach, centre, ray.origin);
-  /*
-   * NOTHING HER JAWS CAN REACH — THE MISS IS TOLD, NOT THROWN.
-   *
-   * For a while this press lobbed a mini dig charge down the aim line — a
-   * fireball that popped a scoop wherever it landed. Joshua's call: "it's
-   * hot but it goes too far and not very antlike" — fire is being remade
-   * as the fire ant's COMBAT signature (see the species-abilities card on
-   * Trello) and digging is her jaws alone: the 6 mm ball at the bottom of
-   * her jaw bone, unchanged. So the out-of-reach stroke is back to the
-   * honest answer it had before the charge existed: the OUT OF REACH note
-   * and the crosshair blush. `digCharge.ts` and `digBurn.ts` keep their
-   * flight and their fire for the combat ability to reuse.
-   */
   if (!seated) {
     host.biteTouched = false;
     host.biteMiss();
     return;
   }
-
-  const touched = carveScoop(host, centre, aim);
-  host.biteTouched = touched > 0;
-  /* The miss is TOLD, not swallowed — kept for the SEATED stroke that
-   * still removes nothing, which is real: `biteCentre` answers for
-   * ground (bark included, so she can be stopped by a tree) while the
-   * shovel edits only soil. A scoop seated on wood changes no samples,
-   * and that press failing belongs on the screen. */
-  if (touched === 0) host.biteMiss();
+  const r = host.boreRadius();
+  const origin = centre.clone().addScaledVector(aim, -(r * 1.5));
+  host.digJob = new DigJob(origin, aim, host.boreLength(), r);
+  /* The press answers NOW — beat zero of the schedule, not next frame. */
+  digJobTick(host, 0, true);
 }
 
 /**
- * ONE MOUTHFUL TAKEN AT `centre`, ALONG `aim` — the cut itself, shared by
- * the jaws and the thrown charge so "scoop-sized" is one fact, not two.
+ * ONE FRAME OF THE BORE BEING EATEN. Called every simulated frame; quiet
+ * when there is no job. `held` is the SCOOP press: releasing it abandons
+ * the rest of the cylinder — the soil already chipped stays gone, which
+ * is the honest partial — and there is no cooldown left to serve, because
+ * the cooldown was only ever the eating itself.
+ */
+export function digJobTick(host: DigHost, dt: number, held: boolean): void {
+  const job = host.digJob;
+  if (!job) return;
+  if (!held) {
+    host.digJob = null;
+    return;
+  }
+  const points = job.tick(dt);
+  if (points.length > 0) {
+    const touched = carveBrush(host, points, job.aim, job.radiusWu);
+    job.carved += touched;
+    if (touched > 0) host.biteTouched = true;
+  }
+  if (job.done) {
+    /* A whole cylinder of nothing — wood, or the seat lied — is a press
+     * that failed, and that belongs on the screen like any other miss. */
+    if (job.carved === 0) {
+      host.biteTouched = false;
+      host.biteMiss();
+    }
+    host.digJob = null;
+  }
+}
+
+/**
+ * A SWEEP OF SPHERES TAKEN ALONG `points` — the cut itself.
  *
  * Everything that must accompany a cut travels with it: the spoil burst,
  * the one-way smoothing pass, the chamber-quest credit, and the
  * synchronous remesh of every chunk touched. A caller that carved without
  * these would reintroduce the stale-floor bug the remesh note below
  * describes, which is why this is one function rather than advice.
+ *
+ * This used to be `carveScoop`, two tangent 6 mm balls — the popcorn.
+ * The sphere count and size are the caller's now (`digJobTick` hands in
+ * one beat's worth of deeply-overlapping bore slices); what stays HERE is
+ * everything a cut owes the rest of the game.
  */
-export function carveScoop(
-  host: DigHost, centre: THREE.Vector3, aim: THREE.Vector3, grit?: number,
+export function carveBrush(
+  host: DigHost, points: readonly THREE.Vector3[], aim: THREE.Vector3,
+  radiusWu: number, grit?: number,
 ): number {
   let touched = 0;
   let minX = Infinity; let minY = Infinity; let minZ = Infinity;
   let maxX = -Infinity; let maxY = -Infinity; let maxZ = -Infinity;
-  /*
-   * Two scoops, one at the face and one a depth further in, so a HELD
-   * stroke cuts a continuous tube rather than a string of beads — one
-   * brush-width is shorter than her stride, so a single ball per stroke
-   * leaves gaps on the first step.
-   *
-   * The step is one brush depth, which for the 6 mm ball means the two
-   * spheres are exactly tangent — the same relationship the old 3 mm-deep
-   * ellipsoid had, so the tube's topology is unchanged and only its size
-   * moved. The smoothing pass below rounds off the waist where they meet.
-   */
-  for (let i = 0; i < 2; i += 1) {
-    const at = S_CENTER.copy(centre).addScaledVector(aim, (i * SCOOP_DEEP_MM) / MM);
+  for (const at of points) {
     const result = host.stream!.subtractEllipsoid(at, aim, {
-      deep: SCOOP_DEEP_MM / 2 / MM,
-      wide: SCOOP_WIDE_MM / 2 / MM,
-      tall: SCOOP_TALL_MM / 2 / MM,
+      deep: radiusWu,
+      wide: radiusWu,
+      tall: radiusWu,
     });
     if (result.changedSamples === 0) continue;
     touched += result.changedSamples;
@@ -268,7 +251,8 @@ export function carveScoop(
    * cuts nothing, and throwing chips off it would be the ghost's own
    * "confident hole over open air" mistake in another form. */
   if (touched === 0) return 0;
-  host.grit?.burst(centre, aim, grit);
+  const face = points[points.length - 1]!;
+  host.grit?.burst(face, aim, grit);
   /*
    * AND SHAVE WHAT WAS JUST CUT, in the same stroke.
    *
@@ -279,7 +263,7 @@ export function carveScoop(
    * slightly wider than intended, which is the failure you want. So the
    * two are one action again — cut, then round off what the cut left.
    */
-  const relaxed = smoothAround(host, centre);
+  const relaxed = smoothAround(host, face);
   if (relaxed) {
     minX = Math.min(minX, relaxed.minX); maxX = Math.max(maxX, relaxed.maxX);
     minY = Math.min(minY, relaxed.minY); maxY = Math.max(maxY, relaxed.maxY);
@@ -390,13 +374,17 @@ export function biteCentre(
   origin: THREE.Vector3 = host.at,
 ): boolean {
   const step = CELL_SIZE * 0.5;
-  const far = reach + SCOOP_DEEP_MM / MM;
+  /* HER bore now sets the seat's depth, not a constant scoop — the face
+   * is pulled one radius in so the mouth straddles the surface however
+   * close she stands, exactly the half-depth rule the scoop had. */
+  const r = host.boreRadius();
+  const far = reach + r * 2;
   for (let d = 0; d <= far; d += step) {
     const x = origin.x + aim.x * d;
     const y = origin.y + aim.y * d;
     const z = origin.z + aim.z * d;
     if (host.groundSolidAt(x, y, z)) {
-      out.set(x, y, z).addScaledVector(aim, SCOOP_DEEP_MM / 2 / MM);
+      out.set(x, y, z).addScaledVector(aim, r);
       return true;
     }
   }

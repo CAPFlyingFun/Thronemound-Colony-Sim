@@ -609,6 +609,33 @@ export const SCOOP_WIDE_MM = SCOOP_BALL_MM;
 export const SCOOP_TALL_MM = SCOOP_BALL_MM;
 export const SCOOP_DEEP_MM = SCOOP_BALL_MM;
 
+/*
+ * THE CYLINDER DIG — Joshua's blueprint, 2026-08-18, drawn: "a cylinder
+ * starting at the Thorax down the ant's head out x distance." One stroke
+ * cuts a bore ONE BODY LENGTH long; its diameter comes off HER OWN RIG,
+ * so a small ant digs a small tunnel and the tunnels grow with the ants —
+ * no per-caste constants to go stale.
+ *
+ * The WIDEN and FLOOR are game tuning, said plainly: a bore exactly her
+ * standing height leaves no room for the antenna sweep or the gait's
+ * lift, and the worker's honest 1.1 mm is below the carve field's own
+ * resolution — voxel noise, not a tunnel. Half again her height, never
+ * under four millimetres, keeps every bore a place an ant and a camera
+ * can actually be.
+ *
+ * PACING is Joshua's formula verbatim: seconds = cylinder volume over
+ * RATE, ROUNDED UP to a whole second so the chip-away lands on a clean
+ * beat — "143/30=4.767 seconds it should take... round up to the closest
+ * whole number so the animation can work maybe every 0.5s." Small ants
+ * dig fast and big ants slow, automatically: queen ~5 s, major ~3 s,
+ * worker ~2 s per body length, measured off the real rigs. The duration
+ * IS the cooldown — one bore at a time, nothing extra after.
+ */
+export const DIG_RATE_MM3_S = 30;
+export const DIG_BEAT_S = 0.5;
+export const BORE_WIDEN = 1.5; //   of her standing height, diameter
+export const BORE_MIN_MM = 4; //    the floor no bore goes under
+
 /**
  * THE THROWN CHARGE 🧨 — what an out-of-reach press becomes.
  *

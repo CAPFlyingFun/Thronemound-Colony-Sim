@@ -127,7 +127,7 @@ import {
   S_LEAN_AXIS, S_BANK_AXIS, S_BANK, UNDER_MM,
   ENCLOSED_MM, CH, CHUNKS_XZ, CHUNKS_Y,
   MESH_BUDGET, LEAD_S, LEAD_MAX, SCROLL_COOLDOWN_MS,
-  SCOOP_WIDE_MM, SCOOP_TALL_MM, SCOOP_DEEP_MM, SMOOTH_STRENGTH,
+  SCOOP_BALL_MM, SMOOTH_STRENGTH,
   SMOOTH_PASSES, SMOOTH_RADIUS_MM, SMOOTH_MAX_SHIFT, SMOOTH_GROW,
   EYE_SKIN, BONE_CLEARANCE, CAMERA_SKIN, EYE_FORWARD,
   EYE_RISE, EYE_FOLLOW_MS, EYE_AIM_MS, EYE_FOLLOW_RATE, S_JAW,
@@ -142,7 +142,7 @@ import {
   CHAMBER_CAM_NEAR, COLONIST_SPEED, COLONIST_TURN, COLONIST_ARRIVE,
   COLONIST_ROAM, TROPHALLAXIS_REACH, TROPHALLAXIS_RATE, CARRY_DELIVER_REACH,
   FIGHT_NOTICE, ROUTE_FORGET_MM, QUEEN_ROAM, QUEEN_PACE, QUEEN_STANDOFF,
-  QUEEN_TAP_WU,
+  QUEEN_TAP_WU, BORE_MIN_MM, BORE_WIDEN, DIG_BEAT_S,
 } from './islandTuning';
 import { Colonist } from './Colonist';
 import { SoilQuery } from './soilQuery';
@@ -188,9 +188,10 @@ import {
   PROP_SCATTER, PROP_SPECS, Prop, type PropGround,
 } from './islandProps';
 import {
-  bite, biteCentre, biteRay, boreAim,
+  bite, biteCentre, biteRay, boreAim, digJobTick,
   enqueueBounds, updateAimDebug, type DigHost,
 } from './islandDig';
+import { DigJob } from './digJob';
 import {
   readSpine, refreshAim, simulate, type BodyHost,
 } from './islandBody';
@@ -2133,6 +2134,10 @@ export class IslandScene {
    *  it — digging at open air must not grip her to the aim line. */
   private biteTouched = false;
 
+  /** The bore being eaten right now — see `digJob.ts` and `bite()` in
+   *  `islandDig`. One at a time; its duration is the cooldown. */
+  digJob: DigJob | null = null;
+
   /* ------------------------------------------------- the founding quests */
 
   /** 0 dig the entrance · 1 hollow the chamber · 2 cinematic · 3 done. */
@@ -3305,6 +3310,28 @@ export class IslandScene {
   private boreAim(): THREE.Vector3 { return boreAim(this.digHost); }
 
   private bite(): void { bite(this.digHost); }
+
+  /** One frame of the bore being eaten — see `digJobTick` in `islandDig`.
+   *  The press is the SCOOP hold; releasing abandons the rest. */
+  digJobTick(dt: number): void { digJobTick(this.digHost, dt, this.input.dig); }
+
+  /**
+   * THE BORE IS HERS, MEASURED, NOT CONSTANT: one body length long, half
+   * again her standing height wide, floored so the smallest worker still
+   * cuts a tunnel the carve field can represent and a camera can enter.
+   * Off the CURRENT rig, so the founding's caste swap re-sizes the shovel
+   * with the ant, and growth will too, with nothing else changing.
+   */
+  boreLength(): number {
+    return this.queenReady ? this.queen.bodyLength() : (SCOOP_BALL_MM * 2) / MM;
+  }
+
+  boreRadius(): number {
+    const heightWu = this.queenReady
+      ? this.queen.standingHeight()
+      : SCOOP_BALL_MM / MM;
+    return Math.max(BORE_MIN_MM / MM, heightWu * BORE_WIDEN) / 2;
+  }
 
   /** The hand that puts the miss note out — re-armed by every miss, so a
    *  held stroke over a drop keeps it lit rather than blinking. */
@@ -4549,8 +4576,32 @@ export class IslandScene {
     }
   }
 
-  /** For probes: cut once, the way the DIG plate does. */
-  biteForTest(): void { this.bite(); }
+  /** For probes: one whole bore, run to completion synchronously —
+   *  probes want the terrain, not the pacing. The pacing has its own
+   *  hook below and its own unit tests. */
+  biteForTest(): void {
+    const held = this.input.dig;
+    this.input.dig = true;
+    this.bite();
+    for (let guard = 0; this.digJob && guard < 128; guard += 1) {
+      this.digJobTick(DIG_BEAT_S);
+    }
+    this.input.dig = held;
+  }
+
+  /** For probes: the live bore's own schedule and her measured shovel. */
+  digJobForTest(): {
+    active: boolean; durationS: number; progress: number; boreMm: number;
+    lengthMm: number;
+  } {
+    return {
+      active: this.digJob !== null,
+      durationS: this.digJob?.durationS ?? 0,
+      progress: +(this.digJob?.progress ?? 0).toFixed(3),
+      boreMm: +(this.boreRadius() * 2 * MM).toFixed(2),
+      lengthMm: +(this.boreLength() * MM).toFixed(2),
+    };
+  }
 
   /** For probes: the parked queen's errand — where she is, where her
    *  chamber anchor is, and whether she is following the player. */
@@ -5337,9 +5388,8 @@ export class IslandScene {
       canRun: this.vitals.canRun ? 1 : 0,
       firstPerson: this.firstPerson ? 1 : 0,
       aimDeg: (this.aimPitch * 180) / Math.PI,
-      scoopWideMm: SCOOP_WIDE_MM,
-      scoopTallMm: SCOOP_TALL_MM,
-      scoopDeepMm: SCOOP_DEEP_MM,
+      boreDiaMm: +(this.boreRadius() * 2 * MM).toFixed(2),
+      boreLenMm: +(this.boreLength() * MM).toFixed(2),
       digMode: this.digMode ? 1 : 0,
       questStage: this.questStage,
       questDepthMm: +this.depthMm().toFixed(1),

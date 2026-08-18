@@ -1369,6 +1369,22 @@ export class QueenModel {
     return rigLengthVoxels(this.rig);
   }
 
+  /**
+   * How tall she STANDS, in world units — the body tube plus the air her
+   * legs hold under it. The tube is `bodyRadius` doubled; the clearance
+   * is the legs' own rest plane, measured off the rig's foot homes the
+   * same way `LegDrive` seats her. This is the number a tunnel has to
+   * clear for her to walk it, which is why the cylinder dig reads its
+   * bore off it — see `BORE_WIDEN` in `islandTuning`.
+   */
+  standingHeight(): number {
+    const feet = this.legPlan();
+    const sole = feet.length
+      ? -Math.min(...feet.map((leg) => leg.home[1]))
+      : 0;
+    return this.bodyRadius() * 2 + Math.max(0, sole);
+  }
+
   /** Her mouthparts, in world space. False when the rig has not loaded. */
   /** The joint her head hangs off — the head end of the thorax chain. */
   headJointPosition(into: THREE.Vector3): boolean {

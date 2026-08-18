@@ -29,7 +29,7 @@ import type { DebugStatsPanel } from './DebugStatsPanel';
 import type { HudPart } from './hudModes';
 import { MM, WINDOW_BYTES, WINDOW_MM } from '../world/worldScape';
 import {
-  AIM_LIMIT, DOUBLE_TAP_MS, DOUBLE_TAP_PX, PACE_NAMES, SCOOP_BALL_MM,
+  AIM_LIMIT, DOUBLE_TAP_MS, DOUBLE_TAP_PX, PACE_NAMES,
   SMOOTH_RADIUS_MM, TAP_MS, TAP_TRAVEL_PX, stickCurve,
 } from './islandTuning';
 
@@ -102,6 +102,8 @@ export interface HudHost {
   /** A double-tap landed on the glass — the scene decides whether it was
    *  ON the queen, and toggles her following. See `queenDoubleTap`. */
   queenDoubleTap(clientX: number, clientY: number): void;
+  boreRadius(): number;
+  boreLength(): number;
   poseReadout: HTMLElement | null;
   paceChip: HTMLButtonElement | null;
   rideChip: HTMLButtonElement | null;
@@ -1220,7 +1222,7 @@ export function updateStatus(host: HudHost, ): void {
     terrain ${host.terrainVerts.toLocaleString()} v / ${host.terrainTris.toLocaleString()} t
     · elevation ${elevM} m<br>
     aim ${((host.aimPitch * 180) / Math.PI).toFixed(0)}° ·
-    scoop \u2300${SCOOP_BALL_MM} mm ball<br>
+    bore \u2300${(host.boreRadius() * 2 * MM).toFixed(1)} x ${(host.boreLength() * MM).toFixed(0)} mm<br>
     soil window ${WINDOW_MM} mm · ${(WINDOW_BYTES / 1048576).toFixed(1)} MB ·
     chunks ${host.chunkMeshes.size} · queued ${host.queue.length} ·
     dug ${host.stream?.editedSamples ?? 0}<br>
