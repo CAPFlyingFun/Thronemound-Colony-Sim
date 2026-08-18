@@ -27,6 +27,7 @@
 import {
   DevicePrefs, PREF_DEFAULTS, PREF_RANGE, loadPrefs, savePrefs,
 } from '../scenes/devicePrefs';
+import type { InputPref } from '../scenes/inputBindings';
 
 const CSS = `
 .tm-settings {
@@ -132,6 +133,17 @@ const CSS = `
   min-height: 32px;
   padding: 6px 12px;
 }
+/* And a named choice is a row of pills filling the same 190px, so the
+ * three columns of the sheet stay three columns. */
+.tm-set-group { display: flex; gap: 4px; width: 190px; }
+.tm-settings button.tm-set-pill {
+  flex: 1;
+  min-width: 0;
+  min-height: 32px;
+  padding: 6px 4px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
 @media (max-height: 400px) {
   .tm-settings { gap: 7px; }
   .tm-settings-sheet { gap: 5px; max-height: 66vh; }
@@ -177,6 +189,8 @@ export class SettingsPanel {
     this.slider(sheet, 'FOV — 3rd person', 'fov3', (v) => `${Math.round(v)}°`);
     this.slider(sheet, 'Look speed', 'lookSens', (v) => `×${v.toFixed(1)}`);
     this.flip(sheet, 'Invert Y');
+    this.section(sheet, 'CONTROLS');
+    this.choice(sheet, 'Input', ['auto', 'touch', 'pc'], ['AUTO', 'TOUCH', 'KEY+MOUSE']);
     this.section(sheet, 'GRAPHICS');
     this.slider(sheet, 'Resolution', 'resScale', (v) => `${Math.round(v * 100)}%`);
 
@@ -253,6 +267,44 @@ export class SettingsPanel {
       value.textContent = show(this.prefs[key]);
       this.commit();
     });
+    into.appendChild(row);
+  }
+
+  /**
+   * A ROW OF EXCLUSIVE PILLS — for a setting whose values are named
+   * rather than measured. AUTO is not a fourth state hiding behind the
+   * other two: it means "follow the hand I am using", which is what a
+   * phone with a keyboard in front of it actually wants.
+   */
+  private choice(
+    into: HTMLElement,
+    label: string,
+    values: readonly InputPref[],
+    labels: readonly string[],
+  ): void {
+    const row = document.createElement('div');
+    row.className = 'tm-settings-row';
+    const name = document.createElement('span');
+    name.className = 'tm-set-name';
+    name.textContent = label;
+    row.appendChild(name);
+    const group = document.createElement('div');
+    group.className = 'tm-set-group';
+    const paint: (() => void)[] = [];
+    values.forEach((value, i) => {
+      const b = document.createElement('button');
+      b.className = 'tm-set-pill';
+      b.textContent = labels[i] ?? value;
+      paint.push(() => b.classList.toggle('is-on', this.prefs.inputMode === value));
+      b.addEventListener('click', () => {
+        this.prefs.inputMode = value;
+        for (const p of paint) p();
+        this.commit();
+      });
+      group.appendChild(b);
+    });
+    for (const p of paint) p();
+    row.appendChild(group);
     into.appendChild(row);
   }
 

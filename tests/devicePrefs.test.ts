@@ -40,6 +40,16 @@ describe('sanitizing a stored blob', () => {
     expect(got.resScale).toBe(0.75);
   });
 
+  it('keeps only a real input mode, and defaults the rest', () => {
+    /* The one non-numeric, non-boolean field: three named values, and a
+     * blob claiming anything else is a blob claiming nothing. */
+    expect(sanitizePrefs({ inputMode: 'pc' }).inputMode).toBe('pc');
+    expect(sanitizePrefs({ inputMode: 'touch' }).inputMode).toBe('touch');
+    expect(sanitizePrefs({ inputMode: 'auto' }).inputMode).toBe('auto');
+    expect(sanitizePrefs({ inputMode: 'gamepad' }).inputMode).toBe('auto');
+    expect(sanitizePrefs({ inputMode: 7 }).inputMode).toBe('auto');
+  });
+
   it('the defaults themselves pass through untouched', () => {
     /* An untouched panel must change nothing about the game — the
      * defaults ARE what every player had before the panel existed. */
@@ -49,5 +59,8 @@ describe('sanitizing a stored blob', () => {
     expect(PREF_DEFAULTS.lookSens).toBe(1);
     expect(PREF_DEFAULTS.invertY).toBe(false);
     expect(PREF_DEFAULTS.resScale).toBe(1);
+    /* AUTO by default: a phone stays a phone until a keyboard says
+     * otherwise, and a laptop is a laptop from the first frame. */
+    expect(PREF_DEFAULTS.inputMode).toBe('auto');
   });
 });

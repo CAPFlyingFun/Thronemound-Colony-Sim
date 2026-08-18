@@ -73,6 +73,17 @@ await page.waitForFunction(
 );
 out.game = await page.evaluate(() => {
   const s = window.islandScene;
+  /*
+   * PINNED TO TOUCH for the drag below, and deliberately.
+   *
+   * This probe is about the DIALS, not about which hand turns them. A
+   * desktop browser has a fine pointer, so the island boots into PC mode,
+   * where the thumb-drag path stands down on purpose — the mouse is
+   * already looking, and two paths on one pointer would swing the camera
+   * twice per pixel. `probe:input` owns that whole question and proves
+   * the same sensitivity through the mouse. Here we want a thumb.
+   */
+  s.applyPrefs({ ...s.prefs, inputMode: 'touch' });
   s.stepForTest(1 / 60, 10);
   const report = { thirdFov: 0, firstFov: 0, digFov: 0, backFov: 0 };
   report.thirdFov = s.camera.fov;
@@ -114,9 +125,31 @@ out.game = await page.evaluate(() => {
 /* 6. The pause menu opens the same panel. */
 await page.keyboard.press('Escape');
 await page.waitForSelector('.tm-pause', { timeout: 10000 });
-const pauseSettings = page.locator('.tm-pause button', { hasText: 'SETTINGS' });
-out.pauseEnabled = !(await pauseSettings.isDisabled());
-await pauseSettings.click();
+/*
+ * DISPATCHED, NOT DRIVEN — and the reason is the PAUSED island rather
+ * than anything about this button.
+ *
+ * Playwright's real click waits for the page to be actionable, and part
+ * of that wants animation frames. A paused island under SwiftShader
+ * serves about two frames a second, so `scrollIntoViewIfNeeded` sits
+ * there until the timeout. Measured on a STASHED tree — this fails
+ * identically on the commit before the input work, so it is the
+ * environment's frame rate, not a control that stopped working. Earlier
+ * runs passed on a quieter machine, which is exactly the kind of pass
+ * worth not trusting.
+ *
+ * A dispatched `click` is the same event a tap or a mouse produces and
+ * it needs no frames, which is how every other in-game probe here drives
+ * a control. The button's own enabled state is still read from the DOM,
+ * and the panel opening is still the proof.
+ */
+out.pauseEnabled = await page.evaluate(() => {
+  const btn = [...document.querySelectorAll('.tm-pause button')]
+    .find((b) => b.textContent === 'SETTINGS');
+  if (!btn || btn.disabled) return false;
+  btn.click();
+  return true;
+});
 await page.waitForSelector('.tm-settings', { timeout: 10000 });
 out.overPause = await page.evaluate(() => ({
   settingsUp: !!document.querySelector('.tm-settings'),

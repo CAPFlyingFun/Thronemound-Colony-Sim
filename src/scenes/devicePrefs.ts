@@ -21,6 +21,8 @@
  * their mechanics do.
  */
 
+import type { InputPref } from './inputBindings';
+
 export interface DevicePrefs {
   /** First-person lens, degrees. */
   fov1: number;
@@ -32,6 +34,11 @@ export interface DevicePrefs {
   invertY: boolean;
   /** Render resolution, as a share of the device's own pixels. */
   resScale: number;
+  /**
+   * WHICH HAND DRIVES: `auto` follows the last one used, the other two
+   * are the player overruling the guess. See `playerIntent.ts`.
+   */
+  inputMode: InputPref;
 }
 
 /** The tuned defaults — what every player had before the panel existed,
@@ -42,6 +49,7 @@ export const PREF_DEFAULTS: DevicePrefs = {
   lookSens: 1,
   invertY: false,
   resScale: 1,
+  inputMode: 'auto',
 };
 
 /** The rails each value is clamped to — also what the sliders show. */
@@ -78,6 +86,8 @@ export function sanitizePrefs(raw: unknown): DevicePrefs {
     lookSens: num('lookSens', PREF_DEFAULTS.lookSens),
     invertY: typeof r.invertY === 'boolean' ? r.invertY : PREF_DEFAULTS.invertY,
     resScale: num('resScale', PREF_DEFAULTS.resScale),
+    inputMode: r.inputMode === 'touch' || r.inputMode === 'pc' || r.inputMode === 'auto'
+      ? r.inputMode : PREF_DEFAULTS.inputMode,
   };
 }
 

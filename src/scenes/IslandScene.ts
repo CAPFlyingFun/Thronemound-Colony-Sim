@@ -150,7 +150,7 @@ import {
   aimCamera, clampedHeadPitch, lensClearance, settleHeadPitch,
   type CameraHost,
 } from './islandCamera';
-import { buildControls, updateStatus, type HudHost } from './islandHud';
+import { buildControls, toggleDig, updateStatus, type HudHost } from './islandHud';
 import {
   depthMm, questTick, spawnWorker, type QuestHost, type VitalBar, type VitalKind,
 } from './islandQuest';
@@ -197,6 +197,16 @@ import {
 } from './islandBody';
 import { RouteTrace, drawRouteTrace } from './routeTrace';
 import { loadPrefs, type DevicePrefs } from './devicePrefs';
+import { PcInput, type PcInputHost } from './pcInput';
+import type { PlayerIntent } from './playerIntent';
+import { hintFor, type InputMode, type IntentAction } from './inputBindings';
+
+/* The rail parts whose names ARE intent actions, so a key hint can be
+ * asked for safely. `HudPart` is the wider vocabulary — it also names
+ * readouts and rows, which no key drives. */
+const KEYED_PARTS: ReadonlySet<string> = new Set<IntentAction>([
+  'bite', 'sting', 'carry', 'interact', 'dig', 'dodge', 'view', 'pace',
+]);
 import {
   boreFrame, buildIsland, footingFrom, groundHeightAt, growForest,
   regrowScrub, type LandHost,
@@ -805,6 +815,51 @@ export class IslandScene {
    * gains its button and its behaviour in the same place — see
    * `antKinds.ts`.
    */
+  /**
+   * THE DODGE, FROM KEYS — the burst in whatever direction she is already
+   * asking for, defaulting backwards.
+   *
+   * The touch gesture reads a direction out of a flick; a key has no
+   * direction of its own, so it takes the one the movement keys are
+   * already stating. Back by default because a dodge with nothing held is
+   * a flinch, and flinching away is what an ant does.
+   */
+  dodgeFromKeys(): void {
+    const dir = this.input.walk > 0.2 ? 'forward'
+      : this.input.walk < -0.2 ? 'back'
+        : this.input.yaw > 0.2 ? 'right'
+          : this.input.yaw < -0.2 ? 'left' : 'back';
+    if (this.vitals.stamina < this.vitals.dodgeCost) return;
+    if (this.dodge.start(dir, MM)) this.vitals.spend(this.vitals.dodgeCost);
+  }
+
+  /** Arm or disarm the shovel — the DIG plate's own act, all six of its
+   *  consequences. See `toggleDig` in `islandHud`. */
+  toggleDig(): void { toggleDig(this.hudHost); }
+
+  /** The CRAWL/WALK/RUN latch, one step on — the SPRINT plate's own act. */
+  cyclePace(): void {
+    this.pace = ((this.pace + 1) % 3) as 0 | 1 | 2;
+    this.applyPace();
+  }
+
+  /**
+   * THE HUD FOLLOWS THE HAND. A class on the root, and the stylesheet does
+   * the rest: the stick goes (WASD replaced it), and every plate wears its
+   * key. Presentation only — nothing about what the plates DO changes, so
+   * a player switching hands mid-fight loses nothing.
+   */
+  onInputMode(mode: InputMode): void {
+    this.hud.classList.toggle('is-pc', mode === 'pc');
+    for (const part of this.railParts) {
+      /* Only the parts that ARE actions can wear a key — the instrument
+       * readouts and the pose row share the rail and answer to nothing. */
+      if (!KEYED_PARTS.has(part.part)) continue;
+      const key = hintFor(part.part as IntentAction);
+      if (key) part.el.setAttribute('data-key', key);
+    }
+  }
+
   private useAbility(id: AbilityId): void {
     if (id === 'bite') {
       /* One button for both halves: BITE takes hold, and BITE lets go.
@@ -2107,6 +2162,7 @@ export class IslandScene {
     Object.assign(this.prefs, p);
     this.renderer.setPixelRatio(this.renderScale());
     this.resize();
+    this.pc?.setPref(this.prefs.inputMode);
     /* The lens follows on the next simulated frame — see `lensTick`. */
   }
 
@@ -2161,6 +2217,23 @@ export class IslandScene {
   /** Did the LAST bite actually remove soil? Surface engagement hangs on
    *  it — digging at open air must not grip her to the aim line. */
   private biteTouched = false;
+
+  /** The DIG plate, so `toggleDig` can dress it from a key press too. */
+  digBtn: HTMLButtonElement | null = null;
+
+  /** The one input seam — `buildControls` builds it, everything that
+   *  speaks for a hand goes through it. See `playerIntent.ts`. */
+  intent: PlayerIntent<AbilityId> | null = null;
+
+  /**
+   * WHICH HAND IS DRIVING — see `playerIntent.ts`. The mechanics never
+   * read this; only the HUD's dress and the touch handlers' mute do,
+   * which is what makes switching hands free.
+   */
+  inputMode: InputMode = 'touch';
+
+  /** The keyboard and mouse, when there are any. See `pcInput.ts`. */
+  private pc: PcInput | null = null;
 
   /** The bore being eaten right now — see `digJob.ts` and `bite()` in
    *  `islandDig`. One at a time; its duration is the cooldown. */
@@ -2476,6 +2549,15 @@ export class IslandScene {
     host.appendChild(this.hud);
     this.statsPanel = new DebugStatsPanel(this.hud);
     this.buildControls();
+    /*
+     * AND THE OTHER HAND, if there is one. Attached after the rail exists
+     * because it dresses the plates it finds; harmless where there is no
+     * keyboard, since it only wakes on a key or a mouse. See `pcInput`.
+     */
+    this.pc = new PcInput(
+      this as unknown as PcInputHost, this.renderer.domElement,
+    );
+    this.pc.setPref(this.prefs.inputMode);
 
     /* The curtain goes up LAST in the DOM and FIRST in importance: plain
      * DOM, so it paints before any of the heavy lifting below, and opaque,
@@ -4991,6 +5073,9 @@ export class IslandScene {
    * costs one frame of `dt`, not five minutes of it.
    */
   setPaused(on: boolean): void {
+    /* A captured mouse is an invisible one, and a menu it cannot click is
+     * a trap — see `PcInput.release`. */
+    if (on) this.pc?.release();
     this.paused = on;
     /* Her feet are still on the stick from before the menu went up. Let go
      * for her, or she walks off the moment it comes down. */
@@ -5514,6 +5599,7 @@ export class IslandScene {
     this.queen.dispose();
     for (const one of this.colony) one.dispose();
     this.queenWalk?.dispose();
+    this.pc?.dispose();
     for (const q of this.quarry) q.dispose();
     this.renderer.dispose();
     this.host.replaceChildren();

@@ -3432,6 +3432,37 @@
  * that it may, but a big overlap puts a plate's label under the plate
  * above it — the layout draws about a third of a plate, so 18 of 56.
  */
+/*
+ * PC MODE — the HUD follows the hand (Foundation Pass step 3).
+ *
+ * Asked for: keys "can also free up buttons if in that mode to look
+ * better". So the STICK goes, because W/A/S/D replaced it and a pad
+ * nobody can reach with a mouse is 200px of swallowed glass; and every
+ * plate that has a key wears it, small and gold under the art, so the
+ * rail teaches its own bindings instead of hiding them in a menu.
+ *
+ * PRESENTATION ONLY. The plates still work — a mouse can click one, and
+ * the mode swings back to touch the moment a finger does. Hiding them
+ * outright would take the mechanic away from anyone whose keyboard is a
+ * keyboard and whose hands still want the screen.
+ */
+.density-lab-hud.is-pc .tm-stick { display: none; }
+.density-lab-hud.is-pc .tm-art[data-key]::after {
+  content: attr(data-key);
+  position: absolute;
+  left: 50%;
+  bottom: -3px;
+  transform: translateX(-50%);
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(12, 9, 6, 0.86);
+  color: #e9c36f;
+  font: 800 8px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.08em;
+  pointer-events: none;
+}
+.density-lab-hud.is-pc .tm-art { position: relative; }
+
 .tm-cluster > * { margin-top: -18px; }
 .tm-cluster > *:first-child { margin-top: 0; }
 

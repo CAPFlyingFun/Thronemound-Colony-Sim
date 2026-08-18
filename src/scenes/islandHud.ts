@@ -56,6 +56,18 @@ export interface HudHost {
     at: number; travel: number };
   readonly keysDown: Set<string>;
   spaceWasDown: boolean;
+  /** Which hand is driving — the touch paths stand down in 'pc'. See
+   *  `inputBindings.ts` for the rule that picks it. */
+  inputMode: 'touch' | 'pc';
+  /** The DIG plate, so `toggleDig` can dress it from a key press too. */
+  digBtn: HTMLButtonElement | null;
+  /**
+   * THE ONE SEAM, reachable. `buildControls` builds the instance; anything
+   * that has to speak for a hand — the extracted DIG toggle, the
+   * keyboard/mouse driver in `pcInput` — goes through THIS rather than
+   * growing a second arbiter with its own idea of who is holding what.
+   */
+  intent: PlayerIntent<AbilityId> | null;
 
   /* --- what the controls write --- */
   readonly input: PlayerInputState;
@@ -145,6 +157,92 @@ export interface HudHost {
   telemetryReport(): string;
 }
 
+/**
+ * ARM OR DISARM THE SHOVEL — six consequences, one door.
+ *
+ * Extracted from the DIG plate's own handler when the G key arrived. It
+ * was never a one-line toggle: a burst in flight has to be cancelled, the
+ * debug overlay's switch leaves with the shovel, the whole rail
+ * re-dresses, a held stroke must not survive the disarm, and arming drops
+ * her into her own eyes. A key that flipped `digMode` alone would look
+ * like it worked and leave five of those undone.
+ */
+export function toggleDig(host: HudHost): void {
+  host.digMode = !host.digMode;
+  /* A burst in flight while the jaws come out would carry her off the
+   * spot she was lining up. */
+  if (host.digMode) host.dodge.cancel();
+  host.digBtn?.classList.toggle('is-grip', host.digMode);
+  /* The overlay's switch belongs to the shovel, and leaves with it —
+   * along with the overlay itself, which `updateAimDebug` hides on the
+   * same condition. It lives inside the DEV drawer rather than on the
+   * rail, so it is not a `railPart` and keeps its own line. */
+  if (host.aimChip) host.aimChip.style.display = host.digMode ? '' : 'none';
+  /* SCOOP and the two instruments used to be switched here by hand. They
+   * are declared against 'dig' now and this one call hangs the whole rail
+   * — including everything that has to LEAVE. */
+  host.applyHudMode();
+  /* THROUGH THE SEAM, not around it: disarming drops the hold from EVERY
+   * hand, or a SCOOP released while Space is still down (or the reverse)
+   * leaves the shovel cutting with nothing pressed. That multi-source
+   * rule is `PlayerIntent`'s, so this asks it rather than writing
+   * `input.dig` behind its back. */
+  if (!host.digMode) {
+    host.intent?.setDig('touch', false);
+    host.intent?.setDig('keyboard', false);
+  }
+  /* Digging is aiming, and aiming is done down her own eyes: arming DIG
+   * drops into first person. The LENS is not written here — `lensTick` on
+   * the scene owns it, choosing the dig's wide working field or the
+   * player's own FOV preference per view, so the settings panel and this
+   * toggle can never fight over one camera. */
+  if (host.digMode) host.firstPerson = true;
+}
+
+/**
+ * ONE LOOK, TWO HANDS — the drag and the mouse write the same swing.
+ *
+ * Extracted from the touch handler's `pointermove` when the mouse driver
+ * arrived. It was already the only place the look was computed; making it
+ * a function is what stops the mouse growing a SECOND copy of the
+ * first-person/third-person split, the sensitivity multiply and the
+ * invert — three rules that must agree between hands or the game feels
+ * different depending on what you touched last.
+ *
+ * `dx`/`dy` are pixels of pointer movement, whatever produced them: a
+ * thumb's drag, a locked mouse's `movementX`, or the deltas `pcInput`
+ * measures itself where pointer lock does not exist.
+ */
+export function applyLook(host: HudHost, dx: number, dy: number): void {
+  const sens = host.prefs.lookSens;
+  const pitchWay = host.prefs.invertY ? -1 : 1;
+  if (host.firstPerson) {
+    /* Her own eyes: the drag turns HER, and the glance IS the aim — one
+     * number, so view and dig can never disagree about which way she is
+     * pointed. The rig is turned and nothing else: `simulate` reads the
+     * step off it and applies it about her own up, so a look-drag on a
+     * ceiling turns her along the ceiling. */
+    host.bore.turn(-dx * 0.004 * sens);
+    /* PITCH IS A LOOK, and a look comes home — it used to write
+     * `aimPitch`, which is the shovel's angle and has no neutral. While
+     * DIGGING the pan is held rather than decayed, so it is still exactly
+     * the aim when it needs to be. */
+    host.lookPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
+      host.lookPitch - dy * 0.004 * sens * pitchWay));
+  } else {
+    /* Third person: BOTH AXES ARE A PAN — an offset off her tail, bounded
+     * to half a turn either way, decaying back to zero, which is how the
+     * view swings home. The vertical drag used to aim the SHOVEL, which
+     * is why the view could be left tilted with no way back: an aim has
+     * no neutral, a pan does. */
+    host.lookYaw = Math.max(-Math.PI, Math.min(Math.PI,
+      host.lookYaw - dx * 0.005 * sens));
+    host.lookPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
+      host.lookPitch - dy * 0.004 * sens * pitchWay));
+  }
+  host.lookIdle = 0;
+}
+
 export function buildControls(host: HudHost, ): void {
   /*
    * ONE INTENTION, TWO HANDS.
@@ -156,6 +254,7 @@ export function buildControls(host: HudHost, ): void {
    * into the SAME scene input the locomotion already consumes.
    */
   const intent = new PlayerIntent<AbilityId>(host.input, (id) => host.useAbility(id));
+  host.intent = intent;
 
   /* The touch stick still has its posture override, so its semantic routing
    * lives here rather than in PlayerIntent. While posture owns the thumb, a
@@ -201,31 +300,9 @@ export function buildControls(host: HudHost, ): void {
   dig.setAttribute('aria-label', 'Dig');
   dig.addEventListener('pointerdown', (e) => {
     e.preventDefault();
-    host.digMode = !host.digMode;
-    /* A burst in flight while the jaws come out would carry her off the
-     * spot she was lining up. */
-    if (host.digMode) host.dodge.cancel();
-    dig.classList.toggle('is-grip', host.digMode);
-    /* The overlay's switch belongs to the shovel, and leaves with it —
-     * along with the overlay itself, which `updateAimDebug` hides on
-     * the same condition. It lives inside the DEV drawer rather than on
-     * the rail, so it is not a `railPart` and keeps its own line. */
-    if (host.aimChip) host.aimChip.style.display = host.digMode ? '' : 'none';
-    /* SCOOP and the two instruments used to be switched here by hand.
-     * They are declared against 'dig' now and this one call hangs the
-     * whole rail — including everything that has to LEAVE. */
-    host.applyHudMode();
-    if (!host.digMode) {
-      intent.setDig('touch', false);
-      intent.setDig('keyboard', false);
-    }
-    /* Digging is aiming, and aiming is done down her own eyes: arming
-     * DIG drops into first person. The LENS is not written here any
-     * more — `lensTick` on the scene owns it, choosing the dig's wide
-     * working field or the player's own FOV preference per view, so the
-     * settings panel and this toggle can never fight over one camera. */
-    if (host.digMode) host.firstPerson = true;
+    toggleDig(host);
   });
+  host.digBtn = dig;
   actions.appendChild(dig);
   host.railPart(dig, 'dig');
 
@@ -1021,7 +1098,14 @@ export function buildControls(host: HudHost, ): void {
       host.stickY = stickCurve(-dy / 48);
       routeTouchStick();
       host.stickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
-    } else if (host.lookPointer === null) {
+    } else if (host.lookPointer === null && host.inputMode !== 'pc') {
+      /*
+       * IN PC MODE THE MOUSE IS ALREADY LOOKING — `pcInput` drives
+       * `applyLook` from a captured pointer (or from hover deltas where
+       * there is no capture). Claiming the same pointer here would swing
+       * the camera twice per pixel, which reads as a sensitivity setting
+       * that lies. The drag path stays whole and simply stands down.
+       */
       host.lookPointer = e.pointerId;
       /* The stroke starts here. Whether it turns out to be a look or a
        * flick is decided on RELEASE — see the note there. */
@@ -1050,50 +1134,7 @@ export function buildControls(host: HudHost, ): void {
       );
       host.stroke.lastX = e.clientX;
       host.stroke.lastY = e.clientY;
-      if (host.firstPerson) {
-        /* Her own eyes: the drag turns HER, and the glance IS the
-         * aim — one number, so view and dig can never disagree about
-         * which way she is pointed. */
-        /* The rig is turned and nothing else: `simulate` reads the step
-         * off it and applies it about her own up, so a look-drag on a
-         * ceiling turns her along the ceiling. Writing `facing` here as
-         * well would fight that for a frame. */
-        host.bore.turn(-e.movementX * 0.004 * host.prefs.lookSens);
-        /*
-         * PITCH IS A LOOK, and a look comes home. It used to write
-         * `aimPitch` directly, which is the shovel's angle and has no
-         * neutral to return to — so first person opened at whatever the
-         * last drag left, in either view, instead of along her nose.
-         * While DIGGING the pan is held rather than decayed, so this is
-         * still exactly the aim when it needs to be.
-         */
-        host.lookPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
-          host.lookPitch - e.movementY * 0.004 * host.prefs.lookSens
-            * (host.prefs.invertY ? -1 : 1)));
-        host.lookIdle = 0;
-      } else {
-        // Third person: the drag pans the view — above ground a full
-        // orbit, underground a tight override the trail cam resumes from
-        // the moment the finger lifts.
-        /* Over her shoulder the vertical drag AIMS HER, and the camera
-         * elevation follows that aim, so what you are looking along is
-         * always the line she will cut. */
-        /* An OFFSET off her tail, bounded to half a turn either way — it
-         * decays back to zero, which is how the view swings home. */
-        /*
-         * BOTH AXES ARE A PAN NOW. The vertical drag used to aim the
-         * SHOVEL and let the camera's elevation follow it, which is why
-         * the third-person view could be left tilted with no way back:
-         * an aim has no neutral. A pan does, and reaches it three
-         * seconds after the finger lifts.
-         */
-        host.lookYaw = Math.max(-Math.PI, Math.min(Math.PI,
-          host.lookYaw - e.movementX * 0.005 * host.prefs.lookSens));
-        host.lookPitch = Math.min(AIM_LIMIT, Math.max(-AIM_LIMIT,
-          host.lookPitch - e.movementY * 0.004 * host.prefs.lookSens
-            * (host.prefs.invertY ? -1 : 1)));
-        host.lookIdle = 0;
-      }
+      applyLook(host, e.movementX, e.movementY);
     }
   });
   /*
