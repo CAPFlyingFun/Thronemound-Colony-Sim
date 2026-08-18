@@ -20,6 +20,7 @@ import type { BoreRig } from './BoreControl';
 import { readFlick, readNudge, type Dodge } from './dodge';
 import type { Vitals } from './islandVitals';
 import { ABILITIES, type AbilityId, type AntKind } from './antKinds';
+import { PlayerIntent, type PlayerInputState } from './playerIntent';
 import type { NestDesigner } from '../nest/NestDesigner';
 import type { NestView } from '../nest/nestView';
 import type { IslandStream } from '../world/IslandStream';
@@ -57,8 +58,7 @@ export interface HudHost {
   spaceWasDown: boolean;
 
   /* --- what the controls write --- */
-  readonly input: { walk: number; yaw: number; strafe: number;
-    dig: boolean; sprint: boolean; crawl: boolean };
+  readonly input: PlayerInputState;
   readonly posture: BodyPosture;
   readonly bore: BoreRig;
   readonly dodge: Dodge;
@@ -146,6 +146,34 @@ export interface HudHost {
 }
 
 export function buildControls(host: HudHost, ): void {
+  /*
+   * ONE INTENTION, TWO HANDS.
+   *
+   * The HUD used to let the keyboard and touch stick write the same six
+   * fields directly. That works until both exist at once: releasing a touch
+   * zeroed W even if W was still held, and releasing SCOOP could cancel a
+   * held Space. PlayerIntent keeps those held states apart and resolves them
+   * into the SAME scene input the locomotion already consumes.
+   */
+  const intent = new PlayerIntent<AbilityId>(host.input, (id) => host.useAbility(id));
+
+  /* The touch stick still has its posture override, so its semantic routing
+   * lives here rather than in PlayerIntent. While posture owns the thumb, a
+   * zero touch move deliberately suppresses a held keyboard walk, matching
+   * the old routeStick behaviour until the thumb is released. */
+  const routeTouchStick = (): void => {
+    if (host.stickPointer === null) {
+      intent.releaseMove('touch');
+      return;
+    }
+    if (host.posture.armed) {
+      intent.setMove('touch', 0, 0, 0);
+      host.posture.command(host.stickX, host.stickY);
+      return;
+    }
+    intent.setMove('touch', host.stickY, host.stickX, 0);
+  };
+
   const actions = document.createElement('div');
   actions.className = 'density-lab-actions';
   host.hud.appendChild(actions);
@@ -187,7 +215,10 @@ export function buildControls(host: HudHost, ): void {
      * They are declared against 'dig' now and this one call hangs the
      * whole rail — including everything that has to LEAVE. */
     host.applyHudMode();
-    if (!host.digMode) host.input.dig = false;
+    if (!host.digMode) {
+      intent.setDig('touch', false);
+      intent.setDig('keyboard', false);
+    }
     /* Digging is aiming, and aiming is done down her own eyes: arming
      * DIG drops into first person. The LENS is not written here any
      * more — `lensTick` on the scene owns it, choosing the dig's wide
@@ -211,9 +242,9 @@ export function buildControls(host: HudHost, ): void {
   scoopBtn.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     scoopBtn.setPointerCapture(e.pointerId);
-    host.input.dig = true;
+    intent.setDig('touch', true);
   });
-  const stopDig = (): void => { host.input.dig = false; };
+  const stopDig = (): void => { intent.setDig('touch', false); };
   scoopBtn.addEventListener('pointerup', stopDig);
   scoopBtn.addEventListener('pointercancel', stopDig);
   scoopBtn.addEventListener('lostpointercapture', stopDig);
@@ -580,7 +611,7 @@ export function buildControls(host: HudHost, ): void {
   for (const id of host.playableAbilities) {
     const ability = ABILITIES[id];
     const b = plate(ability.art, ability.label,
-      ability.built ? () => host.useAbility(id) : null);
+      ability.built ? () => intent.ability(id) : null);
     /* The two the fight drives keep a handle, so `refreshCombatChips` can
      * light and dim them without going looking through the DOM. */
     if (id === 'bite') host.biteBtn = b;
@@ -771,7 +802,7 @@ export function buildControls(host: HudHost, ): void {
       /* A stick already under a thumb when the mode changes would keep
        * meaning whatever it meant a moment ago. Re-route it now, and zero
        * the walk the instant posture takes over. */
-      host.routeStick();
+      routeTouchStick();
       host.refreshPoseChips();
     };
     btn.addEventListener('pointerup', finish);
@@ -865,14 +896,17 @@ export function buildControls(host: HudHost, ): void {
    * W/S walk, A/D turn, Shift runs, C crawls, Space DIGS (hold), B opens the nest
    * tools, V swaps the view. There is no aim key: she digs where the view
    * looks.
-   * Arrows mirror WASD. Keys and stick write the same inputs.
+   * Arrows mirror WASD. Keys and stick now feed one PlayerIntent, so each
+   * source keeps its held state without changing the movement the scene sees.
    */
   const applyKeys = () => {
     const k = host.keysDown;
     if (host.designer?.isOpen) {
-      /* The designer owns the keys, but the Space EDGE must keep tracking
-       * or a release while designing leaves it stuck "down" — and the
-       * next press after DONE would be swallowed. */
+      /* The designer owns the keys. Clear the gameplay side while it is up,
+       * while keeping the Space edge in step so DONE cannot inherit a stale
+       * held shovel. */
+      intent.releaseMove('keyboard');
+      intent.setDig('keyboard', false);
       host.spaceWasDown = k.has(' ');
       return;
     }
@@ -880,10 +914,8 @@ export function buildControls(host: HudHost, ): void {
       - (k.has('s') || k.has('arrowdown') ? 1 : 0);
     const turn = (k.has('d') || k.has('arrowright') ? 1 : 0)
       - (k.has('a') || k.has('arrowleft') ? 1 : 0);
-    if (host.stickPointer === null) {
-      host.input.walk = forward;
-      host.input.yaw = turn;
-    }
+    if (forward === 0 && turn === 0) intent.releaseMove('keyboard');
+    else intent.setMove('keyboard', forward, turn, 0);
     /* The keys are holds and the chip is a latch, so a hold wins for as
      * long as it is held and the latch is still there afterwards — the
      * chip's face keeps reading the latch throughout, because that is
@@ -894,7 +926,7 @@ export function buildControls(host: HudHost, ): void {
     /* Space is the shovel, and it is HELD — but only once DIG is armed. */
     const space = k.has(' ');
     if (space !== host.spaceWasDown) {
-      host.input.dig = host.digMode && space;
+      intent.setDig('keyboard', host.digMode && space);
       host.spaceWasDown = space;
     }
   };
@@ -987,7 +1019,7 @@ export function buildControls(host: HudHost, ): void {
       const dy = Math.max(-48, Math.min(48, e.clientY - host.stickOrigin.y));
       host.stickX = stickCurve(dx / 48);
       host.stickY = stickCurve(-dy / 48);
-      host.routeStick();
+      routeTouchStick();
       host.stickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
     } else if (host.lookPointer === null) {
       host.lookPointer = e.pointerId;
@@ -1008,7 +1040,7 @@ export function buildControls(host: HudHost, ): void {
       const dy = Math.max(-48, Math.min(48, e.clientY - host.stickOrigin.y));
       host.stickX = stickCurve(dx / 48);
       host.stickY = stickCurve(-dy / 48);
-      host.routeStick();
+      routeTouchStick();
       host.stickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
     } else if (e.pointerId === host.lookPointer) {
       /* Path length, not displacement: a drag that wandered out and back
@@ -1089,11 +1121,7 @@ export function buildControls(host: HudHost, ): void {
      * the last deflection stands until the stick moves again, the control
      * is disarmed and re-armed, or it is centred by a long press.
      */
-    host.input.walk = 0;
-    host.input.yaw = 0;
-    /* `strafe` stays nought: nothing writes it any more except the dodge
-     * mixer in `moveSurface`, which owns its own lifetime. */
-    host.input.strafe = 0;
+    intent.releaseMove('touch');
     host.stickKnob.style.transform = 'translate(0px, 0px)';
     /* Home is a CSS position, and the inline `left`/`top` written while
      * the thumb was down would win over it — so they are cleared, not
@@ -1199,10 +1227,15 @@ export function buildControls(host: HudHost, ): void {
   window.addEventListener('blur', () => {
     dropStick();
     dropLook();
-    host.input.dig = false;
+    intent.setDig('touch', false);
   });
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { dropStick(); dropLook(); host.input.dig = false; }
+    if (document.hidden) {
+      dropStick();
+      dropLook();
+      intent.setDig('touch', false);
+      intent.setDig('keyboard', false);
+    }
   });
   canvas.addEventListener('pointerup', release);
   canvas.addEventListener('pointercancel', release);
