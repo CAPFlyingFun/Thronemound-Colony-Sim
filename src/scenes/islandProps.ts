@@ -233,6 +233,8 @@ const SLEEP_POLL = 0.2; //    seconds between a sleeper's footing checks
 const TIP_LEVER = new THREE.Vector3();
 const TIP_AXIS = new THREE.Vector3();
 const HOLD_Q = new THREE.Quaternion();
+const HOLD_TO = new THREE.Vector3();
+const HOLD_BACK = new THREE.Vector3();
 const TIP_TORQUE = new THREE.Vector3();
 const TIP_Q = new THREE.Quaternion();
 
@@ -701,6 +703,13 @@ export class Prop implements Portable {
   /** For tests: the contact points this shape collides with. */
   get hullForTest(): readonly number[] { return this.hull; }
 
+  /** For tests: where on it she took hold, in its own frame. See
+   *  `takeGrip` — a probe reads this to say whether a twig grabbed by the
+   *  end is still being held by the end. */
+  get holdForTest(): readonly [number, number, number] {
+    return [this.hold.x, this.hold.y, this.hold.z];
+  }
+
   /** How close her jaws have to be, from its centre. */
   get radius(): number { return this.spec.halfMm / MM; }
 
@@ -1066,16 +1075,89 @@ export class Prop implements Portable {
      */
     this.hold.set(0, 0, 0);
     if (!jaw) return;
-    let best = Infinity;
+    /*
+     * THE SIDE OF IT THAT FACES HER — measured against WHERE SHE IS
+     * POINTING, not against where its centre happens to lie.
+     *
+     * Two earlier cuts got this wrong in the same place. The first took
+     * the hull point closest to her jaws; the second took the point whose
+     * direction from the centre most agreed with the direction back to
+     * her jaw. Both ask the question relative to `jaw - at`, and that
+     * vector stops meaning "toward her" the moment her jaws are INSIDE
+     * the thing — which is routine, because `propInReach` measures the
+     * gap as distance minus radius, so she can stand right on top of
+     * something small. Her jaw anchor is 2.4 mm out from her centre and a
+     * seed is 2.2 mm across: the anchor sits past the seed's centre, and
+     * `jaw - at` then points up and backwards rather than forwards.
+     * Holding it there left the seed's centre 0.7 mm from her head bone,
+     * inside its own 1.1 mm radius. Reported: "if you zoom in, it's
+     * cutting off her head".
+     *
+     * HER HEADING NEVER DEGENERATES. It is well defined whether she is
+     * beside the thing, over it, or buried in it, and it is the direction
+     * that actually decides the picture: a load hangs in FRONT of the
+     * mouth. So the bite is the hull point furthest round toward her back
+     * — the near face — and `carriedCentre` then puts the body of the
+     * object out ahead of the jaws by its own extent, which is what
+     * carrying something looks like.
+     *
+     * Her rig's local +Z is forward; `IslandScene` builds her basis that
+     * way, so the holder quaternion carries the heading and no extra
+     * argument is needed.
+     */
+    HOLD_TO.set(0, 0, -1).applyQuaternion(holder);
+    if (HOLD_TO.lengthSq() < 1e-12) return;
+    HOLD_TO.normalize();
+    let best = -Infinity;
     for (let i = 0; i < this.hull.length; i += 3) {
       HULL_P.set(this.hull[i]!, this.hull[i + 1]!, this.hull[i + 2]!)
-        .applyQuaternion(this.root.quaternion)
-        .add(this.at);
-      const gap = HULL_P.distanceToSquared(jaw);
-      if (gap >= best) continue;
-      best = gap;
+        .applyQuaternion(this.root.quaternion);
+      const facing = HULL_P.dot(HOLD_TO);
+      if (facing > best) best = facing;
+    }
+    if (!(best > -Infinity)) return;
+    /*
+     * ALONG A TWIG, THE NEAR FACE IS A WHOLE FLANK. Approach one
+     * broadside and every point down its length faces her equally, so
+     * heading alone cannot say where on it she closed her jaws — and
+     * that is exactly the complaint the hold exists for: "I grabbed at
+     * the end, but it snapped to the middle point." Distance to the jaws
+     * decides between the tied ones, which is the touch she can see.
+     */
+    const tol = Math.max(PROP_SKIN, this.radius * 0.2);
+    let near = Infinity;
+    let took = -Infinity;
+    for (let i = 0; i < this.hull.length; i += 3) {
+      HULL_P.set(this.hull[i]!, this.hull[i + 1]!, this.hull[i + 2]!)
+        .applyQuaternion(this.root.quaternion);
+      const facing = HULL_P.dot(HOLD_TO);
+      if (facing < best - tol) continue;
+      const gap = HULL_P.add(this.at).distanceToSquared(jaw);
+      if (gap >= near) continue;
+      near = gap;
+      took = facing;
       this.hold.set(this.hull[i]!, this.hull[i + 1]!, this.hull[i + 2]!);
     }
+    if (!(took > -Infinity)) return;
+    /*
+     * AND THE BITE IS AT THE BACK OF WHAT SHE BIT.
+     *
+     * The tie-break above is allowed to trade a little of "furthest round
+     * toward her" for "nearest her jaws", and whatever it trades is
+     * exactly how far the thing then sits back INSIDE her — measured on a
+     * twig taken from directly above its middle, 0.7 mm of stick behind
+     * her mouth and within her own body width. The trade is worth keeping
+     * for WHERE ALONG the shape she took hold; it is not worth keeping for
+     * HOW DEEP.
+     *
+     * So the chosen point keeps its position across the shape and is moved
+     * back to the shape's own rearmost extent. Her jaws close on the near
+     * surface at the place she reached it, which is what closing your jaws
+     * on something is, and no part of it is then behind the contact.
+     */
+    HOLD_BACK.copy(HOLD_TO)
+      .applyQuaternion(HOLD_Q.copy(this.root.quaternion).invert());
+    this.hold.addScaledVector(HOLD_BACK, best - took);
   }
 
   /**

@@ -729,22 +729,42 @@ describe('where a carried thing is held', () => {
     return p;
   };
 
+  /*
+   * HER HEADING IS PART OF THE QUESTION NOW, so these have to stand her
+   * somewhere consistent with where her jaws are.
+   *
+   * The rig's local +Z is forward. An earlier version of these tests put
+   * her jaws at the twig's +Z end and passed an IDENTITY rotation, which
+   * says she is facing +Z — standing at one end of a stick with her back
+   * to it. That went unnoticed because the old rule chose the grab point
+   * from `jaw - at` alone and never asked which way she was pointing. It
+   * has to ask: `jaw - at` stops meaning "toward her" the moment her jaws
+   * are inside the thing, which is how a seed ended up worn as a hat.
+   */
+  const facing = (deg: number): THREE.Quaternion => new THREE.Quaternion()
+    .setFromAxisAngle(new THREE.Vector3(0, 1, 0), (deg * Math.PI) / 180);
+  /** Standing off the +Z end, looking back down the stick. */
+  const fromPlusZ = facing(180);
+  /** Standing off the -Z end, looking the other way. */
+  const fromMinusZ = facing(0);
+
   it('carries a twig by the end it was grabbed by', () => {
     const p = laidTwig();
     /* Her jaws at one end of it — the twig lies along Z and is 11 mm long,
      * so its far end is 5.5 mm out, which is 1.1 world units. */
     const jaw = jawAt(0, 0, 1.0);
-    p.takeGrip(new THREE.Quaternion(), jaw);
+    p.takeGrip(fromPlusZ, jaw);
     p.carried = true;
     const centre = new THREE.Vector3();
-    p.carriedCentre(jaw, new THREE.Quaternion(), centre);
+    p.carriedCentre(jaw, fromPlusZ, centre);
     /*
-     * The twig's CENTRE ends up a half-length back from her jaws, which is
-     * the whole fix: snapped to the middle this distance would be nought,
+     * The twig's CENTRE ends up a half-length from her jaws, which is the
+     * whole fix: snapped to the middle this distance would be nought,
      * because the centre would BE at her jaws.
      */
     expect(centre.distanceTo(jaw)).toBeGreaterThan(0.8);
-    /* And back along the stick, not out to one side. */
+    /* And along the stick, not out to one side — out in FRONT of her,
+     * which from the +Z end means back down the twig toward -Z. */
     expect(centre.z).toBeLessThan(jaw.z - 0.8);
   });
 
@@ -759,14 +779,59 @@ describe('where a carried thing is held', () => {
     const p = laidTwig();
     const centre = new THREE.Vector3();
     const nearJaw = jawAt(0, 0, 1.0);
-    p.takeGrip(new THREE.Quaternion(), nearJaw);
-    p.carriedCentre(nearJaw, new THREE.Quaternion(), centre);
+    p.takeGrip(fromPlusZ, nearJaw);
+    p.carriedCentre(nearJaw, fromPlusZ, centre);
     expect(centre.z - nearJaw.z).toBeLessThan(-0.8);
 
     const farJaw = jawAt(0, 0, -1.0);
-    p.takeGrip(new THREE.Quaternion(), farJaw);
-    p.carriedCentre(farJaw, new THREE.Quaternion(), centre);
+    p.takeGrip(fromMinusZ, farJaw);
+    p.carriedCentre(farJaw, fromMinusZ, centre);
     expect(centre.z - farJaw.z).toBeGreaterThan(0.8);
+  });
+
+  /*
+   * AND NOTHING SHE IS HOLDING REACHES BACK PAST THE BITE.
+   *
+   * Reported on a screenshot: "if you zoom in, it's cutting off her head
+   * ... not sure about worker and major." The bite point is put at her jaw
+   * anchor, so anything of the object that lies BEHIND that point along
+   * her heading is inside her face. Held properly there is none of it: the
+   * point she closed on is the rearmost part of the thing.
+   *
+   * Stated as a property over every prop and from every approach, rather
+   * than as one case, because the failure was shape-dependent — a seed
+   * failed by being small enough for her to stand over, a twig by being
+   * long enough to reach past her while its centre was still in front.
+   */
+  it('never holds any part of a thing behind the bite', () => {
+    const back = new THREE.Vector3();
+    const point = new THREE.Vector3();
+    const centre = new THREE.Vector3();
+    for (const key of Object.keys(PROP_SPECS)) {
+      for (const deg of [0, 37, 90, 180, 264]) {
+        const her = facing(deg);
+        const p = new Prop(key, PROP_SPECS[key]!, 0, 0, 0);
+        p.at.set(0, 0, 0);
+        /* Her jaws INSIDE it, which is the case that broke: `propInReach`
+         * measures the gap as distance minus radius, so she can stand
+         * right over something smaller than her own reach. */
+        back.set(0, 0, -1).applyQuaternion(her);
+        const jaw = point.clone().copy(back).multiplyScalar(-p.radius * 0.3);
+        p.takeGrip(her, jaw);
+        p.carriedCentre(jaw, her, centre);
+
+        const hull = p.hullForTest;
+        let behind = 0;
+        for (let i = 0; i < hull.length; i += 3) {
+          point.set(hull[i]!, hull[i + 1]!, hull[i + 2]!)
+            .applyQuaternion(p.root.quaternion).add(centre).sub(jaw);
+          behind = Math.max(behind, -point.dot(back.clone().negate()));
+        }
+        /* A thousandth of a world unit is a rounding error, not a stick
+         * through her head. */
+        expect(behind, `${key} at ${deg}°`).toBeLessThan(1e-3);
+      }
+    }
   });
 
   it('still centres a small thing, where centre and grip are the same place', () => {

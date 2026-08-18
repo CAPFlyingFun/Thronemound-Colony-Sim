@@ -1103,9 +1103,28 @@ export class IslandScene {
       if (load.carriedCentre) {
         load.carriedCentre(S_JAW, this.queen.root.quaternion, load.at);
       } else {
-        load.at.x = S_JAW.x;
+        /*
+         * AND NOT INSIDE HER OWN HEAD.
+         *
+         * Reported on a screenshot: "if you zoom in, it's cutting off her
+         * head". Writing the centre straight to the jaw anchor is only
+         * harmless for something with no size, and nothing here has no
+         * size — an aphid centred on her mouth wears her face. Anything
+         * that knows its own shape answers with `carriedCentre` above and
+         * hangs clear by its own extent; the rest are round enough that
+         * pushing them forward by their radius is the same statement.
+         *
+         * Done here rather than in the load, because "forward" is HERS.
+         */
+        /* Duck-typed, because `Portable` is deliberately geometry-free —
+         * see its own note on `at`. Everything the island can pick up and
+         * that does NOT answer `carriedCentre` is a critter, and those
+         * carry a `radius`; anything that grows one later is covered too,
+         * and anything without one lands exactly where it used to. */
+        const out = (load as { radius?: number }).radius ?? 0;
+        load.at.x = S_JAW.x + this.fwd.x * out;
         load.at.y = S_JAW.y;
-        load.at.z = S_JAW.z;
+        load.at.z = S_JAW.z + this.fwd.z * out;
       }
     }
 
@@ -3716,7 +3735,22 @@ export class IslandScene {
       speed: this.groundSpeed,
       turn: -this.input.yaw * TURN_RATE,
       digging: this.input.dig ? 1 : 0,
-      carrying: 0,
+      /*
+       * HER JAWS CLOSE ON WHAT SHE IS HOLDING — and this was nought.
+       *
+       * `hexapod` has driven this since the mandibles were rigged: `grip`
+       * is `max(digging, carrying)`, and where digging snips the jaws open
+       * and shut on the clock, carrying holds them SHUT on the load. The
+       * whole mechanic was built and the island simply never told it. She
+       * has carried a beetle home with her mandibles hanging open since
+       * carrying existed.
+       *
+       * The sandbox room had it right — `carrying: this.heldClod !== null`
+       * — which is what a scene for proving mechanics is FOR, and the port
+       * back is this line. Same as `headYaw` and `headPitch` below, which
+       * came the same way.
+       */
+      carrying: this.carry.carrying ? 1 : 0,
       /*
        * HER HEAD FOLLOWS THE AIM — ported from the sandbox room, which
        * drives both of these from its own arrow keys.
