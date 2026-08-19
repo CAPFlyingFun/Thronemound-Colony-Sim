@@ -5723,9 +5723,15 @@ export class IslandScene {
     return { x: walk.at.x * MM, y: walk.at.y * MM, z: walk.at.z * MM };
   }
 
-  planForTest(): { id: string; x: number; y: number; z: number }[] {
+  planForTest(): {
+    id: string; kind: string; x: number; y: number; z: number; radiusMm: number;
+  }[] {
+    /* Radius and kind included because a probe asking "did she get to the
+     * throne" needs to know the throne is a ROOM thirty millimetres across,
+     * not a point — otherwise it scores her as short while she stands
+     * inside the doorway. */
     return (this.soil?.plan.nodes ?? []).map(
-      (n) => ({ id: n.id, x: n.x, y: n.y, z: n.z }),
+      (n) => ({ id: n.id, kind: n.kind, x: n.x, y: n.y, z: n.z, radiusMm: n.radiusMm }),
     );
   }
 
