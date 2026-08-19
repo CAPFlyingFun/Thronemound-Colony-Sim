@@ -162,6 +162,81 @@ out.override = await page.evaluate(() => {
   return { pinned };
 });
 
+/*
+ * 8. ONE OWNER PER CONTROL — the bug this section exists for.
+ *
+ * Reported from the desktop build: "some of the buttons don't work, like V
+ * to change view." V was bound in `inputBindings` AND handled again in
+ * `islandHud`'s own key handler, so a single press toggled the view twice
+ * and landed back where it started. Shift had the same shape: the table
+ * cycled the pace latch while `islandHud` read it as a held run.
+ */
+out.owners = await page.evaluate(() => {
+  const s = window.islandScene;
+  const view = () => s.statsForTest().firstPerson;
+  const before = view();
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', bubbles: true }));
+  window.dispatchEvent(new KeyboardEvent('keyup', { key: 'v', bubbles: true }));
+  s.stepForTest(1 / 60, 4);
+  const afterOne = view();
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', bubbles: true }));
+  window.dispatchEvent(new KeyboardEvent('keyup', { key: 'v', bubbles: true }));
+  s.stepForTest(1 / 60, 4);
+  const afterTwo = view();
+
+  const paceBefore = s.statsForTest().pace;
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift', bubbles: true }));
+  s.stepForTest(1 / 60, 4);
+  const paceHeld = s.statsForTest().pace;
+  window.dispatchEvent(new KeyboardEvent('keyup', { key: 'Shift', bubbles: true }));
+  s.stepForTest(1 / 60, 4);
+  return { before, afterOne, afterTwo, paceBefore, paceHeld };
+});
+
+/*
+ * 9. THE MOUSE HAS THE FOUR JOBS THE DEVICE ASKED FOR — "digging should be
+ * LMB as well as normal bite, and RMB for Sting (if applicable), with SHIFT
+ * + LMB = (Special Ability #1), and SHIFT + RMB = (Special Ability #2)".
+ *
+ * Driven as real PointerEvents on the canvas so the whole path is under
+ * test, including the swallowed capturing click.
+ */
+out.buttons = await page.evaluate(async () => {
+  const s = window.islandScene;
+  s.pc?.setPref('pc');
+  s.stepForTest(1 / 60, 4);
+  const canvas = document.querySelector('canvas');
+  const press = (button, shift, type) => canvas.dispatchEvent(new PointerEvent(type, {
+    pointerType: 'mouse', button, buttons: type === 'pointerdown' ? 1 : 0,
+    shiftKey: shift, bubbles: true, cancelable: true,
+  }));
+  /* The click that takes the pointer is not the player's — it is swallowed
+   * so a capture cannot bite on the way in. Headless may refuse the lock,
+   * in which case there is nothing to swallow and the next press acts. */
+  press(0, false, 'pointerdown');
+  window.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'mouse', button: 0, bubbles: true }));
+  s.stepForTest(1 / 60, 4);
+
+  if (!s.digMode) s.toggleDig();
+  s.stepForTest(1 / 60, 4);
+  const armed = s.digMode;
+  press(0, false, 'pointerdown');
+  s.stepForTest(1 / 60, 4);
+  const digHeld = s.input.dig;
+  window.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'mouse', button: 0, bubbles: true }));
+  s.stepForTest(1 / 60, 4);
+  const digReleased = s.input.dig;
+
+  /* And the right button never brings the browser's menu onto the glass. */
+  const menu = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+  canvas.dispatchEvent(menu);
+  const menuBlocked = menu.defaultPrevented;
+
+  if (s.digMode) s.toggleDig();
+  s.pc?.setPref('auto');
+  return { armed, digHeld, digReleased, menuBlocked };
+});
+
 await browser.close();
 
 let bad = 0;
@@ -199,6 +274,17 @@ say(Math.abs(out.mouse.swung - out.mouse.want) < 1e-6,
   `the mouse looks with no button held, exactly once per pixel (${out.mouse.swung})`);
 say(out.override.pinned === 'touch',
   'Settings TOUCH pins it against a keyboard');
+say(out.owners.afterOne !== out.owners.before,
+  `V changes the view on ONE press (${out.owners.before} -> ${out.owners.afterOne})`);
+say(out.owners.afterTwo === out.owners.before,
+  'and the second press puts it back — one owner, not two');
+say(out.owners.paceHeld === out.owners.paceBefore,
+  `SHIFT is a modifier, not the pace latch (${out.owners.paceBefore} -> ${out.owners.paceHeld})`);
+say(out.buttons.armed && out.buttons.digHeld,
+  'with DIG armed, the LEFT button holds the shovel');
+say(!out.buttons.digReleased, 'and letting go lets go');
+say(out.buttons.menuBlocked,
+  'the RIGHT button belongs to the ant, not to the browser menu');
 
 if (errs.length) console.log(`\npage errors: ${errs.slice(0, 3).join(' | ')}`);
 if (bad > 0 || errs.length) { console.log(`\n${bad} check(s) failed`); process.exit(1); }

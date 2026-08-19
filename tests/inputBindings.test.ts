@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DEFAULT_KEYS, bindFor, hintFor, pickInputMode, saysKeyboard,
+  DEFAULT_KEYS, DEFAULT_MOUSE, bindFor, hintFor, mouseBindFor,
+  pickInputMode, saysKeyboard,
   type InputPref, type IntentAction,
 } from '../src/scenes/inputBindings';
 
@@ -12,11 +13,35 @@ import {
 describe('the bindings', () => {
   it('covers every action the card names', () => {
     const want: IntentAction[] = [
-      'bite', 'sting', 'carry', 'interact', 'dig', 'dodge', 'view', 'pace',
+      'bite', 'sting', 'carry', 'interact', 'dig', 'dodge', 'view',
     ];
     for (const action of want) {
       expect(hintFor(action), action).toBeTruthy();
     }
+  });
+
+  it('leaves SHIFT alone, because it is a modifier now', () => {
+    /*
+     * It used to be the pace latch's key here WHILE `islandHud` read it as
+     * a held run, so one press did both and they disagreed. The device spec
+     * then made it the ability modifier (SHIFT + a mouse button), which
+     * settles it: the table does not own Shift, and the held run stays
+     * where it has always been.
+     */
+    expect(DEFAULT_KEYS.some((b) => b.key === 'shift')).toBe(false);
+    expect(hintFor('pace')).toBeNull();
+  });
+
+  it('binds V exactly once, in this table and nowhere else', () => {
+    /*
+     * Reported from the desktop build: "some of the buttons don't work,
+     * like V to change view". It was bound HERE and again in `islandHud`'s
+     * own key handler, so one press toggled the view twice and it read as a
+     * dead key. This pins the table's half; the other half is that
+     * `islandHud` no longer mentions V at all.
+     */
+    expect(DEFAULT_KEYS.filter((b) => b.key === 'v')).toHaveLength(1);
+    expect(bindFor('v')?.action).toBe('view');
   });
 
   it('binds no key twice — a key that does two things does neither', () => {
@@ -31,6 +56,35 @@ describe('the bindings', () => {
     for (const b of DEFAULT_KEYS) {
       expect(['w', 'a', 's', 'd', ' ', 'c'], b.key).not.toContain(b.key);
     }
+  });
+
+  it('gives the mouse the four jobs the device asked for', () => {
+    /*
+     * "digging should be LMB as well as normal bite, and RMB for Sting (if
+     * applicable), with SHIFT + LMB = (Special Ability #1), and SHIFT + RMB
+     * = (Special Ability #2)"
+     *
+     * LMB is one action, `primary`, rather than two bindings: what it means
+     * is read off the shovel at the moment of the press, which is the same
+     * rule the HUD already draws when arming DIG swaps the plate row.
+     */
+    expect(mouseBindFor(0, false)?.action).toBe('primary');
+    expect(mouseBindFor(2, false)?.action).toBe('sting');
+    expect(mouseBindFor(0, true)?.action).toBe('ability1');
+    expect(mouseBindFor(2, true)?.action).toBe('ability2');
+  });
+
+  it('binds no mouse button twice, modifier included', () => {
+    const seen = DEFAULT_MOUSE.map((b) => `${b.button}${b.shift ? '+shift' : ''}`);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('leaves the middle button and every other chord alone', () => {
+    /* Middle-click is the browser's (paste, autoscroll) and a chord nobody
+     * bound must not quietly become an action. */
+    expect(mouseBindFor(1, false)).toBeNull();
+    expect(mouseBindFor(1, true)).toBeNull();
+    expect(mouseBindFor(3, false)).toBeNull();
   });
 
   it('is case-insensitive, because a shouted key is the same key', () => {

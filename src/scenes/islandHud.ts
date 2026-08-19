@@ -1010,7 +1010,18 @@ export function buildControls(host: HudHost, ): void {
   window.addEventListener('keydown', (e) => {
     const key = e.key.toLowerCase();
     if (key === 'b' && !e.repeat) host.openDesigner();
-    if (key === 'v' && !e.repeat) host.firstPerson = !host.firstPerson;
+    /*
+     * V IS NOT HANDLED HERE ANY MORE. It was, and so was `pcInput`'s
+     * binding table — so one press toggled the view TWICE and it read as a
+     * dead key. Reported from the desktop build as "some of the buttons
+     * don't work, like V to change view", and measured: `firstPerson` came
+     * back unchanged after a single press.
+     *
+     * `inputBindings` owns it now, alone, because that table is also what
+     * prints the key badge on the plate. B and P stay here: they are dev
+     * keys with no plate and no entry in the table, so nothing else can
+     * claim them.
+     */
     if (key === 'p' && !e.repeat) {
       host.showPlan = !host.showPlan;
       if (host.nestView) host.nestView.root.visible = host.showPlan;

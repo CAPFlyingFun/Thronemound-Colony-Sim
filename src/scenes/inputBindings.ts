@@ -35,7 +35,22 @@
 /** Every command the ant answers to. The card's list, and no more. */
 export type IntentAction =
   | 'bite' | 'sting' | 'carry' | 'interact'
-  | 'dig' | 'dodge' | 'view' | 'pace';
+  | 'dig' | 'dodge' | 'view' | 'pace'
+  /**
+   * THE LEFT BUTTON'S JOB, WHICHEVER IT IS. Asked for: "digging should be
+   * LMB as well as normal bite." One button, and what it means is read off
+   * the shovel — armed, it cuts; idle, it bites. That is the same rule the
+   * HUD already draws, where arming DIG swaps the plate row.
+   */
+  | 'primary'
+  /**
+   * THE TWO SIGNATURE SLOTS, bound now and empty until there is something
+   * to put in them. See `antKinds.ts`: no ant has a signature ability yet
+   * (Trello card 31), so these resolve to nothing and say so rather than
+   * pretending. The binding exists so the mapping is decided once, in the
+   * table, rather than invented later next to a mechanic.
+   */
+  | 'ability1' | 'ability2';
 
 /**
  * WHICH HAND IS DRIVING. Two presentations of one game — the mechanics are
@@ -70,10 +85,15 @@ export interface KeyBind {
  * game interacts with E, F fetches, Q and R are the two attacks under the
  * left hand, G grounds the shovel, V is the view it already was.
  *
- * NO MOUSE BUTTONS, deliberately. A click is how the pointer gets
- * captured for looking (see `pcInput`), and a click that both captures
- * the mouse and bites something is a click that bites something by
- * accident on the way in.
+ * SHIFT IS NOT HERE ANY MORE, and its absence is a bug fix. `islandHud`
+ * has read Shift as a held run since long before this file, and this table
+ * also cycled the pace latch with it — so one press did both, and the two
+ * disagreed about what Shift means. It is a MODIFIER now, per the device
+ * spec: Shift plus a mouse button picks a signature ability. The held run
+ * stays where it always was.
+ *
+ * MOUSE BUTTONS LIVE IN THEIR OWN TABLE below, not this one, because they
+ * carry a modifier and a key does not.
  */
 export const DEFAULT_KEYS: readonly KeyBind[] = [
   { key: 'q', action: 'bite', hint: 'Q' },
@@ -83,8 +103,44 @@ export const DEFAULT_KEYS: readonly KeyBind[] = [
   { key: 'g', action: 'dig', hint: 'G' },
   { key: 'x', action: 'dodge', hint: 'X' },
   { key: 'v', action: 'view', hint: 'V' },
-  { key: 'shift', action: 'pace', hint: 'SHIFT' },
 ];
+
+/**
+ * THE MOUSE, as asked for from the device:
+ *
+ *   "digging should be LMB as well as normal bite, and RMB for Sting (if
+ *   applicable), with SHIFT + LMB = (Special Ability #1), and SHIFT + RMB =
+ *   (Special Ability #2)"
+ *
+ * Buttons are `PointerEvent.button` — 0 left, 2 right. Held state matters
+ * for the left button only: digging is a stroke you hold, and `pcInput`
+ * turns a held primary into `PlayerIntent.setDig` rather than a one-shot.
+ *
+ * THE CAPTURING CLICK STILL DOES NOT ACT. That was the whole reason there
+ * were no mouse bindings before, and it is answered rather than reversed:
+ * the click that takes pointer lock is swallowed, and every click after it
+ * is the player's. See `pcInput.onPointerDown`.
+ */
+export interface MouseBind {
+  readonly button: 0 | 2;
+  readonly shift: boolean;
+  readonly action: IntentAction;
+  readonly hint: string;
+}
+
+export const DEFAULT_MOUSE: readonly MouseBind[] = [
+  { button: 0, shift: false, action: 'primary', hint: 'LMB' },
+  { button: 2, shift: false, action: 'sting', hint: 'RMB' },
+  { button: 0, shift: true, action: 'ability1', hint: 'SHIFT+LMB' },
+  { button: 2, shift: true, action: 'ability2', hint: 'SHIFT+RMB' },
+];
+
+/** What a mouse button means, with or without the modifier held. */
+export function mouseBindFor(
+  button: number, shift: boolean, map: readonly MouseBind[] = DEFAULT_MOUSE,
+): MouseBind | null {
+  return map.find((b) => b.button === button && b.shift === shift) ?? null;
+}
 
 /** The binding for a key press, or null if that key means nothing. */
 export function bindFor(

@@ -34,7 +34,7 @@
  */
 import { applyLook, type HudHost } from './islandHud';
 import {
-  DEFAULT_KEYS, bindFor, pickInputMode, saysKeyboard,
+  DEFAULT_KEYS, bindFor, mouseBindFor, pickInputMode, saysKeyboard,
   type InputMode, type InputPref, type IntentAction,
 } from './inputBindings';
 
@@ -52,6 +52,11 @@ export interface PcInputHost extends HudHost {
   inputMode: InputMode;
   /** Told whenever the mode changes, so the HUD can re-dress. */
   onInputMode(mode: InputMode): void;
+  /** Is the shovel armed? The left button reads this to know its own job. */
+  digMode: boolean;
+  /** Say something briefly — used to tell an empty ability slot apart from
+   *  a dead button. */
+  toastCombat(text: string): void;
 }
 
 /**
@@ -86,6 +91,21 @@ export class PcInput {
 
   private gone = false;
 
+  /** Is the left button holding the shovel down right now? */
+  private digging = false;
+
+  /**
+   * Have we already asked for the pointer and not got it?
+   *
+   * Because the capturing click is swallowed, and a click swallowed by a
+   * capture that never arrives is a mouse that does nothing at all. A lock
+   * can be refused — a permission, a sandboxed frame, a synthetic event
+   * that carries no user gesture — and there is no failure callback to
+   * hear about it, so the second press is the signal: asked once, still not
+   * locked, stop waiting and let the player play.
+   */
+  private lockAsked = false;
+
   constructor(
     private readonly host: PcInputHost,
     private readonly canvas: HTMLElement,
@@ -95,6 +115,13 @@ export class PcInput {
     window.addEventListener('keydown', this.onKeyDown);
     this.canvas.addEventListener('pointerdown', this.onPointerDown);
     this.canvas.addEventListener('pointermove', this.onPointerMove);
+    /* On WINDOW, not the canvas: a button released off the glass — over the
+     * HUD, outside the page — still has to let the shovel go. */
+    window.addEventListener('pointerup', this.onPointerUp);
+    window.addEventListener('blur', this.onPointerUp as EventListener);
+    /* The right button is a game control now, so the browser's menu is not
+     * welcome on the canvas. Only there: the HUD and the menus keep theirs. */
+    this.canvas.addEventListener('contextmenu', this.onContextMenu);
     document.addEventListener('pointerlockchange', this.onLockChange);
     this.refresh();
   }
@@ -192,12 +219,30 @@ export class PcInput {
         if (this.host.intent) this.host.intent.ability(action);
         else this.host.useAbility(action);
         break;
+      case 'primary':
+        /* The shovel is not armed, so the left button is her jaws. Armed,
+         * the press never reaches here — see `onPointerDown`, where it
+         * becomes a held dig instead. */
+        if (this.host.intent) this.host.intent.ability('bite');
+        else this.host.useAbility('bite');
+        break;
+      case 'ability1': case 'ability2':
+        /*
+         * BOUND, AND EMPTY. No ant has a signature ability yet (Trello card
+         * 31), so there is nothing to call and this must not pretend
+         * otherwise — the HUD's oldest rule. It says so once rather than
+         * failing silently, because a binding that does nothing and says
+         * nothing is indistinguishable from the dead V key this same
+         * release fixed.
+         */
+        this.host.toastCombat('NO SIGNATURE ABILITY YET');
+        break;
       case 'dig': this.host.toggleDig(); break;
       case 'dodge': this.host.dodgeFromKeys(); break;
       case 'view': this.host.firstPerson = !this.host.firstPerson; break;
-      /* SHIFT is the pace latch's key and it CYCLES, matching the plate —
-       * `islandHud`'s own handler also reads shift as a held run, and the
-       * two agree because both end at `applyPace`. */
+      /* PACE HAS NO KEY OF ITS OWN ANY MORE — Shift is the ability
+       * modifier, and `islandHud` still reads it as the held run it always
+       * was. Kept as an action because the plate still fires it. */
       case 'pace': this.host.cyclePace(); break;
       default: break;
     }
@@ -212,13 +257,48 @@ export class PcInput {
     if (this.mode !== 'pc' || this.host.designer?.isOpen) return;
     /* Never capture into a menu — see `release`. */
     if (PcInput.menuUp()) return;
-    /* THE CLICK IS THE CAPTURE, which is why no mouse button is bound to
-     * an action: a click that also bit something would bite on the way
-     * in. Where lock does not exist the click does nothing and the hover
-     * path is already looking. */
-    if (this.canLock && !this.locked) {
+    /*
+     * THE CAPTURING CLICK IS SWALLOWED, and every click after it is the
+     * player's.
+     *
+     * This used to be the reason there were no mouse bindings at all: a
+     * click both takes the pointer and would fire an action, so the click
+     * that grabs the mouse bites something on the way in. Answering it is
+     * one line — take the lock, return, and let the NEXT press act — which
+     * is what every first-person game does and what the device asked for
+     * ("digging should be LMB as well as normal bite").
+     *
+     * Where pointer lock does not exist (iOS) there is nothing to capture,
+     * so the first press is already the player's and acts immediately.
+     */
+    if (this.canLock && !this.locked && !this.lockAsked) {
+      this.lockAsked = true;
       try { void this.canvas.requestPointerLock(); } catch { /* denied is fine */ }
+      return;
     }
+    const bind = mouseBindFor(e.button, e.shiftKey);
+    if (!bind) return;
+    /* The canvas owns the button now — no text selection, no drag start,
+     * and for the right button no context menu (see the constructor). */
+    e.preventDefault();
+    if (bind.action === 'primary' && this.host.digMode) {
+      /* DIGGING IS A STROKE YOU HOLD, so the left button becomes the same
+       * held source Space already is, through the same arbiter. */
+      this.digging = true;
+      this.host.intent?.setDig('mouse', true);
+      return;
+    }
+    this.fire(bind.action);
+  };
+
+  /** Let a held dig go — on release, on leaving the window, on losing the
+   *  pointer. A shovel that stays down because a button-up went missing is
+   *  the worst of the failure modes here. */
+  private readonly onPointerUp = (e: PointerEvent): void => {
+    if (this.gone || !this.digging) return;
+    if (e.pointerType === 'touch' || e.pointerType === 'pen') return;
+    this.digging = false;
+    this.host.intent?.setDig('mouse', false);
   };
 
   private readonly onPointerMove = (e: PointerEvent): void => {
@@ -259,10 +339,24 @@ export class PcInput {
     applyLook(this.host, dx, dy);
   };
 
+  private readonly onContextMenu = (e: Event): void => {
+    if (this.gone || this.mode !== 'pc' || PcInput.menuUp()) return;
+    e.preventDefault();
+  };
+
   /** Losing the lock (Escape, a tab switch) must not leave the deltas
-   *  stale, or the next hover move swings by the gap. */
+   *  stale, or the next hover move swings by the gap. And a lock lost
+   *  mid-stroke must not leave the shovel down. */
   private readonly onLockChange = (): void => {
     this.hoverSeen = false;
+    /* Either direction clears it: newly locked, presses act anyway; newly
+     * released (Escape, a tab switch), the next click should re-capture the
+     * way it did the first time. */
+    this.lockAsked = false;
+    if (this.digging) {
+      this.digging = false;
+      this.host.intent?.setDig('mouse', false);
+    }
   };
 
   dispose(): void {
@@ -271,7 +365,11 @@ export class PcInput {
     window.removeEventListener('keydown', this.onKeyDown);
     this.canvas.removeEventListener('pointerdown', this.onPointerDown);
     this.canvas.removeEventListener('pointermove', this.onPointerMove);
+    window.removeEventListener('pointerup', this.onPointerUp);
+    window.removeEventListener('blur', this.onPointerUp as EventListener);
+    this.canvas.removeEventListener('contextmenu', this.onContextMenu);
     document.removeEventListener('pointerlockchange', this.onLockChange);
+    if (this.digging) this.host.intent?.setDig('mouse', false);
     if (this.locked) document.exitPointerLock();
   }
 }

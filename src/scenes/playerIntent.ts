@@ -7,7 +7,13 @@
  * to know which piece of hardware produced them.
  */
 
-export type InputSource = 'touch' | 'keyboard';
+/**
+ * MOUSE is its own source, not a flavour of keyboard, because it holds DIG
+ * independently: the left button can be down while Space is up and the OR
+ * below has to see both. Added when the left button became the shovel —
+ * see `inputBindings.DEFAULT_MOUSE`.
+ */
+export type InputSource = 'touch' | 'keyboard' | 'mouse';
 
 export interface PlayerInputState {
   walk: number;
@@ -44,6 +50,7 @@ export class PlayerIntent<Action extends string = string> {
   private readonly sources: Record<InputSource, SourceIntent> = {
     touch: blankSource(),
     keyboard: blankSource(),
+    mouse: blankSource(),
   };
 
   constructor(
@@ -86,8 +93,12 @@ export class PlayerIntent<Action extends string = string> {
   }
 
   releaseAll(): void {
-    this.releaseSource('touch');
-    this.releaseSource('keyboard');
+    /* Every source, read off the record rather than listed here — the list
+     * form silently skipped `mouse` the day it was added, which is a
+     * shovel left down when the game pauses. */
+    for (const source of Object.keys(this.sources) as InputSource[]) {
+      this.releaseSource(source);
+    }
   }
 
   ability(id: Action): void {
@@ -103,6 +114,9 @@ export class PlayerIntent<Action extends string = string> {
   }
 
   private syncDig(): void {
-    this.input.dig = this.sources.touch.dig || this.sources.keyboard.dig;
+    /* HELD BY ANY HAND. Named sources here would have to be edited every
+     * time one is added, and the first time that was missed the left mouse
+     * button held DIG that nothing ever read. */
+    this.input.dig = Object.values(this.sources).some((s) => s.dig);
   }
 }

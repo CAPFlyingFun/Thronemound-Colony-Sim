@@ -55,6 +55,35 @@ describe('player intent source arbitration', () => {
       .toEqual({ walk: 0, yaw: 0, dig: false });
   });
 
+  it('holds DIG for the mouse too, and lets go with it', () => {
+    /*
+     * The left button became the shovel (`inputBindings.DEFAULT_MOUSE`), so
+     * the mouse is a third holder of DIG. It was added to the source record
+     * before `syncDig` was taught to read it, which is a shovel held by a
+     * button that nothing ever noticed — hence this.
+     */
+    const { input, intent } = make();
+    intent.setDig('mouse', true);
+    expect(input.dig).toBe(true);
+    intent.setDig('keyboard', true);
+    intent.setDig('mouse', false);
+    expect(input.dig).toBe(true);
+    intent.setDig('keyboard', false);
+    expect(input.dig).toBe(false);
+  });
+
+  it('releaseAll drops EVERY source, including ones added later', () => {
+    /* The pause menu calls this. A source missed here is a control still
+     * held while the game is stopped. */
+    const { input, intent } = make();
+    intent.setDig('mouse', true);
+    intent.setMove('keyboard', 1, 0);
+    intent.setMove('touch', 0.5, 0.5);
+    intent.releaseAll();
+    expect({ walk: input.walk, yaw: input.yaw, dig: input.dig })
+      .toEqual({ walk: 0, yaw: 0, dig: false });
+  });
+
   it('forwards an ability through one semantic action door', () => {
     const { actions, intent } = make();
     intent.ability('bite');
