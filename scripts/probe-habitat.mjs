@@ -127,6 +127,74 @@ const out = await page.evaluate(async () => {
   };
 });
 
+/*
+ * AND THE OBSERVER'S HALF, reported from an iPhone: "I can't pan or move the
+ * camera around and it's not recentering on screen rotation."
+ *
+ * Both are about looking, not about her — she walked fine through both
+ * faults. Driven as real pointer events and a real viewport change so the
+ * whole path is under test.
+ */
+const view = await page.evaluate(async () => {
+  const lab = window.habitatScene;
+  const cam = lab.view;
+  const before = cam.reportForTest();
+
+  /* A drag across the glass must swing the view. */
+  const canvas = document.querySelector('canvas');
+  const send = (type, x, y, id = 1) => canvas.dispatchEvent(new PointerEvent(type, {
+    pointerId: id, pointerType: 'touch', clientX: x, clientY: y,
+    bubbles: true, cancelable: true,
+  }));
+  send('pointerdown', 400, 200);
+  send('pointermove', 520, 240);
+  window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true }));
+  const dragged = cam.reportForTest();
+
+  /* A wheel must zoom. */
+  const distBefore = cam.reportForTest().distance;
+  canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: 400, bubbles: true, cancelable: true }));
+  await new Promise((r) => requestAnimationFrame(r));
+  lab.tick(0.016);
+  const zoomed = cam.reportForTest();
+
+  /* And WATCH HER puts the pivot on the ant. */
+  lab.setFollow(true);
+  for (let i = 0; i < 40; i += 1) { lab.tick(1 / 60); }
+  await new Promise((r) => requestAnimationFrame(r));
+  const followed = cam.reportForTest();
+  const her = lab.reportForTest().at;
+  const onHer = Math.hypot(
+    followed.pivot.x - her.x, followed.pivot.y - her.y, followed.pivot.z - her.z,
+  );
+  lab.setFollow(false);
+  return {
+    before, dragged, distBefore, zoomed, followed, onHer,
+    following: lab.followingForTest,
+  };
+});
+
+/* A rotation, as the browser actually reports one. */
+const rotated = await page.evaluate(async () => {
+  const lab = window.habitatScene;
+  const wide = lab.view.reportForTest().distance;
+  return { wide };
+});
+await page.setViewportSize({ width: 430, height: 932 });   // portrait
+await page.waitForTimeout(500);
+const portrait = await page.evaluate(() => ({
+  distance: window.habitatScene.view.reportForTest().distance,
+  aspect: window.habitatScene.camera.aspect,
+  canvasW: document.querySelector('canvas').width,
+}));
+await page.setViewportSize({ width: 932, height: 430 });   // back to landscape
+await page.waitForTimeout(500);
+const landscape = await page.evaluate(() => ({
+  distance: window.habitatScene.view.reportForTest().distance,
+  aspect: window.habitatScene.camera.aspect,
+  canvasW: document.querySelector('canvas').width,
+}));
+
 const checks = [];
 const say = (name, ok, detail) => {
   checks.push(ok);
@@ -186,6 +254,27 @@ say('and she does more than one thing', out.states.length >= 2,
 /* SHE STAYS IN THE TANK. */
 say('she stays inside the glass', out.outOfBox === 0,
   `${out.outOfBox}/${out.steps} frames outside`);
+
+/* THE OBSERVER CAN LOOK. */
+say('a drag swings the view', Math.abs(view.dragged.yaw - view.before.yaw) > 0.05
+  && Math.abs(view.dragged.pitch - view.before.pitch) > 0.05,
+  `yaw ${view.before.yaw.toFixed(2)} -> ${view.dragged.yaw.toFixed(2)}, `
+  + `pitch ${view.before.pitch.toFixed(2)} -> ${view.dragged.pitch.toFixed(2)}`);
+say('a wheel pulls back', view.zoomed.distance > view.distBefore,
+  `${view.distBefore.toFixed(1)} -> ${view.zoomed.distance.toFixed(1)}`);
+say('WATCH HER puts the view on the ant', view.onHer < 3,
+  `${view.onHer.toFixed(2)} voxels off her`);
+say('and it lets go again', view.following === false);
+
+/* AND THE SCREEN CAN TURN. */
+say('rotating resizes the canvas', portrait.canvasW !== landscape.canvasW,
+  `${landscape.canvasW}px wide -> ${portrait.canvasW}px`);
+say('and the aspect follows it', Math.abs(portrait.aspect - 430 / 932) < 0.05
+  && Math.abs(landscape.aspect - 932 / 430) < 0.05,
+  `${portrait.aspect.toFixed(2)} portrait, ${landscape.aspect.toFixed(2)} landscape`);
+say('and the tank is re-fitted, not left framed for the old screen',
+  portrait.distance > landscape.distance,
+  `${landscape.distance.toFixed(0)} landscape -> ${portrait.distance.toFixed(0)} portrait`);
 
 say('nothing threw', errs.length === 0, errs.slice(0, 2).join(' | '));
 
