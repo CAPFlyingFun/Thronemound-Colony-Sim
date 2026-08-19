@@ -18,7 +18,7 @@ const INDEX = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
  * RED state rather than a regression test written after the answer.
  */
 describe('carry meter fill rendering contract', () => {
-  it('loads the carry-meter correction after the scene styles', () => {
+  it('loads the dedicated carry-meter correction stylesheet', () => {
     expect(INDEX).toContain('/src/scenes/carryMeter.css');
   });
 
