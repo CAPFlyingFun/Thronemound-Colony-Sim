@@ -13,6 +13,9 @@ const INDEX = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
  * The replacement keeps the source mask at the FULL channel size and clips
  * that fixed mask with the element's changing width. That makes 10% mean
  * 10% of the run, without squeezing two caps into the same few pixels.
+ *
+ * This file intentionally landed before the fix so the branch has a real
+ * RED state rather than a regression test written after the answer.
  */
 describe('carry meter fill rendering contract', () => {
   it('loads the carry-meter correction after the scene styles', () => {
