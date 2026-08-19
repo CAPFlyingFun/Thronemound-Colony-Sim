@@ -1,0 +1,51 @@
+/*
+ * CARRY METER — THE LEVEL IS A WINDOW, NOT A SQUEEZED PICTURE.
+ *
+ * Reported from an iPhone screenshot: a light load rendered as a green
+ * coin/wedge beside the medallion instead of a short bar. The percentage was
+ * fine; the geometry was not.
+ *
+ * The original `.tm-meter-level` in DensityTerrainLabScene.css changes its
+ * WIDTH with `--tm-level` and nine-slices `fill-meter.png` into that changing
+ * width. Nine-slicing keeps both decorative ends alive. Around ten percent
+ * load the element is only about thirteen pixels wide while its fixed left
+ * and right pieces consume about ten pixels between them, so there is almost
+ * no middle left. On Safari the ends visually collapse into one round blob.
+ *
+ * Keep the source fill at the channel's FULL 131.5 x 17.2 CSS pixels instead.
+ * The element's changing width becomes a CLIPPING WINDOW over that fixed
+ * mask. Ten percent now exposes the first ten percent of a normal bar; it
+ * never asks two fixed caps to fit inside the same few pixels. At full load
+ * the entire authored fill, including its rounded far end, is visible.
+ *
+ * This is intentionally a narrow override rather than a second meter design:
+ * the medallion, gold frame, stone, label, position, colour and load math all
+ * remain owned by the existing HUD styles and islandQuest.
+ */
+.tm-meter.tm-meter-carry .tm-meter-level {
+  /* The percentage is still linear and still uses the channel measurement
+   * already established by the frame probe. */
+  width: calc(var(--tm-level, 0) * 131.5px);
+
+  /* Retire the shrinking nine-slice from the base rule. */
+  -webkit-mask-box-image: none;
+  mask-border: none;
+
+  /* Same authored fill art, but at ONE stable size. The level element clips
+   * it simply because the element itself is narrower. `mask-size` MUST stay
+   * in pixels rather than 100% or we would stretch the art right back into
+   * the bug this rule exists to remove. */
+  -webkit-mask-image: url('/ui/fill-meter.png');
+  mask-image: url('/ui/fill-meter.png');
+  -webkit-mask-size: 131.5px 17.2px;
+  mask-size: 131.5px 17.2px;
+  -webkit-mask-position: left top;
+  mask-position: left top;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+
+  /* A tiny soft edge keeps an in-between percentage from looking cut with a
+   * knife without turning a 10% reading back into a circular cap. */
+  border-radius: 0 2px 2px 0;
+  overflow: hidden;
+}
