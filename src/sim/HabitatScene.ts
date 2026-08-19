@@ -62,6 +62,10 @@ const GLASS: VoxelId = 5;
  * a tray this smooth, and this runs inside a decision she makes several
  * times a second.
  */
+/** How much room to keep around her when the camera is following, in
+ *  voxels — a couple of body lengths, enough to see her legs work. */
+const FOLLOW_RADIUS = 6;
+
 const BODY_RING: readonly (readonly [number, number])[] = [
   [2, 0], [-2, 0], [0, 2], [0, -2],
 ];
@@ -450,7 +454,15 @@ export class HabitatScene {
        * a subject framed for the tall screen is not framed for the wide
        * one. Following her is the exception — she is the subject then, and
        * yanking the distance would throw the view off her. */
-      if (!this.following) this.frameTank();
+      /* Re-fit either way. Following used to be exempt, on the grounds that
+       * she is the subject and the distance should not be yanked — but a
+       * fixed distance is exactly what stops being right when the screen
+       * changes shape, so it re-fits on HER instead of on the tank. */
+      if (this.following) {
+        this.view?.fit(this.ant.at, FOLLOW_RADIUS, this.camera.aspect);
+      } else {
+        this.frameTank();
+      }
     });
   };
 
@@ -458,7 +470,26 @@ export class HabitatScene {
     const vv = window.visualViewport;
     const w = this.host.clientWidth || vv?.width || window.innerWidth;
     const h = this.host.clientHeight || vv?.height || window.innerHeight;
-    this.renderer.setSize(w, h, false);
+    /*
+     * `setSize(w, h)` — AND NOT `setSize(w, h, false)`.
+     *
+     * That third argument means "do not touch the canvas's CSS size", and
+     * passing it was the whole of the not-centering bug. Three.js sizes the
+     * DRAWING BUFFER to `w * pixelRatio`; with `updateStyle` off it leaves
+     * the element's CSS size alone, and this project's only canvas rule is
+     * `canvas { display: block }` — no width, no height. So the canvas laid
+     * itself out at its buffer size: on a phone at devicePixelRatio 3, three
+     * times the viewport in each direction.
+     *
+     * The render was correct the whole time. The player was seeing the
+     * top-left ninth of it, which put an ant centred in the picture off the
+     * right-hand edge of the screen — and no amount of re-fitting the camera
+     * could help, because the fit was never the thing that was wrong.
+     *
+     * Every other scene in the repo calls the two-argument form. This one
+     * was the exception, and it had no reason to be.
+     */
+    this.renderer.setSize(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
   };
@@ -472,8 +503,11 @@ export class HabitatScene {
     if (!this.view) return;
     if (on) {
       this.view.follow = () => this.ant.at;
-      /* Close enough to read her gait, which is what this lab is for. */
-      this.view.frame(this.ant.at, 14);
+      /* FITTED, not a fixed distance. Close enough to read her gait — she is
+       * about two and a half voxels long — but derived from the lens and the
+       * current aspect like every other framing here, so turning the phone
+       * while watching her keeps her the same size on screen. */
+      this.view.fit(this.ant.at, FOLLOW_RADIUS, this.camera.aspect);
     } else {
       this.view.follow = null;
       this.frameTank();
@@ -485,6 +519,10 @@ export class HabitatScene {
   /* ------------------------------------------------------------- probes */
 
   setPausedForTest(on: boolean): void { this.running = !on; }
+
+  /** The ratio the renderer is actually drawing at — capped, so a probe can
+   *  tell a cap apart from a canvas whose buffer leaked into its CSS size. */
+  rendererRatioForTest(): number { return this.renderer.getPixelRatio(); }
 
   /**
    * One step with the brain BYPASSED — a probe naming her intent directly.

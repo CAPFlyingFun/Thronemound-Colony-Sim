@@ -195,6 +195,43 @@ const landscape = await page.evaluate(() => ({
   canvasW: document.querySelector('canvas').width,
 }));
 
+/*
+ * AND THE CANVAS IS THE SIZE OF THE SCREEN — checked at a PHONE'S pixel
+ * ratio, because that is the only place this can go wrong.
+ *
+ * Reported as "still not centering" with the ant off the right-hand edge.
+ * The cause was `setSize(w, h, false)`: the third argument tells three.js
+ * not to touch the canvas's CSS size, and this project's only canvas rule
+ * is `display: block` — no width, no height. So the element laid out at its
+ * DRAWING BUFFER size, which is `w * devicePixelRatio`. At the ratio 3 of a
+ * modern phone the canvas was three times the viewport each way and the
+ * player saw the top-left ninth of a perfectly correct render.
+ *
+ * At ratio 1 it is invisible — buffer and CSS sizes agree — which is why
+ * every desktop run of this probe passed while the phone did not. So this
+ * check opens its own page at ratio 3.
+ */
+const phone = await browser.newPage({
+  viewport: { width: 402, height: 874 }, deviceScaleFactor: 3,
+});
+await phone.goto(URL, { waitUntil: 'domcontentloaded' });
+await phone.waitForFunction(() => window.habitatScene?.ready === true, null, { timeout: 200000 });
+await phone.waitForTimeout(600);
+const fit = await phone.evaluate(() => {
+  const c = document.querySelector('canvas');
+  const r = c.getBoundingClientRect();
+  return {
+    cssW: Math.round(r.width), cssH: Math.round(r.height),
+    bufW: c.width, bufH: c.height,
+    viewW: window.innerWidth, viewH: window.innerHeight,
+    dpr: window.devicePixelRatio,
+    /* The renderer's OWN ratio, which is capped for performance and is
+     * therefore the number the buffer should follow — not the device's. */
+    ratio: window.habitatScene.rendererRatioForTest(),
+  };
+});
+await phone.close();
+
 const checks = [];
 const say = (name, ok, detail) => {
   checks.push(ok);
@@ -275,6 +312,17 @@ say('and the aspect follows it', Math.abs(portrait.aspect - 430 / 932) < 0.05
 say('and the tank is re-fitted, not left framed for the old screen',
   portrait.distance > landscape.distance,
   `${landscape.distance.toFixed(0)} landscape -> ${portrait.distance.toFixed(0)} portrait`);
+
+/* THE CANVAS FILLS THE SCREEN AND NO MORE — at a phone's pixel ratio. */
+say('the canvas is displayed at the size of the viewport',
+  Math.abs(fit.cssW - fit.viewW) <= 2 && Math.abs(fit.cssH - fit.viewH) <= 2,
+  `${fit.cssW}x${fit.cssH} css against a ${fit.viewW}x${fit.viewH} viewport`);
+/* The buffer follows the RENDERER's ratio, which this scene caps at 2 — a
+ * phone at 3 renders at 2 and is displayed at 1, which is the point. What
+ * would be wrong is the buffer size leaking into the CSS size, above. */
+say('and its buffer follows the renderer ratio, capped as intended',
+  Math.abs(fit.bufW - fit.cssW * fit.ratio) <= 3 && fit.ratio <= fit.dpr,
+  `${fit.bufW}px buffer = ${fit.cssW} css x ${fit.ratio} (device dpr ${fit.dpr})`);
 
 say('nothing threw', errs.length === 0, errs.slice(0, 2).join(' | '));
 

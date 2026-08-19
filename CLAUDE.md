@@ -2,16 +2,34 @@
 
 Thronemound Colony Sim is a browser-based 3D ant colony game built with
 three.js + TypeScript + Vite, deployed to GitHub Pages and primarily tested
-on mobile landscape.
+on mobile.
 
-One queen, one island, a founding, and a colony that grows.
+THE PLAYER IS THE KEEPER, NOT THE ANT (decided 2026-08-19). You build a
+habitat, introduce a Queen and watch an autonomous colony dig, forage and
+grow. The player does not normally steer a worker, dig a tunnel by hand or
+carry anything.
+
+The direct-control island build is FROZEN, not deleted. It is still the
+whole of `IslandScene` and the `island*` modules, still playable at
+`?scene=menu` and `?scene=island`, and still the reference for how the ant's
+body works — but it is not what the game opens as any more, and it is not
+where new work goes. The colony simulator lives in `src/sim` on the voxel
+formicarium stack and is what the bare URL serves.
+
+Treat old cards, old commits and older sections of this file that assume
+"you are the queen, dig your nest" as history rather than as the plan.
 
 ---
 
 ## Trello is the living source of truth
 
 **Trello board:**
-https://trello.com/b/QJjGK6yH/thronemound-colony-sim
+https://trello.com/b/qhKcDzLi/thronemound-colony-sim
+
+The board moved (2026-08-19). The old `QJjGK6yH` board is now a DIFFERENT
+GAME — it became "Trail of Ants" and then TRADDOMIUM: Micro Battle, which
+has its own repo. Anything read there is another project's plan. If a link
+in an old card or an old instruction points at `QJjGK6yH`, it is stale.
 
 Trello is the authoritative source for CURRENT:
 
