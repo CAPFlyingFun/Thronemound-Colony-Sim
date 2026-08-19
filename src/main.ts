@@ -43,7 +43,7 @@ const host = document.getElementById('app');
  * a rig can still take an update immediately and none of them can strand one.
  */
 const island = !colonySim && ![
-  'queen', 'block', 'terrainbug', 'world', 'hex', 'dig',
+  'queen', 'block', 'terrainbug', 'world', 'hex', 'dig', 'habitat',
   'ant-sandbox', 'rail', 'pipes', 'sandbox', 'carry',
   /*
    * The pose editor is up as soon as its module is — no curtain to lift and
@@ -86,6 +86,17 @@ if (host) {
     // were taken from. See src/voxel/HexGrid.ts for why it could never be the
     // real grid.
     void import('./scenes/HexScene').then(({ HexScene }) => new HexScene(host));
+  } else if (scene === 'habitat') {
+    /*
+     * LAB 00 of the colony simulator — the formicarium, and one autonomous
+     * queen standing on voxel soil. New path; touches nothing the island
+     * build owns. See `src/sim/HabitatScene.ts`.
+     */
+    void import('./sim/HabitatScene').then(({ HabitatScene }) => {
+      const lab = new HabitatScene(host);
+      (window as unknown as { habitatScene: unknown }).habitatScene = lab;
+      void lab.start();
+    });
   } else if (scene === 'dig') {
     // The original dig room remains available explicitly as a reference rig.
     void import('./scenes/DigScene').then(({ DigScene }) => new DigScene(host));
