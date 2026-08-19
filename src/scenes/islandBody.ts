@@ -39,8 +39,7 @@ import {
   MESH_BUDGET, NOSE_REACH, RIDE, RISE_RATE, SCROLL_COOLDOWN_MS,
   SHELL_REACH, SHELL_SHARE, SOIL_DARK, SPRINT, TURN_RATE, UNDER_MM,
   senseAt, WALK_SPEED, QUEST_DEPTH_MM, SPAN_MM, SUPPORT_SHARE, TAIL_HOLD_RAD,
-  TUBE_FLOOR_SHARE, TUBE_PLUMB_MIN,
-  S_LEAN, S_RAD, S_RIGHT, S_SPOT, S_SUPPORT, S_TUBE,
+  S_LEAN, S_RAD, S_RIGHT, S_SPOT, S_SUPPORT,
 } from './islandTuning';
 
 /** One frame of her — everything it may reach, and nothing else. */
@@ -975,41 +974,6 @@ export function moveSurface(host: BodyHost, dt: number, speed: number): void {
    * degrees — real, and precisely the thing that must not be allowed to
    * argue with the scheduler that is deliberately turning her.
    */
-  /*
-   * AND A TUNNEL HAS A FLOOR, which is the one thing the soil's gradient
-   * cannot tell her.
-   *
-   * Above ground "which way is up" has a single answer. Inside a bore it
-   * has a circle of them — every point on the wall is a perfectly good
-   * surface with a perfectly good normal — so she rolls around the pipe and
-   * ends up hanging from the roof. `probe:tube` measured 374 of 900 frames
-   * upside down, walking back the way she came.
-   *
-   * The missing fact is gravity's, not geometry's: a tunnel has a floor
-   * because things fall to it. So the pull is WORLD UP WITH THE TUNNEL'S
-   * OWN DIRECTION TAKEN OUT — level in a level drift, and shrinking to
-   * nothing as the bore stands on end, which is how a plumb shaft gets
-   * climbed with no opinion from this at all. No threshold does that; the
-   * arithmetic does it by itself, and `TUBE_PLUMB_MIN` only says where the
-   * remainder stops being a direction worth normalising.
-   *
-   * ABOVE THE FOOT POLYGON, deliberately. In this exact fault her six feet
-   * are planted on the wall she should not be on, so they vote confidently
-   * for staying there — the support normal is the error agreeing with
-   * itself. Below the corner's pre-tilt, which is a turn somebody meant.
-   *
-   * ROOFED, not merely low: `enclosed` is the sensed view's own flag, so an
-   * open pit with the sky over it keeps the surface behaviour it has always
-   * had.
-   */
-  if (!attitude && host.underground) {
-    S_TUBE.set(0, 1, 0).addScaledVector(host.fwd, -host.fwd.y);
-    const across = S_TUBE.length();
-    if (across > TUBE_PLUMB_MIN) {
-      S_TUBE.divideScalar(across);
-      attitude = { toward: S_TUBE, share: TUBE_FLOOR_SHARE };
-    }
-  }
   if (!attitude && host.drive && host.footAttitude) {
     const fit = host.drive.supportNormal(S_SUPPORT, host.up);
     if (fit > 0) attitude = { toward: S_SUPPORT, share: SUPPORT_SHARE * fit };

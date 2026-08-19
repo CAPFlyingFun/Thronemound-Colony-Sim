@@ -123,48 +123,6 @@ export const PACE_NAMES = ['CRAWL', 'WALK', 'RUN'] as const;
  */
 export const SUPPORT_SHARE = 0.5;
 
-/**
- * HOW HARD THE FLOOR OF A TUNNEL PULLS HER BACK DOWN, as a share of her
- * attitude goal.
- *
- * Reported from the device: "the Queen... doesn't like to walk seamlessly
- * underground like above ground and maybe because it doesn't know what to
- * grab to, but should be obvious in a small tube." The last clause is the
- * whole diagnosis. Above ground the soil's gradient has exactly one answer
- * for which way is up. Inside a bore it has a full circle of them, all
- * equally true, so she rolls around the pipe — measured by `probe:tube`,
- * 374 of 900 frames UPSIDE DOWN on the ceiling, walking back the way she
- * came.
- *
- * What is missing is not a rail. It is gravity's opinion. A tunnel has a
- * floor because things fall to it, and nothing in a density gradient says
- * so. This is that preference, and it goes in as one more attitude hint to
- * the same `walker.settle` every other postural correction goes through —
- * NOT as a second movement system. See the note at the head of `simulate`:
- * the island once had a rail owning tunnels, a bore travel owning digging
- * and the walker owning the surface, and nearly every movement bug for a
- * week lived in the hand-offs between them rather than inside any one.
- *
- * Ranked BELOW the corner's pre-tilt, which is a deliberate turn and must
- * not be argued with, and ABOVE the foot polygon, which in this exact case
- * is the fault reinforcing itself: her six feet are planted on the wall she
- * should not be standing on, so they vote confidently for staying there.
- */
-export const TUBE_FLOOR_SHARE = 0.85;
-
-/**
- * Below this much world-up left after the tunnel's own direction is taken
- * out, the bore is too close to plumb for "down" to mean anything across
- * it, and the hint stands aside.
- *
- * It is not a special case for vertical shafts so much as the arithmetic
- * admitting where it stops: the pull is world up with the along-tunnel
- * component removed, which shrinks to nothing exactly as the tunnel stands
- * on end. A 30 mm entrance shaft is climbed with no opinion from this at
- * all, which is right — there is no floor in a chimney.
- */
-export const TUBE_PLUMB_MIN = 0.25;
-
 /*
  * SHE LEANS INTO IT — the body pitching on planted feet, which is the one
  * thing the robot rigs do that this does not.
@@ -374,7 +332,6 @@ export const S_TARGET = new THREE.Vector3();
 export const S_SPOT = new THREE.Vector3();
 export const S_LEAN = new THREE.Vector3();
 export const S_SUPPORT = new THREE.Vector3();
-export const S_TUBE = new THREE.Vector3();
 
 /**
  * The LEAST fold the tail believes while the rear feet are still crossing a
