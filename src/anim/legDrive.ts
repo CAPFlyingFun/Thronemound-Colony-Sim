@@ -508,8 +508,19 @@ export class LegDrive {
    */
   readonly scale: number;
 
-  constructor(setup: LegSetup[], scale = 1) {
+  /**
+   * How far above its home a foot may look for ground, in world units — the
+   * guessed fold limit and her own back, whichever is tighter. See
+   * `REACH_UP_MM` and the ceiling note beneath it.
+   */
+  readonly reachUpWu: number;
+
+  constructor(setup: LegSetup[], scale = 1, bodyTopWu = 0) {
     this.scale = scale;
+    /* Zero means "she has not loaded, so no opinion" — see
+     * `QueenModel.bodyTopAboveSole`. Only a real measurement may tighten. */
+    const guessed = (REACH_UP_MM * scale) / MM;
+    this.reachUpWu = bodyTopWu > 0 ? Math.min(guessed, bodyTopWu) : guessed;
     for (const leg of setup) {
       const spare = ((REACH_DOWN_MM[leg.slot] ?? 1) * scale) / MM;
       this.legs.push({
@@ -724,7 +735,7 @@ export class LegDrive {
     const ahead = DEST_AHEAD.copy(home)
       .addScaledVector(DEST_DIR, speed > 1e-9 ? radius : 0);
     return ground.nearest(
-      ahead, body.up, leg.down, (REACH_UP_MM * this.scale) / MM,
+      ahead, body.up, leg.down, this.reachUpWu,
     ) !== null;
   }
 
@@ -753,7 +764,7 @@ export class LegDrive {
     const ahead = DEST_AHEAD.copy(home)
       .addScaledVector(DEST_DIR, speed > 1e-9 ? radius : 0);
     const hit = ground.nearest(
-      ahead, body.up, leg.down, (REACH_UP_MM * this.scale) / MM,
+      ahead, body.up, leg.down, this.reachUpWu,
     );
     if (!hit) return false;
     return hit.distanceTo(leg.anchor) > radius * 0.35;
@@ -775,7 +786,7 @@ export class LegDrive {
     this.corner.reset();
     const home = new THREE.Vector3();
     const lead = (STRIDE_MM.walk * this.scale) / 2 / MM;
-    const up = (REACH_UP_MM * this.scale) / MM;
+    const up = this.reachUpWu;
     for (const leg of this.legs) {
       this.homeWorld(leg, body, home);
       const want = TRIPOD_B.includes(leg.slot)
@@ -1308,7 +1319,7 @@ export class LegDrive {
           .addScaledVector(SCRATCH_CONTACT.normal, FOOT_CLEARANCE_MM / MM)
         : (leg.crossing
           ? leg.to
-          : ground.nearest(ahead, body.up, leg.down, (REACH_UP_MM * this.scale) / MM));
+          : ground.nearest(ahead, body.up, leg.down, this.reachUpWu));
       if (!hit) {
         /*
          * Nothing to stand on. She keeps the leg raised and keeps reaching —

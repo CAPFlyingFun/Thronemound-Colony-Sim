@@ -3064,7 +3064,15 @@ export class IslandScene {
      * nothing she does changes.
      */
     const scale = CASTE_LENGTH_MM[this.queen.rig.caste] / CASTE_LENGTH_MM.queen;
-    this.drive = new LegDrive(setup, scale);
+    /*
+     * AND HER OWN BACK, as the ceiling on how high a foot may reach —
+     * asked for from the device, and measured off her bind-pose skin rather
+     * than guessed. See `LegDrive`'s note on `REACH_UP_MM`: it is taken as
+     * the TIGHTER of the two bounds, which on this rig leaves today's
+     * numbers untouched and stops a future retune from lifting her feet
+     * above her thorax.
+     */
+    this.drive = new LegDrive(setup, scale, this.queen.bodyTopAboveSole());
     /* The slow gaits, if they were asked for — see `feetAllowedUp`. */
     this.drive.adaptiveGait = this.adaptiveGait;
     /* The pace her gait fractions are judged against scales with her too:

@@ -210,6 +210,13 @@ export class QueenModel {
    * expressed as the thing the solver actually needs. See `IK_MIN_MOBILITY`.
    */
   private readonly boneMobility = new Map<string, number>();
+  /**
+   * The highest point of her BODY's skin in the bind pose, in her own frame
+   * — measured in the same sweep as the limb radii. Null until she loads.
+   * See `bodyTopAboveSole`.
+   */
+  private skinTopY: number | null = null;
+
   /** Neutral foot position and reach per leg. See `legPlan`. */
   private readonly legHome: Array<{ slot: string; home: Vec3; reach: number }> = [];
   /** Her head in her own frame. See `headOffset`. */
@@ -1100,6 +1107,7 @@ export class QueenModel {
       for (const name of names) this.limbRadius.set(name, 0);
     }
 
+    this.skinTopY = null;
     const vertex = new THREE.Vector3();
     this.root.traverse((node) => {
       const mesh = node as THREE.SkinnedMesh;
@@ -1135,6 +1143,15 @@ export class QueenModel {
         const reach = distanceToPolyline([vertex.x, vertex.y, vertex.z], spine);
         if (reach > (this.limbRadius.get(bone!.name) ?? 0)) {
           this.limbRadius.set(bone!.name, reach);
+        }
+        /*
+         * AND HOW HIGH HER BACK IS, from the same vertices, in the same
+         * bind pose. Body groups only: her antennae stand well above her
+         * thorax and her legs fold above it too, and neither is what "the
+         * top of the body" means. See `bodyTopAboveSole`.
+         */
+        if (group === 'body' || group === 'thorax' || group === 'gaster') {
+          if (this.skinTopY === null || vertex.y > this.skinTopY) this.skinTopY = vertex.y;
         }
       }
     });
@@ -1383,6 +1400,36 @@ export class QueenModel {
       ? -Math.min(...feet.map((leg) => leg.home[1]))
       : 0;
     return this.bodyRadius() * 2 + Math.max(0, sole);
+  }
+
+  /**
+   * THE TOP OF HER BACK, ABOVE THE GROUND SHE STANDS ON — static, in her
+   * own units, with no animation in it.
+   *
+   * Asked for from the device, as the bound on how high a foot may reach:
+   * "should measure the skin from the top to the ground with no animations
+   * (Static) and that is the max it can reach as most ants keep their feet
+   * below their body so they don't lose their balance."
+   *
+   * Which is the right shape for the rule as well as the right number. A
+   * foot planted above her own back is a leg holding her up from over the
+   * top, and nothing about an ant does that.
+   *
+   * OFF THE SKIN, not off `bodyRadius`. `standingHeight` above approximates
+   * the same thing as the body tube doubled, which is honest for a tunnel
+   * bore and too rough for this: the tube is the WIDEST the body gets, and
+   * her back is not a cylinder. This walks the actual vertices in the bind
+   * pose — body, thorax and gaster only, because her antennae stand higher
+   * than her back and are not what anybody means by the top of the body.
+   *
+   * Zero before she loads, which callers must treat as "no opinion" rather
+   * than as a limit of nought.
+   */
+  bodyTopAboveSole(): number {
+    const feet = this.legPlan();
+    if (!feet.length || this.skinTopY === null) return 0;
+    const sole = Math.min(...feet.map((leg) => leg.home[1]));
+    return Math.max(0, this.skinTopY - sole);
   }
 
   /** Her mouthparts, in world space. False when the rig has not loaded. */
