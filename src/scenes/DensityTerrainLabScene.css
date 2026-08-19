@@ -2431,7 +2431,35 @@
   top: 7.4px;
   left: 30.5px;
   height: 17.2px;
-  width: calc(var(--tm-level, 0) * 131.5px);
+  /*
+   * THE LOAD DRIVES THE STRETCHY MIDDLE, NOT THE WHOLE BAR.
+   *
+   * Reported from an iPhone: a light load drew a green coin beside the
+   * medallion instead of a short bar. The percentage was right; the shape
+   * was not.
+   *
+   * The cause is in the mask below. `mask-border` nine-slices the drawn
+   * bar, which means the concave left end and the round cap are FIXED at
+   * 2.7px and 7.33px and only the flat middle stretches. Ten of the
+   * element's pixels are therefore spoken for before any bar exists. Drive
+   * the whole width off the level and a 10% load asks two 10px-worth of
+   * caps to fit inside 13px; the spec scales them both down to fit, both
+   * ends round off at once, and what is left is a coin.
+   *
+   * So the level drives the part that can actually move. Zero is the two
+   * caps meeting (never seen — `is-loaded` hides the meter until she is
+   * carrying something) and one is the channel exactly, so a full bar still
+   * lands on the same 131.5px it always did. Every load in between keeps a
+   * true-size cap at each end with real bar between them.
+   */
+  --tm-cap-left: 2.7px;
+  --tm-cap-right: 7.33px;
+  --tm-channel: 131.5px;
+  width: calc(
+    var(--tm-cap-left) + var(--tm-cap-right)
+    + var(--tm-level, 0)
+      * (var(--tm-channel) - var(--tm-cap-left) - var(--tm-cap-right))
+  );
   box-sizing: border-box;
   /*
    * THE SHAPE COMES FROM THE ART, THE COLOUR FROM HERE.
