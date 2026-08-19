@@ -66,6 +66,7 @@
     "probe:settings": "node scripts/probe-settings.mjs",
     "probe:input": "node scripts/probe-input.mjs",
     "probe:colony": "node scripts/probe-colony.mjs",
+    "probe:tube": "node scripts/probe-tube.mjs",
     "probe:lookstuck": "node scripts/probe-lookstuck.mjs",
     "probe:worm": "node scripts/probe-worm.mjs",
     "probe:scale": "node scripts/probe-scale.mjs",
