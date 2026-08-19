@@ -42,20 +42,21 @@ const host = document.getElementById('app');
  * nothing worth protecting from a reload. They are marked loaded at once, so
  * a rig can still take an update immediately and none of them can strand one.
  */
-const island = !colonySim && ![
-  'queen', 'block', 'terrainbug', 'world', 'hex', 'dig', 'habitat',
-  'ant-sandbox', 'rail', 'pipes', 'sandbox', 'carry',
-  /*
-   * The pose editor is up as soon as its module is — no curtain to lift and
-   * nothing worth holding an update back for. The MENU is deliberately NOT
-   * here: it is the default route and it boots the island behind itself, so
-   * the gate has to stay shut until the island says so. Marking it loaded
-   * when the menu paints would hand a waiting service worker the app in the
-   * middle of the queen's megabyte, which is the exact bug the gate exists
-   * for.
-   */
-  'poseedit',
-].includes(scene ?? '');
+/*
+ * WHICH ROUTES BOOT THE ISLAND — and therefore hold the update gate open.
+ *
+ * Inverted from a list of everything-else on purpose. The island used to be
+ * the DEFAULT, so the honest way to write this was "anything not in the lab
+ * list"; now that the colony simulator is the default, the island is the
+ * special case and naming it directly means adding a lab can no longer
+ * accidentally leave a route holding the gate.
+ *
+ * `markLoaded` is what lets a waiting service worker take the app. The
+ * island earns its delay — it is a megabyte of queen behind a height field —
+ * and every other route is up as soon as its module is. See `pwa.ts`.
+ */
+const ISLAND_ROUTES = new Set(['island', 'menu']);
+const island = !colonySim && ISLAND_ROUTES.has(scene ?? '');
 if (!island) markLoaded();
 
 if (host) {
@@ -86,17 +87,6 @@ if (host) {
     // were taken from. See src/voxel/HexGrid.ts for why it could never be the
     // real grid.
     void import('./scenes/HexScene').then(({ HexScene }) => new HexScene(host));
-  } else if (scene === 'habitat') {
-    /*
-     * LAB 00 of the colony simulator — the formicarium, and one autonomous
-     * queen standing on voxel soil. New path; touches nothing the island
-     * build owns. See `src/sim/HabitatScene.ts`.
-     */
-    void import('./sim/HabitatScene').then(({ HabitatScene }) => {
-      const lab = new HabitatScene(host);
-      (window as unknown as { habitatScene: unknown }).habitatScene = lab;
-      void lab.start();
-    });
   } else if (scene === 'dig') {
     // The original dig room remains available explicitly as a reference rig.
     void import('./scenes/DigScene').then(({ DigScene }) => new DigScene(host));
@@ -147,9 +137,15 @@ if (host) {
      * exactly as it was rather than routed through the front door.
      */
     void import('./scenes/IslandScene').then(({ IslandScene }) => new IslandScene(host));
-  } else {
+  } else if (scene === 'menu') {
     /*
-     * THE DEFAULT: the menu IS the loading screen.
+     * `?scene=menu` — THE OLD FRONT DOOR, and it was the default until the
+     * colony simulator took that place. Kept whole and reachable: the island
+     * build is frozen, not deleted, and this is how a person gets to it with
+     * its menu, its save and its settings rather than dropping straight into
+     * the world at `?scene=island`.
+     *
+     * THE MENU IS THE LOADING SCREEN.
      *
      * The island's boot is long and front-loaded, and it used to be spent
      * watching a black overlay count off "Raising the island…". Now the menu
@@ -416,6 +412,26 @@ if (host) {
         if (e.key !== 'Escape' || pause?.isUp) return;
         openPause();
       });
+    });
+  } else {
+    /*
+     * THE DEFAULT IS THE COLONY SIMULATOR — the formicarium, the soil, and
+     * a Fire Ant queen living in it.
+     *
+     * This is the project split arriving at the front door. Thronemound is
+     * the keeper's game now: you build a habitat, introduce a Queen and
+     * watch. The direct-control island is frozen rather than gone, and both
+     * ways to it are still open — `?scene=menu` for its front door with the
+     * save and the settings, `?scene=island` for straight into the world,
+     * which is what forty probes navigate to and have always got.
+     *
+     * No curtain and no menu here: the lab is up as soon as its module is,
+     * so it marks the app loaded immediately. See `ISLAND_ROUTES`.
+     */
+    void import('./sim/HabitatScene').then(({ HabitatScene }) => {
+      const lab = new HabitatScene(host);
+      (window as unknown as { habitatScene: unknown }).habitatScene = lab;
+      void lab.start();
     });
   }
 }

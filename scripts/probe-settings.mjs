@@ -30,7 +30,7 @@ const browser = await chromium.launch({
 const errs = [];
 const page = await browser.newPage({ viewport: { width: 932, height: 430 } });
 page.on('pageerror', (e) => errs.push(e.message));
-await page.goto(`${URL}/`, { waitUntil: 'domcontentloaded' });
+await page.goto(`${URL}/?scene=menu`, { waitUntil: 'domcontentloaded' });
 await page.waitForSelector('.main-menu', { timeout: 120000 });
 
 const out = {};
@@ -163,7 +163,7 @@ out.escapeOneLayer = await page.evaluate(() => ({
 }));
 
 /* 7. A reload comes back wearing everything. */
-await page.goto(`${URL}/`, { waitUntil: 'domcontentloaded' });
+await page.goto(`${URL}/?scene=menu`, { waitUntil: 'domcontentloaded' });
 await page.waitForSelector('.main-menu', { timeout: 120000 });
 out.reload = await page.evaluate(
   () => JSON.parse(window.localStorage.getItem('thronemound.prefs.v1') ?? 'null'),

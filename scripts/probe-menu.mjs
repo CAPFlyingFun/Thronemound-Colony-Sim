@@ -37,7 +37,7 @@ p.on('console', (m) => { if (m.type() === 'error') errs.push(`console: ${m.text(
 const log = [];
 const ok = (what, cond) => log.push([what, cond === true]);
 
-await p.goto(`${base}/`, { waitUntil: 'domcontentloaded' });
+await p.goto(`${base}/?scene=menu`, { waitUntil: 'domcontentloaded' });
 await p.waitForSelector('.main-menu__button[data-key="onStart"]', { timeout: 120000 });
 
 /* --- 1. START is live from the first frame, with no island behind it --- */
@@ -92,7 +92,7 @@ ok('RESUME reflects whether a save exists', watch.resume === watch.hasSave);
  * words the title screen no longer shows have to be on the curtain, or the
  * silence was bought by deleting the loading screen.
  */
-await p.goto(`${base}/`, { waitUntil: 'domcontentloaded' });
+await p.goto(`${base}/?scene=menu`, { waitUntil: 'domcontentloaded' });
 await p.waitForSelector('.main-menu__button[data-key="onStart"]', { timeout: 120000 });
 await p.evaluate(() => document.querySelector(
   '.main-menu__button[data-key="onStart"]',

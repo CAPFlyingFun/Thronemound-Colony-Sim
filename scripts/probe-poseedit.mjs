@@ -45,7 +45,7 @@ page.on('pageerror', (e) => errs.push(e.message));
  * it. Loaded bare — no `?scene=` — because that is what a player opens and
  * what a home-screen PWA launches.
  */
-await page.goto(`${base}/`, { waitUntil: 'domcontentloaded' });
+await page.goto(`${base}/?scene=menu`, { waitUntil: 'domcontentloaded' });
 await page.waitForSelector('.main-menu__button', { timeout: 60000 });
 
 const menu = await page.evaluate(() => {
@@ -338,7 +338,7 @@ if (direct) fail.push('?scene=island now shows the menu — the direct route cha
 console.log(`direct : ?scene=island still goes straight in (${direct ? 'NO' : 'yes'})`);
 
 /* Back to the menu for the PIN checks. */
-await page.goto(`${base}/`, { waitUntil: 'domcontentloaded' });
+await page.goto(`${base}/?scene=menu`, { waitUntil: 'domcontentloaded' });
 await page.waitForSelector('.main-menu__button', { timeout: 60000 });
 
 /* DEV opens the keypad rather than the tools. */

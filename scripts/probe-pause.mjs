@@ -22,7 +22,13 @@
  */
 import { chromium } from 'playwright';
 
-const URL = process.env.SMOKE_URL ?? 'http://127.0.0.1:5173/';
+/*
+ * THE FRONT DOOR MOVED to `?scene=menu` — Thronemound's default route is the
+ * colony simulator now. This probe is about the island's pause/menu/save
+ * flow, so it asks for that door by name.
+ */
+const BASE = process.env.SMOKE_URL ?? 'http://127.0.0.1:5173/';
+const URL = BASE.includes('?') ? BASE : `${BASE.replace(/\/$/, '')}/?scene=menu`;
 const SAVE_KEY = 'thronemound.island.v1';
 
 const b = await chromium.launch({

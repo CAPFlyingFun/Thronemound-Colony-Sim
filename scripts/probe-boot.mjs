@@ -27,7 +27,7 @@ const errs = [];
 p.on('pageerror', (e) => errs.push(e.message));
 p.on('console', (m) => { if (m.type() === 'error') errs.push(`console: ${m.text()}`); });
 
-await p.goto(`${base}/`, { waitUntil: 'domcontentloaded' });
+await p.goto(`${base}/?scene=menu`, { waitUntil: 'domcontentloaded' });
 
 /* 1. The front door. */
 await p.waitForSelector('.main-menu__button[data-key="onStart"]', { timeout: 90000 });
