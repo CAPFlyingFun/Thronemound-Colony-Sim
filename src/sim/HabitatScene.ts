@@ -41,6 +41,7 @@ import { meshChunk } from '../voxel/mesher';
 import { AntBody } from './AntBody';
 import { AntStroll, type StrollSenses } from './antStroll';
 import { VoxelGround } from './voxelGround';
+import { ObserverCamera } from './observerCamera';
 
 /** The tank, in voxels. 96 is 48 cm across — a real formicarium footprint. */
 const SIZE = 96;
@@ -97,11 +98,21 @@ export class HabitatScene {
 
   private readonly ant = new AntBody('queen');
 
+  /** Public so a probe can ask where the view is pointing. */
+  view: ObserverCamera | null = null;
+
+  /** Is the camera locked onto her, or holding still over the tank? */
+  private following = false;
+
   private readonly stroll: AntStroll;
 
   private readonly meshes = new Map<number, THREE.Mesh>();
 
   private last = 0;
+
+  private watcher: ResizeObserver | null = null;
+
+  private reframe = 0;
 
   private running = false;
 
@@ -174,8 +185,28 @@ export class HabitatScene {
     this.camera = new THREE.PerspectiveCamera(55, 1, 0.1, 4000);
     host.appendChild(this.renderer.domElement);
     this.light();
+    this.view = new ObserverCamera(this.camera, this.renderer.domElement);
     this.resize();
-    window.addEventListener('resize', this.resize);
+    /*
+     * FOUR WAYS TO HEAR ABOUT A ROTATION, because on a phone one is not
+     * enough.
+     *
+     * Reported from an iPhone: turning the device did not recentre. The
+     * first cut listened to `window.resize` alone and read `clientWidth`
+     * immediately — but Safari fires that BEFORE the new layout has settled,
+     * so the aspect was recomputed from the old size and the tank sat half
+     * off the screen. `orientationchange` fires early too, `visualViewport`
+     * is the one that reports the real drawable area, and a `ResizeObserver`
+     * on the host catches every case none of them cover. All four land in
+     * the same deferred handler, which reads the size a frame later, once
+     * the browser has finished.
+     */
+    window.addEventListener('resize', this.onViewportChange);
+    window.addEventListener('orientationchange', this.onViewportChange);
+    window.visualViewport?.addEventListener('resize', this.onViewportChange);
+    this.watcher = new ResizeObserver(this.onViewportChange);
+    this.watcher.observe(host);
+    this.buildViewButton();
   }
 
   /**
@@ -250,14 +281,48 @@ export class HabitatScene {
     this.ant.place(mid, mid, top, 0);
     this.ant.plant(this.ground);
 
-    this.camera.position.set(mid - 26, top + 16, mid - 26);
-    this.camera.lookAt(mid, top, mid);
+    /* Framed on the whole tank, fitted to whatever shape the screen is. */
+    this.frameTank();
 
     this.ready = true;
     this.running = true;
     this.last = performance.now();
     this.renderer.setAnimationLoop(this.frame);
   }
+
+  /**
+   * ONE BUTTON, AND IT MOVES A CAMERA.
+   *
+   * The brief is firm that the UI reads simulation state and sends keeper
+   * commands but never implements simulation, so this is about as much UI as
+   * Lab 00 is entitled to: it changes what is looked at and nothing about
+   * what happens. She walks the same either way.
+   *
+   * A button rather than a double-tap because a double-tap on the glass is
+   * also the start of a drag, and an observer who wanted to swing the view
+   * should not find themselves snapped onto an ant instead.
+   */
+  private buildViewButton(): void {
+    const b = document.createElement('button');
+    b.textContent = 'WATCH HER';
+    b.style.cssText = [
+      'position:absolute', 'right:14px', 'bottom:14px', 'z-index:5',
+      'min-height:44px', 'padding:10px 16px',
+      'font:600 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace',
+      'letter-spacing:0.12em', 'color:#efe3c4',
+      'background:rgba(24,22,18,0.86)',
+      'border:1px solid rgba(247,226,176,0.34)', 'border-radius:10px',
+      'touch-action:manipulation',
+    ].join(';');
+    b.addEventListener('click', () => {
+      this.setFollow(!this.following);
+      b.textContent = this.following ? 'WATCH THE TANK' : 'WATCH HER';
+    });
+    this.host.appendChild(b);
+    this.viewButton = b;
+  }
+
+  private viewButton: HTMLButtonElement | null = null;
 
   private light(): void {
     this.scene.background = new THREE.Color(0x1a1d22);
@@ -352,16 +417,70 @@ export class HabitatScene {
     const dt = Math.min(0.05, (now - this.last) / 1000);
     this.last = now;
     if (this.running) this.tick(dt);
+    this.view?.update(dt);
     this.renderer.render(this.scene, this.camera);
   };
 
+  /**
+   * The whole habitat on screen, whichever way the phone is held.
+   *
+   * The radius is the tank's own half-diagonal, so the fit holds for a
+   * corner-on view as well as a face-on one.
+   */
+  private frameTank(): void {
+    const { size, ceilingY } = this.box;
+    const centre = new THREE.Vector3(size / 2, ceilingY * 0.4, size / 2);
+    const radius = Math.hypot(size, ceilingY, size) / 2;
+    this.view?.fit(centre, radius, this.camera.aspect);
+  }
+
+  /**
+   * Deferred by one frame, deliberately. Every rotation signal a browser
+   * offers arrives before the layout it is announcing, so measuring on the
+   * event measures the OLD screen — which is what left the tank half off the
+   * side after turning the phone.
+   */
+  private readonly onViewportChange = (): void => {
+    if (this.reframe) cancelAnimationFrame(this.reframe);
+    this.reframe = requestAnimationFrame(() => {
+      this.reframe = 0;
+      this.resize();
+      /* Re-fit rather than merely re-aspect: a portrait phone turned
+       * landscape keeps its vertical field of view and gains horizontal, so
+       * a subject framed for the tall screen is not framed for the wide
+       * one. Following her is the exception — she is the subject then, and
+       * yanking the distance would throw the view off her. */
+      if (!this.following) this.frameTank();
+    });
+  };
+
   private readonly resize = (): void => {
-    const w = this.host.clientWidth || window.innerWidth;
-    const h = this.host.clientHeight || window.innerHeight;
+    const vv = window.visualViewport;
+    const w = this.host.clientWidth || vv?.width || window.innerWidth;
+    const h = this.host.clientHeight || vv?.height || window.innerHeight;
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
   };
+
+  /**
+   * Watch her, or watch the tank. The observer's one switch, and the only
+   * thing in this lab a press does — it moves a point of view, never her.
+   */
+  setFollow(on: boolean): void {
+    this.following = on;
+    if (!this.view) return;
+    if (on) {
+      this.view.follow = () => this.ant.at;
+      /* Close enough to read her gait, which is what this lab is for. */
+      this.view.frame(this.ant.at, 14);
+    } else {
+      this.view.follow = null;
+      this.frameTank();
+    }
+  }
+
+  get followingForTest(): boolean { return this.following; }
 
   /* ------------------------------------------------------------- probes */
 
@@ -411,7 +530,12 @@ export class HabitatScene {
 
   dispose(): void {
     this.renderer.setAnimationLoop(null);
-    window.removeEventListener('resize', this.resize);
+    this.view?.dispose();
+    this.viewButton?.remove();
+    this.watcher?.disconnect();
+    window.removeEventListener('resize', this.onViewportChange);
+    window.removeEventListener('orientationchange', this.onViewportChange);
+    window.visualViewport?.removeEventListener('resize', this.onViewportChange);
     for (const mesh of this.meshes.values()) mesh.geometry.dispose();
     this.renderer.dispose();
   }
