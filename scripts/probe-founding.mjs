@@ -73,6 +73,39 @@ const out = await page.evaluate(async () => {
   let bar = { max: 0, everBetween: false };
   let last = lab.reportForTest();
 
+  /*
+   * HOW HIGH HER PLANTED FEET ARE, relative to her own body origin.
+   *
+   * The check that caught "the feet keep rising above her body while she was
+   * dropping down", and it needs its own measurement because a planted-feet
+   * COUNT cannot see it: a foot stranded on the rim above her still counts as
+   * planted. Measured on the drawn foot — the last bone with geometry — so it
+   * is what is on screen and not what the gait believes.
+   */
+  const ant = lab.ant;
+  const model = ant.model;
+  const tipOf = new Map();
+  for (const leg of ant.drive.legs) {
+    const name = model.limbTipName(leg.slot);
+    if (name) tipOf.set(leg.slot, model.root.getObjectByName(name));
+  }
+  const bellyMm = model.bellyAboveOrigin() * 5;
+  const backMm = model.bodyTopAboveSole() * 5;
+  const mk = () => ({ n: 0, sum: 0, max: -99, overBack: 0 });
+  const high = { over: mk(), under: mk() };
+  const sampleFeet = (aboveGround) => {
+    const into = aboveGround ? high.over : high.under;
+    for (const leg of ant.drive.legs) {
+      if (!leg.planted) continue;
+      const bone = tipOf.get(leg.slot);
+      if (!bone) continue;
+      const p = bone.getWorldPosition(bone.position.clone());
+      const mm = (p.y - ant.at.y) * 5;
+      into.n += 1; into.sum += mm; into.max = Math.max(into.max, mm);
+      if (mm > backMm) into.overBack += 1;
+    }
+  };
+
   for (let i = 0; i < 60 * 420; i += 1) {
     lab.tick(DT);
     const r = lab.reportForTest();
@@ -101,6 +134,7 @@ const out = await page.evaluate(async () => {
         : null;
     if (bucket) {
       bucket.planted += r.planted; bucket.groping += r.groping; bucket.n += 1;
+      sampleFeet(bucket === surface);
     }
 
     if (i % 1800 === 0) {
@@ -143,6 +177,16 @@ const out = await page.evaluate(async () => {
     excavated: end.excavated, den: end.den, entrance: lab.founding.entrance,
     overrides: lab.dug.overrides,
     bar,
+    bellyMm,
+    backMm,
+    feetOver: {
+      mean: high.over.sum / Math.max(1, high.over.n), max: high.over.max,
+      overBack: (100 * high.over.overBack) / Math.max(1, high.over.n),
+    },
+    feetUnder: {
+      mean: high.under.sum / Math.max(1, high.under.n), max: high.under.max,
+      overBack: (100 * high.under.overBack) / Math.max(1, high.under.n),
+    },
   };
 });
 
@@ -200,13 +244,58 @@ say('the round digging bar fills, and is seen part full',
 say('on the surface her feet are still perfect',
   out.surface.groping <= 0.2,
   `${out.surface.planted} planted, ${out.surface.groping} groping`);
-say('underground she keeps most of her feet down while digging',
-  out.digging.planted >= 4 && out.digging.groping <= 1.8,
-  `${out.digging.planted} planted, ${out.digging.groping} groping `
-  + '(baseline 4.54 / 1.32 — a dug floor is treads, see the file head)');
+/*
+ * A TRIPOD IS THE DESIGN, so what is asked of the count is that she keeps
+ * one — not that she keeps as many feet down as possible.
+ *
+ * The threshold used to be 4.0, and it was rewarding the wrong thing: a foot
+ * stranded on the rim above her counted as planted, so the number went DOWN
+ * (4.54 to 3.86) when the stranding was fixed, while groping went down too
+ * (1.32 to 1.23). Feet-above-the-body is measured directly below instead.
+ */
+say('underground she still carries herself on a tripod',
+  out.digging.planted >= 3.4 && out.digging.groping <= 1.8,
+  `${out.digging.planted} planted, ${out.digging.groping} groping`);
 say('and while walking her own tunnel',
   out.tunnel.planted >= 2.8 && out.tunnel.groping <= 2.3,
   `${out.tunnel.planted} planted, ${out.tunnel.groping} groping`);
+
+/*
+ * AND HER FEET STAY UNDER HER, which is the one a planted-foot count cannot
+ * see. Reported from the device: "the feet still keep rising above her body
+ * while she was dropping down."
+ *
+ * They did. `LegDrive` measures a stance foot's strain across the ground and
+ * projects the vertical out — right for an animal walking OVER terrain, wrong
+ * for one digging the floor from beneath herself: nothing horizontal moved,
+ * so no foot was ever spent, so no foot was ever picked up, and her body sank
+ * away from feet that stayed where the floor had been. Measured over her
+ * entrance shaft, before the fix: mean 3.86 mm above her body origin, worst
+ * 6.77 — against a BACK 3.17 mm high.
+ */
+console.log(`
+  her belly sits ${out.bellyMm.toFixed(2)} mm above her origin, `
+  + `her back ${out.backMm.toFixed(2)}
+`);
+/*
+ * MEASURED ON THE MEAN AND ON HOW OFTEN, not on the single worst frame.
+ *
+ * The worst frame does not discriminate: before the fix it was 6.77 mm and
+ * after it was 6.19, because one stranded foot in twenty thousand samples
+ * looks the same either way. What moved — and what the eye actually sees — is
+ * the average height of every planted foot, 3.86 mm down to 0.29, and how
+ * much of the time a foot is up over her back, which went to nothing.
+ */
+say('her planted feet stay under her body on the surface',
+  out.feetOver.mean < 0.6 && out.feetOver.overBack < 0.5,
+  `mean ${out.feetOver.mean.toFixed(2)} mm above her origin, over her back `
+  + `${out.feetOver.overBack.toFixed(2)}% of the time, worst `
+  + `${out.feetOver.max.toFixed(2)}`);
+say('and they still do while the floor drops away beneath her',
+  out.feetUnder.mean < 0.6 && out.feetUnder.overBack < 0.5,
+  `mean ${out.feetUnder.mean.toFixed(2)} mm (was 3.86), over her back `
+  + `${out.feetUnder.overBack.toFixed(2)}% of the time, worst `
+  + `${out.feetUnder.max.toFixed(2)}`);
 
 /* THE ONE REFUSAL THAT MATTERS MOST. */
 say('the glass is untouched — she cannot dig out of the tank',

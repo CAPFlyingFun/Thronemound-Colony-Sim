@@ -132,6 +132,30 @@ export const TURN_RATE = 1.6;
 export const BELLY_CLEARANCE_MM = 0.25;
 
 /**
+ * HOW FAR A PLANTED FOOT MAY RISE ABOVE ITS HOME before she picks it up
+ * again, in millimetres.
+ *
+ * Reported from the device: "the feet still keep rising above her body while
+ * she was dropping down." They were — measured over her entrance shaft, the
+ * mean planted foot stood 3.86 mm above her body origin and the worst 6.77,
+ * against a back that is 3.17 mm high. Her feet were over her own thorax.
+ *
+ * The cause is in `LegDrive.excursion`, which projects the vertical out of a
+ * stance foot's strain on purpose: the gait circle is a circle on the ground,
+ * which is right for an animal walking OVER terrain and wrong for one whose
+ * floor is being dug away underneath her. Nothing horizontal moved, so no
+ * foot was ever spent, so no foot was ever lifted.
+ *
+ * The number is her BELLY CLEARANCE, and that is not a coincidence: her leg
+ * homes sit within a hair of her belly line in the bind pose, so "no more
+ * than one clearance above home" is the same statement as "a foot may not get
+ * more than a clearance above the underside of her body". Which is what an
+ * ant looks like, and what the device asked for the first time round: "most
+ * ants keep their feet below their body so they don't lose their balance".
+ */
+export const FOOT_LIFT_MM = BELLY_CLEARANCE_MM;
+
+/**
  * How quickly her height chases the ground it is aiming at, as a time
  * constant in seconds — UP and DOWN separately.
  *
@@ -371,6 +395,8 @@ export class AntBody {
         speed: WALK_SPEED,
         yawRate: TURN_RATE,
         settle: false,
+        /* See `FOOT_LIFT_MM`. Opt-in; the frozen build passes nothing. */
+        liftAbove: FOOT_LIFT_MM / VOXEL_MM,
         /* No corners in this milestone — she has nothing to climb onto and
          * a transition she cannot finish is worse than one she never
          * starts. Wall-walking is its own milestone. */

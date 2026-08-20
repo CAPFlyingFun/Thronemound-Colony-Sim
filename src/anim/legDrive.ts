@@ -362,6 +362,43 @@ export interface DriveInput {
   speed: number;
   yawRate: number;
   /**
+   * HOW FAR A PLANTED FOOT MAY RISE ABOVE ITS HOME before it counts as
+   * spent, in world units. Optional; without it this file behaves exactly as
+   * it always has, to the digit.
+   *
+   * ## Why it exists
+   *
+   * `excursion` deliberately projects the vertical out: a stance foot's
+   * strain is measured across the ground, because the gait circle is a
+   * circle on the surface she is standing on. That is right for an animal
+   * walking OVER terrain, which is every use this file had until now.
+   *
+   * It is wrong for one whose ground is DROPPING AWAY UNDER HER. The colony
+   * sim's queen digs the floor out from beneath herself and settles as it
+   * goes; her body descends while her anchored feet stay on the world points
+   * the gait put them on. Nothing horizontal changes, so no strain accrues,
+   * so no leg ever lifts — and the feet are left standing where the floor
+   * used to be, above her. Measured while she sank her entrance shaft: the
+   * mean planted foot sat 3.86 mm above her body origin and the worst 6.77,
+   * against a BACK that is 3.17 mm high. Reported from the device as "the
+   * feet keep rising above her body while she was dropping down".
+   *
+   * ## What could be affected
+   *
+   * Nothing that does not ask for it. The term is skipped entirely when this
+   * is undefined, and no existing caller sets it — the island build, its
+   * colonists, and every sandbox construct their `DriveInput` without it.
+   * The frozen direct-control ant is bit-identical.
+   *
+   * UPWARD ONLY, and deliberately. A foot BELOW its home is the ordinary
+   * state on any descending slope — on a ramp every stance foot is a tread
+   * below where the body frame puts its home — so a symmetric limit would
+   * declare the whole tripod spent on every downhill frame and thrash the
+   * gait. What is being caught here is the one-sided case: the floor left
+   * her feet behind.
+   */
+  liftAbove?: number;
+  /**
    * Whether this drive APPLIES the spin, or only accounts for it. Default
    * true.
    *
@@ -1120,7 +1157,16 @@ export class LegDrive {
       // planted, so a foot at rest does not read as spent by accident.
       if (speed <= 1e-9) dir.copy(leg.dir);
       // Signed along the stroke: -1 just planted ahead, +1 fully spent.
-      const spent = this.excursion(leg, home, body.up).dot(dir) / radius;
+      let spent = this.excursion(leg, home, body.up).dot(dir) / radius;
+      /*
+       * AND SPENT BY BEING LEFT BEHIND, when the caller asks for it. See
+       * `DriveInput.liftAbove` — this is the whole of the change, and it
+       * cannot fire unless a caller opts in.
+       */
+      if (input.liftAbove !== undefined && input.liftAbove > 1e-9) {
+        const rise = leg.anchor.dot(body.up) - home.dot(body.up);
+        if (rise > 0) spent = Math.max(spent, rise / input.liftAbove);
+      }
       if (!spentest || spent > strain) {
         strain = spent;
         spentest = leg;

@@ -693,6 +693,26 @@ function reachable(
  * floor, so "at or below her" is the cell she is standing on and everything
  * under it.
  */
+/**
+ * THE LOWEST CELL THE CHAMBER MAY TAKE — the first one entirely above her
+ * footing, which is not always the one `Math.floor` lands on.
+ *
+ * A tunnel floor is made of PART-FULL cells, so where she stands inside a
+ * cell depends on how much of it was left. Standing on a cell cut to
+ * six tenths, `Math.floor(y)` is that cell — and hollowing from there digs
+ * away the very ground under her feet. Ceiling from just below her puts the
+ * base on the first cell that is genuinely air.
+ *
+ * Measured before this: through the chambering phase 1.74% of her planted
+ * feet were above her own BACK, with the worst at 6.19 mm — the floor
+ * dropping out from under her and her anchored feet left up on the rim. The
+ * shaft and the gallery, which had the same fault fixed at the gait, were
+ * already at 0%.
+ */
+function domeBase(y: number): number {
+  return Math.ceil(y - FILL_EPSILON);
+}
+
 function domeCells(
   at: { x: number; y: number; z: number },
   visit: (dx: number, dy: number, dz: number) => void,
@@ -716,7 +736,7 @@ function countAir(
   let air = 0;
   domeCells(at, (dx, dy, dz) => {
     const fill = senses.fillAt(
-      Math.floor(at.x) + dx, Math.floor(at.y) + dy, Math.floor(at.z) + dz,
+      Math.floor(at.x) + dx, domeBase(at.y) + dy, Math.floor(at.z) + dz,
     );
     if (fill <= FILL_EPSILON) air += 1;
   });
@@ -733,7 +753,7 @@ function nearestSolid(
     const d2 = dx * dx + dy * dy + dz * dz;
     if (d2 >= bestDistance) return;
     const x = Math.floor(at.x) + dx;
-    const y = Math.floor(at.y) + dy;
+    const y = domeBase(at.y) + dy;
     const z = Math.floor(at.z) + dz;
     if (senses.fillAt(x, y, z) <= FILL_EPSILON) return;
     best = [x, y, z];
