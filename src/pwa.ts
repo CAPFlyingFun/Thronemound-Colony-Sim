@@ -24,6 +24,28 @@ const RECHECK_MS = 30 * 60_000;
 /** When to stop waiting for a scene that never reports itself loaded. */
 const LOAD_BACKSTOP_MS = 90_000;
 
+/**
+ * And how soon after the app comes BACK that it looks again.
+ *
+ * The gap this closes, reported from the device: "playing it as the PWA, so
+ * maybe the workers are lazy and didn't update it yet as I don't see any
+ * version number yet."
+ *
+ * They were lazy, and by omission. An installed PWA resumed from the app
+ * switcher does not navigate, so `register()` never runs again and the only
+ * remaining check is the half-hourly interval — which only ticks while the
+ * app is actually open and awake. Put the phone down on Tuesday's build,
+ * pick it up on Thursday, and the first look for a new one is up to thirty
+ * minutes away. A tester who launches, glances, and closes can miss every
+ * deploy indefinitely.
+ *
+ * So the app asks whenever it becomes visible again, which is exactly the
+ * moment somebody is about to look at it. Throttled, because iOS fires
+ * `visibilitychange` for a notification shade as readily as for a relaunch,
+ * and an update check is a network request.
+ */
+const RESUME_CHECK_MS = 60_000;
+
 function prompt(onAccept: () => void): void {
   if (document.querySelector('.tm-update')) return;
   const bar = document.createElement('div');
@@ -150,6 +172,25 @@ export function registerServiceWorker(): void {
         });
         window.setTimeout(() => void registration.update(), FIRST_CHECK_MS);
         window.setInterval(() => void registration.update(), RECHECK_MS);
+        /*
+         * AND WHENEVER SHE COMES BACK TO IT. See `RESUME_CHECK_MS` — this is
+         * the one that matters for an installed app, which is resumed far
+         * more often than it is launched.
+         *
+         * `visibilitychange` rather than `focus`: a standalone PWA on iOS
+         * does not reliably fire window focus, and visibility is the event
+         * that actually tracks "on screen and being looked at".
+         */
+        let lastCheck = 0;
+        const checkOnResume = (): void => {
+          if (document.visibilityState !== 'visible') return;
+          const now = performance.now();
+          if (now - lastCheck < RESUME_CHECK_MS) return;
+          lastCheck = now;
+          void registration.update();
+        };
+        document.addEventListener('visibilitychange', checkOnResume);
+        window.addEventListener('pageshow', checkOnResume);
       })
       .catch(() => {
         // A refused registration costs offline play and nothing else. The
