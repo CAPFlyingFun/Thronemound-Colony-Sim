@@ -16,3 +16,6 @@ scratch-*.png
 # test file, and CPU contention that turns 900ms tests into 5s timeouts.
 .claude/worktrees/
 shots/
+
+# Throwaway experiment scripts — probes live as probe-*.mjs
+scripts/_*.mjs
