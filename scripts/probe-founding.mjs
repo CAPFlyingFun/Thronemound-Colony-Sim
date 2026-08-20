@@ -48,14 +48,35 @@ const browser = await chromium.launch({
   args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'],
 });
 const errs = [];
-const page = await browser.newPage({ viewport: { width: 932, height: 430 } });
+/*
+ * A FRESH BUNDLE, EVERY RUN — and this is not belt and braces.
+ *
+ * Without blocking the service worker and busting the URL, this probe once
+ * reported a confident 14/14 on a build whose simulation was in fact
+ * deadlocked after seven cells, because the page it measured was one an
+ * earlier run had cached. A probe that can silently measure yesterday's code
+ * is worse than no probe: it answers the wrong question in the same tone of
+ * voice as the right one, and the result was acted on.
+ */
+const context = await browser.newContext({
+  viewport: { width: 932, height: 430 }, serviceWorkers: 'block',
+});
+const page = await context.newPage();
 page.on('pageerror', (e) => errs.push(e.message));
 page.on('console', (m) => { if (m.type() === 'error') errs.push(m.text()); });
-await page.goto(URL, { waitUntil: 'domcontentloaded' });
+await page.goto(`${URL}${URL.includes('?') ? '&' : '?'}probe=${Date.now()}`,
+  { waitUntil: 'domcontentloaded' });
 await page.waitForFunction(() => window.habitatScene?.ready === true, null, { timeout: 200000 });
 
 const out = await page.evaluate(async () => {
   const lab = window.habitatScene;
+  /*
+   * PAUSED FIRST, AND BEFORE ANY `await`. The scene drives itself off
+   * `requestAnimationFrame` at REAL time until this call, so anything
+   * awaited above it lets the founding run for however long that takes, at
+   * whatever frame rate the machine manages — unmeasured, and different
+   * every run.
+   */
   lab.setPausedForTest(true);
 
   const DT = 1 / 60;
