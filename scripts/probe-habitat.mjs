@@ -70,8 +70,44 @@ const out = await page.evaluate(async () => {
   let outOfBox = 0;
   let rideMin = Infinity;
   let rideMax = -Infinity;
+  let bellyMin = Infinity;
+  let bellyMax = -Infinity;
   const states = new Set();
   const headings = [];
+
+  /*
+   * AND HOW FAR A PLANTED FOOT SLIDES, which is the other half of "the
+   * animation looks off".
+   *
+   * Measured on the DRAWN foot — the last bone with geometry on it, which
+   * is the thing on screen — and only across frames where that leg was
+   * planted at both ends. A stance foot is standing on the soil, so its
+   * horizontal ground speed should be nought; anything else is the ant
+   * skating, and it is invisible in a planted-feet count.
+   */
+  const drive = lab.ant.drive;
+  const model = lab.ant.model;
+  const tipOf = new Map();
+  for (const leg of drive.legs) {
+    const name = model.limbTipName(leg.slot);
+    if (name) tipOf.set(leg.slot, model.root.getObjectByName(name));
+  }
+  const wasAt = new Map();
+  const slip = { sum: 0, n: 0, max: 0 };
+  const sampleFeet = () => {
+    for (const leg of drive.legs) {
+      const bone = tipOf.get(leg.slot);
+      if (!bone) continue;
+      const p = bone.getWorldPosition(bone.position.clone());
+      const prev = wasAt.get(leg.slot);
+      if (prev && prev.planted && leg.planted) {
+        const d = Math.hypot(p.x - prev.x, p.z - prev.z) * 5;   // mm
+        slip.sum += d; slip.n += 1;
+        slip.max = Math.max(slip.max, d);
+      }
+      wasAt.set(leg.slot, { x: p.x, z: p.z, planted: leg.planted });
+    }
+  };
 
   for (let i = 0; i < STEPS; i += 1) {
     lab.tick(DT);
@@ -81,8 +117,13 @@ const out = await page.evaluate(async () => {
     moved += Math.abs(r.movedMm);
     states.add(r.state);
     headings.push(r.heading);
+    sampleFeet();
     if (r.surfaceUnder === null) offSurface += 1;
-    else { rideMin = Math.min(rideMin, r.ride); rideMax = Math.max(rideMax, r.ride); }
+    else {
+      rideMin = Math.min(rideMin, r.ride); rideMax = Math.max(rideMax, r.ride);
+      bellyMin = Math.min(bellyMin, r.bellyClearMm);
+      bellyMax = Math.max(bellyMax, r.bellyClearMm);
+    }
     /* Inside the tank, always. The panes are one cell thick at the rim. */
     if (r.at.x < 1 || r.at.z < 1 || r.at.x > bounds.size - 1
       || r.at.z > bounds.size - 1 || r.at.y > bounds.ceilingY) outOfBox += 1;
@@ -123,6 +164,10 @@ const out = await page.evaluate(async () => {
     outOfBox,
     rideMin,
     rideMax,
+    bellyMin,
+    bellyMax,
+    seat: end.seat,
+    slip: { mean: slip.sum / Math.max(1, slip.n), max: slip.max, n: slip.n },
     states: [...states],
   };
 });
@@ -273,6 +318,42 @@ say('and her swinging feet find the soil', out.meanGroping <= 1.0,
 say('and she rides a steady height over the soil',
   out.rideMax - out.rideMin < 1.2,
   `${out.rideMin.toFixed(3)} to ${out.rideMax.toFixed(3)} voxels`);
+
+/*
+ * BODY = HEIGHT. LEGS = MOTION.
+ *
+ * The seat is measured from the BOTTOM OF HER BODY, not from her feet, and
+ * this is the check that says so. Two claims, and they fail differently:
+ *
+ *   - the clearance never goes NEGATIVE — a negative one is her gaster
+ *     ploughing through the soil, which is what she did before this. Seated
+ *     on the sole plane her belly cleared the ground by 0.02 mm.
+ *   - and it does not WANDER — that is the constant-height law itself. It
+ *     is allowed to sit a little above target while the look-ahead carries
+ *     her over something, which is why the window is one-sided and loose
+ *     upward.
+ */
+say('her belly never ploughs the soil', out.bellyMin > 0.05,
+  `${out.bellyMin.toFixed(3)} mm at its lowest`);
+say('and it holds a near-constant height above it',
+  out.bellyMax - out.bellyMin < 0.5,
+  `${out.bellyMin.toFixed(3)} to ${out.bellyMax.toFixed(3)} mm, `
+  + `aiming at ${out.seat.rideMm.toFixed(3)} + ${out.seat.bellyMm.toFixed(3)}`);
+
+/*
+ * AND HER PLANTED FEET DO NOT SLIDE.
+ *
+ * The one that made this look wrong on the device. `solveFeet` takes an
+ * ANCHOR — the world point the gait planted the foot on — and this scene
+ * was not passing it, so every frame the solver re-derived the foot from
+ * the body and it crept along under her. Measured over the same walk:
+ * 0.182 mm a frame without the anchor, 0.006 with it. She travels 7 mm a
+ * second, so the unanchored feet were sliding backwards nearly twice as
+ * fast as she was walking forwards.
+ */
+say('and her planted feet stay put on the soil', out.slip.mean < 0.05,
+  `${out.slip.mean.toFixed(4)} mm a frame, worst ${out.slip.max.toFixed(3)}, `
+  + `over ${out.slip.n} stance frames`);
 say('never leaving the surface behind her', out.offSurface === 0,
   `${out.offSurface}/${out.steps} frames over nothing`);
 

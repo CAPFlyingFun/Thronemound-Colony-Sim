@@ -30,7 +30,7 @@
 
 import * as THREE from 'three';
 import {
-  MATERIALS, VoxelWorld, isSolid, materialOf, type VoxelId,
+  MATERIALS, VOXEL_MM, VoxelWorld, isSolid, materialOf, type VoxelId,
 } from '../voxel/VoxelWorld';
 import {
   RELIEF_VOXELS, habitatFill, habitatGenerator, habitatSlope,
@@ -546,10 +546,29 @@ export class HabitatScene {
     heading: number; state: string; elapsed: number;
     planted: number; groping: number; movedMm: number;
     surfaceUnder: number | null; ride: number;
+    seat: { rideMm: number; bellyMm: number; soleMm: number };
+    bellyClearMm: number | null;
   } {
     const r = this.ant.report;
     const top = this.surfaceAt(this.ant.at.x, this.ant.at.z);
+    const seat = this.ant.seatForTest();
     return {
+      seat,
+      /*
+       * THE NUMBER THE SEATING MODEL IS ABOUT: how far the lowest point of
+       * her BODY is above the soil directly under her, in millimetres. Not
+       * derivable from `ride` — that is measured to her ORIGIN, and the
+       * whole correction was that her origin is not her belly. On this rig
+       * the belly sits ABOVE the origin, so it adds.
+       *
+       * Measured against the column under her CENTRE, which is not quite
+       * what she is seated on: the look-ahead can hold her a little above
+       * it while she crests something. So this reads at or above the
+       * target, never far below it.
+       */
+      bellyClearMm: top === null
+        ? null
+        : (this.ant.at.y - top) * VOXEL_MM + seat.bellyMm,
       at: { x: this.ant.at.x, y: this.ant.at.y, z: this.ant.at.z },
       heading: this.ant.heading,
       state: this.stroll.state,

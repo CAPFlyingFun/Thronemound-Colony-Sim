@@ -217,6 +217,13 @@ export class QueenModel {
    */
   private skinTopY: number | null = null;
 
+  /**
+   * And the LOWEST point of her body's skin in the bind pose — her belly.
+   * Measured in the same sweep, from the same vertices. See
+   * `bellyAboveOrigin`.
+   */
+  private skinBottomY: number | null = null;
+
   /** Neutral foot position and reach per leg. See `legPlan`. */
   private readonly legHome: Array<{ slot: string; home: Vec3; reach: number }> = [];
   /** Her head in her own frame. See `headOffset`. */
@@ -1108,6 +1115,7 @@ export class QueenModel {
     }
 
     this.skinTopY = null;
+    this.skinBottomY = null;
     const vertex = new THREE.Vector3();
     this.root.traverse((node) => {
       const mesh = node as THREE.SkinnedMesh;
@@ -1152,6 +1160,9 @@ export class QueenModel {
          */
         if (group === 'body' || group === 'thorax' || group === 'gaster') {
           if (this.skinTopY === null || vertex.y > this.skinTopY) this.skinTopY = vertex.y;
+          if (this.skinBottomY === null || vertex.y < this.skinBottomY) {
+            this.skinBottomY = vertex.y;
+          }
         }
       }
     });
@@ -1430,6 +1441,35 @@ export class QueenModel {
     if (!feet.length || this.skinTopY === null) return 0;
     const sole = Math.min(...feet.map((leg) => leg.home[1]));
     return Math.max(0, this.skinTopY - sole);
+  }
+
+  /**
+   * WHERE THE LOWEST POINT OF HER BODY SITS relative to her origin, in her
+   * own units — static, off the bind-pose skin, with no animation in it.
+   *
+   * The number a walker needs to hold her at a constant clearance over the
+   * ground. Asked for from the device: "the height above the ground needs to
+   * be the bottom of the ant's body to ground to keep a constant height...
+   * and the legs will naturally stretch longer if it needs to."
+   *
+   * Right, and it is a different question from where her FEET rest. Seating
+   * her by the sole plane — which is what the rig's leg homes describe — ties
+   * her body to wherever her legs happen to be, so every foothold moves the
+   * whole animal. Seating her by the belly makes the body a smooth line over
+   * the terrain and leaves the legs to reach for it, which is what an ant
+   * actually looks like.
+   *
+   * Body groups only, like `bodyTopAboveSole`: the lowest vertex of a LEG is
+   * a foot, and a foot is not a belly.
+   *
+   * SIGNED, AND NOT CLAMPED. This rig's origin sits at her sole plane, so her
+   * belly is a fifth of a millimetre ABOVE it and a "how far below" reading
+   * of the same measurement is zero — which a seater cannot tell apart from
+   * an unloaded rig, and which quietly seats her a quarter-millimetre wrong.
+   * Null is the only honest "not measured".
+   */
+  bellyAboveOrigin(): number | null {
+    return this.skinBottomY;
   }
 
   /** Her mouthparts, in world space. False when the rig has not loaded. */
