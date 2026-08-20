@@ -402,6 +402,39 @@ say('and the tank is re-fitted, not left framed for the old screen',
   portrait.distance > landscape.distance,
   `${landscape.distance.toFixed(0)} landscape -> ${portrait.distance.toFixed(0)} portrait`);
 
+/*
+ * WHICH BUILD IS THIS. Asked for from the device — "I don't know which
+ * version is live" — and it is checked here rather than trusted because a
+ * stamp that quietly stops rendering is worse than none: it would read as a
+ * confident answer to the wrong question.
+ *
+ * Three claims, and the third is the one that is easy to get wrong: the
+ * label must not EAT POINTER EVENTS. The observer camera takes its drags
+ * from the canvas underneath, so an element parked in a corner without
+ * `pointer-events: none` silently swallows every gesture that starts on it.
+ */
+const stamp = await page.evaluate(() => {
+  const el = document.querySelector('.tm-build');
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  const style = getComputedStyle(el);
+  return {
+    text: el.textContent,
+    pointer: style.pointerEvents,
+    /* What the browser says is actually AT its middle — the canvas, if the
+     * label is properly transparent to input. */
+    hitTarget: document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.tagName,
+    onScreen: r.width > 0 && r.left >= 0 && r.bottom <= window.innerHeight + 1,
+  };
+});
+say('the build stamp says which version is live', stamp !== null
+  && /^v\d+\.\d+\.\d+ · /.test(stamp.text ?? ''),
+  stamp ? stamp.text : 'no .tm-build element');
+say('and it is on screen', stamp?.onScreen === true);
+say('and it does not swallow drags meant for the camera',
+  stamp?.pointer === 'none' && stamp?.hitTarget === 'CANVAS',
+  `pointer-events: ${stamp?.pointer}, hit target ${stamp?.hitTarget}`);
+
 /* THE CANVAS FILLS THE SCREEN AND NO MORE — at a phone's pixel ratio. */
 say('the canvas is displayed at the size of the viewport',
   Math.abs(fit.cssW - fit.viewW) <= 2 && Math.abs(fit.cssH - fit.viewH) <= 2,

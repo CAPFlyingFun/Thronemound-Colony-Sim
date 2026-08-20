@@ -296,6 +296,7 @@ export class HabitatScene {
     this.watcher = new ResizeObserver(this.onViewportChange);
     this.watcher.observe(host);
     this.buildViewButton();
+    this.buildStamp();
   }
 
   /**
@@ -481,6 +482,49 @@ export class HabitatScene {
   }
 
   private viewButton: HTMLButtonElement | null = null;
+
+  /**
+   * WHICH BUILD IS THIS. Small, in the corner, and it earns its pixels.
+   *
+   * Asked for from the device: "I don't know which version is live." The
+   * project has hit this before — `vite.config.ts` puts the version and the
+   * build time in as defines and its own comment says why: without them
+   * "there is no way to tell from a phone whether you are looking at the
+   * newest build or a cached one, which has already caused a 'this is still
+   * broken' report against code that was two versions old." The island menus
+   * surface them; this scene is newer and never did, so the same trap was
+   * sitting there again — and with a service worker in front of it, a stale
+   * build is the normal failure, not an exotic one.
+   *
+   * THE BUILD TIME MATTERS AS MUCH AS THE VERSION. A cached bundle carries
+   * the old version string with it, so two builds of the same version are
+   * told apart by the stamp and by nothing else.
+   *
+   * `pointer-events: none`, which is not decoration. The observer camera
+   * takes its drags from the canvas underneath, and a label sitting in a
+   * corner would silently eat every gesture that started on it — the sort of
+   * thing that gets reported as "I can't rotate the view near the bottom".
+   *
+   * Bottom LEFT, opposite the WATCH HER button, and lifted by the safe-area
+   * inset so it clears a phone's home indicator.
+   */
+  private buildStamp(): void {
+    const tag = document.createElement('div');
+    tag.className = 'tm-build';
+    tag.textContent = `v${__APP_VERSION__} · ${__BUILD_TIME__}`;
+    tag.style.cssText = [
+      'position:absolute', 'z-index:5',
+      'left:calc(12px + env(safe-area-inset-left,0px))',
+      'bottom:calc(10px + env(safe-area-inset-bottom,0px))',
+      'font:500 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace',
+      'letter-spacing:0.08em', 'color:rgba(239,227,196,0.42)',
+      'pointer-events:none', 'user-select:none',
+    ].join(';');
+    this.host.appendChild(tag);
+    this.stamp = tag;
+  }
+
+  private stamp: HTMLElement | null = null;
 
   private light(): void {
     this.scene.background = new THREE.Color(0x1a1d22);
@@ -986,6 +1030,7 @@ export class HabitatScene {
     this.renderer.setAnimationLoop(null);
     this.view?.dispose();
     this.viewButton?.remove();
+    this.stamp?.remove();
     this.watcher?.disconnect();
     window.removeEventListener('resize', this.onViewportChange);
     window.removeEventListener('orientationchange', this.onViewportChange);
