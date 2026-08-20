@@ -378,20 +378,28 @@ canvas {
 /* ------------------------------------------------------ landscape-only lock */
 
 /*
- * The game is landscape-only, and this is a pure-CSS gate with no JS state to
- * get stuck in. It covers every scene the moment a touch device turns portrait
- * and vanishes the moment it turns back, because a media query cannot forget
- * to fire the way an orientationchange listener can.
+ * A landscape gate for the FROZEN ISLAND BUILD, and for nothing else.
  *
- * Gated on `pointer: coarse` so a narrow desktop window — which nobody can
- * rotate — is never blocked by it.
+ * The colony sim plays in either orientation — it re-fits the tank on rotation
+ * and `probe:habitat` measures that in both — so gating it behind "rotate your
+ * device" was telling the player to fix a problem the game does not have.
+ *
+ * The island is a different case and keeps the gate: its HUD was designed and
+ * measured at a 932 x 430 landscape canvas, and it is frozen, so it is not
+ * going to learn portrait. `main.ts` sets `data-orient-lock` on the island
+ * routes; every other route never matches this rule at all.
+ *
+ * Still a pure-CSS gate with no JS state to get stuck in: a media query cannot
+ * forget to fire the way an orientationchange listener can. And still gated on
+ * `pointer: coarse`, so a narrow desktop window — which nobody can rotate — is
+ * never blocked by it.
  */
 .tm-orient-lock {
   display: none;
 }
 
 @media (orientation: portrait) and (pointer: coarse) {
-  .tm-orient-lock {
+  html[data-orient-lock] .tm-orient-lock {
     display: flex;
     position: fixed;
     inset: 0;

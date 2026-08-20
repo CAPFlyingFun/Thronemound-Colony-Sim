@@ -59,6 +59,21 @@ const ISLAND_ROUTES = new Set(['island', 'menu']);
 const island = !colonySim && ISLAND_ROUTES.has(scene ?? '');
 if (!island) markLoaded();
 
+/*
+ * THE LANDSCAPE GATE IS THE ISLAND'S, not the game's.
+ *
+ * The colony sim plays either way up — it re-fits the tank on rotation, and
+ * `probe:habitat` measures the canvas, the aspect and the framing in both
+ * orientations. So "ROTATE YOUR DEVICE" was asking the player to solve a
+ * problem that no longer exists, on the route that is now the front door.
+ *
+ * The frozen island keeps it: its HUD was laid out and measured at 932 x 430
+ * and it is not going to learn portrait. Set here rather than in the markup so
+ * the default route never carries it, which also means there is no flash of a
+ * gate to dismiss on the scene most people open.
+ */
+if (island) document.documentElement.setAttribute('data-orient-lock', '');
+
 if (host) {
   host.classList.add('dig-host');
   if (colonySim) {

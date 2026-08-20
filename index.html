@@ -27,10 +27,12 @@
   <body>
     <div id="app"></div>
     <!--
-      Landscape-only lock. Driven entirely by the `.tm-orient-lock` media query
-      in style.css, so it needs no JS and cannot be left showing by a scene
-      that forgot to hide it. It lives in the static markup rather than being
-      built by a scene so it is up before the first frame renders.
+      Landscape lock — FOR THE FROZEN ISLAND BUILD ONLY.
+      Driven by the `.tm-orient-lock` media query in style.css, which now also
+      requires `html[data-orient-lock]`. `main.ts` sets that attribute on the
+      island routes and nowhere else, so the colony sim never sees this and
+      needs no JS to dismiss it.
+      Still in static markup so the island has it up before its first frame.
     -->
     <div class="tm-orient-lock" aria-hidden="true">
       <div class="tm-orient-lock__inner">
