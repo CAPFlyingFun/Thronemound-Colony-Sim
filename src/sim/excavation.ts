@@ -111,12 +111,15 @@ export interface Bite {
 /**
  * How finely a part-dug cell's drawn height is stepped.
  *
- * The cell drains continuously, but re-meshing its chunk is not free and a
- * bite lasts a couple of seconds. Rounding the drawn fill to eighths gives
- * about eight rebuilds a cell instead of a hundred and twenty, and an eighth
- * of a voxel is 0.6 mm — under the width of the crumbs coming off it.
+ * The cell drains continuously, but re-meshing its chunk is NOT FREE —
+ * measured at about 124 ms a chunk, and a change dirties its neighbours too.
+ * Rounding the drawn fill to quarters gives four rebuilds a cell instead of a
+ * hundred and twenty, and a quarter of a voxel is 1.25 mm, which is about the
+ * size of the crumbs coming off it anyway.
+ *
+ * Eighths were the first cut and looked no better for twice the hitching.
  */
-export const FILL_STEPS = 8;
+export const FILL_STEPS = 4;
 
 /**
  * ONE FACE AT A TIME.

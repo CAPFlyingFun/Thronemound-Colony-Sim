@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   AntFounding, FOUNDING_DEPTH_MM, RAMP_GRADE, SEEK_SECONDS,
+  SHAFT_DEPTH_MM, SHAFT_RADIUS,
   type FoundingPose, type FoundingSenses,
 } from '../src/sim/founding';
 
@@ -17,15 +18,24 @@ class FlatSoil implements FoundingSenses {
 
   constructor(private readonly grade = 40) {}
 
+  /*
+   * FLOORED, like a real world. A first cut keyed the map on the raw numbers
+   * and the brain asks about integer CELLS while the seater asks under a
+   * fractional POSITION — so every cut was filed under "20,39,20" and looked
+   * up under "20.5,39,20.5", and the tray stayed pristine no matter how much
+   * she dug. She sank a shaft and never went down an inch.
+   */
   fillAt(x: number, y: number, z: number): number {
-    const found = this.cut.get(`${x},${y},${z}`);
+    const key = `${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`;
+    const found = this.cut.get(key);
     if (found !== undefined) return found;
-    return y < this.grade ? 1 : 0;
+    return Math.floor(y) < this.grade ? 1 : 0;
   }
 
   floorUnder(x: number, z: number, from: number): number | null {
     for (let y = Math.floor(from); y >= 0; y -= 1) {
-      if (this.fillAt(x, y, z) > 0) return y + this.fillAt(x, y, z);
+      const fill = this.fillAt(x, y, z);
+      if (fill > 0) return y + fill;
     }
     return null;
   }
@@ -36,10 +46,29 @@ class FlatSoil implements FoundingSenses {
   }
 }
 
-/** Walk her through the seeking phase so the tests start at the interesting part. */
+/** Walk her through seeking, so the tests start where she commits. */
 function commit(brain: AntFounding, pose: FoundingPose, soil: FlatSoil): void {
   for (let i = 0; i < Math.ceil(SEEK_SECONDS * 60) + 2; i += 1) {
     brain.step(1 / 60, pose, soil);
+  }
+}
+
+/**
+ * Seat her on whatever the soil now is under her — the walker's job, done by
+ * hand here, because the whole design rests on this file never doing it.
+ */
+function settle(pose: FoundingPose, soil: FlatSoil): void {
+  const floor = soil.floorUnder(pose.x, pose.z, pose.y + 2);
+  if (floor !== null) pose.y = floor;
+}
+
+/** And on through the entrance shaft, granting everything she asks for. */
+function sink(brain: AntFounding, pose: FoundingPose, soil: FlatSoil): void {
+  commit(brain, pose, soil);
+  for (let i = 0; i < 6000 && brain.state === 'shaft'; i += 1) {
+    const want = brain.step(1 / 60, pose, soil);
+    if (want.digAt) soil.grant(want.digAt, want.leave);
+    settle(pose, soil);
   }
 }
 
@@ -53,7 +82,40 @@ describe('AntFounding', () => {
     expect(early.walk).toBeGreaterThan(0);
     expect(early.digAt).toBeNull();
     commit(brain, pose, soil);
+    expect(brain.state).toBe('shaft');
+  });
+
+  /*
+   * THE ENTRANCE SHAFT. Reported from the device: at the gallery's grade she
+   * ploughed an open trench across the tray instead of going into the ground.
+   * So she sinks a hole first, straight down, under her own feet.
+   */
+  it('sinks the entrance shaft straight down, without walking anywhere', () => {
+    const soil = new FlatSoil();
+    const brain = new AntFounding();
+    const pose: FoundingPose = { x: 20.5, y: 40, z: 20.5, heading: 0 };
+    commit(brain, pose, soil);
+    expect(brain.state).toBe('shaft');
+
+    for (let i = 0; i < 6000 && brain.state === 'shaft'; i += 1) {
+      const want = brain.step(1 / 60, pose, soil);
+      /* Never a step across the tray while the shaft is going down. */
+      expect(want.walk).toBe(0);
+      if (want.digAt) {
+        /* And never above her own head, nor outside the shaft's radius. */
+        expect(want.digAt[1]).toBeLessThanOrEqual(Math.ceil(pose.y));
+        expect(Math.hypot(want.digAt[0] - 20, want.digAt[2] - 20))
+          .toBeLessThanOrEqual(SHAFT_RADIUS + 1);
+        soil.grant(want.digAt, want.leave);
+      }
+      settle(pose, soil);
+    }
     expect(brain.state).toBe('sinking');
+    /* She is in a hole, and it is about as deep as it was asked to be. */
+    expect(40 - pose.y).toBeGreaterThanOrEqual(SHAFT_DEPTH_MM / 5 - 0.6);
+    /* And she has not moved an inch across the tray to get there. */
+    expect(pose.x).toBe(20.5);
+    expect(pose.z).toBe(20.5);
   });
 
   /*
@@ -65,7 +127,7 @@ describe('AntFounding', () => {
     const soil = new FlatSoil();
     const brain = new AntFounding();
     const pose: FoundingPose = { x: 20.5, y: 40, z: 20.5, heading: 0 };
-    commit(brain, pose, soil);
+    sink(brain, pose, soil);
 
     /* Heading 0 is +z, so everything she asks for must be forward of her. */
     for (let i = 0; i < 400; i += 1) {
@@ -85,7 +147,7 @@ describe('AntFounding', () => {
     const soil = new FlatSoil();
     const brain = new AntFounding();
     const pose: FoundingPose = { x: 20.5, y: 40, z: 20.5, heading: 0 };
-    commit(brain, pose, soil);
+    sink(brain, pose, soil);
 
     const leaves = new Set<number>();
     for (let i = 0; i < 400; i += 1) {
@@ -106,7 +168,7 @@ describe('AntFounding', () => {
     const soil = new FlatSoil();
     const brain = new AntFounding();
     const pose: FoundingPose = { x: 20.5, y: 40, z: 20.5, heading: 0 };
-    commit(brain, pose, soil);
+    sink(brain, pose, soil);
     for (let i = 0; i < 400; i += 1) {
       const want = brain.step(1 / 60, pose, soil);
       if (want.digAt) expect(want.walk).toBe(0);
@@ -123,7 +185,7 @@ describe('AntFounding', () => {
     const soil = new FlatSoil();
     const brain = new AntFounding();
     const pose: FoundingPose = { x: 20.5, y: 40, z: 20.5, heading: 0 };
-    commit(brain, pose, soil);
+    sink(brain, pose, soil);
     let walked = false;
     for (let i = 0; i < 2000; i += 1) {
       const want = brain.step(1 / 60, pose, soil);
@@ -143,24 +205,37 @@ describe('AntFounding', () => {
     const soil = new FlatSoil();
     const brain = new AntFounding();
     const pose: FoundingPose = { x: 20.5, y: 40, z: 20.5, heading: 0 };
-    commit(brain, pose, soil);
+    sink(brain, pose, soil);
+    const from = pose.y;
     for (let i = 0; i < 3000; i += 1) {
       const want = brain.step(1 / 60, pose, soil);
       if (!want.digAt) break;
       soil.grant(want.digAt, want.leave);
     }
-    const here = soil.floorUnder(20, 20, 42)!;
-    const ahead = soil.floorUnder(20, 22, 42)!;
-    /* Two voxels forward should be about two grades down. */
-    expect(here - ahead).toBeGreaterThan(RAMP_GRADE * 1.2);
-    expect(here - ahead).toBeLessThan(RAMP_GRADE * 3);
+    /*
+     * Read along the GALLERY, past the shaft. The shaft bottom is three
+     * voxels below grade, so comparing it against the gallery would measure
+     * the entrance rather than the ramp.
+     */
+    const eye = pose.y + 0.5;
+    /* Both inside the cut corridor: it runs from FACE_NEAR to FACE_AHEAD
+     * ahead of her, so a column past that is a face, not a floor. */
+    const near = soil.floorUnder(20, 21, eye)!;
+    const far = soil.floorUnder(20, 22, eye)!;
+    /*
+     * Read from INSIDE the tunnel, not from the sky: the gallery is roofed,
+     * so a scan from above finds the roof and reports every column at grade.
+     * A voxel further along should be about one grade further down.
+     */
+    expect(near - far).toBeGreaterThan(RAMP_GRADE * 0.5);
+    expect(near - far).toBeLessThan(RAMP_GRADE * 3);
   });
 
   it('stops sinking once it is deep enough', () => {
     const soil = new FlatSoil();
     const brain = new AntFounding();
     const pose: FoundingPose = { x: 20.5, y: 40, z: 20.5, heading: 0 };
-    commit(brain, pose, soil);
+    sink(brain, pose, soil);
     expect(brain.state).toBe('sinking');
     pose.y = 40 - (FOUNDING_DEPTH_MM / 5) - 0.1;
     brain.step(1 / 60, pose, soil);

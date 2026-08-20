@@ -35,8 +35,10 @@ import {
 import {
   RELIEF_VOXELS, habitatFill, habitatGenerator, habitatSlope,
   type HabitatOptions,
+  habitatCornerHeight, habitatHeight,
 } from './habitatSoil';
 import { ceilingFor, isGlassCell, type BoxOptions } from '../voxel/formicarium';
+import { DRAPE_LIMIT } from '../voxel/terrain';
 import { meshChunk } from '../voxel/mesher';
 import { AntBody, LOOK_UP } from './AntBody';
 import { AntStroll, type StrollSenses } from './antStroll';
@@ -95,6 +97,9 @@ export class HabitatScene {
 
   /** How full every cell is, terrain plus whatever has been dug out of it. */
   private readonly dug: DugSoil;
+
+  /** The height field the tray was generated from. */
+  private readonly terrain: HabitatOptions;
 
   /**
    * The world as BOTH the mesher and the ant read it — one description of
@@ -196,6 +201,7 @@ export class HabitatScene {
      * which is what `surfaceFill` already answers.
      */
     const terrain: HabitatOptions = { surfaceY: SURFACE_Y, size: SIZE, seed };
+    this.terrain = terrain;
     const world = this.world;
     /*
      * HOW FULL A CELL IS — the terrain's answer for untouched soil, and the
@@ -522,7 +528,74 @@ export class HabitatScene {
     ),
     fill: (x: number, y: number, z: number): number => this.soil.fill(x, y, z),
     slope: (x: number, y: number, z: number) => this.soil.slope(x, y, z),
+    cornerHeight: (cx: number, cz: number): number => this.corner(cx, cz),
   };
+
+  /**
+   * THE HEIGHT OF THE DRAWN SHEET AT A LATTICE CORNER — reported from the
+   * device as "the faces of the terrain aren't blending".
+   *
+   * `fill` can only squash a cell flat, so a slope drawn from fills alone is
+   * a flight of level treads with a riser between each pair, and the tray
+   * reads as a checkerboard of tiles rather than as ground. Corners are
+   * SHARED: every surface cell touching this corner places its top vertex at
+   * this same height, so their tops meet along their common edges exactly and
+   * the steps disappear into one sheet. The mesher has had the hook all along
+   * (`cornerHeight`); this scene simply never gave it one.
+   *
+   * AND IT SAGS INTO A DIG. The pristine field is a fiction reconciling a
+   * height function with a lattice, and the fiction only holds while the
+   * lattice underneath still matches it: cut a trench and the sheets either
+   * side go on sloping toward ground that is not there any more, leaving a
+   * crust hanging over the hole with its underside culled — which is a hole
+   * in the world at every glancing angle. So a corner with a dug column
+   * against it is pulled down toward that column's floor.
+   *
+   * Not all the way down, though. `DRAPE_LIMIT` is a voxel and a half, which
+   * covers the rim of a shallow cutting; anything deeper is a SHAFT, and a
+   * shaft mouth should stay a crisp rim with blocky walls under it rather
+   * than a sheet plunging to its floor. That boundary is the frozen dig
+   * scene's, and it was drawn there for the same reason.
+   */
+  private corner(cx: number, cz: number): number {
+    const pristine = habitatCornerHeight(cx, cz, this.terrain);
+    /* Costs four column reads a corner and cannot fire on untouched soil. */
+    if (this.dug.overrides === 0 && this.world.excavated === 0) return pristine;
+    let h = pristine;
+    for (let dx = -1; dx <= 0; dx += 1) {
+      for (let dz = -1; dz <= 0; dz += 1) {
+        const x = cx + dx;
+        const z = cz + dz;
+        /*
+         * UNDUG COLUMNS COST ONE READ. The pristine top cell of a column
+         * that nobody has touched is still soil, and its corner cannot have
+         * sagged — so the expensive part is skipped for the whole tray
+         * except the handful of columns around the nest.
+         *
+         * It is not a micro-optimisation. Asked as a full column scan from
+         * the lid, this ran for every corner of every surface cell of every
+         * chunk rebuilt by a bite, and the simulation went from finishing a
+         * founding in under seven minutes to not finishing two minutes of it
+         * in three of wall clock.
+         */
+        const top = Math.ceil(habitatHeight(x, z, this.terrain)) - 1;
+        if (!this.world.inBounds(x, top, z)) continue;
+        if (isSolid(this.world.get(x, top, z))
+          && this.dug.fill(x, top, z) > FILL_EPSILON) continue;
+        const floor = this.surfaceAt(x, z, top);
+        if (floor === null) continue;
+        /*
+         * Clamped against the PRISTINE height, never against the running
+         * minimum: the cap is "how far the sheet may sag below where it was",
+         * and taking it off an already-sagged `h` compounds per dug column —
+         * four open shafts round one corner would pull it down four limits
+         * deep, in whatever order the loop happened to visit them.
+         */
+        h = Math.min(h, Math.max(floor, pristine - DRAPE_LIMIT));
+      }
+    }
+    return h;
+  }
 
   private soilMaterial: THREE.Material | null = null;
 

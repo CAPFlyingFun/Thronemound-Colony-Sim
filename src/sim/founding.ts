@@ -101,7 +101,9 @@ export interface FoundingIntent {
 export type FoundingState =
   /** Walking the surface, looking for somewhere to start. */
   | 'seeking'
-  /** Cutting the ramp down. */
+  /** Sinking the entrance shaft straight down, under her own feet. */
+  | 'shaft'
+  /** Cutting the gallery down and round. */
   | 'sinking'
   /** Coming round at the bottom, before the chamber. */
   | 'turning'
@@ -153,6 +155,30 @@ export const FOUNDING_DEPTH_MM = 30;
  * THE FLOOR IT DESCRIBES IS A CONE ROUND THE ENTRANCE, not a slope in front
  * of her nose — see `floorAt`.
  */
+/**
+ * HOW DEEP THE ENTRANCE SHAFT GOES before the gallery starts, in millimetres.
+ *
+ * Reported from the device, laughing: "she isn't digging straight down at
+ * first and making a trench". Quite right, and the trench was a consequence
+ * of the grade. The gallery is shallow because her front legs bound it, and a
+ * shallow ramp starting AT the surface stays above the roofline for its first
+ * twenty voxels — so instead of an ant going into the ground, you watch an
+ * ant plough an open cutting across the tray.
+ *
+ * A real founding queen sinks a shaft first, and so does this one. She digs
+ * the cells UNDER HERSELF and her body follows the floor down, which is the
+ * seater doing its ordinary job as the ground changes rather than the dig
+ * system moving her — the same relationship she has with any terrain. Card
+ * 01's rule is about her travel ACROSS the tray, and that stays hers.
+ *
+ * Three voxels is enough that the mouth is a hole with a rim rather than a
+ * ditch, and enough that the gallery below it is roofed from its first cell.
+ */
+export const SHAFT_DEPTH_MM = 15;
+
+/** How wide the shaft is, in voxels — room to stand in while she sinks it. */
+export const SHAFT_RADIUS = 1.4;
+
 export const RAMP_GRADE = 0.11;
 
 /**
@@ -300,8 +326,11 @@ export class AntFounding {
    * inside a small tank. See `SPIRAL_TURN`.
    */
   private floorAt(along: number): number {
-    return this.siteGrade - RAMP_GRADE * (this.travelled + along);
+    return this.rampTop - RAMP_GRADE * (this.travelled + along);
   }
+
+  /** Where the gallery starts — the bottom of the entrance shaft. */
+  private rampTop = 0;
 
   /** How far she has walked from the entrance, along her own path. */
   private travelled = 0;
@@ -358,6 +387,7 @@ export class AntFounding {
     this.held += dt;
     switch (this.state) {
       case 'seeking': return this.seek(pose, senses);
+      case 'shaft': return this.sinkShaft(pose, senses);
       case 'sinking': return this.sink(pose, senses);
       case 'turning': return this.turn(dt, pose);
       case 'chambering': return this.chamber(pose, senses);
@@ -386,7 +416,7 @@ export class AntFounding {
         this.site = { x: pose.x, z: pose.z };
         this.siteGrade = grade;
         this.entrance = { x: pose.x, y: grade, z: pose.z };
-        this.enter('sinking');
+        this.enter('shaft');
         return STILL;
       }
       this.held = SEEK_SECONDS / 2;
@@ -395,8 +425,65 @@ export class AntFounding {
   }
 
   /**
-   * THE RAMP. Chew the nearest solid cell in the corridor ahead and below;
-   * when the near part of it is clear, walk into what she has made.
+   * THE ENTRANCE SHAFT. Straight down, under her own feet, until the mouth is
+   * a hole rather than a ditch.
+   *
+   * SHE DOES NOT WALK AT ALL HERE. The floor drains away beneath her and she
+   * settles with it, exactly as she would on any ground that changed shape —
+   * her position across the tray never moves, which is the half of the rule
+   * that matters.
+   *
+   * The cells go FARTHEST FROM HER FIRST within each layer, so the ground
+   * directly under her middle is the last of it to go and she keeps something
+   * to stand on for as long as possible. Nearest-first hollowed out her own
+   * footing and left her balanced on the rim.
+   */
+  private sinkShaft(pose: FoundingPose, senses: FoundingSenses): FoundingIntent {
+    if (this.depthMm(pose) >= SHAFT_DEPTH_MM) {
+      /* The gallery starts from wherever the shaft actually got to. */
+      this.rampTop = pose.y;
+      this.travelled = 0;
+      this.wasAt = null;
+      this.enter('sinking');
+      return STILL;
+    }
+    const floor = this.siteGrade - SHAFT_DEPTH_MM / 5;
+    const found: Array<{ cell: Cell; leave: number; sort: number }> = [];
+    const r = Math.ceil(SHAFT_RADIUS);
+    for (let y = Math.ceil(pose.y); y >= Math.floor(floor); y -= 1) {
+      for (let dz = -r; dz <= r; dz += 1) {
+        for (let dx = -r; dx <= r; dx += 1) {
+          const out = Math.hypot(dx, dz);
+          if (out > SHAFT_RADIUS) continue;
+          const x = Math.floor(pose.x) + dx;
+          const z = Math.floor(pose.z) + dz;
+          if (senses.fillAt(x, y, z) <= FILL_EPSILON) continue;
+          /* The bottom course is cut off AT the shaft floor, so she lands on
+           * a level surface rather than on the last whole cell's lid. */
+          const leave = Math.max(0, Math.min(1, floor - y));
+          if (senses.fillAt(x, y, z) <= leave + FILL_EPSILON) continue;
+          if (!reachable(x, y, z, senses)) continue;
+          found.push({ cell: [x, y, z], leave, sort: -y * 100 - out });
+        }
+      }
+    }
+    if (found.length === 0) {
+      /* Nothing left to take and still not deep enough — she has hit
+       * something she cannot chew. Start the gallery from here. */
+      this.rampTop = pose.y;
+      this.travelled = 0;
+      this.wasAt = null;
+      this.enter('sinking');
+      return STILL;
+    }
+    found.sort((a, b) => a.sort - b.sort);
+    const wish = this.hold(found, senses);
+    return { walk: 0, turn: 0, digAt: wish.cell, leave: wish.leave };
+  }
+
+  /**
+   * THE GALLERY. Chew the nearest cell in the corridor ahead and below; when
+   * it is all cut, walk into what she has made.
    */
   private sink(pose: FoundingPose, senses: FoundingSenses): FoundingIntent {
     /*

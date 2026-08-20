@@ -94,8 +94,9 @@ const out = await page.evaluate(async () => {
     bar.max = Math.max(bar.max, r.digProgress);
     if (r.digProgress > 0.15 && r.digProgress < 0.85) bar.everBetween = true;
 
+    const UNDER = ['shaft', 'sinking', 'chambering'];
     const bucket = r.founding === 'seeking' ? surface
-      : (r.founding === 'sinking' || r.founding === 'chambering')
+      : UNDER.includes(r.founding)
         ? (r.digAt ? digging : tunnel)
         : null;
     if (bucket) {
@@ -162,7 +163,7 @@ console.log();
 
 /* THE WHOLE FLOW, in order, without a keypress in this file. */
 say('she goes through every stage of founding',
-  ['seeking', 'sinking', 'turning', 'chambering', 'sealed']
+  ['seeking', 'shaft', 'sinking', 'turning', 'chambering', 'sealed']
     .every((s) => out.states.includes(s)),
   out.states.join(' -> '));
 say('and she finishes', out.sealedAt !== null,

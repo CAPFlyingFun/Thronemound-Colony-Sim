@@ -85,6 +85,28 @@ export function habitatHeight(x: number, z: number, opts: HabitatOptions): numbe
   return opts.surfaceY + ((a * 0.6 + b * 0.4) * RELIEF_VOXELS) / 2;
 }
 
+/**
+ * The tray's height AT A LATTICE CORNER — the render sheet's real input.
+ *
+ * The same field as `habitatHeight`, and that is the point rather than an
+ * oversight: corners are SHARED. Every surface cell touching a corner reads
+ * this same value there, so neighbouring cell tops meet along their common
+ * edge exactly and the tread-and-riser pair disappears into one continuous
+ * sheet. `fill` alone can only squash a cell flat, which leaves a slope drawn
+ * as a flight of level steps — reported from the device as "the faces of the
+ * terrain aren't blending".
+ *
+ * Its own function rather than a call to `habitatHeight` at the call site,
+ * because the mesher asks for a CORNER and the height field is sampled at
+ * cell centres everywhere else; naming the distinction is what stops the two
+ * being mixed up half an axis apart.
+ */
+export function habitatCornerHeight(
+  cx: number, cz: number, opts: HabitatOptions,
+): number {
+  return habitatHeight(cx, cz, opts);
+}
+
 /** Which soil a solid cell is made of, by its depth under its own surface. */
 export function soilAt(y: number, surface: number): VoxelId {
   if (y < BEDROCK) return STONE;
