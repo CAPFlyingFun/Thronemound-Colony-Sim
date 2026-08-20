@@ -38,10 +38,14 @@ import {
 } from './habitatSoil';
 import { ceilingFor, isGlassCell, type BoxOptions } from '../voxel/formicarium';
 import { meshChunk } from '../voxel/mesher';
-import { AntBody } from './AntBody';
+import { AntBody, LOOK_UP } from './AntBody';
 import { AntStroll, type StrollSenses } from './antStroll';
 import { VoxelGround } from './voxelGround';
 import { ObserverCamera } from './observerCamera';
+import { Excavation, type Cell, type Diggable } from './excavation';
+import { DugSoil, FILL_EPSILON } from './dugSoil';
+import { AntFounding, type FoundingSenses } from './founding';
+import { DigGauge, DirtBurst } from './digGauge';
 
 /** The tank, in voxels. 96 is 48 cm across — a real formicarium footprint. */
 const SIZE = 96;
@@ -66,6 +70,14 @@ const GLASS: VoxelId = 5;
  *  voxels — a couple of body lengths, enough to see her legs work. */
 const FOLLOW_RADIUS = 6;
 
+/**
+ * How far above her origin to ask "is there soil here" — the middle of her
+ * body, in voxels. Her back is about 0.64 voxels up (`bodyTopAboveSole`), so
+ * this is chest height: low enough that a bank she cannot climb blocks her,
+ * high enough that the floor she is standing on does not.
+ */
+const BODY_MIDDLE = 0.3;
+
 const BODY_RING: readonly (readonly [number, number])[] = [
   [2, 0], [-2, 0], [0, 2], [0, -2],
 ];
@@ -80,6 +92,9 @@ export class HabitatScene {
   private readonly world: VoxelWorld;
 
   private readonly ground: VoxelGround;
+
+  /** How full every cell is, terrain plus whatever has been dug out of it. */
+  private readonly dug: DugSoil;
 
   /**
    * The world as BOTH the mesher and the ant read it — one description of
@@ -110,6 +125,23 @@ export class HabitatScene {
 
   private readonly stroll: AntStroll;
 
+  /** The dig system. The only thing here allowed to remove soil. */
+  private readonly excavate: Excavation;
+
+  /** Her founding brain — what she wants, never what she does. */
+  readonly founding: AntFounding;
+
+  /** Ant Scout's round digging bar, at the cell she is chewing. */
+  private readonly gauge = new DigGauge();
+
+  /** And the soil that comes out of it. */
+  private readonly dust = new DirtBurst();
+
+  /** Chunks whose geometry no longer matches the world. */
+  private readonly stale = new Set<number>();
+
+  private readonly rand: () => number;
+
   private readonly meshes = new Map<number, THREE.Mesh>();
 
   private last = 0;
@@ -121,6 +153,11 @@ export class HabitatScene {
   private running = false;
 
   ready = false;
+
+  /** See the seam at the head of `tick`. */
+  private foundingOn = true;
+
+  setFoundingForTest(on: boolean): void { this.foundingOn = on; }
 
   /** Seconds of simulation since START — the colony's own clock. */
   elapsed = 0;
@@ -160,14 +197,38 @@ export class HabitatScene {
      */
     const terrain: HabitatOptions = { surfaceY: SURFACE_Y, size: SIZE, seed };
     const world = this.world;
+    /*
+     * HOW FULL A CELL IS — the terrain's answer for untouched soil, and the
+     * dug store's for anything an ant has been at. One object, consulted by
+     * the mesher, by the ant's footing and by the dig system alike, so a
+     * half-eaten cell is drawn, stood on and chewed as the same shape.
+     */
+    this.dug = new DugSoil(SIZE, SIZE, (x, y, z) => (
+      world.get(x, y, z) === GLASS ? 1 : habitatFill(x, y, z, terrain)
+    ));
+    const dug = this.dug;
     this.soil = {
       get: (x, y, z) => world.get(x, y, z),
       inBounds: (x, y, z) => world.inBounds(x, y, z),
-      fill: (x, y, z) => (
-        world.get(x, y, z) === GLASS ? 1 : habitatFill(x, y, z, terrain)
-      ),
+      /*
+       * AND AN AIR CELL IS EMPTY, whatever the height field says about it.
+       * The terrain's fill is a function of position, so it keeps answering
+       * for a cell long after an ant has removed it — a dug cell would go on
+       * reporting the fraction it had when it was soil.
+       */
+      fill: (x, y, z) => (isSolid(world.get(x, y, z)) ? dug.fill(x, y, z) : 0),
+      /*
+       * AND A PART-DUG CELL IS NOT A SLOPE. `slope` is what makes the mesher
+       * blend a cell into the smooth terrain sheet around it, which is right
+       * for a hillside and wrong for the floor of a tunnel — a cut face
+       * should look cut. The sampler owns that distinction, and the mesher's
+       * own note says so: "dug soil can be part full without being surface at
+       * all."
+       */
       slope: (x, y, z) => (
-        world.get(x, y, z) === GLASS ? null : habitatSlope(x, z, terrain)
+        world.get(x, y, z) === GLASS || dug.touched(x, y, z)
+          ? null
+          : habitatSlope(x, z, terrain)
       ),
     };
     this.ground = new VoxelGround(this.soil);
@@ -182,7 +243,25 @@ export class HabitatScene {
       t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
+    this.rand = rand;
     this.stroll = new AntStroll(rand);
+    /*
+     * THE DIG SYSTEM'S VIEW OF THE WORLD: the voxel array for what is where,
+     * and the dug-fill store for how much of it is left. Assembled here
+     * rather than inside `Excavation` so the excavator stays testable against
+     * a nine-cell fake, and so nothing but this line knows the two are
+     * separate objects.
+     */
+    const diggable: Diggable = {
+      get: (x, y, z) => world.get(x, y, z),
+      inBounds: (x, y, z) => world.inBounds(x, y, z),
+      dig: (x, y, z) => world.dig(x, y, z),
+      fillOf: (x, y, z) => this.dug.fill(x, y, z),
+      setFill: (x, y, z, fill) => this.dug.setFill(x, y, z, fill),
+      clearFill: (x, y, z) => this.dug.clear(x, y, z),
+    };
+    this.excavate = new Excavation(diggable);
+    this.founding = new AntFounding(rand);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
@@ -224,28 +303,74 @@ export class HabitatScene {
    * already the leg solver's question. Two different questions, two
    * different callers, neither guessing.
    */
-  surfaceAt = (x: number, z: number): number | null => {
+  surfaceAt = (x: number, z: number, from?: number): number | null => {
     const vx = Math.floor(x);
     const vz = Math.floor(z);
     if (!this.world.inBounds(vx, 0, vz)) return null;
     /*
-     * Below the lid, so the glass ceiling is never mistaken for ground, and
-     * carrying the top cell's fill so she stands on the drawn bank rather
-     * than on the cell boundary under it.
+     * SCANNED DOWN FROM WHERE THE ASKER IS, not from the lid — and that
+     * argument is what lets an ant be underground at all.
+     *
+     * Scanning from the ceiling answers "the top of this column", which is
+     * the right question for an ant on the surface and exactly the wrong one
+     * for an ant in a tunnel: her floor is under her, and the top of her
+     * column is the roof of the burrow with the whole tray on top of it. A
+     * queen who walked into her own shaft was lifted straight back out of it.
+     *
+     * `solveFeet` has the identical argument for the identical reason — its
+     * note says a burrow makes "the ground here" depend on where you are
+     * standing — so this is the same rule applied one level up, at the body
+     * instead of at the foot.
+     *
+     * Capped at the lid so the glass ceiling is never mistaken for ground,
+     * and carrying the top cell's fill so she stands on the drawn bank
+     * rather than on the cell boundary under it.
      */
-    for (let y = Math.floor(this.box.ceilingY) - 1; y >= 0; y -= 1) {
+    const lid = Math.floor(this.box.ceilingY) - 1;
+    const top = from === undefined ? lid : Math.min(lid, Math.floor(from));
+    for (let y = top; y >= 0; y -= 1) {
       const id = this.world.get(vx, y, vz);
       if (id === GLASS || !isSolid(id)) continue;
-      return y + this.soil.fill(vx, y, vz);
+      const fill = this.soil.fill(vx, y, vz);
+      /*
+       * A CELL WITH NO SOIL IN IT IS NOT GROUND, whatever its id says.
+       *
+       * A voxel can be solid and empty at once — the terrain gives a column's
+       * top cell a fractional fill and it can land on nought, and a cell dug
+       * down to a hair keeps its material id until it is removed. Stopping at
+       * one of those reports a floor at the cell's own base with open air
+       * under it. Measured mid-tunnel: she was seated at y=40.00 standing on a
+       * cell of fill 0, with the real floor 0.9 voxels below her at 39.1, and
+       * all six feet groping for ground she was floating over.
+       */
+      if (fill <= FILL_EPSILON) continue;
+      return y + fill;
     }
     return null;
   };
 
-  /** What the brain is allowed to ask about the world. */
+  /** What the founding brain is allowed to ask. Reads only. */
+  private readonly foundingSenses: FoundingSenses = {
+    /*
+     * OUTSIDE THE WORLD IS FULL, not air. A brain that reads the void as
+     * diggable space would walk its ramp out through the end of the array;
+     * the dig system would refuse the cells, but she would stand there
+     * wanting them forever.
+     */
+    fillAt: (x, y, z) => {
+      if (!this.world.inBounds(x, y, z)) return 1;
+      if (!isSolid(this.world.get(x, y, z))) return 0;
+      return this.dug.fill(x, y, z);
+    },
+    floorUnder: (x, z, from) => this.surfaceAt(x, z, from),
+  };
+
+  /** What the stroller is allowed to ask about the world. */
   private readonly senses: StrollSenses = {
     groundAhead: (heading, probe) => {
       const x = this.ant.at.x + Math.sin(heading) * probe;
       const z = this.ant.at.z + Math.cos(heading) * probe;
+      const eye = this.ant.at.y + LOOK_UP;
       /*
        * SOMEWHERE HER WHOLE BODY FITS, not somewhere her middle does.
        *
@@ -261,15 +386,38 @@ export class HabitatScene {
        * it looks — four samples, only while she is deciding.
        */
       for (const [ox, oz] of BODY_RING) {
-        const top = this.surfaceAt(x + ox, z + oz);
+        const top = this.surfaceAt(x + ox, z + oz, eye);
         if (top === null) return false;
-        /*
-         * And ground she could actually step ONTO. A rise taller than she
-         * is reads as a wall: there is no climbing in this milestone, so
-         * walking at one would be walking into it.
-         */
-        if (top - (this.ant.at.y - 0.2) >= 1.5) return false;
       }
+      /*
+       * AND SOMEWHERE HER BODY FITS — asked as "is there soil where I would
+       * be standing", not as "is the ground ahead much higher than here".
+       *
+       * The height comparison it replaces could only work above ground. In a
+       * tunnel every reading is taken from her own eye height, so a wall and
+       * an open corridor report floors a few millimetres apart and the test
+       * waved her into the rock face. Solid-at-body-height is the same
+       * question asked directly, and it means the same thing on a bank as it
+       * does forty millimetres down.
+       */
+      /*
+       * ASKED OF `VoxelGround.solidAt`, which is the ONE test in this build
+       * that understands a part-full cell: it reports a cell drawn seven
+       * tenths full as solid for its first seven tenths and air above that.
+       *
+       * Asked instead of the voxel's ID — which is what a first cut did —
+       * every point on the tray reads as solid, because the terrain marks the
+       * top cell of every column solid and then gives it a fractional fill.
+       * She stood in the open turning circles: 4674 degrees of heading change
+       * and nought voxels travelled, permanently in the "avoiding" state,
+       * because the whole world was a wall.
+       *
+       * Sampled at her BODY's middle rather than at the floor, because that
+       * is the question: not "is the ground higher there" but "is there soil
+       * where I would be". It means the same thing on a bank as it does forty
+       * millimetres down a tunnel.
+       */
+      if (this.ground.solidAt(x, this.ant.at.y + BODY_MIDDLE, z)) return false;
       return true;
     },
   };
@@ -354,40 +502,86 @@ export class HabitatScene {
    * material in later replaces this function and nothing under it.
    */
   private build(): void {
-    const material = new THREE.MeshStandardMaterial({
+    this.soilMaterial = new THREE.MeshStandardMaterial({
       vertexColors: true, roughness: 0.95, metalness: 0,
     });
-    /* Glass reads as air to the MESHER only. */
-    const drawn = {
-      ...this.soil,
-      get: (x: number, y: number, z: number) => {
-        const id = this.world.get(x, y, z);
-        return id === GLASS ? 0 : id;
-      },
-    };
-    for (const index of this.world.allMeshableChunks()) {
-      const [cx, cy, cz] = this.world.chunkCoords(index);
-      const data = meshChunk(drawn, cx, cy, cz);
-      if (!data || data.indices.length === 0) continue;
-      const geometry = new THREE.BufferGeometry();
-      /*
-       * NO `mesh.position` OFFSET. `meshChunk` already emits WORLD-space
-       * positions — it adds `chunkX * CHUNK` itself — so translating the
-       * mesh as well put every chunk at twice its own coordinate and
-       * scattered the tray into floating slabs. `DigScene` does not offset
-       * them either; that is where this was checked.
-       */
-      geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
-      geometry.setAttribute('normal', new THREE.BufferAttribute(data.normals, 3));
-      geometry.setAttribute('color', new THREE.BufferAttribute(
-        tinted(data.colors, data.layers), 3,
-      ));
-      geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
-      const mesh = new THREE.Mesh(geometry, material);
-      this.scene.add(mesh);
-      this.meshes.set(index, mesh);
-    }
+    for (const index of this.world.allMeshableChunks()) this.remesh(index);
+    this.scene.add(this.gauge.root);
+    this.scene.add(this.dust.points);
     this.drawTank();
+  }
+
+  /** Glass reads as air to the MESHER only — the wire box draws the tank. */
+  private readonly drawn = {
+    get: (x: number, y: number, z: number): VoxelId => {
+      const id = this.world.get(x, y, z);
+      return id === GLASS ? 0 : id;
+    },
+    inBounds: (x: number, y: number, z: number): boolean => (
+      this.world.inBounds(x, y, z)
+    ),
+    fill: (x: number, y: number, z: number): number => this.soil.fill(x, y, z),
+    slope: (x: number, y: number, z: number) => this.soil.slope(x, y, z),
+  };
+
+  private soilMaterial: THREE.Material | null = null;
+
+  /**
+   * Rebuild one chunk's geometry from the world as it is now.
+   *
+   * The same path builds the tray at start and repairs it after a bite, so a
+   * dug tunnel cannot be drawn by different code from the soil around it.
+   * A chunk that ends up with no faces has its mesh removed outright rather
+   * than left holding the old triangles.
+   */
+  private remesh(index: number): void {
+    const [cx, cy, cz] = this.world.chunkCoords(index);
+    const data = meshChunk(this.drawn, cx, cy, cz);
+    const existing = this.meshes.get(index);
+    if (!data || data.indices.length === 0) {
+      if (existing) {
+        this.scene.remove(existing);
+        existing.geometry.dispose();
+        this.meshes.delete(index);
+      }
+      return;
+    }
+    const geometry = new THREE.BufferGeometry();
+    /*
+     * NO `mesh.position` OFFSET. `meshChunk` already emits WORLD-space
+     * positions — it adds `chunkX * CHUNK` itself — so translating the
+     * mesh as well put every chunk at twice its own coordinate and
+     * scattered the tray into floating slabs. `DigScene` does not offset
+     * them either; that is where this was checked.
+     */
+    geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(data.normals, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(
+      tinted(data.colors, data.layers), 3,
+    ));
+    geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
+    if (existing) {
+      existing.geometry.dispose();
+      existing.geometry = geometry;
+      return;
+    }
+    const mesh = new THREE.Mesh(geometry, this.soilMaterial!);
+    this.scene.add(mesh);
+    this.meshes.set(index, mesh);
+  }
+
+  /**
+   * Redraw whatever digging changed, once a frame.
+   *
+   * BATCHED RATHER THAN IMMEDIATE. A single bite dirties up to 27 chunks
+   * through the mesher's dependency radius, and neighbouring bites dirty most
+   * of the same ones; re-meshing at the moment of the break would rebuild the
+   * same chunk several times in a frame for nothing.
+   */
+  private repaint(): void {
+    if (this.stale.size === 0) return;
+    for (const index of this.stale) this.remesh(index);
+    this.stale.clear();
   }
 
   /** The tank's edges, so an invisible pane still reads as a boundary. */
@@ -407,11 +601,125 @@ export class HabitatScene {
   }
 
   /** One simulation step. Split out so a probe can drive it without a clock. */
+  /**
+   * ONE FRAME OF THE COLONY, in the brief's own order.
+   *
+   *     AI decides -> dig system validates -> terrain changes -> she moves
+   *
+   * The order is the design, not a detail. Digging happens BEFORE she is
+   * moved and has no say in where she ends up: the excavator removes a cell,
+   * and then the walker walks her wherever her legs can carry her, which may
+   * be into the space that just appeared or may be nowhere at all. Card 01:
+   * "Digging must NEVER directly drive ant locomotion." Nothing below writes
+   * a position.
+   */
   tick(dt: number): void {
     if (!this.ready) return;
     this.elapsed += dt;
-    const intent = this.stroll.step(dt, this.ant.heading, this.senses);
-    this.ant.step(dt, intent, this.ground, this.surfaceAt);
+
+    /*
+     * THE STROLLER ALONE, when the founding is switched off.
+     *
+     * Not a game mode — a test seam. "She stands and walks correctly on voxel
+     * soil" and "she founds a nest unaided" are two different claims about
+     * two different systems, and `probe:habitat` exists to hold the first
+     * one. With the brain running she commits to a site six seconds in and
+     * never strolls again, so that probe would be measuring the founding and
+     * reporting it as locomotion.
+     */
+    if (!this.foundingOn) {
+      this.ant.step(
+        dt, this.stroll.step(dt, this.ant.heading, this.senses),
+        this.ground, this.surfaceAt,
+      );
+      return;
+    }
+
+    /* 1. WHAT SHE WANTS. */
+    const want = this.founding.step(dt, {
+      x: this.ant.at.x, y: this.ant.at.y, z: this.ant.at.z,
+      heading: this.ant.heading,
+    }, this.foundingSenses);
+
+    /*
+     * While she is still choosing a site she walks like an ant rather than
+     * like a machine on rails — the stroller already knows to keep off the
+     * glass, and the founding brain has no business learning that too.
+     */
+    const move = this.founding.state === 'seeking'
+      ? this.stroll.step(dt, this.ant.heading, this.senses)
+      : { walk: want.walk, turn: want.turn };
+
+    /* 2. AND WHETHER SHE MAY HAVE IT. */
+    /*
+     * THE DIG SYSTEM FINISHES WHAT IT STARTS.
+     *
+     * A new wish is only taken up when the excavator is free. The brain is
+     * allowed to change its mind about what it WANTS every frame — it derives
+     * the corridor from her pose, and her pose moves — but a half-chewed cell
+     * abandoned a frame before it breaks is a cell that never breaks.
+     *
+     * That was not hypothetical. The brain drops a cell from its wish list as
+     * soon as the cell is thin enough to be finished, which is exactly one
+     * frame before the excavator would have removed it: measured, a queen dug
+     * a fifty-five-cell tunnel and removed precisely none of it, leaving a
+     * ramp of cells shaved to a fiftieth of a voxel that still counted as
+     * soil. Ownership of "when is this cell done" belongs to the thing doing
+     * the digging.
+     *
+     * An empty wish still cancels — that is the brain saying stop, which is a
+     * different statement from the brain saying dig elsewhere.
+     */
+    if (!want.digAt) this.excavate.cancel();
+    else if (!this.excavate.target) this.excavate.aim(want.digAt, want.leave);
+
+    /* 3. THE SOIL CHANGES — and only here. */
+    const working = this.excavate.target;
+    const bite = this.excavate.bite(dt);
+    /*
+     * A cell being EATEN INTO redraws as well as one that goes: the fill
+     * drains in eighths and the tunnel wall has to follow it, or the soil
+     * stays whole on screen until the instant it vanishes — which is the
+     * cube-popping-out-of-existence this was meant to replace.
+     */
+    if (bite.changed && working) this.dirty(working);
+    if (bite.broke) this.broke(bite.broke, bite.removed);
+    this.gauge.show(this.excavate.target, this.excavate.progress, this.camera);
+    this.dust.step(dt);
+
+    /* 4. AND SHE MOVES, on her own legs, knowing none of the above. */
+    this.ant.step(dt, move, this.ground, this.surfaceAt);
+
+    this.repaint();
+  }
+
+  /**
+   * A cell came out: throw its dirt and mark what has to be re-drawn.
+   *
+   * THE NEIGHBOURS TOO. A chunk's mesh is built from its own cells AND a
+   * margin of the ones around it, so removing a cell on a chunk boundary
+   * changes the faces of the chunk next door. Re-meshing only the owner
+   * leaves a soil wall standing in mid-air along the seam.
+   */
+  private broke(cell: Cell, removed: VoxelId): void {
+    this.dust.burst(cell, materialOf(removed).color, this.rand);
+    this.dirty(cell);
+  }
+
+  /**
+   * Mark a cell's geometry out of date — AND ITS NEIGHBOURS'.
+   *
+   * A chunk's mesh is built from its own cells and a margin of the ones
+   * around it, so changing a cell on a chunk boundary changes the faces of
+   * the chunk next door. Re-meshing only the owner leaves a soil wall
+   * standing in mid-air along the seam. `chunksNear` already knows the
+   * mesher's dependency radius; its own comment is about a bug of exactly
+   * this shape.
+   */
+  private dirty(cell: Cell): void {
+    for (const index of this.world.chunksNear(cell[0], cell[1], cell[2])) {
+      this.stale.add(index);
+    }
   }
 
   private readonly frame = (): void => {
@@ -548,12 +856,28 @@ export class HabitatScene {
     surfaceUnder: number | null; ride: number;
     seat: { rideMm: number; bellyMm: number; soleMm: number };
     bellyClearMm: number | null;
+    founding: string;
+    depthMm: number;
+    digAt: readonly [number, number, number] | null;
+    digProgress: number;
+    refused: string | null;
+    excavated: number;
+    den: { x: number; y: number; z: number } | null;
   } {
     const r = this.ant.report;
     const top = this.surfaceAt(this.ant.at.x, this.ant.at.z);
     const seat = this.ant.seatForTest();
     return {
       seat,
+      founding: this.founding.state,
+      depthMm: this.founding.depthMm({
+        x: this.ant.at.x, y: this.ant.at.y, z: this.ant.at.z, heading: 0,
+      }, VOXEL_MM),
+      digAt: this.excavate.target,
+      digProgress: this.excavate.progress,
+      refused: this.excavate.refused,
+      excavated: this.excavate.excavated,
+      den: this.founding.den,
       /*
        * THE NUMBER THE SEATING MODEL IS ABOUT: how far the lowest point of
        * her BODY is above the soil directly under her, in millimetres. Not
@@ -594,6 +918,9 @@ export class HabitatScene {
     window.removeEventListener('orientationchange', this.onViewportChange);
     window.visualViewport?.removeEventListener('resize', this.onViewportChange);
     for (const mesh of this.meshes.values()) mesh.geometry.dispose();
+    this.gauge.dispose();
+    this.dust.dispose();
+    this.soilMaterial?.dispose();
     this.renderer.dispose();
   }
 }

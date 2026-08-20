@@ -183,7 +183,11 @@ export class VoxelGround {
     for (let vy = Math.floor(from); vy >= 0; vy -= 1) {
       if (!this.world.inBounds(vx, vy, vz)) continue;
       if (!isSolid(this.world.get(vx, vy, vz))) continue;
-      return vy + (this.world.fill?.(vx, vy, vz) ?? 1);
+      const fill = this.world.fill?.(vx, vy, vz) ?? 1;
+      /* An empty cell is not ground even when its id is solid — see the note
+       * on `solidAt`, which already agrees: `(y - vy) < 0` is never true. */
+      if (fill <= 0) continue;
+      return vy + fill;
     }
     return null;
   }

@@ -36,6 +36,14 @@ await page.waitForFunction(() => window.habitatScene?.ready === true, null, { ti
 const out = await page.evaluate(async () => {
   const lab = window.habitatScene;
   lab.setPausedForTest(true);          // drive the clock ourselves
+  /*
+   * AND THE FOUNDING OFF. This probe is Milestone 0's — "she stands and walks
+   * correctly on voxel soil" — and with her brain running she picks a nest
+   * site six seconds in and spends the rest of the minute digging. Every
+   * number below would then be measuring the founding and calling it
+   * locomotion. `probe:founding` is where the digging is held to account.
+   */
+  lab.setFoundingForTest(false);
   const bounds = lab.boundsForTest();
 
   /*

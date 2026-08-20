@@ -56,6 +56,31 @@ import type { StrollIntent } from './antStroll';
  */
 export const WALK_SPEED = 1.4;
 
+/**
+ * WHERE THE FLOOR IS UNDER A POINT, ASKED FROM A HEIGHT.
+ *
+ * The third argument is the one that lets her go underground. Asked without
+ * it, a world answers "the top of that column" — correct on the surface and
+ * catastrophic in a burrow, where the top of her column is the roof with the
+ * whole tray sitting on it. She would be lifted out of her own tunnel.
+ *
+ * `QueenModel.solveFeet` takes the same argument for the same reason, at the
+ * foot instead of at the body. This is that rule one level up.
+ */
+export type SurfaceQuery =
+  (x: number, z: number, from?: number) => number | null;
+
+/**
+ * How far above her body origin she looks for a floor, in voxels.
+ *
+ * It has to clear the highest bank she is allowed to step onto and stay well
+ * under the roof of a tunnel she fits in — a scan that starts inside the
+ * ceiling finds the ceiling and calls it ground. Her corridor is about two
+ * and a half voxels tall and she rides near the bottom of it, so one voxel up
+ * is inside the air either way.
+ */
+export const LOOK_UP = 1;
+
 /** And how fast she comes round, in radians a second. */
 export const TURN_RATE = 1.6;
 
@@ -333,7 +358,7 @@ export class AntBody {
     dt: number,
     intent: StrollIntent,
     ground: Ground,
-    surfaceAt: (x: number, z: number) => number | null,
+    surfaceAt: SurfaceQuery,
   ): void {
     if (!this.ready || !this.drive) return;
 
@@ -388,7 +413,7 @@ export class AntBody {
       headPitch: 0,
     });
     this.model.solveFeet(
-      (x, z) => surfaceAt(x, z) ?? this.aim ?? this.at.y - this.ride,
+      (x, z, y) => surfaceAt(x, z, y + LOOK_UP) ?? this.aim ?? this.at.y - this.ride,
       FOOT_CLEARANCE_MM / VOXEL_MM,
       /*
        * THE LEG BAND, off her LEG REACH — and the old value was worse than
@@ -441,29 +466,46 @@ export class AntBody {
    *    this milestone, so "no ground under me" is a situation to stay put
    *    in rather than to fall through.
    */
-  private seat(dt: number, surfaceAt: (x: number, z: number) => number | null): void {
+  private seat(dt: number, surfaceAt: SurfaceQuery): void {
     const lead = AHEAD_MM / VOXEL_MM;
     const radius = LOOK_RADIUS_MM / VOXEL_MM;
     const cx = this.at.x + this.forward.x * lead;
     const cz = this.at.z + this.forward.z * lead;
 
-    const local = surfaceAt(this.at.x, this.at.z);
+    const eye = this.at.y + LOOK_UP;
+    const local = surfaceAt(this.at.x, this.at.z, eye);
     if (local === null) return;
 
     let ahead = local;
     for (const [ox, oz] of LOOK_RING) {
-      const hit = surfaceAt(cx + ox * radius, cz + oz * radius);
-      if (hit !== null && hit > ahead) ahead = hit;
+      const hit = surfaceAt(cx + ox * radius, cz + oz * radius, eye);
+      if (hit === null) continue;
+      /*
+       * A WALL IS NOT GROUND AHEAD, and this line is the difference between
+       * a queen who can walk down her own tunnel and one who cannot.
+       *
+       * The look-ahead exists to lift her belly over what is coming. It was
+       * written on the surface, where every sample in the disc is soil she
+       * might walk onto. Underground, the disc is three millimetres wide and
+       * the tunnel is about twelve, so the WALLS are always in it — and a
+       * wall reads as ground a whole voxel higher than the floor. She was
+       * lifted by her entire spare leg reach at every step of the descent,
+       * permanently, and then had nothing left to reach the floor with.
+       * Measured: about 1.5 of 6 feet groping the whole way down, and it did
+       * not care about the ramp's grade or the tunnel's width — because it
+       * was never about either.
+       *
+       * A rise she could not follow anyway is therefore IGNORED rather than
+       * clamped. She is not going to step onto it: the stroller's own test
+       * refuses to walk at soil that is where her body wants to be, and her
+       * legs could not climb it if it did.
+       */
+      if (hit - local > this.liftCap) continue;
+      if (hit > ahead) ahead = hit;
     }
 
-    /*
-     * ANTICIPATION, CAPPED BY HER LEGS. She rises early for what is coming,
-     * but never further above the soil she is standing on than her spare
-     * reach can follow — past that the feet leave the ground and the ant
-     * floats, which is a worse lie than arriving at a bump a frame late.
-     * A bank taller than the cap is climbed as she reaches it, on the local
-     * soil, exactly as before.
-     */
+    /* Still capped, because the samples that survive are the ones she can
+     * follow, and the cap is what "can follow" means. */
     const top = local + Math.min(ahead - local, this.liftCap);
 
     this.aim = top;
