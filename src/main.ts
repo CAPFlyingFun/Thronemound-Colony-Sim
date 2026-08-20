@@ -443,10 +443,29 @@ if (host) {
      * No curtain and no menu here: the lab is up as soon as its module is,
      * so it marks the app loaded immediately. See `ISLAND_ROUTES`.
      */
-    void import('./sim/HabitatScene').then(({ HabitatScene }) => {
-      const lab = new HabitatScene(host);
-      (window as unknown as { habitatScene: unknown }).habitatScene = lab;
-      void lab.start();
-    });
+    /*
+     * DENSITY SOIL IS THE DEFAULT, and the voxel tray is one query parameter
+     * away at `?terrain=voxel`.
+     *
+     * Swapping the terrain under the front door is the riskiest change this
+     * project has made, so the old scene stays whole and reachable rather
+     * than being unpicked: if the density build turns out to be unplayable on
+     * a device, the revert is this line and nothing else. Both expose
+     * themselves as `habitatScene`, so every probe keeps working against
+     * whichever is serving.
+     */
+    if (params.get('terrain') === 'voxel') {
+      void import('./sim/HabitatScene').then(({ HabitatScene }) => {
+        const lab = new HabitatScene(host);
+        (window as unknown as { habitatScene: unknown }).habitatScene = lab;
+        void lab.start();
+      });
+    } else {
+      void import('./sim/DensityHabitatScene').then(({ DensityHabitatScene }) => {
+        const lab = new DensityHabitatScene(host);
+        (window as unknown as { habitatScene: unknown }).habitatScene = lab;
+        void lab.start();
+      });
+    }
   }
 }
