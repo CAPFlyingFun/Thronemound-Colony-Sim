@@ -171,10 +171,28 @@ export const FOUNDING_DEPTH_MM = 30;
  * system moving her — the same relationship she has with any terrain. Card
  * 01's rule is about her travel ACROSS the tray, and that stays hers.
  *
- * Three voxels is enough that the mouth is a hole with a rim rather than a
- * ditch, and enough that the gallery below it is roofed from its first cell.
+ * AND IT GOES THE WHOLE WAY NOW, which deletes more than it adds.
+ *
+ * There used to be a sloping gallery under it, because she cannot climb yet
+ * and I decided a tunnel therefore had to descend while she WALKED down it.
+ * Nothing ever asked for that. It was mine, and everything hard in this file
+ * came out of it: a sloping floor cut from cells is a flight of 5 mm treads
+ * under a 3 mm ant, her front foot reaches 0.81 mm below her body, so she
+ * spent the whole gallery with a third of her legs waving — and once she had
+ * to WALK from block to block, that stopped being ugly and started being a
+ * deadlock. She would stand asking to move with two feet on the ground and
+ * nothing to push against.
+ *
+ * A shaft has no slope. She digs it from a standstill, which she has always
+ * been able to do, and its floor is flat — so her footing at the bottom is
+ * the footing she has out on the open tray, where she gropes nothing at all.
+ *
+ * It is also what a founding queen actually does: nearly straight down, and
+ * a chamber at the bottom. Card 01 asks for "mostly downward to about 30 mm,
+ * turns, hollows the first chamber", and this is that, with the walking put
+ * where walking works.
  */
-export const SHAFT_DEPTH_MM = 15;
+export const SHAFT_DEPTH_MM = FOUNDING_DEPTH_MM;
 
 /** How wide the shaft is, in voxels — room to stand in while she sinks it. */
 export const SHAFT_RADIUS = 1.4;
@@ -264,6 +282,45 @@ export const FLOOR_SLACK = 0.15;
  * ant does and what makes the bar mean something.
  */
 export const DIG_BEFORE_STEP = true;
+
+/**
+ * ARM IT, WALK TO IT, DIG IT, PICK ANOTHER — the loop, as asked for.
+ *
+ * "It needs to act like a person controlling it. Walk to a square, dig it,
+ * move forward or any direction once it picks a new location so like arm it,
+ * move to it, dig. Pick new target (arm the location) walk to it, dig, etc."
+ *
+ * The piece that description names and that every earlier attempt lacked is
+ * the STAND SPOT. Choosing a cell and then working out frame by frame whether
+ * she was near enough and pointed the right way gave two separate tests that
+ * could both be false at once, and she froze between them. A person does not
+ * do that: they pick the block, walk to somewhere they can stand, and dig.
+ *
+ * So a job carries both — the cell, AND a place to do it from, chosen out of
+ * cells that are already open. Walking somewhere open cannot walk her into
+ * soil, which is the other thing that kept going wrong: she has no collision.
+ */
+interface DigJob {
+  cell: Cell;
+  leave: number;
+  /** Where she stands to do it. Open, floored, next to the cell. */
+  standX: number;
+  standZ: number;
+}
+
+/** Close enough to the stand spot to call it arrived, in voxels. */
+export const ARRIVED = 0.5;
+
+/** How close to square she must be before she bites, in radians. */
+export const FACE_TOLERANCE = 0.15;
+
+/**
+ * How long she will spend walking to one job before giving up on it.
+ *
+ * A watchdog, not a plan. A spot she cannot actually get to must cost her a
+ * few seconds and a fresh target, never the rest of the founding.
+ */
+export const GIVE_UP_SECONDS = 5;
 
 /** How far round she comes at the bottom, in radians. */
 export const TURN_RADIANS = 1.9;
@@ -365,6 +422,15 @@ export class AntFounding {
    */
   private working: DigWish | null = null;
 
+  /** The armed job: what she digs next, and where she stands to do it. */
+  private job: DigJob | null = null;
+
+  /** Seconds spent walking to it. See `GIVE_UP_SECONDS`. */
+  private walking = 0;
+
+  /** Cells she could not get to, so she stops re-arming them. */
+  private readonly stuck = new Set<string>();
+
   constructor(private readonly rand: () => number = () => 0.5) {}
 
   /** Depth below the grade at her chosen site, in millimetres. */
@@ -399,6 +465,9 @@ export class AntFounding {
     this.state = state;
     this.held = 0;
     this.working = null;
+    this.job = null;
+    this.walking = 0;
+    this.stuck.clear();
   }
 
   /**
@@ -440,11 +509,9 @@ export class AntFounding {
    */
   private sinkShaft(pose: FoundingPose, senses: FoundingSenses): FoundingIntent {
     if (this.depthMm(pose) >= SHAFT_DEPTH_MM) {
-      /* The gallery starts from wherever the shaft actually got to. */
-      this.rampTop = pose.y;
-      this.travelled = 0;
-      this.wasAt = null;
-      this.enter('sinking');
+      this.turnFrom = pose.heading;
+      this.turned = 0;
+      this.enter('turning');
       return STILL;
     }
     const floor = this.siteGrade - SHAFT_DEPTH_MM / 5;
@@ -469,11 +536,10 @@ export class AntFounding {
     }
     if (found.length === 0) {
       /* Nothing left to take and still not deep enough — she has hit
-       * something she cannot chew. Start the gallery from here. */
-      this.rampTop = pose.y;
-      this.travelled = 0;
-      this.wasAt = null;
-      this.enter('sinking');
+       * something she cannot chew. Make the den here. */
+      this.turnFrom = pose.heading;
+      this.turned = 0;
+      this.enter('turning');
       return STILL;
     }
     found.sort((a, b) => a.sort - b.sort);
@@ -511,6 +577,77 @@ export class AntFounding {
     /* Soil left in the corridor at all means she stands and works it. */
     const wish = this.hold(face, senses);
     return { walk: 0, turn: 0, digAt: wish.cell, leave: wish.leave };
+  }
+
+  /**
+   * RUN THE JOB. Three states, no ambiguity between them: she has no job, she
+   * is walking to one, or she is stood at one digging it.
+   *
+   * Returns null when there is nothing she can take on, which is the caller's
+   * cue that this phase of the founding is finished.
+   */
+  private doJob(
+    dt: number, pose: FoundingPose, senses: FoundingSenses, offer: DigWish[],
+  ): FoundingIntent | null {
+    /* Done, or somebody else took it, or it stopped being worth taking. */
+    if (this.job
+      && senses.fillAt(...this.job.cell) <= this.job.leave + FILL_EPSILON) {
+      this.job = null;
+    }
+
+    /* ARM. */
+    if (!this.job) {
+      this.walking = 0;
+      for (const wish of offer) {
+        if (this.stuck.has(key(wish.cell))) continue;
+        const spot = standSpotFor(wish.cell, pose, senses);
+        if (!spot) continue;
+        this.job = {
+          cell: wish.cell, leave: wish.leave, standX: spot.x, standZ: spot.z,
+        };
+        break;
+      }
+      if (!this.job) return null;
+    }
+
+    const job = this.job;
+    const away = Math.hypot(job.standX - pose.x, job.standZ - pose.z);
+
+    /* WALK TO IT. */
+    if (away > ARRIVED) {
+      this.walking += dt;
+      if (this.walking > GIVE_UP_SECONDS) {
+        this.stuck.add(key(job.cell));
+        this.job = null;
+        return STILL;
+      }
+      const off = wrap(
+        Math.atan2(job.standX - pose.x, job.standZ - pose.z) - pose.heading,
+      );
+      const turn = Math.max(-1, Math.min(1, off * 2.5));
+      /* Turn first, then go — walking while badly aimed carves an arc. */
+      return Math.abs(off) > FACE_TOLERANCE
+        ? { walk: 0, turn, digAt: null, leave: 0 }
+        : { walk: 1, turn, digAt: null, leave: 0 };
+    }
+
+    /* STAND AND DIG. She is at the spot, so squaring up is a turn on the
+     * spot and cannot carry her anywhere. */
+    this.walking = 0;
+    const cx = job.cell[0] + 0.5;
+    const cz = job.cell[2] + 0.5;
+    /* Straight down needs no facing: that is how an ant digs beneath
+     * herself, and no bearing would make it more head-on. */
+    if (Math.hypot(cx - pose.x, cz - pose.z) >= 0.9) {
+      const off = wrap(Math.atan2(cx - pose.x, cz - pose.z) - pose.heading);
+      if (Math.abs(off) > FACE_TOLERANCE) {
+        return {
+          walk: 0, turn: Math.max(-1, Math.min(1, off * 2.5)),
+          digAt: null, leave: 0,
+        };
+      }
+    }
+    return { walk: 0, turn: 0, digAt: job.cell, leave: job.leave };
   }
 
   /**
@@ -761,6 +898,50 @@ function nearestSolid(
   });
   return best;
 }
+
+/** A cell as a map key. */
+function key(cell: Cell): string {
+  return `${cell[0]},${cell[1]},${cell[2]}`;
+}
+
+/**
+ * WHERE SHE STANDS TO DIG A CELL — the piece the loop turns on.
+ *
+ * Somewhere ALREADY OPEN, with a floor, next to the block. Open because she
+ * has no collision and walking at soil walks her into it; floored because a
+ * spot with nothing under it is not somewhere she can stand; next to the
+ * block because the whole rule is that she does not dig at range.
+ *
+ * The neighbour ABOVE counts, and is the ordinary answer while she sinks the
+ * shaft: the place to stand to dig the floor is on the floor.
+ *
+ * Nearest to where she already is, so a job is usually a step rather than a
+ * journey, and she works her way across a face instead of crossing the hole
+ * for every cell.
+ */
+function standSpotFor(
+  cell: Cell, pose: FoundingPose, senses: FoundingSenses,
+): { x: number; z: number } | null {
+  let best: { x: number; z: number } | null = null;
+  let bestAway = Infinity;
+  for (const [dx, dy, dz] of STAND_AT) {
+    const nx = cell[0] + dx;
+    const ny = cell[1] + dy;
+    const nz = cell[2] + dz;
+    if (senses.fillAt(nx, ny, nz) > FILL_EPSILON) continue;
+    const floor = senses.floorUnder(nx + 0.5, nz + 0.5, ny + 0.9);
+    if (floor === null || floor < ny - 1.2) continue;
+    const x = nx + 0.5;
+    const z = nz + 0.5;
+    const away = Math.hypot(x - pose.x, z - pose.z);
+    if (away < bestAway) { bestAway = away; best = { x, z }; }
+  }
+  return best;
+}
+
+const STAND_AT: readonly Cell[] = [
+  [0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1],
+];
 
 /** An angle brought into -pi..pi. */
 function wrap(radians: number): number {
