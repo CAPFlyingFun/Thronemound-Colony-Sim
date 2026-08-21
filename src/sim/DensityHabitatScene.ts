@@ -360,6 +360,15 @@ export class DensityHabitatScene {
    */
   gradeForTest(): number { return GRADE; }
 
+  /**
+   * The colour behind the world, as a hex string — so a probe can compare the
+   * PAGE against it rather than against a constant written down twice.
+   */
+  sceneBackgroundForTest(): string | null {
+    const bg = this.scene.background;
+    return bg instanceof THREE.Color ? `#${bg.getHexString()}` : null;
+  }
+
   /** Everything a probe needs to judge "she stands and walks correctly". */
   reportForTest(): {
     at: { x: number; y: number; z: number };

@@ -1,0 +1,131 @@
+/**
+ * DOES THE GAME FILL THE SCREEN? Measured at real device viewports.
+ *
+ * Written after a portrait PWA showed a band of page background along the
+ * bottom edge. The band's colour is the tell: the page painted `#182016` (the
+ * island build's olive) where the scene behind it paints `0x1a1d22`, so any
+ * strip the canvas did not cover announced itself.
+ *
+ * Two separate things are checked, because they fail separately. GEOMETRY —
+ * the canvas covers the viewport edge to edge — is the actual fix. COLOUR —
+ * the page behind it matches the scene — is what stops a residual inset from
+ * reading as a stripe rather than as more of the same dark.
+ *
+ * A caveat this file should carry honestly: iOS's standalone-PWA viewport is
+ * not reproducible in Chromium, which is where this runs. The geometry checks
+ * here would have passed on the broken build. What they pin is that the
+ * layout is right everywhere it CAN be measured, and the colour check is what
+ * pins the symptom Joshua actually saw.
+ */
+import { chromium } from 'playwright';
+
+const PORT = process.env.PORT ?? '5177';
+const checks = [];
+const check = (name, ok, detail) => {
+  checks.push({ name, ok, detail });
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}${detail === undefined ? '' : ` — ${detail}`}`);
+};
+
+/* Portrait and landscape, at sizes real phones report. */
+const SIZES = [
+  { label: 'portrait phone', width: 402, height: 874 },
+  { label: 'landscape phone', width: 932, height: 430 },
+  { label: 'small landscape', width: 740, height: 360 },
+];
+
+const browser = await chromium.launch({
+  executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
+  args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'],
+});
+
+/* The scene's own background, so page and canvas can be compared rather than
+ * both asserted against a colour written down twice. */
+let sceneBg = null;
+
+for (const size of SIZES) {
+  const ctx = await browser.newContext({
+    viewport: { width: size.width, height: size.height },
+    deviceScaleFactor: 3, hasTouch: true, isMobile: true, serviceWorkers: 'block',
+  });
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.goto(`http://127.0.0.1:${PORT}/?cb=${Date.now()}`, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => window.habitatScene?.ready === true, null, { timeout: 240000 });
+  /* A frame for the deferred resize to land. */
+  await page.waitForTimeout(600);
+
+  const r = await page.evaluate(() => {
+    const canvas = document.querySelector('canvas');
+    const box = canvas.getBoundingClientRect();
+    const hex = (css) => {
+      const m = css.match(/\d+/g);
+      return m ? `#${m.slice(0, 3).map((n) => (+n).toString(16).padStart(2, '0')).join('')}` : css;
+    };
+    const scene = window.habitatScene.sceneBackgroundForTest?.() ?? null;
+    return {
+      viewport: { w: window.innerWidth, h: window.innerHeight },
+      canvas: {
+        top: +box.top.toFixed(1), left: +box.left.toFixed(1),
+        right: +box.right.toFixed(1), bottom: +box.bottom.toFixed(1),
+      },
+      pageBg: hex(getComputedStyle(document.documentElement).backgroundColor),
+      bodyBg: hex(getComputedStyle(document.body).backgroundColor),
+      sceneBg: scene,
+    };
+  });
+  sceneBg = r.sceneBg;
+
+  const gapBottom = r.viewport.h - r.canvas.bottom;
+  const gapRight = r.viewport.w - r.canvas.right;
+  console.log(`  ${size.label} ${size.width}x${size.height}: ${JSON.stringify(r)}`);
+  check(`${size.label}: no error`, errors.length === 0, errors.join(' | ') || 'none');
+  check(`${size.label}: canvas reaches the bottom edge`, Math.abs(gapBottom) < 1,
+    `${gapBottom.toFixed(1)} px short`);
+  check(`${size.label}: canvas reaches the right edge`, Math.abs(gapRight) < 1,
+    `${gapRight.toFixed(1)} px short`);
+  check(`${size.label}: canvas starts at the top-left`,
+    Math.abs(r.canvas.top) < 1 && Math.abs(r.canvas.left) < 1,
+    `top ${r.canvas.top}, left ${r.canvas.left}`);
+  /*
+   * THE ONE THAT WOULD HAVE CAUGHT IT. The page behind a full-bleed canvas
+   * must be the canvas's own colour, so an inset the browser imposes cannot
+   * paint itself a different shade.
+   */
+  check(`${size.label}: page matches the scene behind it`,
+    r.pageBg === r.sceneBg && r.bodyBg === r.sceneBg,
+    `page ${r.pageBg}, body ${r.bodyBg}, scene ${r.sceneBg}`);
+  await ctx.close();
+}
+
+/* The manifest is part of how the PWA lays itself out, so it is checked here
+ * rather than trusted. A landscape lock outlived the rotate gate that v0.3.7
+ * deleted, which left the installed app declaring an orientation the game no
+ * longer requires. */
+const ctx = await browser.newContext({ serviceWorkers: 'block' });
+const page = await ctx.newPage();
+/* Navigated first: a fetch from `about:blank` is cross-origin and fails, which
+ * looks exactly like a missing manifest. */
+await page.goto(`http://127.0.0.1:${PORT}/?cb=${Date.now()}`, { waitUntil: 'domcontentloaded' });
+const manifest = await page.evaluate(async () => {
+  const link = document.querySelector('link[rel="manifest"]');
+  if (!link) return null;
+  const res = await fetch(link.href);
+  return res.ok ? res.json() : null;
+}).catch(() => null);
+await ctx.close();
+
+if (manifest) {
+  check('manifest does not lock an orientation', manifest.orientation === 'any',
+    `orientation "${manifest.orientation}"`);
+  check('manifest colours match the scene',
+    manifest.background_color === sceneBg && manifest.theme_color === sceneBg,
+    `background ${manifest.background_color}, theme ${manifest.theme_color}, scene ${sceneBg}`);
+} else {
+  check('manifest readable', false, 'could not fetch manifest.webmanifest');
+}
+
+await browser.close();
+const bad = checks.filter((c) => !c.ok);
+console.log(`\n  ${checks.length - bad.length}/${checks.length} checks passed`);
+if (bad.length > 0) process.exit(1);

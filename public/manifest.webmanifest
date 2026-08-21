@@ -2,14 +2,14 @@
   "id": "/Thronemound-Colony-Sim/",
   "name": "Thronemound Colony Sim",
   "short_name": "Thronemound",
-  "description": "A living ant colony simulation: dig, climb, and drive a queen through streamed voxel soil.",
+  "description": "A living ant colony: build the habitat, introduce a queen, and watch the colony dig and grow.",
   "start_url": "./",
   "scope": "./",
   "display": "fullscreen",
   "display_override": ["fullscreen", "standalone"],
-  "orientation": "landscape",
-  "background_color": "#182016",
-  "theme_color": "#182016",
+  "orientation": "any",
+  "background_color": "#1a1d22",
+  "theme_color": "#1a1d22",
   "categories": ["games", "simulation"],
   "icons": [
     {

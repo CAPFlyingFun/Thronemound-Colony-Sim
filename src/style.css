@@ -1,12 +1,51 @@
+/*
+ * THE PAGE IS THE CANVAS'S BACKING, and it must be the canvas's COLOUR.
+ *
+ * `#182016` was the island build's olive, and it is what showed on device as a
+ * green band along the bottom of the PWA in portrait: the page painting a
+ * different colour from the scene behind it (`0x1a1d22`), in whatever strip
+ * the drawable area did not cover. A full-bleed 3D canvas should have nothing
+ * of a different colour behind it — then a stray inset reads as more of the
+ * same dark instead of as a stripe.
+ *
+ * That is the belt. The braces are `dvh` and the fixed `#app` below, which are
+ * about the inset existing at all rather than about how it looks.
+ */
 html,
 body,
 #app {
   width: 100%;
   height: 100%;
+  /*
+   * `dvh` is the DYNAMIC viewport height, and it exists because `100%` does
+   * not mean the same thing on iOS as it does elsewhere: in a standalone PWA
+   * it can resolve against the safe area rather than the screen, leaving a
+   * band along the bottom where the home indicator lives. `100%` stays as the
+   * line above for anything that does not know `dvh`.
+   */
+  height: 100dvh;
   margin: 0;
   overflow: hidden;
-  background: #182016;
+  background: #1a1d22;
   touch-action: none;
+}
+
+/*
+ * And the game surface is pinned to the VIEWPORT, not sized through the
+ * html -> body -> #app chain.
+ *
+ * Three percentage heights in a row is three chances for one of them to
+ * resolve against something other than the screen, and the renderer sizes
+ * itself from this element's client box — so a short `#app` is a short canvas
+ * and a visible gap. Fixed to `inset: 0` there is no chain to get wrong.
+ *
+ * `.dig-host` sets `position: relative` for the HUD's absolute children; an ID
+ * outranks a class so this wins, and a fixed element is a containing block for
+ * absolute descendants exactly as a relative one is, so the HUD is unmoved.
+ */
+#app {
+  position: fixed;
+  inset: 0;
 }
 
 /*
