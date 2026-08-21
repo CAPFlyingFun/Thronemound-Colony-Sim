@@ -399,6 +399,30 @@ export interface DriveInput {
    */
   liftAbove?: number;
   /**
+   * MAY HER BODY BE HERE? Optional; a room that does not answer is a room
+   * with nothing solid in it.
+   *
+   * The drive already reduces a frame's twist to the largest fraction its
+   * planted feet can follow — step 3 below, bisected. This adds one more
+   * clause to that same predicate, so body collision is a CONSTRAINT ON THE
+   * TWIST rather than a second mover correcting the first afterwards. The
+   * distinction is not stylistic: a corrector that shoves her back out of a
+   * wall each frame fights the foot-driven motion this file exists to
+   * preserve, and shows as jitter at exactly the moment she is against
+   * something.
+   *
+   * Called with a PROPOSED pose, several times per frame, so it must be
+   * cheap — the caller's implementation is nine field samples.
+   *
+   * Nothing that does not ask for it is affected. The term is skipped when
+   * undefined, and no existing caller sets it: the island build, its
+   * colonists and every sandbox construct their `DriveInput` without it, so
+   * the frozen direct-control ant is bit-identical.
+   */
+  bodyClear?: (
+    at: THREE.Vector3, forward: THREE.Vector3, up: THREE.Vector3,
+  ) => boolean;
+  /**
    * Whether this drive APPLIES the spin, or only accounts for it. Default
    * true.
    *
@@ -1053,10 +1077,18 @@ export class LegDrive {
           if (home.sub(hold.point).dot(hold.normal) < this.cornerTune.browLift) return false;
         }
       }
+      /*
+       * AND HER BODY HAS TO FIT WHERE THIS WOULD PUT IT. See
+       * `DriveInput.bodyClear`. Last in the predicate because it is the
+       * dearest clause and the cheap ones above reject most frames first.
+       */
+      if (input.bodyClear && !input.bodyClear(probe.at, probe.forward, body.up)) {
+        return false;
+      }
       return true;
     };
     let allowed = 1;
-    if ((limits.length > 0 || holdLegs.length > 0) && !fits(1)) {
+    if ((limits.length > 0 || holdLegs.length > 0 || input.bodyClear) && !fits(1)) {
       let lo = 0;
       let hi = 1;
       for (let i = 0; i < CLIP_STEPS; i += 1) {

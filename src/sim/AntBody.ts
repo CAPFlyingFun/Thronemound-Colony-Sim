@@ -36,7 +36,9 @@ import {
   FOOT_CLEARANCE_MM, LegDrive, REACH_DOWN_MM,
   type DriveReport, type Ground, type LegSetup,
 } from '../anim/legDrive';
+import { RIGS } from '../anim/hexapod';
 import { VOXEL_MM } from '../voxel/VoxelWorld';
+import { BodyShell, type SegmentName, type SignedField } from './bodyShell';
 import type { StrollIntent } from './antStroll';
 
 /**
@@ -337,7 +339,7 @@ export class AntBody {
 
   ready = false;
 
-  constructor(caste: Caste = 'queen') {
+  constructor(private readonly caste: Caste = 'queen') {
     this.model = new QueenModel(caste);
     this.model.root.visible = false;
   }
@@ -346,8 +348,64 @@ export class AntBody {
     const ok = await this.model.load();
     this.ready = ok;
     this.model.root.visible = ok;
-    if (ok) this.buildDrive();
+    if (ok) {
+      this.buildDrive();
+      /* `Caste` is read off QueenModel's constructor, whose parameter has a
+       * default, so the type admits `undefined` while the value never is. */
+      const rig = RIGS[this.caste ?? 'queen'];
+      if (rig) this.shell = BodyShell.measure(this.model.root, rig);
+    }
     return ok;
+  }
+
+  /**
+   * Her core body as three measured capsules, or null if the rig had no skin
+   * to measure. See `BodyShell`.
+   *
+   * NULL IS NOT "CLEAR". A caller that cannot measure her cannot enforce
+   * anything, and the honest reading of that is "no collision available" —
+   * which the scene reports rather than quietly letting her walk through
+   * walls again.
+   */
+  shell: BodyShell | null = null;
+
+  /**
+   * The soil her body may not be inside. Set by the world; without it she is
+   * as solid as she was before this existed, which is not at all.
+   */
+  solid: SignedField | null = null;
+
+  /**
+   * Segments exempt from the clearance test right now.
+   *
+   * The head is the one that ever needs it: while a bore is running her
+   * mandibles are ON the work face, and a face is solid by definition. The
+   * scene sets this while a `DigJob` is live and clears it after.
+   */
+  readonly exempt = new Set<SegmentName>();
+
+  /**
+   * How far inside solid soil her core body is at a PROPOSED pose, world
+   * units. Zero when clear, and zero when nothing can measure it.
+   */
+  insideAt(at: THREE.Vector3, forward: THREE.Vector3, up: THREE.Vector3): number {
+    if (!this.shell || !this.solid) return 0;
+    PROBE_RIGHT.crossVectors(up, forward).normalize();
+    PROBE_BASIS.makeBasis(PROBE_RIGHT, up, forward);
+    PROBE_Q.setFromRotationMatrix(PROBE_BASIS);
+    /* The drawn body carries her dig pitch on top of the foot frame, and so
+     * must the shape being tested — otherwise the collision describes an ant
+     * standing level while the one on screen is nose-down 34 degrees. */
+    if (Math.abs(this.bodyPitch) > 1e-4) {
+      PROBE_PITCH.setFromAxisAngle(PROBE_RIGHT, this.bodyPitch);
+      PROBE_Q.premultiply(PROBE_PITCH);
+    }
+    return this.shell.worstInside(this.solid, at, PROBE_Q, this.exempt);
+  }
+
+  /** Her body's deepest penetration where she actually is, world units. */
+  get inside(): number {
+    return this.insideAt(this.at, this.forward, this.up);
   }
 
   /**
@@ -499,6 +557,14 @@ export class AntBody {
         settle: false,
         /* See `FOOT_LIFT_MM`. Opt-in; the frozen build passes nothing. */
         liftAbove: FOOT_LIFT_MM / VOXEL_MM,
+        /*
+         * SOLID SOIL IS A CONSTRAINT ON THIS TWIST. See
+         * `DriveInput.bodyClear`. Undefined until the world hands her a
+         * field, so nothing changes for a caller that has no soil.
+         */
+        bodyClear: this.solid && this.shell
+          ? (at, forward, up) => this.insideAt(at, forward, up) <= CLEARANCE_TOL
+          : undefined,
         /* No corners in this milestone — she has nothing to climb onto and
          * a transition she cannot finish is worse than one she never
          * starts. Wall-walking is its own milestone. */
@@ -691,7 +757,51 @@ export class AntBody {
      * probe's software renderer, and a fixed factor would settle at two
      * different speeds in the two. Clamped so one very long frame lands
      * on the target instead of overshooting past it. */
-    this.at.y += (want - this.at.y) * Math.min(1, 1 - Math.exp(-dt / tau));
+    const step = (want - this.at.y) * Math.min(1, 1 - Math.exp(-dt / tau));
+    /*
+     * AND THE SEAT IS SUBJECT TO SOLID SOIL, exactly as the twist is.
+     *
+     * This was left out of the first cut of the body-collision work and the
+     * measurement said so immediately: with only the horizontal twist
+     * constrained, her head and thorax reached zero penetration while
+     * walking, facing and closing — and her GASTER got worse, 15.03 mm and
+     * inside soil on 84 % of frames.
+     *
+     * The reason is that while she digs her walk intent is zero. The legs
+     * move her nowhere; this line moves her, following a floor that the bore
+     * is cutting out from under her. So every millimetre of her descent went
+     * through the one path that had no clearance test on it, and clamping
+     * the twist alone could never have caught it. A body-collision system
+     * has to own EVERY way the body moves or it owns none of them.
+     *
+     * Bisected rather than rejected outright: refusing the whole step would
+     * stop her following a floor she has legitimately dug away, so she takes
+     * the largest fraction of it that fits. Ten halvings of one frame's ease
+     * is far below anything visible.
+     */
+    this.at.y += this.clearFraction(step) * step;
+  }
+
+  /**
+   * The largest fraction of a proposed vertical step that keeps her core body
+   * out of soil. One when the whole step fits, zero when none of it does.
+   */
+  private clearFraction(step: number): number {
+    if (!this.shell || !this.solid || Math.abs(step) < 1e-12) return 1;
+    const y0 = this.at.y;
+    const fits = (f: number): boolean => {
+      SEAT_TRY.set(this.at.x, y0 + step * f, this.at.z);
+      return this.insideAt(SEAT_TRY, this.forward, this.up) <= CLEARANCE_TOL;
+    };
+    if (fits(1)) return 1;
+    let lo = 0;
+    let hi = 1;
+    for (let i = 0; i < 10; i += 1) {
+      const mid = (lo + hi) / 2;
+      if (fits(mid)) lo = mid;
+      else hi = mid;
+    }
+    return lo;
   }
 }
 
@@ -706,7 +816,23 @@ const LOOK_RING: readonly (readonly [number, number])[] = [
   [-1, 0], [-0.5, -0.866], [0.5, -0.866],
 ];
 
+/**
+ * HOW DEEP INTO SOIL STILL COUNTS AS CLEAR, in world units — 0.01 mm.
+ *
+ * Not zero, because the field is sampled with a `min()` of distances and the
+ * shell radius is the largest skin vertex, so the two disagree by a hair at
+ * a surface she is legitimately resting against. A hard zero makes every
+ * frame a bisection that never converges. This is well under the 0.05 mm the
+ * brief asks to hold her to and two orders under the 5 mm she was managing.
+ */
+const CLEARANCE_TOL = 0.01 / VOXEL_MM;
+
 /* Scratch, so a walking ant allocates nothing per frame. */
 const RIGHT = new THREE.Vector3();
+const PROBE_RIGHT = new THREE.Vector3();
+const PROBE_BASIS = new THREE.Matrix4();
+const PROBE_Q = new THREE.Quaternion();
+const PROBE_PITCH = new THREE.Quaternion();
+const SEAT_TRY = new THREE.Vector3();
 const PITCH_Q = new THREE.Quaternion();
 const BASIS = new THREE.Matrix4();

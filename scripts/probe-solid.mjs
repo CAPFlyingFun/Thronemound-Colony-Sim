@@ -348,6 +348,12 @@ async function measure() {
     return {
       elapsedAtPause: +elapsedAtPause.toFixed(3),
       extents,
+      shell: ant.shell ? {
+        headRadiusMm: +(ant.shell.radiusOf('head') * MM).toFixed(2),
+        thoraxRadiusMm: +(ant.shell.radiusOf('thorax') * MM).toFixed(2),
+        gasterRadiusMm: +(ant.shell.radiusOf('gaster') * MM).toFixed(2),
+        samplesPerTest: ant.shell.sampleCount,
+      } : null,
       body: {
         headPenMm: mm(worst.head),
         thoraxPenMm: mm(worst.thorax),
@@ -408,6 +414,10 @@ for (const seg of ['head', 'thorax', 'gaster']) {
   const e = runs[0].extents[seg];
   console.log(`    ${seg.padEnd(7)} ${e.widthMm} mm wide  ${e.heightMm} mm tall  ${e.lengthMm} mm long  (${e.verts} verts)`);
 }
+const sh = runs[0].shell;
+console.log(sh
+  ? `\n  COLLISION SHELL — head r ${sh.headRadiusMm} mm, thorax r ${sh.thoraxRadiusMm} mm, gaster r ${sh.gasterRadiusMm} mm, ${sh.samplesPerTest} field samples per clearance test`
+  : '\n  COLLISION SHELL — none measured');
 console.log('\n  CORE BODY INSIDE SOLID SOIL, depth in mm');
 console.log(`    head    worst ${span((r) => r.body.headPenMm)}   frames inside ${span((r) => r.body.insidePct.head)} %`);
 console.log(`    thorax  worst ${span((r) => r.body.thoraxPenMm)}   frames inside ${span((r) => r.body.insidePct.thorax)} %`);

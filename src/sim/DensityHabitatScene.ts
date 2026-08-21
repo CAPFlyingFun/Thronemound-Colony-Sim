@@ -236,6 +236,13 @@ export class DensityHabitatScene {
 
     const mid = TANK / 2;
     const top = this.surfaceAt(mid, mid) ?? GRADE;
+    /*
+     * THE SOIL IS SOLID TO HER FROM HERE ON. See `BodyShell`. Handed the
+     * FIELD rather than the ground adapter because the field's value is a
+     * distance and the adapter's is a boolean, and a capsule test needs the
+     * distance — see the note there on why a capsule costs one sample.
+     */
+    this.ant.solid = this.field;
     this.ant.place(mid, mid, top, 0);
     this.ant.plant(this.ground);
 
@@ -325,6 +332,17 @@ export class DensityHabitatScene {
         (into) => this.ant.model.jawPosition(into))
       : this.stroll.step(dt, this.ant.heading, this.senses);
     this.lastIntent = intent;
+    /*
+     * HER HEAD IS ALLOWED IN THE SOIL WHILE SHE IS CUTTING, and only then.
+     *
+     * A work face is solid — that is what makes it a face — so holding her
+     * head to the same rule as her gaster would forbid her to dig at all.
+     * The exemption is tied to a LIVE BORE rather than to the dig phase, so
+     * it lapses the moment the job finishes rather than lasting as long as
+     * she feels like calling herself a digger.
+     */
+    if (this.digging && this.dig.cutting) this.ant.exempt.add('head');
+    else this.ant.exempt.delete('head');
     this.ant.step(dt, intent, this.ground, this.surfaceAt);
     /* The bar rides the WORK FACE — a bore ahead of her jaw, not her jaw —
      * so it reads as the soil being worked rather than as a badge on the ant. */
