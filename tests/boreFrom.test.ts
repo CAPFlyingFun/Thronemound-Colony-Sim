@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { bore } from '../src/voxel/carve';
 import { boreFrom } from '../src/sim/density/boreFrom';
-import { CASTE_DIG, boreRadiusMm, segmentBeyondJawMm } from '../src/sim/density/casteDig';
+import {
+  CASTE_DIG, boreRadiusMm, boreSegmentMm, segmentBeyondJawMm,
+} from '../src/sim/density/casteDig';
 
 /**
  * The bore is positive INSIDE, so "inside" reads as `> 0`.
@@ -95,6 +97,37 @@ describe('CASTE_DIG', () => {
     expect(segmentBeyondJawMm('major')).toBeCloseTo(5.0, 2);
     for (const caste of ['queen', 'worker', 'major'] as const) {
       expect(segmentBeyondJawMm(caste)).toBeGreaterThan(2);
+    }
+  });
+
+  /*
+   * THE SEGMENT IS NOT THE DEPTH, and the difference is a whole radius.
+   *
+   * Joshua, 2026-08-21: "9 mm is the hole -> the segment should be 6 mm." The
+   * spec'd length is what the finished tunnel measures; the round work face
+   * reaches a radius past the segment that produced it. Handing `boreFrom`
+   * the spec'd length instead would cut every tunnel a third too deep and
+   * nothing else in the codebase would notice.
+   */
+  it('shortens the segment by the cap, so the HOLE is the spec length', () => {
+    expect(boreSegmentMm('queen')).toBeCloseTo(6, 6);
+    expect(boreSegmentMm('worker')).toBeCloseTo(4.5, 6);
+    expect(boreSegmentMm('major')).toBeCloseTo(5, 6);
+    for (const caste of ['queen', 'worker', 'major'] as const) {
+      expect(boreSegmentMm(caste) + boreRadiusMm(caste))
+        .toBeCloseTo(CASTE_DIG[caste].lengthMm, 6);
+    }
+  });
+
+  /* And the geometry agrees: a bore built from the segment is inside soil
+   * right up to the spec'd depth and outside just past it. */
+  it('reaches exactly the spec depth along its centreline', () => {
+    for (const caste of ['queen', 'worker', 'major'] as const) {
+      const depth = CASTE_DIG[caste].lengthMm;
+      const f = boreFrom([0, 0, 0], [0, 0, 1],
+        boreSegmentMm(caste), boreRadiusMm(caste));
+      expect(f(0, 0, depth - 0.05)).toBeGreaterThan(0);
+      expect(f(0, 0, depth + 0.05)).toBeLessThan(0);
     }
   });
 

@@ -125,6 +125,29 @@ export function boreRadiusMm(caste: Caste): number {
 }
 
 /**
+ * THE SEGMENT TO HAND `boreFrom`, so the HOLE comes out the spec'd depth.
+ *
+ * Decided by Joshua, 2026-08-21: "9 mm is the hole -> the segment should be
+ * 6 mm." `lengthMm` is what the tunnel measures when it is finished, not the
+ * argument that produces it.
+ *
+ * The two differ because a bore is a capsule cut flat at the thorax plane:
+ * flat where it starts, ROUND where it works. The round cap is the point — a
+ * tunnel does not end in a disc — and it reaches one radius past the end of
+ * the segment. So a queen's 6 mm segment at 3 mm radius removes 9 mm of soil,
+ * a worker's 4.5 at 1.5 removes 6, and a major's 5 at 2 removes 7. Measured,
+ * not derived on trust: `probe:dig` digs one and reads the floor back off the
+ * ground query.
+ *
+ * A caller passing `lengthMm` here would cut a tunnel a third too deep and
+ * nothing would complain, which is exactly why this is a named function
+ * rather than a subtraction at each call site.
+ */
+export function boreSegmentMm(caste: Caste): number {
+  return CASTE_DIG[caste].lengthMm - boreRadiusMm(caste);
+}
+
+/**
  * How much of a planned segment lies beyond her mandibles — so how much of it
  * she has to advance into rather than reach.
  *

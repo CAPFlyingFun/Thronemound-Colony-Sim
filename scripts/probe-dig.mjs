@@ -42,6 +42,7 @@ await pressPlay(page);
 const r = await page.evaluate(async () => {
   const { boreFrom } = await import('/src/sim/density/boreFrom.ts');
   const { carveInto, boreBounds } = await import('/src/sim/density/carveInto.ts');
+  const { CASTE_DIG, boreRadiusMm, boreSegmentMm } = await import('/src/sim/density/casteDig.ts');
   const lab = window.habitatScene;
   lab.setPausedForTest(true);
   const field = lab.field;
@@ -49,22 +50,29 @@ const r = await page.evaluate(async () => {
 
   const before = { tris: soil.triangles(), chunks: soil.liveChunks(), all: soil.chunkCount() };
 
-  /* A queen's bore, straight down from a point on the surface: radius 3 mm
-   * and 9 mm long, in world units (one unit is 5 mm). */
+  /*
+   * A QUEEN'S BORE, straight down from the surface, built the way the game
+   * will build it: the SEGMENT from `boreSegmentMm`, never the spec'd length.
+   * Starting flush with the surface rather than below it, so the depth this
+   * measures is the depth of the tunnel and not the tunnel plus a head start.
+   */
   const MM = 5;
   const x = 12.8; const z = 12.8;
   const top = lab.surfaceAt(x, z);
-  const start = [x, top - 0.05, z];
+  const start = [x, top, z];
   const aim = [0, -1, 0];
-  const length = 9 / MM;
-  const radius = 3 / MM;
+  const specMm = CASTE_DIG.queen.lengthMm;
+  const radiusMm = boreRadiusMm('queen');
+  const segmentMm = boreSegmentMm('queen');
+  const length = segmentMm / MM;
+  const radius = radiusMm / MM;
 
   /* What the field says before, at three places: inside the bore, off to one
    * side of it, and directly BEHIND the origin — the last is the one that
    * catches a capsule masquerading as a bore. */
   const probes = {
-    inside: [x, top - 0.05 - length / 2, z],
-    beside: [x + radius * 2.5, top - 0.05 - length / 2, z],
+    inside: [x, top - length / 2, z],
+    beside: [x + radius * 2.5, top - length / 2, z],
     behind: [x, top + 0.3, z],
   };
   const was = Object.fromEntries(
@@ -106,9 +114,7 @@ const r = await page.evaluate(async () => {
     surfaceBefore: +top.toFixed(3),
     surfaceAfter: after === null ? null : +after.toFixed(3),
     droppedMm: after === null ? null : +((top - after) * MM).toFixed(2),
-    boreLenMm: 9,
-    boreRadiusMm: 3,
-    startBelowMm: 0.25,
+    specMm, radiusMm, segmentMm: +segmentMm.toFixed(2),
   };
 });
 
@@ -144,27 +150,22 @@ check('a second bite in the same hole removes nothing',
 check('the floor under the hole dropped',
   r.droppedMm !== null && r.droppedMm > 4,
   `${r.droppedMm} mm`);
+
 /*
- * A BORE REMOVES `length + radius`, NOT `length` — and that is worth pinning
- * because it is a live design question rather than an accident.
+ * AND BY THE SPEC'D DEPTH — the hole, not the segment that cut it.
  *
- * `boreFrom` is a capsule cut flat at the thorax plane: flat where it starts,
- * ROUND where it works. The round cap is the point — a tunnel does not end in
- * a disc — and it reaches one radius past the end of the segment. So a
- * queen's 9 mm segment at 3 mm radius takes out 12 mm of soil, measured here
- * as 12.25 including the quarter-millimetre the jaw started below the surface.
+ * Joshua, 2026-08-21: "9 mm is the hole -> the segment should be 6 mm." So
+ * the queen's tunnel is driven by a 6 mm segment whose round work face
+ * reaches the remaining 3 mm, and what the ground reads back afterwards
+ * should be the 9 mm the design asks for.
  *
- * Joshua's spec says "Queen = 6 mm wide x 6 mm tall x 9 mm deep/long". If the
- * 9 is meant to be the DEPTH OF THE HOLE, the segment should be 6 mm and this
- * expectation becomes `length` exactly. That is his call, not one to make by
- * quietly changing a constant — decision 1 on this work was "do not silently
- * resize the design" — so the check pins what the geometry ACTUALLY does and
- * will go red the moment anyone changes it in either direction.
+ * Measured off `surfaceIn`, which is a different instrument from the one that
+ * cut the hole: the carve wrote samples, this asks where the floor is now.
+ * Half a millimetre of tolerance covers the surface search's own step.
  */
-check('and by the bore segment plus its rounded cap',
-  r.droppedMm !== null
-    && Math.abs(r.droppedMm - (r.boreLenMm + r.boreRadiusMm + r.startBelowMm)) < 0.6,
-  `${r.droppedMm} mm vs ${r.boreLenMm} + ${r.boreRadiusMm} cap + ${r.startBelowMm} start`);
+check('and by the depth the caste spec asks for',
+  r.droppedMm !== null && Math.abs(r.droppedMm - r.specMm) < 0.5,
+  `${r.droppedMm} mm against a spec of ${r.specMm} (segment ${r.segmentMm} + ${r.radiusMm} cap)`);
 
 await browser.close();
 const bad = checks.filter((c) => !c.ok);
