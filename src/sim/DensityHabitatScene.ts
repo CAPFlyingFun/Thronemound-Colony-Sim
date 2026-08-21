@@ -411,6 +411,7 @@ export class DensityHabitatScene {
         `canvas   ${n(rect.width)} x ${n(rect.height)}  top ${n(rect.top)}  bot ${n(rect.bottom)}`,
         `renderer ${n(this.sizedW)} x ${n(this.sizedH)}  ratio ${n(this.renderer.getPixelRatio())}  dpr ${n(window.devicePixelRatio)}`,
         `safe     t${pad.paddingTop} r${pad.paddingRight} b${pad.paddingBottom} l${pad.paddingLeft}`,
+        `chose    ${n(this.sizedW)} x ${n(this.sizedH)}  (max of the rows above)`,
         `GAP bottom ${n(window.innerHeight - rect.bottom)}   right ${n(window.innerWidth - rect.width)}`,
       ].join('\n');
     };
@@ -443,14 +444,46 @@ export class DensityHabitatScene {
    * the window, and `innerWidth/Height` last so there is always an answer.
    */
   private viewportSize(): { w: number; h: number } {
+    const de = document.documentElement;
     const vv = window.visualViewport;
     const hostW = this.host.clientWidth;
     const hostH = this.host.clientHeight;
-    /* The host wins when it is genuinely smaller — a panel, a split view —
-     * and the visual viewport wins when the host is claiming the whole page
-     * and may be claiming a stale size for it. */
-    const w = hostW > 0 && (!vv || hostW < vv.width) ? hostW : vv?.width ?? window.innerWidth;
-    const h = hostH > 0 && (!vv || hostH < vv.height) ? hostH : vv?.height ?? window.innerHeight;
+
+    /*
+     * A HOST THAT IS GENUINELY SMALLER THAN THE PAGE gets to say so — a
+     * panel, a split view, a scene mounted in something. Judged against the
+     * document, not against the visual viewport, because the visual viewport
+     * shrinks for reasons that have nothing to do with the element.
+     */
+    const pageW = Math.max(de.clientWidth, window.innerWidth);
+    const pageH = Math.max(de.clientHeight, window.innerHeight);
+    if (hostW > 0 && hostH > 0 && (hostW < pageW - 1 || hostH < pageH - 1)) {
+      return { w: Math.max(1, Math.round(hostW)), h: Math.max(1, Math.round(hostH)) };
+    }
+
+    /*
+     * OTHERWISE THE HOST IS THE PAGE, and the candidates that all claim to
+     * measure it get to disagree. TAKE THE LARGEST.
+     *
+     * The previous version took the smallest, and that was the portrait gap.
+     * It read `host < visualViewport ? host : visualViewport`, which is a
+     * minimum however it is spelled, and on iOS in portrait the visual
+     * viewport can report a height that excludes the home-indicator band
+     * while `#app` — pinned to `inset: 0`, so the viewport by definition —
+     * reports the whole screen. Taking the smaller of those is taking the
+     * band off, and the band is the gap. In landscape the two agree closely
+     * enough that nothing showed, which is exactly the shape of the report:
+     * portrait only.
+     *
+     * The failure modes are NOT symmetric, and that is the whole argument.
+     * Too small leaves a strip of page with no game on it — visible, and the
+     * thing being fixed. Too large draws a few rows of pixels past the edge,
+     * where `#app`'s `overflow: hidden` clips them and nobody can tell. When
+     * instruments disagree about a number whose errors cost that differently,
+     * the answer is not the average and it is certainly not the minimum.
+     */
+    const w = Math.max(hostW, vv?.width ?? 0, de.clientWidth, window.innerWidth);
+    const h = Math.max(hostH, vv?.height ?? 0, de.clientHeight, window.innerHeight);
     return { w: Math.max(1, Math.round(w)), h: Math.max(1, Math.round(h)) };
   }
 

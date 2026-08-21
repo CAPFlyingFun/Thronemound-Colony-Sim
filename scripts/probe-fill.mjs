@@ -135,6 +135,61 @@ for (const size of SIZES) {
   await ctx.close();
 }
 
+/*
+ * THE DISAGREEMENT, STAGED — because Chromium will not stage it for us.
+ *
+ * The portrait gap came from `visualViewport.height` reporting less than the
+ * page while `#app` reported the whole screen, and the sizing code taking the
+ * SMALLER of the two. Chromium keeps them equal, so the fault is invisible
+ * here unless it is put there on purpose: this shadows `window.visualViewport`
+ * with one that under-reports by the height of an iPhone's home indicator, and
+ * asserts the canvas still reaches the bottom edge.
+ *
+ * It is a stand-in, not the real iOS viewport, and it proves one specific
+ * thing: that a short reading from one instrument can no longer shorten the
+ * canvas. That is the mechanism that was broken.
+ */
+{
+  const ctx = await browser.newContext({
+    viewport: { width: 402, height: 874 }, deviceScaleFactor: 3,
+    hasTouch: true, isMobile: true, serviceWorkers: 'block',
+  });
+  const page = await ctx.newPage();
+  /* Installed before any app code runs, so the scene never sees the real one. */
+  await page.addInitScript(() => {
+    const real = window.visualViewport;
+    const LIES_BY = 34;               // an iPhone's home-indicator band
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true,
+      get: () => (real === null ? null : {
+        get width() { return real.width; },
+        get height() { return real.height - LIES_BY; },
+        get offsetTop() { return real.offsetTop; },
+        get scale() { return real.scale; },
+        addEventListener: real.addEventListener.bind(real),
+        removeEventListener: real.removeEventListener.bind(real),
+      }),
+    });
+  });
+  await page.goto(`http://127.0.0.1:${PORT}/?cb=${Date.now()}`, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => window.habitatScene?.ready === true, null, { timeout: 240000 });
+  await pressPlay(page);
+  await page.waitForTimeout(2600);
+  const r = await page.evaluate(() => {
+    const box = document.querySelector('canvas').getBoundingClientRect();
+    return {
+      h: window.innerHeight, bottom: +box.bottom.toFixed(1),
+      vv: window.visualViewport?.height ?? null,
+      sized: window.habitatScene.sizedForTest?.() ?? null,
+    };
+  });
+  console.log(`  under-reporting visualViewport: ${JSON.stringify(r)}`);
+  check('a short visualViewport cannot shorten the canvas',
+    Math.abs(r.h - r.bottom) < 1,
+    `visualViewport said ${r.vv}, viewport is ${r.h}, canvas ends at ${r.bottom}`);
+  await ctx.close();
+}
+
 /* The manifest is part of how the PWA lays itself out, so it is checked here
  * rather than trusted. A landscape lock outlived the rotate gate that v0.3.7
  * deleted, which left the installed app declaring an orientation the game no
