@@ -57,6 +57,16 @@ import type { StrollIntent } from './antStroll';
 export const WALK_SPEED = 1.4;
 
 /**
+ * How long her POSE takes to catch up with her intent, in seconds.
+ *
+ * See `poseSpeed` / `poseTurn`. Turn is the slower of the two because it is
+ * the one that swings her abdomen; speed only has to keep the gait from
+ * snapping between standing and walking in a single frame.
+ */
+export const POSE_SPEED_TAU = 0.09;
+export const POSE_TURN_TAU = 0.14;
+
+/**
  * WHERE THE FLOOR IS UNDER A POINT, ASKED FROM A HEIGHT.
  *
  * The third argument is the one that lets her go underground. Asked without
@@ -204,6 +214,33 @@ export class AntBody {
   readonly forward = new THREE.Vector3(0, 0, 1);
 
   private drive: LegDrive | null = null;
+
+  /**
+   * WHAT HER POSE FOLLOWS, as opposed to what her steering obeys.
+   *
+   * `LegDrive` gets the raw intent — a brain that says "turn now" must turn
+   * her now, and smoothing her steering would make her sluggish to command.
+   * The POSE is a different question. `gaitPose` maps turn straight onto her
+   * gaster's yaw and her body's roll, so an intent that changes in one frame
+   * moves her abdomen in one frame, and the abdomen is the heaviest thing on
+   * her.
+   *
+   * Measured on the tray: her brain was emitting turn impulses that lasted a
+   * single frame, and each one snapped her gaster 0.497 mm sideways against a
+   * median frame-to-frame motion of 0.052 mm — a tenfold spike, several times
+   * a second. That is the shaking. The stroll's chatter is fixed separately
+   * and is the larger half, but a pose that tracks its input instantly would
+   * still snap on any honest change of mind, so both halves are worth having.
+   *
+   * `hexapod.ts` already claims this behaviour — "a heavy abdomen does not
+   * track the thorax instantly" — and does not implement it. Rather than
+   * change it there, where the frozen island reads the same function, the lag
+   * is applied to the values handed IN. The island passes its own and is
+   * untouched.
+   */
+  private poseSpeed = 0;
+
+  private poseTurn = 0;
 
   /**
    * How far her body origin rides above the ground her belly is clearing —
@@ -365,6 +402,10 @@ export class AntBody {
      * may jump: smoothing it would sink her into the soil and glide her out
      * of it over a tenth of a second, in full view. */
     this.aim = surfaceY;
+    /* And her pose starts at rest rather than carrying the lag of whatever
+     * she was doing before she was moved. */
+    this.poseSpeed = 0;
+    this.poseTurn = 0;
   }
 
   /** Plant every foot where it stands — after a placement or a teleport. */
@@ -430,9 +471,26 @@ export class AntBody {
     this.model.root.quaternion.setFromRotationMatrix(
       BASIS.makeBasis(RIGHT, this.up, this.forward),
     );
+    /*
+     * The pose lags the intent. Exponential rather than a fixed rate so the
+     * lag is a TIME and not a distance: a small change of mind arrives almost
+     * at once and a large one takes the same fraction of a second to arrive
+     * fully, which is what mass does.
+     *
+     * Turn lags harder than speed because it is the term that reaches the
+     * gaster. Both are frame-rate independent by construction — the same
+     * `1 - exp(-dt/tau)` the seater uses — so a slow frame does not overshoot.
+     */
+    const wantSpeed = Math.abs(intent.walk) * WALK_SPEED;
+    const wantTurn = intent.turn * TURN_RATE;
+    this.poseSpeed += (wantSpeed - this.poseSpeed)
+      * Math.min(1, 1 - Math.exp(-dt / POSE_SPEED_TAU));
+    this.poseTurn += (wantTurn - this.poseTurn)
+      * Math.min(1, 1 - Math.exp(-dt / POSE_TURN_TAU));
+
     this.model.update(dt, {
-      speed: Math.abs(intent.walk) * WALK_SPEED,
-      turn: intent.turn * TURN_RATE,
+      speed: this.poseSpeed,
+      turn: this.poseTurn,
       digging: 0,
       carrying: 0,
       headYaw: 0,

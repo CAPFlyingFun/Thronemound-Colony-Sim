@@ -67,6 +67,38 @@ export const PAUSE_SECONDS = { min: 0.4, max: 1.6 } as const;
  */
 export const AVOID_TURN = 0.85;
 
+/**
+ * How much further she must see before she calls a wall cleared, as a
+ * multiple of `lookAhead` — the HYSTERESIS, and it is not a refinement.
+ *
+ * Without it, the test that ends an avoid is the same test that began it, and
+ * one frame of avoid-turn is 1.3 degrees — enough to flip `groundAhead` back
+ * to true. Measured at the tray edge: 239 turn impulses in 30 seconds, of
+ * which almost every one lasted a single frame, as she flipped between
+ * walking and avoiding at frame rate and ground along the boundary instead of
+ * leaving it. Her x/z never got further from the glass than the margin.
+ *
+ * Requiring a LONGER sightline to resume has a plain meaning — do not walk on
+ * until you can see past the thing that stopped you — and it costs one extra
+ * sense call on the frames she is already turning.
+ */
+export const CLEAR_AHEAD = 1.8;
+
+/**
+ * How long a new-bearing turn is HELD, in seconds.
+ *
+ * The turn used to be returned on one frame and then dropped, which meant the
+ * comment below — "a turn over the next leg rather than a teleported heading"
+ * — described something the code did not do. One frame of 0.6 turn is 0.9
+ * degrees, so striking off on a new bearing changed her course by about a
+ * degree and she carried on essentially straight until she met the glass.
+ *
+ * Seconds rather than radians because this module is deliberately unit-free:
+ * it says what she WANTS in -1..1 and has no idea how fast a turn of 1 is.
+ * At the body's current rate this sweeps roughly 20 to 60 degrees.
+ */
+export const BEARING_SECONDS = { min: 0.35, max: 1.1 } as const;
+
 type Phase = 'walking' | 'pausing' | 'avoiding';
 
 export class AntStroll {
@@ -76,6 +108,11 @@ export class AntStroll {
 
   /** Which way she peels off an obstacle; held for the whole avoid. */
   private avoidSign = 1;
+
+  /** Seconds of the current bearing sweep still to run, and how hard. */
+  private turning = 0;
+
+  private turnRate = 0;
 
   constructor(
     private readonly rand: () => number = Math.random,
@@ -98,6 +135,7 @@ export class AntStroll {
    */
   step(dt: number, heading: number, senses: StrollSenses): StrollIntent {
     this.left -= dt;
+    this.turning -= dt;
 
     /*
      * THE WALL COMES FIRST, whatever she was doing. A pause that ends with
@@ -119,13 +157,18 @@ export class AntStroll {
       /* Both or neither: keep turning the way she already was, so a corner
        * does not become a place she oscillates in. */
       this.left = 0;
+      /* A wall outranks whatever sweep she was part-way through. */
+      this.turning = 0;
     }
 
     if (this.phase === 'avoiding') {
       /* Turning on the spot until the way ahead is clear again. Not walking
        * while she does it: a wall is exactly where a forward stride cannot
        * go, and pressing into one is the scrabbling this avoids. */
-      if (senses.groundAhead(heading, this.lookAhead)) {
+      /* Cleared only when she can see PAST the thing that stopped her. See
+       * `CLEAR_AHEAD` — the same probe on both edges is what made her
+       * chatter. */
+      if (senses.groundAhead(heading, this.lookAhead * CLEAR_AHEAD)) {
         this.phase = 'walking';
         this.left = this.span(LEG_SECONDS);
         return { walk: 1, turn: 0 };
@@ -134,8 +177,10 @@ export class AntStroll {
     }
 
     if (this.left > 0) {
+      /* Part-way through a leg — and possibly still part-way through the
+       * bearing sweep that started it. */
       return this.phase === 'walking'
-        ? { walk: 1, turn: 0 }
+        ? { walk: 1, turn: this.turning > 0 ? this.turnRate : 0 }
         : { walk: 0, turn: 0 };
     }
 
@@ -152,9 +197,12 @@ export class AntStroll {
       return { walk: 0, turn: 0 };
     }
     /* A new bearing, taken as a turn over the next leg rather than as a
-     * teleported heading — she is an animal, not a turret. */
+     * teleported heading — she is an animal, not a turret. HELD, now: see
+     * `BEARING_SECONDS` for why one frame of it was not a bearing change. */
     this.phase = 'walking';
     this.left = this.span(LEG_SECONDS);
-    return { walk: 1, turn: (this.rand() * 2 - 1) * 0.6 };
+    this.turnRate = (this.rand() * 2 - 1) * 0.6;
+    this.turning = this.span(BEARING_SECONDS);
+    return { walk: 1, turn: this.turnRate };
   }
 }

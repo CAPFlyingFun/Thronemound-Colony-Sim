@@ -34,7 +34,7 @@
 import * as THREE from 'three';
 import { buildSurfaceNets } from '../density/SurfaceNets';
 import { AntBody } from './AntBody';
-import { AntStroll, type StrollSenses } from './antStroll';
+import { AntStroll, type StrollIntent, type StrollSenses } from './antStroll';
 import { ObserverCamera } from './observerCamera';
 import { DensityGround } from './density/densityGround';
 import {
@@ -251,8 +251,14 @@ export class DensityHabitatScene {
     if (!this.ready) return;
     this.elapsed += dt;
     const intent = this.stroll.step(dt, this.ant.heading, this.senses);
+    this.lastIntent = intent;
     this.ant.step(dt, intent, this.ground, this.surfaceAt);
   }
+
+  /** What her brain asked for this frame, so a probe can watch the input. */
+  private lastIntent: StrollIntent = { walk: 0, turn: 0 };
+
+  intentForTest(): StrollIntent { return this.lastIntent; }
 
   private readonly frame = (): void => {
     const now = performance.now();

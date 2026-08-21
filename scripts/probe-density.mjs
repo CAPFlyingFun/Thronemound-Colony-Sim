@@ -42,7 +42,8 @@ await page.goto(`http://127.0.0.1:${PORT}/?cb=${Date.now()}`, { waitUntil: 'domc
 await page.waitForFunction(() => window.habitatScene?.ready === true, null, { timeout: 240000 });
 const bootS = (Date.now() - t0) / 1000;
 
-const r = await page.evaluate(() => {
+const r = await page.evaluate(async () => {
+  const THREE = await import('/node_modules/three/build/three.module.js');
   const lab = window.habitatScene;
   lab.setPausedForTest(true);
   const ant = lab.ant;
@@ -69,6 +70,22 @@ const r = await page.evaluate(() => {
    * is an independent witness.
    */
   const belly = ant.seatForTest().bellyMm / 5;
+  /*
+   * THE SHAKE, watched at the tip of her abdomen.
+   *
+   * Measured in HER frame — gaster minus body, projected on her own right and
+   * up — so her travel and her turning drop out and only the wobble is left.
+   * The number that matters is the second difference: a sway has a small one
+   * and a shake has a large one, and the two are indistinguishable from
+   * amplitude alone. She is SUPPOSED to sway about a millimetre.
+   */
+  const gas = new THREE.Vector3();
+  const right = new THREE.Vector3();
+  let lastLat = null; let lastVel = 0;
+  let latAccel = 0; let latSteps = 0; let latFlips = 0; let worstStep = 0;
+  /* Runs of consecutive frames on which her brain asked for a turn. A run of
+   * one is an impulse, and an impulse is what snapped her gaster. */
+  let turnRun = 0; let impulses = 0;
   for (let i = 0; i < 3600; i += 1) {
     lab.tick(1 / 60);
     const s = lab.reportForTest();
@@ -80,6 +97,23 @@ const r = await page.evaluate(() => {
     else if (!lab.ground.solidAt(ant.at.x, ant.at.y - 0.2, ant.at.z)) floating += 1;
     lo = Math.min(lo, ant.at.x, ant.at.z);
     hi = Math.max(hi, ant.at.x, ant.at.z);
+
+    if (Math.abs(lab.intentForTest().turn) > 1e-9) turnRun += 1;
+    else { if (turnRun === 1) impulses += 1; turnRun = 0; }
+
+    ant.model.segmentShell('gaster', gas);
+    right.crossVectors(ant.up, ant.forward).normalize();
+    const lat = gas.sub(ant.at).dot(right) * 5;
+    if (lastLat !== null) {
+      const vel = lat - lastLat;
+      worstStep = Math.max(worstStep, Math.abs(vel));
+      if (latSteps > 0) {
+        latAccel += Math.abs(vel - lastVel);
+        if (vel !== 0 && lastVel !== 0 && Math.sign(vel) !== Math.sign(lastVel)) latFlips += 1;
+      }
+      lastVel = vel; latSteps += 1;
+    }
+    lastLat = lat;
   }
 
   return {
@@ -96,6 +130,12 @@ const r = await page.evaluate(() => {
     buried,
     floating,
     span: [+lo.toFixed(2), +hi.toFixed(2)],
+    gaster: {
+      accelMm: +(latAccel / latSteps).toFixed(4),
+      worstStepMm: +worstStep.toFixed(3),
+      flipsPerSec: +(latFlips / (latSteps / 60)).toFixed(1),
+      impulses,
+    },
   };
 });
 
@@ -141,6 +181,34 @@ check('stays inside the glass', r.span[0] > 0 && r.span[1] < r.tank.size,
   `x/z spanned ${r.span[0]}..${r.span[1]} of 0..${r.tank.size}`);
 check('belly never inside soil', r.buried === 0, `${r.buried} frames buried`);
 check('soil always under her feet', r.floating === 0, `${r.floating} frames floating`);
+
+/*
+ * HER ABDOMEN SWAYS; IT DOES NOT SHAKE.
+ *
+ * Three ways of asking the same question, because amplitude alone cannot tell
+ * them apart — she is meant to sway about a millimetre side to side.
+ *
+ * `accelMm` is the mean absolute second difference of the gaster's lateral
+ * offset in her own frame: 0.238 mm when she was shaking, 0.008 mm when she
+ * was not. `worstStepMm` catches the single snap an average would hide — the
+ * spikes were 0.497 mm against a 0.052 mm median. `flipsPerSec` catches a
+ * wobble that is smooth but far too fast: her gait is about 1.9 Hz, so
+ * reversals should come at roughly twice that, and 18.7 was what a shake
+ * looked like.
+ */
+check('gaster sways smoothly', r.gaster.accelMm < 0.03, `${r.gaster.accelMm} mm/frame^2`);
+check('gaster never snaps', r.gaster.worstStepMm < 0.25, `worst step ${r.gaster.worstStepMm} mm`);
+check('gaster wobbles at gait rate', r.gaster.flipsPerSec < 9,
+  `${r.gaster.flipsPerSec} reversals/s`);
+
+/*
+ * And the cause, checked at the source: a turn her brain holds for exactly
+ * one frame is not a decision, it is a twitch, and it was the thing driving
+ * the snap. Her stroll used to emit 239 of them in 30 seconds while she
+ * ground along the glass.
+ */
+check('brain never twitches the turn', r.gaster.impulses === 0,
+  `${r.gaster.impulses} one-frame turn impulses`);
 
 await page.screenshot({ path: 'scratch-density.png' });
 await browser.close();
