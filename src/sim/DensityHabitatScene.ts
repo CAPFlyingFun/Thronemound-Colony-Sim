@@ -82,6 +82,15 @@ const GAUGE_SCALE = 1.6;
 /** Reused so the frame allocates nothing. */
 const SCRATCH_FACE = new THREE.Vector3();
 
+/**
+ * How much soil is left above her when the cutaway is on, in world units.
+ *
+ * Enough to keep the roof of her own tunnel — a burrow with its ceiling
+ * sliced off is a groove, not a burrow — and not so much that the camera ends
+ * up back inside the ground it just cut. A queen stands about 0.63 units tall.
+ */
+const CUT_HEADROOM = 1.1;
+
 /** Which way the page is asked to sit relative to the system insets. */
 type ViewportFit = 'cover' | 'contain';
 
@@ -247,6 +256,9 @@ export class DensityHabitatScene {
      */
     this.running = false;
     this.last = performance.now();
+    /* The cutaway is a material clipping plane, and three.js will not honour
+     * one unless local clipping is switched on for the whole renderer. */
+    this.renderer.localClippingEnabled = true;
     this.renderer.setAnimationLoop(this.frame);
   }
 
@@ -320,6 +332,22 @@ export class DensityHabitatScene {
         .addScaledVector(this.dig.aim, toUnits(boreRadiusMm('queen')))
       : null;
     this.gauge.showAt(face, this.dig.progress, this.camera, GAUGE_SCALE);
+    this.cutaway();
+  }
+
+  /**
+   * TAKE THE LID OFF WHEN SHE IS UNDER IT.
+   *
+   * Only while FOLLOWING, and only once she is actually below the original
+   * grade: the whole tank seen from outside should be a whole tank, and
+   * slicing it on the surface would remove the tray for no reason. Once she
+   * is underground the soil above her is the only thing between the camera
+   * and the thing it is pointed at.
+   */
+  private cutaway(): void {
+    if (!this.soil) return;
+    const under = this.following && this.ant.at.y < GRADE - 0.05;
+    this.soil.setCut(under ? this.ant.at.y + CUT_HEADROOM : null);
   }
 
   /** Her brain, and the switch between her two of them. */

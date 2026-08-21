@@ -122,6 +122,44 @@ export class SoilMesh {
     });
   }
 
+  /**
+   * CUT THE SOIL AWAY ABOVE A HEIGHT — the formicarium's own view.
+   *
+   * Following an ant underground put the camera INSIDE the soil, and because
+   * the material is double-sided (the mesher winds its negative-facing quads
+   * backwards, so culling would delete every tunnel ceiling) you then see
+   * straight through the soil to the far inside of the tray. It reads as a
+   * lit room with strata for walls, and her tunnels read as solid white
+   * tubes — you are looking at their outside from within the ground. Joshua
+   * reported it as "walking into the open space in un-digged dirt", which is
+   * exactly what it looks like and nothing like what is happening.
+   *
+   * Pulling the camera out to open air would frame her from above through
+   * however much soil is in the way. A cutaway is what a real formicarium
+   * does and what card 07 asks for: take the lid off at her level and look
+   * down into the nest. It also fixes the burial for free, since everything
+   * between her and a camera above her is what gets removed.
+   *
+   * `null` restores the whole tray.
+   */
+  setCut(y: number | null): void {
+    if (y === null) {
+      this.material.clippingPlanes = null;
+      return;
+    }
+    /* Keep what is BELOW the cut: `-y + cut >= 0`. */
+    if (this.cut) this.cut.constant = y;
+    else this.cut = new THREE.Plane(new THREE.Vector3(0, -1, 0), y);
+    this.material.clippingPlanes = [this.cut];
+  }
+
+  private cut: THREE.Plane | null = null;
+
+  /** Where the soil is currently cut, or null for a whole tray. */
+  cutForTest(): number | null {
+    return this.material.clippingPlanes ? this.cut?.constant ?? null : null;
+  }
+
   /** Mesh the lot. Called once; after that only `rebuild` runs. */
   buildAll(): void {
     for (let z = 0; z < this.nz; z += 1) {

@@ -322,6 +322,67 @@ check('she excavates to a real depth',
 
 check('digging never hitches the frame', live.rebuildMs < 40, `${live.rebuildMs} ms`);
 
+/* ------------------------------------------------------------- the cutaway */
+
+/*
+ * CAN YOU SEE HER UNDERGROUND?
+ *
+ * Following her below the surface put the camera INSIDE the soil, and the
+ * material is double-sided — culling would delete every tunnel ceiling, since
+ * the mesher winds negative-facing quads backwards — so you saw through the
+ * ground to the far inside of the tray. A lit room with strata for walls, and
+ * her tunnels as solid white tubes seen from without. Reported as "walking
+ * into the open space in un-digged dirt", which is what it looks like and
+ * nothing like what is happening.
+ *
+ * The check is on the CUT rather than on a screenshot: with her underground
+ * and the camera following, the soil must be clipped just above her, and with
+ * her on the surface it must not be clipped at all.
+ */
+const cut = await page.evaluate(async () => {
+  const { boreFrom } = await import('/src/sim/density/boreFrom.ts');
+  const { carveInto, boreBounds } = await import('/src/sim/density/carveInto.ts');
+  const lab = window.habitatScene;
+  lab.setPausedForTest(true);
+  lab.setDiggingForTest(false);
+  lab.setFollow(false);
+  for (let i = 0; i < 30; i += 1) lab.tick(1 / 60);
+  const onSurface = lab.soilForTest().cutForTest();
+
+  /* Sink a shaft and drop her down it. */
+  const x = lab.ant.at.x; const z = lab.ant.at.z;
+  const top = lab.surfaceAt(x, z);
+  for (let i = 0; i < 8; i += 1) {
+    const o = [x, top - i * 1.2, z];
+    const r = carveInto(lab.field, boreFrom(o, [0, -1, 0], 1.2, 0.6),
+      boreBounds(o, [0, -1, 0], 1.2, 0.6));
+    if (r) lab.soilForTest().rebuild(r);
+  }
+  const floor = lab.surfaceAt(x, z);
+  lab.ant.place(x, z, floor, 0);
+  lab.ant.plant(lab.ground);
+  lab.setFollow(true);
+  for (let i = 0; i < 30; i += 1) lab.tick(1 / 60);
+  const under = lab.soilForTest().cutForTest();
+  return {
+    depthMm: +((lab.gradeForTest() - floor) * 5).toFixed(1),
+    antY: +lab.ant.at.y.toFixed(2),
+    onSurface, under,
+    cameraInSoil: lab.ground.solidAt(
+      lab.camera.position.x, lab.camera.position.y, lab.camera.position.z,
+    ),
+  };
+});
+
+console.log(`  ${JSON.stringify(cut)}`);
+check('the tank is whole when she is on the surface',
+  cut.onSurface === null, `cut at ${cut.onSurface}`);
+check('the lid comes off when she is under it',
+  cut.under !== null && cut.under > cut.antY && cut.under < cut.antY + 2,
+  `cut at ${cut.under}, ant at ${cut.antY}, ${cut.depthMm} mm down`);
+check('and the camera is not buried', !cut.cameraInSoil,
+  cut.cameraInSoil ? 'camera inside soil' : 'camera in open air');
+
 await browser.close();
 const bad = checks.filter((c) => !c.ok);
 console.log(`\n  ${checks.length - bad.length}/${checks.length} checks passed`);
