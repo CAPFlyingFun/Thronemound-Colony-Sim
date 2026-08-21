@@ -120,6 +120,41 @@ export class SoilMesh {
        */
       side: THREE.DoubleSide,
     });
+    /*
+     * THE CUTAWAY HIDES THE LID, NOT THE TRAY.
+     *
+     * A clipping plane was the first cut and it took too much: everything
+     * above the line went, including the tank's own side walls, so the
+     * strata went with them and the formicarium stopped looking like one.
+     * Joshua: "as the ant digs, I lost all the layers from the surface
+     * downward which was weird and why I suggested only the top surface
+     * layer, not the walls and sides."
+     *
+     * What has to go is the UP-FACING soil between the camera and her — the
+     * lid. A wall faces sideways and a tunnel ceiling faces down, and both
+     * should stay: the walls are where the strata are legible and the
+     * ceiling is what makes a burrow a burrow rather than a groove.
+     *
+     * So the test is on the NORMAL as well as the height, which a clipping
+     * plane cannot express. Discarding in the fragment shader can, and it
+     * leaves the geometry completely untouched — the mesh stays authoritative
+     * and the cutaway is purely a way of drawing it, which is the property
+     * worth keeping.
+     */
+    this.material.onBeforeCompile = (shader) => {
+      shader.uniforms.tmCutY = this.cutY;
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nvarying vec3 vTmWorld;\nvarying vec3 vTmNormal;')
+        .replace('#include <worldpos_vertex>',
+          '#include <worldpos_vertex>\n  vTmWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\n  vTmNormal = normalize(mat3(modelMatrix) * objectNormal);');
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nuniform float tmCutY;\nvarying vec3 vTmWorld;\nvarying vec3 vTmNormal;')
+        .replace('#include <clipping_planes_fragment>',
+          /* Up-facing, and above the cut. 0.4 is about 66 degrees off
+           * vertical — steep enough that a tunnel wall survives, shallow
+           * enough that a rolling surface is taken whole. */
+          '  if (vTmWorld.y > tmCutY && vTmNormal.y > 0.4) discard;\n#include <clipping_planes_fragment>');
+    };
   }
 
   /**
@@ -143,22 +178,21 @@ export class SoilMesh {
    * `null` restores the whole tray.
    */
   setCut(y: number | null): void {
-    if (y === null) {
-      this.material.clippingPlanes = null;
-      return;
-    }
-    /* Keep what is BELOW the cut: `-y + cut >= 0`. */
-    if (this.cut) this.cut.constant = y;
-    else this.cut = new THREE.Plane(new THREE.Vector3(0, -1, 0), y);
-    this.material.clippingPlanes = [this.cut];
+    /* A height nothing can be above switches it off without branching in the
+     * shader — the uniform is always there, the test simply never passes. */
+    this.cutY.value = y ?? 1e9;
+    this.cutOn = y !== null;
   }
 
-  private cut: THREE.Plane | null = null;
+  private readonly cutY = { value: 1e9 };
+
+  private cutOn = false;
 
   /** Where the soil is currently cut, or null for a whole tray. */
   cutForTest(): number | null {
-    return this.material.clippingPlanes ? this.cut?.constant ?? null : null;
+    return this.cutOn ? this.cutY.value : null;
   }
+
 
   /** Mesh the lot. Called once; after that only `rebuild` runs. */
   buildAll(): void {

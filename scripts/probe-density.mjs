@@ -59,6 +59,16 @@ const r = await page.evaluate(async () => {
    * walking. `probe:dig` is where the digging is held to account.
    */
   lab.setDiggingForTest(false);
+  /*
+   * AND PUT HER BACK WHERE SHE STARTED. The simulation begins the instant
+   * PLAY is pressed, so a handful of live frames run before this probe can
+   * pause it — enough for the digger to take a step or a bite, and enough to
+   * make the settled seat read differently run to run. A locomotion probe
+   * should measure the same ant on the same ground every time.
+   */
+  const mid = tank.size / 2;
+  lab.ant.place(mid, mid, lab.surfaceAt(mid, mid) ?? 0, 0);
+  lab.ant.plant(lab.ground);
 
   /* Three seconds to settle, then three standing still. */
   for (let i = 0; i < 180; i += 1) lab.tickForTest(1 / 60, 0, 0);

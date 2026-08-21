@@ -346,8 +346,13 @@ export class DensityHabitatScene {
    */
   private cutaway(): void {
     if (!this.soil) return;
-    const under = this.following && this.ant.at.y < GRADE - 0.05;
-    this.soil.setCut(under ? this.ant.at.y + CUT_HEADROOM : null);
+    /*
+     * Cut at HER level when the player has asked for it, wherever she is —
+     * on the surface that takes the lid off the tray above her, which is the
+     * ant-farm view, and underground it is what lets the camera see her at
+     * all. One control, one meaning.
+     */
+    this.soil.setCut(this.cutOpen ? this.ant.at.y + CUT_HEADROOM : null);
   }
 
   /** Her brain, and the switch between her two of them. */
@@ -455,7 +460,36 @@ export class DensityHabitatScene {
     });
     this.host.appendChild(b);
     this.viewButton = b;
+
+    /*
+     * THE CUTAWAY IS THE PLAYER'S, not the game's.
+     *
+     * Joshua: "should be a manual toggle not automatic." It was tied to
+     * following her underground, which meant the tray took its own lid off
+     * without being asked and put it back the moment she surfaced — a view
+     * that changes itself is one you cannot use to compare two moments.
+     */
+    const cut = document.createElement('button');
+    cut.textContent = 'CUTAWAY';
+    cut.style.cssText = b.style.cssText.replace(
+      `bottom:max(${MARGIN_PX}px, env(safe-area-inset-bottom,0px))`,
+      `bottom:calc(max(${MARGIN_PX}px, env(safe-area-inset-bottom,0px)) + 54px)`,
+    );
+    cut.addEventListener('click', () => {
+      this.cutOpen = !this.cutOpen;
+      cut.textContent = this.cutOpen ? 'WHOLE TANK' : 'CUTAWAY';
+      cut.style.background = this.cutOpen ? '#3a4a2c' : '#20241d';
+    });
+    this.host.appendChild(cut);
+    this.cutButton = cut;
   }
+
+  private cutButton: HTMLButtonElement | null = null;
+
+  /** Whether the player has asked for the lid off. See `buildViewButton`. */
+  private cutOpen = false;
+
+  setCutawayForTest(on: boolean): void { this.cutOpen = on; }
 
   /** So the live version is never a guess. */
   private buildStamp(): void {
@@ -1091,6 +1125,7 @@ export class DensityHabitatScene {
     this.renderer.setAnimationLoop(null);
     this.view?.dispose();
     this.viewButton?.remove();
+    this.cutButton?.remove();
     this.stamp?.remove();
     window.clearInterval(this.metricsTimer);
     this.metrics?.remove();

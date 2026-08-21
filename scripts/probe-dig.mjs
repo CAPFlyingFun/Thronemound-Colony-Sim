@@ -346,6 +346,7 @@ const cut = await page.evaluate(async () => {
   lab.setPausedForTest(true);
   lab.setDiggingForTest(false);
   lab.setFollow(false);
+  lab.setCutawayForTest(false);
   for (let i = 0; i < 30; i += 1) lab.tick(1 / 60);
   const onSurface = lab.soilForTest().cutForTest();
 
@@ -362,6 +363,7 @@ const cut = await page.evaluate(async () => {
   lab.ant.place(x, z, floor, 0);
   lab.ant.plant(lab.ground);
   lab.setFollow(true);
+  lab.setCutawayForTest(true);
   for (let i = 0; i < 30; i += 1) lab.tick(1 / 60);
   const under = lab.soilForTest().cutForTest();
   return {
@@ -375,9 +377,9 @@ const cut = await page.evaluate(async () => {
 });
 
 console.log(`  ${JSON.stringify(cut)}`);
-check('the tank is whole when she is on the surface',
+check('the tank is whole until the player asks',
   cut.onSurface === null, `cut at ${cut.onSurface}`);
-check('the lid comes off when she is under it',
+check('the lid comes off when the player asks',
   cut.under !== null && cut.under > cut.antY && cut.under < cut.antY + 2,
   `cut at ${cut.under}, ant at ${cut.antY}, ${cut.depthMm} mm down`);
 check('and the camera is not buried', !cut.cameraInSoil,
