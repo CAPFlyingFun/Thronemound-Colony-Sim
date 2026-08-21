@@ -5,10 +5,10 @@
  * `tickForTest(dt, 1, 0)` — full walk, straight ahead, for ten seconds — and
  * reported 1.46 feet planted and 3.91 groping, which read as a catastrophic
  * regression against the voxel tray's 3.3 / 0.0. It was not. The density tray
- * is 64 mm across where the voxel tray was 480 mm, so ten seconds of forced
- * marching walked her 70 mm: clean off the end of the soil and 6.6 mm out
- * through the glass, where six feet groping is the correct answer. The numbers
- * were measuring a probe artefact.
+ * was 64 mm across at the time where the voxel tray had been 480 mm, so ten
+ * seconds of forced marching walked her 70 mm: clean off the end of the soil
+ * and 6.6 mm out through the glass, where six feet groping is the correct
+ * answer. The numbers were measuring a probe artefact.
  *
  * So this one drives `tick()`, which is the REAL frame — stroll AI, senses,
  * avoidance and all — and asserts on what the game actually does. The lesson
@@ -120,6 +120,8 @@ const r = await page.evaluate(async () => {
     tank,
     tris: (lab.soilForTest?.().geometry.index?.count ?? 0) / 3,
     cellMm: settled.cellMm,
+    soilDepthMm: +(lab.gradeForTest() * 5).toFixed(1),
+    tankMm: +(tank.size * 5).toFixed(0),
     memMB: +(settled.samples * 4 / 1048576).toFixed(1),
     seat: ant.seatForTest(),
     settledRideMm: +(settled.ride * 5).toFixed(3),
@@ -144,8 +146,20 @@ console.log(`  ${JSON.stringify(r)}`);
 
 check('no page errors', errors.length === 0, errors.join(' | ') || 'none');
 check('soil meshed', r.tris > 1000, `${r.tris} triangles`);
-check('cells are 0.25 mm', Math.abs(r.cellMm - 0.25) < 1e-6, `${r.cellMm} mm`);
+check('cells are 0.5 mm', Math.abs(r.cellMm - 0.5) < 1e-6, `${r.cellMm} mm`);
 check('field fits the memory budget', r.memMB < 64, `${r.memMB} MB`);
+
+/*
+ * ENOUGH SOIL UNDER HER TO DIG THE NEST THE DESIGN ASKS FOR.
+ *
+ * Card 01 puts the founding shaft at about 30 mm. The first tank was 48 mm
+ * tall with the surface at 55% of it, which is 26.4 mm of soil — she would
+ * have struck the glass floor part-way down her own burrow, and nothing in
+ * the build said so because digging is not wired yet. A tank is not merely a
+ * viewport; it has to hold the game.
+ */
+check('deep enough for a founding shaft', r.soilDepthMm >= 30,
+  `${r.soilDepthMm} mm of soil below grade`);
 
 /* She stands on six feet. Anything less on flat soil is a seating fault. */
 check('stands on all six', r.stand.planted > 5.9, `${r.stand.planted} planted`);
@@ -162,7 +176,7 @@ check('stands without groping', r.stand.groping < 0.05, `${r.stand.groping} grop
  * the belly clearance says it should. `buried` and `floating` below are the
  * checks that ask the field itself.
  */
-check('settles on the seat it asked for', Math.abs(r.settledRideMm - r.seat.rideMm) < 0.02,
+check('settles on the seat it asked for', Math.abs(r.settledRideMm - r.seat.rideMm) < 0.01,
   `ride ${r.settledRideMm.toFixed(3)} mm vs seat ${r.seat.rideMm.toFixed(3)} mm`);
 
 /* A tripod gait keeps three down; below three she is dragging. */

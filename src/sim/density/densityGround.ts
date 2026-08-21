@@ -29,19 +29,50 @@ import type { DensityField } from '../../density/DensityField';
 import type { Ground } from '../../anim/legDrive';
 
 /**
- * How finely a surface search walks before it bisects, in world units.
+ * How finely a surface search walks, as a fraction of the field's OWN cell.
  *
  * A hair under a cell, so a march cannot step over a thin wall between two
  * samples and report the far side of it. The bisections that follow are what
  * actually deliver the precision; the march only has to not miss the crossing.
+ *
+ * A FRACTION, and derived from the field rather than written down, because
+ * this used to be the absolute 0.04 that suited a 0.05-unit cell — and the
+ * moment the tray was rebuilt at a different resolution that constant meant
+ * something else. A step finer than a cell only costs time; a step coarser
+ * than a cell walks through walls. Tying it to the cell is the difference
+ * between a number that stays true and one that was true once.
  */
-export const STEP = 0.04;
+export const STEP_PER_CELL = 0.8;
 
-/** Halvings after the crossing is bracketed. Four gives ~1/16 of a step. */
-export const BISECTIONS = 4;
+/**
+ * How precisely a bracketed crossing is resolved, in world units.
+ *
+ * A TARGET rather than a count of halvings, and the difference showed the
+ * first time the tray was rebuilt at a coarser cell. Four halvings of a
+ * 0.05-unit cell resolves the surface to 0.0125 mm; four halvings of a
+ * 0.1-unit cell resolves it to 0.025 mm — and her belly rides 0.02 mm above
+ * the soil, so the ground had become less precise than the clearance it was
+ * being asked to hold. A fixed count of halvings is a precision that changes
+ * when nobody meant it to.
+ *
+ * 0.002 units is 0.01 mm, comfortably under the smallest gap the body model
+ * cares about, and each extra halving it costs is one more sample.
+ */
+export const PRECISION = 0.002;
 
 export class DensityGround implements Ground {
-  constructor(private readonly field: DensityField) {}
+  /** This field's march step, in world units. See `STEP_PER_CELL`. */
+  readonly step: number;
+
+  /** Halvings needed to bring one step down to `PRECISION`. */
+  readonly bisections: number;
+
+  constructor(private readonly field: DensityField) {
+    this.step = field.cellSize * STEP_PER_CELL;
+    this.bisections = Math.max(
+      1, Math.ceil(Math.log2(this.step / PRECISION)),
+    );
+  }
 
   /** Is this point inside soil? The whole of "solid", in one sample. */
   solidAt = (x: number, y: number, z: number): boolean => (
@@ -80,20 +111,20 @@ export class DensityGround implements Ground {
 
     /* Down: looking for the first place the sign flips. */
     let last = here;
-    for (let t = STEP; t <= down + 1e-9; t += STEP) {
+    for (let t = this.step; t <= down + 1e-9; t += this.step) {
       const value = this.field.sample(
         at.x - up.x * t, at.y - up.y * t, at.z - up.z * t,
       );
-      if ((value > 0) !== (last > 0)) return -this.refine(at, up, -(t - STEP), -t);
+      if ((value > 0) !== (last > 0)) return -this.refine(at, up, -(t - this.step), -t);
       last = value;
     }
     /* Up: the same, for a foot that has ended up buried. */
     last = here;
-    for (let t = STEP; t <= rise + 1e-9; t += STEP) {
+    for (let t = this.step; t <= rise + 1e-9; t += this.step) {
       const value = this.field.sample(
         at.x + up.x * t, at.y + up.y * t, at.z + up.z * t,
       );
-      if ((value > 0) !== (last > 0)) return this.refine(at, up, t - STEP, t);
+      if ((value > 0) !== (last > 0)) return this.refine(at, up, t - this.step, t);
       last = value;
     }
     /*
@@ -115,7 +146,7 @@ export class DensityGround implements Ground {
     const sign = this.field.sample(
       at.x + up.x * lo, at.y + up.y * lo, at.z + up.z * lo,
     ) > 0;
-    for (let i = 0; i < BISECTIONS; i += 1) {
+    for (let i = 0; i < this.bisections; i += 1) {
       const mid = (lo + hi) / 2;
       const value = this.field.sample(
         at.x + up.x * mid, at.y + up.y * mid, at.z + up.z * mid,
@@ -135,13 +166,13 @@ export class DensityGround implements Ground {
    */
   surfaceIn(x: number, z: number, from: number): number | null {
     let last = this.field.sample(x, from, z);
-    for (let y = from - STEP; y > 0; y -= STEP) {
+    for (let y = from - this.step; y > 0; y -= this.step) {
       const value = this.field.sample(x, y, z);
       if (value > 0 && !(last > 0)) {
-        /* Bisect between y and y + STEP for the drawn surface. */
+        /* Bisect between y and y + one step for the drawn surface. */
         let lo = y;
-        let hi = y + STEP;
-        for (let i = 0; i < BISECTIONS; i += 1) {
+        let hi = y + this.step;
+        for (let i = 0; i < this.bisections; i += 1) {
           const mid = (lo + hi) / 2;
           if (this.field.sample(x, mid, z) > 0) lo = mid; else hi = mid;
         }
@@ -161,7 +192,7 @@ export class DensityGround implements Ground {
    * shares a field with rather than in whichever file first wants it.
    */
   normalAt(x: number, y: number, z: number, into: THREE.Vector3): THREE.Vector3 {
-    const h = STEP;
+    const h = this.step;
     const dx = this.field.sample(x + h, y, z) - this.field.sample(x - h, y, z);
     const dy = this.field.sample(x, y + h, z) - this.field.sample(x, y - h, z);
     const dz = this.field.sample(x, y, z + h) - this.field.sample(x, y, z - h);

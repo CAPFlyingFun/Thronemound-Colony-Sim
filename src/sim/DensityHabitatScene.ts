@@ -354,6 +354,12 @@ export class DensityHabitatScene {
   /** The drawn soil, so a probe can count triangles rather than trust a log. */
   soilForTest(): THREE.Mesh | null { return this.soil; }
 
+  /**
+   * How much soil sits below the surface, in world units — the depth a
+   * founding shaft has to fit inside. See the probe's check on it.
+   */
+  gradeForTest(): number { return GRADE; }
+
   /** Everything a probe needs to judge "she stands and walks correctly". */
   reportForTest(): {
     at: { x: number; y: number; z: number };

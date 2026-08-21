@@ -17,18 +17,33 @@
  * iso 0) and `carve.ts`. Intersection is therefore `Math.min` and it reads
  * backwards until you hold that in your head: `Math.min(a, b)` is "inside both".
  *
- * ## Why the tank got smaller
+ * ## Why the tank is not 480 mm, and how big it is instead
  *
- * The voxel tray was 480 mm across. At the 0.25 mm cells this needs to make a
- * 3 mm worker tunnel look round, 480 mm is 1920 cells a side — about 3.9
- * billion samples, or 15.7 GB. That is not a tuning problem, it is an
- * arithmetic one, and it is why `labWorld` streams tiles instead.
+ * The voxel tray was 480 mm across. A signed field stores a sample per lattice
+ * point in THREE dimensions, so its cost goes as the cube of resolution: 480 mm
+ * at 0.25 mm cells is 1920 cells a side, about 3.9 billion samples, or 15.7 GB.
+ * That is not a tuning problem, it is an arithmetic one.
  *
- * So this first pass uses the size the density lab already proved runs well on
- * the target devices: 64 x 48 x 64 mm at 0.25 mm, which is 12.7 M samples and
- * about 51 MB. Smaller tank, real geometry. Tiling it back up to a full
- * formicarium is the chunk manager's job and is deliberately not attempted
- * here — one hard thing at a time.
+ * The same arithmetic run the other way is the whole reason this tank could
+ * grow. Every doubling of the cell buys eight times the volume for the same
+ * memory, so the choice is really "how round must a tunnel be", not "how big
+ * may the tank be":
+ *
+ *     cell     tank (w x h x d)     field     soil depth   3 mm tunnel
+ *     0.25     64 x 48 x 64          49 MB       26 mm      12 cells
+ *     0.5     128 x 96 x 128         49 MB       53 mm       6 cells
+ *     0.75    192 x 144 x 192        49 MB       79 mm       4 cells
+ *     1.0     320 x 240 x 320        95 MB      132 mm       3 cells
+ *
+ * 0.5 mm is the row this uses (Joshua, 2026-08-21): the same 12.7 M samples
+ * and ~49 MB the first pass measured on the target devices, twice the tank in
+ * every direction, and enough soil under her for a founding shaft. A worker's
+ * tunnel is six cells across and a queen's twelve, which SurfaceNets should
+ * still round off cleanly — that last claim is the one to check against a real
+ * bore once digging is wired, rather than to trust from this comment.
+ *
+ * Tiling back up to a full 480 mm formicarium is still the chunk manager's
+ * job and is deliberately not attempted here — one hard thing at a time.
  */
 
 import { DensityField } from '../../density/DensityField';
@@ -36,13 +51,21 @@ import { DensityField } from '../../density/DensityField';
 /** One world unit is one 5 mm voxel, as everywhere else in the sim. */
 export const MM_PER_UNIT = 5;
 
-/** Density resolution. 3 mm worker tunnel = 12 cells across. */
-export const CELL_MM = 0.25;
+/**
+ * Density resolution: a 3 mm worker tunnel is 6 cells across, a 6 mm queen
+ * tunnel 12.
+ *
+ * Halved from 0.25 mm (2026-08-21, Joshua) and the halving is what pays for
+ * the tank below. Sample count goes as the CUBE of resolution, so one step
+ * coarser buys eight times the volume for nothing — see the table in the note
+ * on size.
+ */
+export const CELL_MM = 0.5;
 export const CELL_SIZE = CELL_MM / MM_PER_UNIT;
 
 /** The tank's interior, in millimetres. See the note on size above. */
-export const TANK_MM = 64;
-export const TANK_HEIGHT_MM = 48;
+export const TANK_MM = 128;
+export const TANK_HEIGHT_MM = 96;
 
 export const CELLS_X = Math.round(TANK_MM / CELL_MM);
 export const CELLS_Y = Math.round(TANK_HEIGHT_MM / CELL_MM);
@@ -55,21 +78,32 @@ export const TANK_HEIGHT = TANK_HEIGHT_MM / MM_PER_UNIT;
 /**
  * Where the soil's surface sits when nothing has dug it, in world units.
  *
- * Just under half the tank, so there is room to watch her on top and room for
- * a 30 mm founding beneath her without meeting the floor.
+ * Just over half the tank, which leaves 52.8 mm of soil under her and 43.2 mm
+ * of air above. The depth is the half that matters and it was not always
+ * enough: at the first tank size this same fraction gave 26.4 mm of soil,
+ * against a founding shaft that card 01 puts at about 30 mm. She would have
+ * hit the glass floor part-way down her own nest.
  */
 export const GRADE = TANK_HEIGHT * 0.55;
 
 /**
- * How much the surface rolls, in world units — gentle.
+ * How much the surface rolls, as a FRACTION of the tank's width.
  *
  * The voxel tray used 1.5 voxels (7.5 mm) of relief across 78 voxels, and the
  * ant walked it with nothing groping. Keeping the same gentle character rather
  * than making the density version showier: this is a geometry change, not an
  * art-direction change, and a dramatic surface would be a second variable when
  * the first one is still being proved.
+ *
+ * A fraction and not a fixed 0.3 world units, because the swells' WAVELENGTH
+ * already scales with the tank (see `k` below) — so a fixed height on a
+ * doubled tank would have halved every slope on it and quietly flattened the
+ * tray the first time it was resized. Relief and wavelength have to move
+ * together or "gentle" stops meaning anything.
  */
-export const RELIEF = 0.3;
+export const RELIEF_FRACTION = 0.3 / 12.8;
+
+export const RELIEF = TANK * RELIEF_FRACTION;
 
 /** How far in from the glass the soil stops, so the tray reads as a tray. */
 const MARGIN = CELL_SIZE * 1.5;
