@@ -1,7 +1,7 @@
 {
   "name": "thronemound-colony-sim",
   "private": true,
-  "version": "0.8.2",
+  "version": "0.8.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -82,7 +82,8 @@
     "gen:meter-fill": "node scripts/make-meter-fill.mjs",
     "probe:founding": "node scripts/probe-founding.mjs",
     "probe:orient": "node scripts/probe-orient.mjs",
-    "probe:solid": "node scripts/probe-solid.mjs"
+    "probe:solid": "node scripts/probe-solid.mjs",
+    "probe:determinism": "node scripts/probe-determinism.mjs"
   },
   "dependencies": {
     "three": "^0.180.0"

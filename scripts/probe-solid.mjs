@@ -41,6 +41,14 @@ async function measure() {
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(`http://127.0.0.1:${PORT}/?cb=${Date.now()}`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => window.habitatScene?.ready === true, null, { timeout: 240000 });
+  /*
+   * THE CLOCK IS TAKEN BEFORE THE DOOR IS OPENED, not after.
+   *
+   * `reveal()` starts the live loop, and every frame it runs before the
+   * probe pauses is simulation nobody counted. Pausing first makes the run
+   * exactly the frames this file ticks — see the note on `reveal`.
+   */
+  await page.evaluate(() => window.habitatScene.setPausedForTest(true));
   await pressPlay(page);
 
   const out = await page.evaluate(async ({ seconds }) => {

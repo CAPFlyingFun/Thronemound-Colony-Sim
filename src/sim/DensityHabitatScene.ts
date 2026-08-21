@@ -167,16 +167,18 @@ export class DensityHabitatScene {
   constructor(private readonly host: HTMLElement, seed = 1) {
     this.ground = new DensityGround(this.field);
 
-    let n = seed >>> 0;
-    const rand = (): number => {
-      /* Mulberry32 — seeded, so the same seed gives the same ant every run. */
-      n += 0x6d2b79f5;
-      let t = n;
-      t = Math.imul(t ^ (t >>> 15), t | 1);
-      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-    this.stroll = new AntStroll(rand);
+    this.strollSeed[0] = seed >>> 0;
+    /*
+     * A SECOND STREAM FOR THE DIGGER, off the same seed but decorrelated.
+     *
+     * One shared stream would work and would be deterministic, but it would
+     * make every dig site depend on how many bearings the stroller happened
+     * to draw first — so a change to wandering would silently move the whole
+     * nest, and a dig test would be measuring the stroller. Two streams keep
+     * the two brains reproducible independently.
+     */
+    this.digSeed[0] = (seed ^ 0x9e3779b9) >>> 0;
+    this.stroll = new AntStroll(() => mulberry(this.strollSeed));
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
@@ -359,6 +361,15 @@ export class DensityHabitatScene {
 
   private readonly gauge = new DigGauge();
 
+  /**
+   * THE TWO SEEDED STREAMS. Declared here, before `dig`, because a field
+   * initialiser runs before the constructor body and `dig` reads these
+   * through a closure — see the note inside it.
+   */
+  private readonly strollSeed = new Uint32Array(1);
+
+  private readonly digSeed = new Uint32Array(1);
+
   private readonly dig = new DigBrain('queen', {
     /*
      * Every one of these is a CLOSURE rather than a captured reference,
@@ -374,7 +385,22 @@ export class DensityHabitatScene {
       if (region) this.soil?.rebuild(region);
     },
     size: TANK,
-  });
+  },
+  /*
+   * SEEDED, AND IT NEVER WAS.
+   *
+   * `DigBrain`'s third parameter defaults to `Math.random`, and this call
+   * passed two arguments — so every site the Queen has ever chosen was drawn
+   * from an unseeded generator while the file above it described a seeded
+   * world. The stroller was seeded; the digger, which decides where the nest
+   * goes, was not.
+   *
+   * It hid because nothing measured it. `probe:dig` reported excavation
+   * depths of 8.6, 12.6, 24.2 and 45.8 mm on identical runs and that was put
+   * down to the software renderer's timing; it was this. A determinism check
+   * would have caught it on the day it was written, and there wasn't one.
+   */
+  () => mulberry(this.digSeed));
 
   /** For a probe, and for a future keeper control. */
   setDiggingForTest(on: boolean): void { this.digging = on; }
@@ -910,8 +936,19 @@ export class DensityHabitatScene {
    * enough to have settled, and a human has touched the screen.
    */
   reveal(): void {
-    /* The game begins here, not when the scene was built. See `start`. */
-    this.running = true;
+    /*
+     * The game begins here, not when the scene was built. See `start`.
+     *
+     * UNLESS A PROBE HAS ALREADY ASKED FOR THE CLOCK. `setPausedForTest`
+     * used to be a plain `running = false` that `reveal` then overwrote, so
+     * a probe could only pause AFTER pressing PLAY — and between the click
+     * and the pause the live loop ran 0.15 to 0.25 s of real simulation at
+     * whatever rate the software renderer managed that day. Measured, that
+     * alone moved excavation depth from 32.6 mm to 49.9 mm across runs of
+     * the same seed. The randomness was never the RNG; it was the frames
+     * nobody counted.
+     */
+    this.running = !this.heldForTest;
     this.applyRememberedFit();
     this.resize(true);
     this.settleFor = SETTLE_SECONDS;
@@ -1042,7 +1079,16 @@ export class DensityHabitatScene {
     try { window.localStorage.setItem(FIT_KEY, fit); } catch { /* see above */ }
   }
 
-  setPausedForTest(on: boolean): void { this.running = !on; }
+  /**
+   * Hold the clock. STICKY ACROSS `reveal`, so a probe may pause the world
+   * before pressing PLAY and receive a run with zero unaccounted frames.
+   */
+  setPausedForTest(on: boolean): void {
+    this.heldForTest = on;
+    this.running = !on;
+  }
+
+  private heldForTest = false;
 
   setFollow(on: boolean): void {
     this.following = on;
@@ -1159,4 +1205,20 @@ export class DensityHabitatScene {
     this.gauge.dispose();
     this.renderer.dispose();
   }
+}
+
+/**
+ * MULBERRY32, advancing the caller's state in place.
+ *
+ * A `Uint32Array` of one rather than a closed-over number so the state can
+ * live in a field that a field initialiser may read — see `strollSeed`. The
+ * arithmetic is the same generator the scene has always used.
+ */
+function mulberry(state: Uint32Array): number {
+  const next = ((state[0] ?? 0) + 0x6d2b79f5) >>> 0;
+  state[0] = next;
+  let t = next;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 }
