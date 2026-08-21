@@ -17,6 +17,27 @@
 import './MainMenu.css';
 import { DevGate, type PinResult } from './devPin';
 
+/**
+ * How the door is dressed. Optional, so the island's front door — which
+ * supplies every action — is untouched by this existing.
+ */
+export interface MainMenuOptions {
+  /**
+   * Render ONLY these entries, in this order.
+   *
+   * The default shows every entry and greys the ones with no action, which
+   * is right for a menu whose shape is settled and whose greyed buttons
+   * promise features that exist. It is wrong for a door with one thing
+   * behind it: the colony simulator has no save, no settings and no info
+   * yet, so four dead buttons would advertise four features that are not
+   * merely unfinished but unstarted. The project's contextual rule covers
+   * this — a control must not appear until the mechanic does.
+   */
+  only?: (keyof MainMenuActions)[];
+  /** Override an entry's label, for a door where "START" is not the word. */
+  labels?: Partial<Record<keyof MainMenuActions, string>>;
+}
+
 export interface MainMenuActions {
   onStart?: () => void;
   onResume?: () => void;
@@ -71,6 +92,7 @@ export class MainMenu {
   constructor(
     private readonly host: HTMLElement,
     private readonly actions: MainMenuActions,
+    private readonly options: MainMenuOptions = {},
   ) {
     this.root = document.createElement('div');
     this.root.className = 'main-menu';
@@ -101,10 +123,15 @@ export class MainMenu {
 
     const list = document.createElement('div');
     list.className = 'main-menu__list';
-    for (const entry of ENTRIES) {
+    const shown = options.only
+      ? options.only
+        .map((key) => ENTRIES.find((e) => e.key === key))
+        .filter((e): e is Entry => e !== undefined)
+      : ENTRIES;
+    for (const entry of shown) {
       const b = document.createElement('button');
       b.className = 'main-menu__button';
-      b.textContent = entry.label;
+      b.textContent = options.labels?.[entry.key] ?? entry.label;
       b.dataset.key = entry.key;
       const action = actions[entry.key];
       if (!action) {

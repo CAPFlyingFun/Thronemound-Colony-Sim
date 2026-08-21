@@ -45,6 +45,13 @@ import {
 declare const __APP_VERSION__: string;
 declare const __BUILD_TIME__: string;
 
+/**
+ * How long after a reveal the scene keeps re-checking its own size, in
+ * seconds. See `settleFor` — long enough to outlast an app launch, short
+ * enough that it is over before anybody has done anything.
+ */
+const SETTLE_SECONDS = 2;
+
 /** How much room to keep around her when the camera is following, in units. */
 const FOLLOW_RADIUS = 6;
 
@@ -265,6 +272,12 @@ export class DensityHabitatScene {
     /* Clamped: a backgrounded tab returns with a second of dt. */
     const dt = Math.min(0.05, (now - this.last) / 1000);
     this.last = now;
+    /* See `settleFor`: a viewport that finishes settling without telling
+     * anybody is caught here rather than never. */
+    if (this.settleFor > 0) {
+      this.settleFor -= dt;
+      this.resize();
+    }
     if (this.running) this.tick(dt);
     if (this.following) this.view?.fit(this.ant.at, FOLLOW_RADIUS, this.camera.aspect);
     this.view?.update(dt);
@@ -325,12 +338,80 @@ export class DensityHabitatScene {
     });
   };
 
+  /**
+   * THE DRAWABLE AREA, asked of the thing that actually knows it.
+   *
+   * `visualViewport` first, because on iOS it is the only one that reports
+   * the area the page can really paint — `innerHeight` and an element's
+   * client box can both be a launch-time value that nothing later corrects.
+   * The host's own box second, for a scene mounted in something smaller than
+   * the window, and `innerWidth/Height` last so there is always an answer.
+   */
+  private viewportSize(): { w: number; h: number } {
+    const vv = window.visualViewport;
+    const hostW = this.host.clientWidth;
+    const hostH = this.host.clientHeight;
+    /* The host wins when it is genuinely smaller — a panel, a split view —
+     * and the visual viewport wins when the host is claiming the whole page
+     * and may be claiming a stale size for it. */
+    const w = hostW > 0 && (!vv || hostW < vv.width) ? hostW : vv?.width ?? window.innerWidth;
+    const h = hostH > 0 && (!vv || hostH < vv.height) ? hostH : vv?.height ?? window.innerHeight;
+    return { w: Math.max(1, Math.round(w)), h: Math.max(1, Math.round(h)) };
+  }
+
+  /**
+   * Size the renderer to the viewport, and do nothing if it already is.
+   *
+   * The early return is what makes it safe to call every frame during the
+   * settling window below: `setSize` reallocates the drawing buffer, so a
+   * per-frame unconditional call would be a per-frame reallocation.
+   */
   private resize(): void {
-    const w = this.host.clientWidth || window.innerWidth;
-    const h = this.host.clientHeight || window.innerHeight;
+    const { w, h } = this.viewportSize();
+    if (w === this.sizedW && h === this.sizedH) return;
+    this.sizedW = w;
+    this.sizedH = h;
     this.renderer.setSize(w, h);
-    this.camera.aspect = w / Math.max(1, h);
+    this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+  }
+
+  private sizedW = 0;
+
+  private sizedH = 0;
+
+  /**
+   * Seconds left of the SETTLING WINDOW — resize on every frame while it runs.
+   *
+   * Measured on device, and it is the whole reason this exists: opened in
+   * portrait the game came up short, and one rotation to landscape and back
+   * fixed it permanently. That is the signature of a size read ONCE, too
+   * early, that nothing afterwards re-reads — the rotation was simply the
+   * first event that forced a second look.
+   *
+   * Every event a browser offers was already listened for (`resize`,
+   * `orientationchange`, `visualViewport`, a `ResizeObserver` on the host).
+   * The lesson is that on iOS the drawable area can settle without any of
+   * them firing, so an event-driven resize has a hole in it that no amount of
+   * more events closes. Watching for a couple of seconds does close it, and
+   * costs one comparison a frame — the resize above returns immediately when
+   * nothing moved.
+   */
+  private settleFor = 0;
+
+  /**
+   * The game is on screen NOW — size it for the viewport it is actually in.
+   *
+   * Called when the menu comes down rather than when the scene is built,
+   * which is the other half of the fix: by then the app has been open long
+   * enough to have settled, and a human has touched the screen.
+   */
+  reveal(): void {
+    this.sizedW = 0;
+    this.sizedH = 0;
+    this.resize();
+    this.settleFor = SETTLE_SECONDS;
+    if (!this.following) this.frameTank();
   }
 
   setPausedForTest(on: boolean): void { this.running = !on; }
@@ -361,6 +442,17 @@ export class DensityHabitatScene {
   gradeForTest(): number { return GRADE; }
 
   /**
+   * Seconds left of the settling window, so a probe can see it ARMED rather
+   * than infer it from a size that happened to be right.
+   */
+  settleForTest(): number { return this.settleFor; }
+
+  /** The size the renderer was last set to, in CSS pixels. */
+  sizedForTest(): { w: number; h: number } {
+    return { w: this.sizedW, h: this.sizedH };
+  }
+
+  /**
    * The colour behind the world, as a hex string — so a probe can compare the
    * PAGE against it rather than against a constant written down twice.
    */
@@ -376,10 +468,32 @@ export class DensityHabitatScene {
     planted: number; groping: number; movedMm: number;
     surfaceUnder: number | null; ride: number;
     cellMm: number; samples: number;
+    seat: { rideMm: number; bellyMm: number; soleMm: number };
+    bellyClearMm: number | null;
   } {
     const r = this.ant.report;
     const top = this.surfaceAt(this.ant.at.x, this.ant.at.z, this.ant.at.y + 1);
+    const seat = this.ant.seatForTest();
     return {
+      /*
+       * THE SAME SHAPE THE VOXEL TRAY REPORTS.
+       *
+       * Not tidiness: the default route is the only route now, so every
+       * locomotion probe points here, and one that asked for `seat` got
+       * `undefined` and reported the belly clearance as NaN — a check that
+       * fails without saying anything true. Two scenes answering the same
+       * question have to answer it in the same words.
+       */
+      seat,
+      /*
+       * How far the lowest point of her BODY is above the soil under her, in
+       * millimetres. Not derivable from `ride`, which is measured to her
+       * ORIGIN — and the whole belly model is that her origin is not her
+       * belly. On this rig the belly sits ABOVE the origin, so it adds.
+       */
+      bellyClearMm: top === null
+        ? null
+        : (this.ant.at.y - top) * MM_PER_UNIT + seat.bellyMm,
       at: { x: this.ant.at.x, y: this.ant.at.y, z: this.ant.at.z },
       heading: this.ant.heading,
       state: this.stroll.state,

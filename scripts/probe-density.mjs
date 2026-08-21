@@ -16,6 +16,7 @@
  * add a movement probe will be tempted to force the input again.
  */
 import { chromium } from 'playwright';
+import { pressPlay } from './lib/pressPlay.mjs';
 
 const PORT = process.env.PORT ?? '5177';
 const checks = [];
@@ -40,6 +41,8 @@ page.on('pageerror', (e) => errors.push(e.message));
 const t0 = Date.now();
 await page.goto(`http://127.0.0.1:${PORT}/?cb=${Date.now()}`, { waitUntil: 'domcontentloaded' });
 await page.waitForFunction(() => window.habitatScene?.ready === true, null, { timeout: 240000 });
+/* Through the door, as a player would — `reveal()` is on the other side. */
+const doored = await pressPlay(page);
 const bootS = (Date.now() - t0) / 1000;
 
 const r = await page.evaluate(async () => {
@@ -145,6 +148,7 @@ console.log(`  booted in ${bootS.toFixed(1)} s`);
 console.log(`  ${JSON.stringify(r)}`);
 
 check('no page errors', errors.length === 0, errors.join(' | ') || 'none');
+check('the PLAY door opens onto the tray', doored, doored ? 'pressed' : 'no door found');
 check('soil meshed', r.tris > 1000, `${r.tris} triangles`);
 check('cells are 0.5 mm', Math.abs(r.cellMm - 0.5) < 1e-6, `${r.cellMm} mm`);
 check('field fits the memory budget', r.memMB < 64, `${r.memMB} MB`);

@@ -10,8 +10,18 @@
  *   SMOKE_URL=http://127.0.0.1:5177/?scene=habitat node scripts/probe-thorax.mjs
  */
 import { chromium } from 'playwright';
+import { pressPlay } from './lib/pressPlay.mjs';
 
-const URL = process.env.SMOKE_URL ?? 'http://127.0.0.1:5173/?scene=habitat';
+/*
+ * THE BARE URL, because the default no-scene route is the game.
+ *
+ * This used to default to `?scene=habitat`. That route falls through to the
+ * same branch, so it was not measuring a different program by accident — but
+ * it was naming one, and a probe that names a route nobody plays is one
+ * refactor away from measuring it. Standing rule (Joshua, 2026-08-21): no
+ * scenes; all work and all measurement on the default URL.
+ */
+const URL = process.env.SMOKE_URL ?? 'http://127.0.0.1:5173/';
 const browser = await chromium.launch({
   executablePath: process.env.CHROME_PATH
     ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
@@ -22,8 +32,11 @@ const ctx = await browser.newContext({
 });
 const page = await ctx.newPage();
 page.on('pageerror', (e) => console.log('PAGEERR', e.message));
-await page.goto(`${URL}&probe=${Date.now()}`, { waitUntil: 'domcontentloaded' });
+await page.goto(`${URL}${URL.includes('?') ? '&' : '?'}probe=${Date.now()}`,
+  { waitUntil: 'domcontentloaded' });
 await page.waitForFunction(() => window.habitatScene?.ready === true, null, { timeout: 200000 });
+/* Through the front door, as a player must — `reveal()` is on the far side. */
+await pressPlay(page);
 
 const rows = await page.evaluate(async () => {
   const THREE = await import('/node_modules/three/build/three.module.js');

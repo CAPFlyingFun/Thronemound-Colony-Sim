@@ -19,8 +19,18 @@
  * point of the "no player input" line: if she moves, she moved herself.
  */
 import { chromium } from 'playwright';
+import { pressPlay } from './lib/pressPlay.mjs';
 
-const URL = process.env.SMOKE_URL ?? 'http://127.0.0.1:5173/?scene=habitat';
+/*
+ * THE BARE URL, because the default no-scene route is the game.
+ *
+ * This used to default to `?scene=habitat`. That route falls through to the
+ * same branch, so it was not measuring a different program by accident — but
+ * it was naming one, and a probe that names a route nobody plays is one
+ * refactor away from measuring it. Standing rule (Joshua, 2026-08-21): no
+ * scenes; all work and all measurement on the default URL.
+ */
+const URL = process.env.SMOKE_URL ?? 'http://127.0.0.1:5173/';
 const browser = await chromium.launch({
   executablePath: process.env.CHROME_PATH
     ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
@@ -32,6 +42,8 @@ page.on('pageerror', (e) => errs.push(e.message));
 page.on('console', (m) => { if (m.type() === 'error') errs.push(m.text()); });
 await page.goto(URL, { waitUntil: 'domcontentloaded' });
 await page.waitForFunction(() => window.habitatScene?.ready === true, null, { timeout: 200000 });
+/* Through the front door, as a player must — `reveal()` is on the far side. */
+await pressPlay(page);
 
 const out = await page.evaluate(async () => {
   const lab = window.habitatScene;
@@ -43,7 +55,9 @@ const out = await page.evaluate(async () => {
    * number below would then be measuring the founding and calling it
    * locomotion. `probe:founding` is where the digging is held to account.
    */
-  lab.setFoundingForTest(false);
+  /* Optional: the density tray has no founding yet, so there is nothing to
+   * switch off there. Present on the voxel tray, where it matters. */
+  lab.setFoundingForTest?.(false);
   const bounds = lab.boundsForTest();
 
   /*
@@ -132,9 +146,21 @@ const out = await page.evaluate(async () => {
       bellyMin = Math.min(bellyMin, r.bellyClearMm);
       bellyMax = Math.max(bellyMax, r.bellyClearMm);
     }
-    /* Inside the tank, always. The panes are one cell thick at the rim. */
-    if (r.at.x < 1 || r.at.z < 1 || r.at.x > bounds.size - 1
-      || r.at.z > bounds.size - 1 || r.at.y > bounds.ceilingY) outOfBox += 1;
+    /*
+     * INSIDE THE GLASS, always — and the glass is where the tank says it is.
+     *
+     * This used to inset the test by a hard-coded 1 world unit, which was one
+     * 5 mm voxel on the tray it was written for and is a rim the density tray
+     * does not have: its soil stops 0.75 mm from the pane, so an ant standing
+     * perfectly well on it was counted 1176 frames outside a wall she was
+     * nowhere near. The same class of stale constant as the ground's march
+     * step — a number that described the world once.
+     *
+     * Whether she is on SOIL is a different question and `offSurface` above
+     * already asks it, so this one only has to be about the glass.
+     */
+    if (r.at.x < 0 || r.at.z < 0 || r.at.x > bounds.size
+      || r.at.z > bounds.size || r.at.y > bounds.ceilingY) outOfBox += 1;
     if (i % 300 === 0) {
       trail.push({
         t: +(i * DT).toFixed(1),
@@ -269,6 +295,7 @@ const phone = await browser.newPage({
 });
 await phone.goto(URL, { waitUntil: 'domcontentloaded' });
 await phone.waitForFunction(() => window.habitatScene?.ready === true, null, { timeout: 200000 });
+await pressPlay(phone);
 await phone.waitForTimeout(600);
 const fit = await phone.evaluate(() => {
   const c = document.querySelector('canvas');

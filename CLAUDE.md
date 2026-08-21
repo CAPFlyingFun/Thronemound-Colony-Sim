@@ -21,6 +21,35 @@ Treat old cards, old commits and older sections of this file that assume
 
 ---
 
+## The default route is the game. There are no scenes.
+
+**Joshua, 2026-08-21: "No scenes... please make all changes on the default
+no scene."**
+
+The bare URL — no `?scene=`, no `?terrain=` — is the game, and it is the only
+place current work goes. It is what the PWA opens, it is what Joshua tests,
+and it is therefore the only build whose behaviour is real.
+
+This applies to probes as much as to features. A probe that measures
+`?scene=something` is measuring a route nobody plays, and the project has
+already shipped a build that passed every check against something the device
+was not running. Point probes at the bare URL and drive them through whatever
+the player has to touch — including the front door's PLAY button. Do not add
+a query parameter that lets a probe skip a step a player cannot skip.
+
+The query routes that still exist are HISTORY, not alternatives:
+
+- `?scene=menu` / `?scene=island` are the frozen direct-control island.
+- `?terrain=voxel` is the pre-density tray, kept only as a one-parameter
+  revert while the density stack proves itself. It is a safety line, not a
+  second product, and it is not where fixes go.
+- The remaining `?scene=` rigs are dev instruments.
+
+Fixing something on a scene route instead of on the default route is not a
+smaller change. It is a change to the wrong program.
+
+---
+
 ## Trello is the living source of truth
 
 **Trello board:**

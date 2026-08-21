@@ -40,8 +40,28 @@
  * fail on a regression and they do not pretend the current number is good.
  */
 import { chromium } from 'playwright';
+import { pressPlay } from './lib/pressPlay.mjs';
 
-const URL = process.env.SMOKE_URL ?? 'http://127.0.0.1:5173/?scene=habitat';
+/*
+ * THE ONE PROBE THAT IS NOT ON THE DEFAULT ROUTE, and why.
+ *
+ * The standing rule (Joshua, 2026-08-21) is that there are no scenes and all
+ * work happens on the bare URL. This probe is the exception because the thing
+ * it measures is not there yet: the default route serves the DENSITY tray,
+ * and founding — the Queen digging her shaft, turning, cutting her first
+ * chamber — still speaks in voxel CELLS and runs only on the voxel tray.
+ * Pointing this at the bare URL does not test founding on density, it throws
+ * on the first missing hook, which is a red that teaches nothing.
+ *
+ * `?terrain=voxel` is not a scene. It is the one-parameter revert kept while
+ * the density stack proves itself, and running the old founding probe against
+ * the old tray is measuring the thing that exists rather than pretending.
+ *
+ * THIS LINE IS A DEBT. When digging is wired to density (card 01a, item 1),
+ * this goes back to the bare URL and the voxel default is deleted. If you are
+ * reading it after that has happened, it is stale — say so.
+ */
+const URL = process.env.SMOKE_URL ?? 'http://127.0.0.1:5173/?terrain=voxel';
 const browser = await chromium.launch({
   executablePath: process.env.CHROME_PATH
     ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
@@ -67,6 +87,8 @@ page.on('console', (m) => { if (m.type() === 'error') errs.push(m.text()); });
 await page.goto(`${URL}${URL.includes('?') ? '&' : '?'}probe=${Date.now()}`,
   { waitUntil: 'domcontentloaded' });
 await page.waitForFunction(() => window.habitatScene?.ready === true, null, { timeout: 200000 });
+/* Through the front door, as a player must — `reveal()` is on the far side. */
+await pressPlay(page);
 
 const out = await page.evaluate(async () => {
   const lab = window.habitatScene;

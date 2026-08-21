@@ -461,10 +461,58 @@ if (host) {
         void lab.start();
       });
     } else {
-      void import('./sim/DensityHabitatScene').then(({ DensityHabitatScene }) => {
-        const lab = new DensityHabitatScene(host);
+      /*
+       * A DOOR IN FRONT OF THE TRAY, and it is not only furniture.
+       *
+       * Asked for as "a loading screen before it loads up everything in the
+       * background, or a simple main menu with a single play button" — and it
+       * happens to be the structural fix for the sizing fault reported
+       * alongside it. Opened in portrait the game came up short of the bottom
+       * edge; one rotation to landscape and back put it right for good. That
+       * is a size read once, at launch, before the viewport had settled.
+       *
+       * The menu moves the moment the canvas is sized from "as early as
+       * possible" to "when a human pressed PLAY", by which time there is
+       * nothing left to settle. `reveal()` re-reads the viewport then, and
+       * keeps re-reading it for two seconds after, because on iOS the
+       * drawable area can settle without firing any event to say so.
+       *
+       * ONE BUTTON, not five greyed ones. The colony simulator has no save,
+       * no settings and no info yet — not unfinished, unstarted — and the
+       * project's contextual rule is that a control must not appear before
+       * its mechanic does. `only` is how the island's door keeps all of its
+       * buttons while this one shows what it has.
+       */
+      void Promise.all([
+        import('./sim/DensityHabitatScene'),
+        import('./ui/MainMenu'),
+      ]).then(([{ DensityHabitatScene }, { MainMenu }]) => {
+        let lab: InstanceType<typeof DensityHabitatScene> | null = null;
+        let opened = false;
+
+        const door = new MainMenu(host, {
+          onStart: () => {
+            if (opened) return;
+            opened = true;
+            door.dispose();
+            lab?.reveal();
+          },
+        }, { only: ['onStart'], labels: { onStart: 'PLAY' } });
+
+        /* Disabled until the tray exists, so PLAY can never open onto a
+         * scene that has not finished building itself. */
+        door.setEnabled('onStart', false);
+        door.setStatus('Preparing the tray…');
+
+        lab = new DensityHabitatScene(host);
         (window as unknown as { habitatScene: unknown }).habitatScene = lab;
-        void lab.start();
+        void lab.start().then(() => {
+          door.setLoaded();
+          door.setStatus('');
+          door.setEnabled('onStart', true);
+        }).catch((why: unknown) => {
+          door.setFailed(why instanceof Error ? why.message : 'The tray failed to build');
+        });
       });
     }
   }

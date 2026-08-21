@@ -18,6 +18,7 @@
  * pins the symptom Joshua actually saw.
  */
 import { chromium } from 'playwright';
+import { pressPlay } from './lib/pressPlay.mjs';
 
 const PORT = process.env.PORT ?? '5177';
 const checks = [];
@@ -52,8 +53,13 @@ for (const size of SIZES) {
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(`http://127.0.0.1:${PORT}/?cb=${Date.now()}`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => window.habitatScene?.ready === true, null, { timeout: 240000 });
-  /* A frame for the deferred resize to land. */
-  await page.waitForTimeout(600);
+  /*
+   * THROUGH THE DOOR FIRST. `reveal()` is what sizes the renderer now, and
+   * measuring before it is measuring a canvas no player ever sees. Then long
+   * enough for the settling window to have run its course.
+   */
+  await pressPlay(page);
+  await page.waitForTimeout(2600);
 
   const r = await page.evaluate(() => {
     const canvas = document.querySelector('canvas');
@@ -63,6 +69,7 @@ for (const size of SIZES) {
       return m ? `#${m.slice(0, 3).map((n) => (+n).toString(16).padStart(2, '0')).join('')}` : css;
     };
     const scene = window.habitatScene.sceneBackgroundForTest?.() ?? null;
+    const sized = window.habitatScene.sizedForTest?.() ?? null;
     return {
       viewport: { w: window.innerWidth, h: window.innerHeight },
       canvas: {
@@ -72,6 +79,7 @@ for (const size of SIZES) {
       pageBg: hex(getComputedStyle(document.documentElement).backgroundColor),
       bodyBg: hex(getComputedStyle(document.body).backgroundColor),
       sceneBg: scene,
+      sized,
     };
   });
   sceneBg = r.sceneBg;
@@ -84,6 +92,11 @@ for (const size of SIZES) {
     `${gapBottom.toFixed(1)} px short`);
   check(`${size.label}: canvas reaches the right edge`, Math.abs(gapRight) < 1,
     `${gapRight.toFixed(1)} px short`);
+  /* The renderer's own idea of its size must be the viewport's, not merely
+   * whatever the canvas element's CSS box happens to report. */
+  check(`${size.label}: renderer sized to the viewport`,
+    r.sized !== null && r.sized.w === r.viewport.w && r.sized.h === r.viewport.h,
+    `renderer ${r.sized?.w}x${r.sized?.h}, viewport ${r.viewport.w}x${r.viewport.h}`);
   check(`${size.label}: canvas starts at the top-left`,
     Math.abs(r.canvas.top) < 1 && Math.abs(r.canvas.left) < 1,
     `top ${r.canvas.top}, left ${r.canvas.left}`);
@@ -95,6 +108,30 @@ for (const size of SIZES) {
   check(`${size.label}: page matches the scene behind it`,
     r.pageBg === r.sceneBg && r.bodyBg === r.sceneBg,
     `page ${r.pageBg}, body ${r.bodyBg}, scene ${r.sceneBg}`);
+
+  /*
+   * AND IT MUST FOLLOW A VIEWPORT THAT CHANGES AFTER LOAD.
+   *
+   * This is the fault as it was actually described: opened in portrait the
+   * game came up short, and rotating to landscape and back put it right for
+   * good. The rotation was not a fix, it was the first event that forced a
+   * second look at a size read once and never re-read. So the thing to pin
+   * is that the canvas tracks the viewport whenever it moves, not only at
+   * the one moment the scene was built.
+   */
+  await page.setViewportSize({ width: size.height, height: size.width });
+  await page.waitForTimeout(900);
+  const rotated = await page.evaluate(() => {
+    const box = document.querySelector('canvas').getBoundingClientRect();
+    return {
+      w: window.innerWidth, h: window.innerHeight,
+      right: +box.right.toFixed(1), bottom: +box.bottom.toFixed(1),
+    };
+  });
+  check(`${size.label}: follows a rotation`,
+    Math.abs(rotated.w - rotated.right) < 1 && Math.abs(rotated.h - rotated.bottom) < 1,
+    `${rotated.w}x${rotated.h} viewport, canvas ends at ${rotated.right}x${rotated.bottom}`);
+
   await ctx.close();
 }
 
