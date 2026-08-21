@@ -372,7 +372,7 @@ export class DensityHabitatScene {
       'right:calc(10px + env(safe-area-inset-right,0px))',
       'padding:8px 10px', 'border-radius:8px',
       'background:rgba(8,10,14,0.86)', 'color:#cfe3d0',
-      'font:500 10px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace',
+      'font:500 9.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace',
       'white-space:pre', 'pointer-events:none', 'user-select:none',
       'overflow:hidden',
     ].join(';');
@@ -393,26 +393,60 @@ export class DensityHabitatScene {
     document.body.appendChild(ruler);
 
     const n = (v: number): string => String(Math.round(v * 10) / 10);
+    /* Three decimals, because a page zoom of 1.15 rounds to 1.1 and the
+     * difference between "no zoom" and "zoomed" is the question. */
+    const n3 = (v: number): string => v.toFixed(3);
+    const yn = (v: boolean): string => (v ? 'YES' : 'no ');
     const paint = (): void => {
       if (!this.metrics) return;
       const vv = window.visualViewport;
       const rect = this.renderer.domElement.getBoundingClientRect();
       const pad = getComputedStyle(ruler);
       const hostRect = this.host.getBoundingClientRect();
-      const standalone = window.matchMedia('(display-mode: standalone)').matches
-        || window.matchMedia('(display-mode: fullscreen)').matches
-        || (navigator as unknown as { standalone?: boolean }).standalone === true;
+      /*
+       * THE THREE ANSWERS, KEPT APART.
+       *
+       * They were OR'd into one word, which made the readout unable to show
+       * the one distinction now in question: WebKit has open bugs about
+       * manifest `fullscreen` on iOS, and the working comparison apps (Ant
+       * Scout, StormTracker) both ask for `standalone`. A label that says
+       * "standalone" when the media query matched `fullscreen` is an
+       * instrument answering a question nobody asked.
+       */
+      const mStandalone = window.matchMedia('(display-mode: standalone)').matches;
+      const mFullscreen = window.matchMedia('(display-mode: fullscreen)').matches;
+      const mMinimalUi = window.matchMedia('(display-mode: minimal-ui)').matches;
+      const navStandalone = (navigator as unknown as { standalone?: boolean }).standalone === true;
+      /*
+       * SCREEN AGAINST WINDOW — the row that decides the next move.
+       *
+       * If the screen reports the device's full logical size while the window
+       * reports less, WebKit is shrinking the web-app viewport and the shell
+       * settings are the suspect. If the screen ITSELF is small, the device's
+       * own Display Zoom is in play and nothing about the manifest explains
+       * it. Those want opposite fixes, so the ratio is printed rather than
+       * left to be worked out from two rows.
+       */
+      const sh = window.screen;
+      const ratioW = window.innerWidth > 0 ? sh.width / window.innerWidth : 0;
+      const ratioH = window.innerHeight > 0 ? sh.height / window.innerHeight : 0;
       this.metrics.textContent = [
-        `v${__APP_VERSION__}  ${standalone ? 'standalone' : 'browser'}`,
+        `v${__APP_VERSION__}`,
+        `mode     standalone ${yn(mStandalone)} fullscreen ${yn(mFullscreen)}`,
+        `         minimal-ui ${yn(mMinimalUi)} nav.standalone ${yn(navStandalone)}`,
+        `screen   ${n(sh.width)} x ${n(sh.height)}  avail ${n(sh.availWidth)} x ${n(sh.availHeight)}`,
+        `outer    ${n(window.outerWidth)} x ${n(window.outerHeight)}`,
         `window   ${n(window.innerWidth)} x ${n(window.innerHeight)}`,
-        `visual   ${vv ? `${n(vv.width)} x ${n(vv.height)}  off ${n(vv.offsetTop)}  scale ${n(vv.scale)}` : 'none'}`,
+        `screen/window  ${n3(ratioW)} w   ${n3(ratioH)} h`,
+        `visual   ${vv ? `${n(vv.width)} x ${n(vv.height)}  off ${n(vv.offsetTop)}` : 'none'}`,
+        `zoom     ${vv ? n3(vv.scale) : '-'}   dpr ${n3(window.devicePixelRatio)}`,
         `docEl    ${n(document.documentElement.clientWidth)} x ${n(document.documentElement.clientHeight)}`,
         `#app     ${n(this.host.clientWidth)} x ${n(this.host.clientHeight)}  top ${n(hostRect.top)}  bot ${n(hostRect.bottom)}`,
         `canvas   ${n(rect.width)} x ${n(rect.height)}  top ${n(rect.top)}  bot ${n(rect.bottom)}`,
-        `renderer ${n(this.sizedW)} x ${n(this.sizedH)}  ratio ${n(this.renderer.getPixelRatio())}  dpr ${n(window.devicePixelRatio)}`,
+        `renderer ${n(this.sizedW)} x ${n(this.sizedH)}  ratio ${n(this.renderer.getPixelRatio())}`,
         `safe     t${pad.paddingTop} r${pad.paddingRight} b${pad.paddingBottom} l${pad.paddingLeft}`,
-        `chose    ${n(this.sizedW)} x ${n(this.sizedH)}  (max of the rows above)`,
-        `GAP bottom ${n(window.innerHeight - rect.bottom)}   right ${n(window.innerWidth - rect.width)}`,
+        `GAP vs window   bot ${n(window.innerHeight - rect.bottom)}  right ${n(window.innerWidth - rect.width)}`,
+        `GAP vs screen   bot ${n(sh.height - rect.bottom)}  right ${n(sh.width - rect.width)}`,
       ].join('\n');
     };
     paint();
