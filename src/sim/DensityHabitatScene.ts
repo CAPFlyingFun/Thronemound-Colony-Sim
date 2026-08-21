@@ -392,6 +392,29 @@ export class DensityHabitatScene {
     ].join(';');
     document.body.appendChild(ruler);
 
+    /*
+     * WHAT THE MANIFEST ASKS FOR, against what iOS ACTUALLY GAVE US.
+     *
+     * iOS bakes the display mode in at INSTALL time, so a Home Screen app
+     * keeps the shell it was added with however many times the page reloads.
+     * That cost a whole round trip: a device running the new build reported
+     * `fullscreen YES` from a manifest that had said `standalone` since the
+     * previous version, and the experiment had simply not run yet.
+     *
+     * An instrument that can say "you are running the old install" is worth
+     * more than one that leaves it to be inferred from a mode nobody expected.
+     */
+    let wantDisplay = '?';
+    const link = document.querySelector<HTMLLinkElement>('link[rel="manifest"]');
+    if (link) {
+      void fetch(link.href)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((m: { display?: string } | null) => {
+          wantDisplay = m?.display ?? '?';
+        })
+        .catch(() => { wantDisplay = 'unreadable'; });
+    }
+
     const n = (v: number): string => String(Math.round(v * 10) / 10);
     /* Three decimals, because a page zoom of 1.15 rounds to 1.1 and the
      * difference between "no zoom" and "zoomed" is the question. */
@@ -430,8 +453,47 @@ export class DensityHabitatScene {
       const sh = window.screen;
       const ratioW = window.innerWidth > 0 ? sh.width / window.innerWidth : 0;
       const ratioH = window.innerHeight > 0 ? sh.height / window.innerHeight : 0;
+      const live = mFullscreen ? 'fullscreen'
+        : mStandalone ? 'standalone'
+          : mMinimalUi ? 'minimal-ui' : 'browser';
+      /*
+       * ONLY AN INSTALLED APP CAN BE A STALE INSTALL. In a browser tab the
+       * live mode is `browser` and always differs from whatever the manifest
+       * asks for, which is not a fault and must not shout about one — an
+       * instrument that cries wolf in the ordinary case gets ignored in the
+       * one case it matters.
+       */
+      const installed = mStandalone || mFullscreen || mMinimalUi || navStandalone;
+      const stale = installed && wantDisplay !== '?' && wantDisplay !== 'unreadable'
+        && wantDisplay !== live;
+      /*
+       * THE SHORTFALL, STATED AS A NUMBER RATHER THAN LEFT TO ARITHMETIC.
+       *
+       * The viewport, converted back to screen points through the zoom, is
+       * what should equal the screen. In landscape it does — 810 x 1.15 is
+       * 931.5 of 932. In portrait it came to 872.85 of 932, short by the
+       * status-bar inset, which is the whole fault in one row.
+       */
+      const zoom = vv?.scale ?? 1;
+      const coveredW = window.innerWidth * zoom;
+      const coveredH = window.innerHeight * zoom;
+      /*
+       * COMPARED ALONG THE LONG AND SHORT AXES, not width against width.
+       *
+       * `screen` does not rotate on iOS — it reported 430 x 932 in both
+       * orientations — so subtracting it from a viewport that DOES rotate
+       * produces nonsense the moment the phone is turned (it read "right
+       * -380" in landscape). Sorting both pairs asks the question that
+       * survives rotation: how much of the long side of the screen is
+       * covered, and how much of the short side.
+       */
+      const screenLong = Math.max(sh.width, sh.height);
+      const screenShort = Math.min(sh.width, sh.height);
+      const coverLong = Math.max(coveredW, coveredH);
+      const coverShort = Math.min(coveredW, coveredH);
       this.metrics.textContent = [
         `v${__APP_VERSION__}`,
+        `manifest ${wantDisplay}  ->  live ${live}${stale ? '   ** REINSTALL **' : ''}`,
         `mode     standalone ${yn(mStandalone)} fullscreen ${yn(mFullscreen)}`,
         `         minimal-ui ${yn(mMinimalUi)} nav.standalone ${yn(navStandalone)}`,
         `screen   ${n(sh.width)} x ${n(sh.height)}  avail ${n(sh.availWidth)} x ${n(sh.availHeight)}`,
@@ -446,7 +508,8 @@ export class DensityHabitatScene {
         `renderer ${n(this.sizedW)} x ${n(this.sizedH)}  ratio ${n(this.renderer.getPixelRatio())}`,
         `safe     t${pad.paddingTop} r${pad.paddingRight} b${pad.paddingBottom} l${pad.paddingLeft}`,
         `GAP vs window   bot ${n(window.innerHeight - rect.bottom)}  right ${n(window.innerWidth - rect.width)}`,
-        `GAP vs screen   bot ${n(sh.height - rect.bottom)}  right ${n(sh.width - rect.width)}`,
+        `covers   ${n(coverLong)} of ${n(screenLong)} long   ${n(coverShort)} of ${n(screenShort)} short`,
+        `SHORT BY ${n(screenLong - coverLong)} long   ${n(screenShort - coverShort)} short  (screen pts)`,
       ].join('\n');
     };
     paint();
