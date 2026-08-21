@@ -68,6 +68,38 @@ export const POSE_TURN_TAU = 0.14;
 export const POSE_DIG_TAU = 0.18;
 
 /**
+ * HOW FAR SHE PITCHES HER BODY NOSE-DOWN TO DIG, in radians. About 34
+ * degrees at full effort.
+ *
+ * THE BODY, NOT THE FOOT FRAME — and that separation is the whole of why
+ * this works where two earlier attempts did not.
+ *
+ * The first tried leaning `up` itself onto the support normal. It pitched
+ * her, and it also told `LegDrive` that the ground was tilted 57 degrees,
+ * so her legs tried to stand on a plane that was not there: planted feet
+ * fell from 4.0 to 1.13 and groping rose to 4.16. Body attitude and foot
+ * support were the same vector, so leaning for the dig capsized the walk.
+ *
+ * They are different questions. Her feet are on a floor and want the floor's
+ * normal; her body is leaning INTO a face and wants her own intent. A real
+ * ant opening a nest braces her legs on the ground and drives her head down —
+ * her feet do not tilt with her thorax. So `up` stays the foot frame, and
+ * this pitches only the drawn body around it.
+ *
+ * AND IT IS DELIBERATELY SHALLOWER THAN THE BORE. `digBrain.DIG_PITCH` aims
+ * the cut 57 degrees below her forward; this leans the body 34. The gap is
+ * not a disagreement, it is the HEAD: her thorax tips a third of a turn and
+ * her head carries the rest, which is the decomposition Joshua asked for —
+ * "mid-thorax through mandibles, with the head raising and lowering". So the
+ * bore is left exactly as it was, because it was already the sum of the two,
+ * and 33.6 mm of measured excavation depends on it.
+ */
+export const DIG_PITCH_DOWN = 0.6;
+
+/** How fast the body settles into that pitch, in seconds. */
+export const PITCH_TAU = 0.2;
+
+/**
  * WHERE THE FLOOR IS UNDER A POINT, ASKED FROM A HEIGHT.
  *
  * The third argument is the one that lets her go underground. Asked without
@@ -247,6 +279,12 @@ export class AntBody {
   private poseDig = 0;
 
   /**
+   * How far her body is pitched nose-down, in radians — drawn, and aimed
+   * along, but NOT the frame her feet stand on. See `DIG_PITCH_DOWN`.
+   */
+  private bodyPitch = 0;
+
+  /**
    * How far her body origin rides above the ground her belly is clearing —
    * her measured belly drop plus `BELLY_CLEARANCE_MM`. A constant, because
    * the whole point of the belly model is that this number does not move.
@@ -374,6 +412,23 @@ export class AntBody {
     };
   }
 
+  /**
+   * HOW FAR HER DRAWN BODY IS PITCHED NOSE-DOWN, in degrees.
+   *
+   * Read off the MODEL's own rotation rather than off `bodyPitch`, because
+   * the field is what this file intends and the quaternion is what the
+   * renderer will use. Two earlier attempts at pitch got the intent right
+   * and the sign wrong, and a probe reading the field would have called
+   * both of them green while she reared at the ceiling. Positive is
+   * nose-down.
+   */
+  drawnPitchDegForTest(): number {
+    const nose = new THREE.Vector3(0, 0, 1)
+      .applyQuaternion(this.model.root.quaternion);
+    return -Math.asin(THREE.MathUtils.clamp(nose.dot(this.up), -1, 1))
+      * THREE.MathUtils.RAD2DEG;
+  }
+
   /** Which way her nose points, as a world bearing. */
   get heading(): number {
     return Math.atan2(this.forward.x, this.forward.z);
@@ -411,6 +466,7 @@ export class AntBody {
     this.poseSpeed = 0;
     this.poseTurn = 0;
     this.poseDig = 0;
+    this.bodyPitch = 0;
   }
 
   /** Plant every foot where it stands — after a placement or a teleport. */
@@ -472,10 +528,31 @@ export class AntBody {
      * had.
      */
     RIGHT.crossVectors(this.up, this.forward).normalize();
+    /*
+     * The body's own pitch, eased in. It rides ON TOP of her frame rather
+     * than replacing it: the basis below is still built from the up her feet
+     * are using, and the pitch is applied afterwards, so the legs keep
+     * solving against real ground while the body leans into its work.
+     */
+    const wantPitch = DIG_PITCH_DOWN * this.poseDig;
+    this.bodyPitch += (wantPitch - this.bodyPitch)
+      * Math.min(1, 1 - Math.exp(-dt / PITCH_TAU));
     this.model.root.position.copy(this.at);
     this.model.root.quaternion.setFromRotationMatrix(
       BASIS.makeBasis(RIGHT, this.up, this.forward),
     );
+    if (Math.abs(this.bodyPitch) > 1e-4) {
+      /*
+       * POSITIVE ABOUT `RIGHT` IS NOSE-DOWN, and that is a measurement, not
+       * a derivation. The negation that stood here first drew her 34.2
+       * degrees nose-UP: it lifted her mandibles clear of the soil, so the
+       * face gate never opened, and she armed nine sites and bit none — 1.5
+       * mm of excavation against the 32.5 mm she manages flat. Every earlier
+       * attempt at pitch got this sign wrong too.
+       */
+      PITCH_Q.setFromAxisAngle(RIGHT, this.bodyPitch);
+      this.model.root.quaternion.premultiply(PITCH_Q);
+    }
     /*
      * The pose lags the intent. Exponential rather than a fixed rate so the
      * lag is a TIME and not a distance: a small change of mind arrives almost
@@ -631,4 +708,5 @@ const LOOK_RING: readonly (readonly [number, number])[] = [
 
 /* Scratch, so a walking ant allocates nothing per frame. */
 const RIGHT = new THREE.Vector3();
+const PITCH_Q = new THREE.Quaternion();
 const BASIS = new THREE.Matrix4();

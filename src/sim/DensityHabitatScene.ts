@@ -392,8 +392,16 @@ export class DensityHabitatScene {
     onFace: boolean; cutting: boolean; seatReachMm: number;
     jaw: { x: number; y: number; z: number };
     jawAboveSoilMm: number | null; bodyAboveSoilMm: number | null;
+    pitchDeg: number; aimDownDeg: number;
   } {
     return {
+      /* Positive is nose-down, off the drawn model. See `AntBody`. */
+      pitchDeg: this.ant.drawnPitchDegForTest(),
+      /* And how far below the horizon the BORE runs, which is the number
+       * the soil actually feels. They should agree. */
+      aimDownDeg: -Math.asin(
+        THREE.MathUtils.clamp(this.dig.aim.y, -1, 1),
+      ) * THREE.MathUtils.RAD2DEG,
       phase: this.dig.phase,
       progress: this.dig.progress,
       bites: this.dig.bites,

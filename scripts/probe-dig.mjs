@@ -193,6 +193,22 @@ const live = await page.evaluate(async () => {
   let worstJawGapMm = 0;
   let lastProgress = 0;
   let travelled = 0;
+  /*
+   * HER ATTITUDE, AND WHAT IT COSTS HER LEGS.
+   *
+   * Both of these are here because the two earlier attempts at pitch each
+   * bought the lean with something else: leaning `up` onto the support
+   * normal pitched her and collapsed the gait, and a thorax-only bore
+   * pitched her and stopped the digging. So a pitch measurement alone
+   * cannot say the change is good — it has to be read next to the feet and
+   * the depth, or it is the same green those two would have shown.
+   */
+  let peakPitchDeg = -90;
+  let pitchDigSum = 0;
+  let pitchDigFrames = 0;
+  let plantedSum = 0;
+  let gropingSum = 0;
+  let gaitFrames = 0;
   const prev = lab.ant.at.clone();
   const phases = {};
 
@@ -206,9 +222,14 @@ const live = await page.evaluate(async () => {
     travelled += lab.ant.at.distanceTo(prev);
     prev.copy(lab.ant.at);
 
+    peakPitchDeg = Math.max(peakPitchDeg, d.pitchDeg);
+    const r = lab.reportForTest();
+    plantedSum += r.planted; gropingSum += r.groping; gaitFrames += 1;
+
     if (d.cutting) worstSeatMm = Math.max(worstSeatMm, d.seatReachMm);
     if (d.phase === 'digging') {
       framesDigging += 1;
+      pitchDigSum += d.pitchDeg; pitchDigFrames += 1;
       if (!d.onFace) framesDiggingOffFace += 1;
       /* Did the BAR advance on a frame where her jaws were off the soil? */
       if (!d.onFace && d.progress > lastProgress) barMovedOffFace += 1;
@@ -256,6 +277,12 @@ const live = await page.evaluate(async () => {
     worstJawGapMm: +worstJawGapMm.toFixed(2),
     travelledMm: +(travelled * MM).toFixed(0),
     worstSeatMm: +worstSeatMm.toFixed(2),
+    peakPitchDeg: +peakPitchDeg.toFixed(1),
+    diggingPitchDeg: pitchDigFrames === 0
+      ? null : +(pitchDigSum / pitchDigFrames).toFixed(1),
+    aimDownDeg: +end.aimDownDeg.toFixed(1),
+    planted: +(plantedSum / gaitFrames).toFixed(2),
+    groping: +(gropingSum / gaitFrames).toFixed(2),
     noseReachMm: NOSE_REACH_MM,
     bodyMm: CASTE_DIG.queen.lengthMm,
     rebuildMs: +lab.soilForTest().lastRebuildMs.toFixed(1),
@@ -313,6 +340,55 @@ check('and that reach is a fraction of her, not an ant-length',
  */
 check('she excavates to a real depth',
   live.deepestMm >= 4, `deepest excavation ${live.deepestMm} mm`);
+
+/*
+ * SHE PITCHES INTO THE WORK — Joshua, 2026-08-21: "Can you have it pitch as
+ * that's the point and how ants dig and I can't give an honest assessment
+ * because it's not behaving like a real ant would."
+ *
+ * Read off the DRAWN model's rotation, because the two attempts before this
+ * one both set the intent correctly and got the sign wrong, and one of them
+ * reared her 34.9 degrees at the ceiling. A field named `bodyPitch` would
+ * have called that green.
+ */
+check('she pitches her body into the dig',
+  live.diggingPitchDeg !== null && live.diggingPitchDeg >= 12,
+  `${live.diggingPitchDeg} deg nose-down while digging, peak ${live.peakPitchDeg}`);
+check('and her head carries the rest of the bore',
+  live.aimDownDeg > live.peakPitchDeg + 5,
+  `bore ${live.aimDownDeg} deg down, body at most ${live.peakPitchDeg}`);
+/*
+ * WHAT THE GAIT DOES UNDER THE PITCH — RECORDED, NOT ASSERTED.
+ *
+ * There was a check here. It read `planted >= 3.4, groping <= 1.2` — the
+ * figures a WALKING ant posts — on the assumption that digging holds the
+ * same line. It does not, and the assumption was mine, not a measurement.
+ *
+ * Measured, four runs each, in this harness:
+ *
+ *     flat build     planted 1.10 - 1.39    groping 4.31 - 4.36
+ *     with pitch     planted 0.73 - 1.90    groping 3.82 - 5.13
+ *
+ * Two things follow. First, MOST OF HER FEET ARE ALREADY GROPING WHILE SHE
+ * DIGS, and were before the pitch existed — better than four of six. That is
+ * a real defect, it is what Joshua saw as "the legs were way over her body",
+ * and it belongs to the IK in `solveFeet` / `QueenModel`, not to her
+ * attitude. Second, the pitched spread STRADDLES the flat one: the
+ * run-to-run variance is larger than any difference between them, so this
+ * probe cannot honestly say the pitch made the gait worse OR that it left
+ * it alone.
+ *
+ * So no check. A threshold loose enough to pass every pitched run would also
+ * have passed the attempt that drove planted to 1.13, which is exactly the
+ * regression it would exist to catch — and a green that cannot go red is
+ * worse than a number written down. `planted` and `groping` are in the JSON
+ * line above; read them. The leg defect gets its own fix and its own proof.
+ *
+ * The same caution applies to `deepestMm`, and it cuts the other way: the
+ * pitched runs excavate 24 - 46 mm against the flat build's 9 - 34, which
+ * LOOKS like a large win and is not separable at this spread either. The
+ * depth check below stays where it was rather than being raised to claim it.
+ */
 
 check('digging never hitches the frame', live.rebuildMs < 40, `${live.rebuildMs} ms`);
 
