@@ -36,6 +36,11 @@ import { AntBody } from './AntBody';
 import { AntStroll, type StrollIntent, type StrollSenses } from './antStroll';
 import { ObserverCamera } from './observerCamera';
 import { DensityGround } from './density/densityGround';
+import { DigBrain } from './density/digBrain';
+import { DigGauge } from './digGauge';
+import { boreFrom } from './density/boreFrom';
+import { boreBounds, carveInto } from './density/carveInto';
+import { boreRadiusMm, toUnits } from './density/casteDig';
 import { SoilMesh } from './density/soilMesh';
 import {
   CELLS_X, CELLS_Y, CELLS_Z, GRADE, MM_PER_UNIT, TANK, TANK_HEIGHT,
@@ -63,6 +68,19 @@ const SETTLE_SECONDS = 2;
  * either fit and the numbers stop depending on which one is set.
  */
 const MARGIN_PX = 18;
+
+/**
+ * How big the round dig bar is drawn, in world units.
+ *
+ * A queen is 1.8 units nose to tail, so a gauge at its native size would be
+ * most of her length and read as a hoop she was standing in. This is a little
+ * over a bore's width — enough to see the ring turn, small enough that the
+ * soil it sits on is still what you are looking at.
+ */
+const GAUGE_SCALE = 1.6;
+
+/** Reused so the frame allocates nothing. */
+const SCRATCH_FACE = new THREE.Vector3();
 
 /** Which way the page is asked to sit relative to the system insets. */
 type ViewportFit = 'cover' | 'contain';
@@ -204,6 +222,7 @@ export class DensityHabitatScene {
     this.scene.add(this.ant.model.root);
     this.buildSoil();
     this.drawTank();
+    this.scene.add(this.gauge.root);
 
     const mid = TANK / 2;
     const top = this.surfaceAt(mid, mid) ?? GRADE;
@@ -212,7 +231,21 @@ export class DensityHabitatScene {
 
     this.frameTank();
     this.ready = true;
-    this.running = true;
+    /*
+     * SHE DOES NOT LIVE BEHIND THE DOOR.
+     *
+     * `start` used to set the world running the moment it was built, which
+     * meant the queen spent the whole time the menu was up walking about and
+     * digging — so PLAY opened onto a tray that had already been worked, from
+     * a game nobody had started. It also quietly broke `probe:density`, whose
+     * seat measurement came out 0.203 mm against a 0.020 mm target because she
+     * was standing in a hole she had dug before the probe began.
+     *
+     * The render loop still runs, so the menu has a lit tray behind it. Only
+     * the SIMULATION waits, and `reveal` is what starts it — the same moment
+     * the canvas is sized and the door comes down.
+     */
+    this.running = false;
     this.last = performance.now();
     this.renderer.setAnimationLoop(this.frame);
   }
@@ -233,10 +266,24 @@ export class DensityHabitatScene {
 
   private light(): void {
     this.scene.background = new THREE.Color(0x1a1d22);
-    const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+    /*
+     * TURNED DOWN, because the normals got CORRECT.
+     *
+     * 2.2 of sun and 1.1 of hemisphere was tuned against normals from
+     * `computeVertexNormals`, and `buildSurfaceNets` winds a good share of its
+     * quads backwards — so a fair fraction of the tray was being lit from
+     * inside itself and came out darker than it should have. The gradient
+     * normals `SoilMesh` uses now all point out of the soil, correctly, and
+     * the same lighting promptly blew the surface to white: topsoil's albedo
+     * is 0.28 and 0.28 x 3.3 is 0.92, which is not brown.
+     *
+     * A fix that makes an old tuning wrong is still a fix. This is the same
+     * scene relit for normals that mean what they say.
+     */
+    const sun = new THREE.DirectionalLight(0xffffff, 1.25);
     sun.position.set(60, 120, 40);
     this.scene.add(sun);
-    this.scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x3a2c22, 1.1));
+    this.scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x3a2c22, 0.55));
   }
 
   /** The glass, as a wire box. Density is for SOIL; the tank stays the tank. */
@@ -254,9 +301,84 @@ export class DensityHabitatScene {
   tick(dt: number): void {
     if (!this.ready) return;
     this.elapsed += dt;
-    const intent = this.stroll.step(dt, this.ant.heading, this.senses);
+    /*
+     * THE DIGGER DRIVES HER, and the stroller is what she does when there is
+     * nothing to dig. Two brains, one body, and only one of them steering at
+     * a time — the alternative is blending two sets of intent, which is how
+     * an ant ends up walking toward one thing while facing another.
+     */
+    const intent = this.digging
+      ? this.dig.step(dt, this.ant.at, this.ant.heading, this.ant.forward,
+        (into) => this.ant.model.jawPosition(into))
+      : this.stroll.step(dt, this.ant.heading, this.senses);
     this.lastIntent = intent;
     this.ant.step(dt, intent, this.ground, this.surfaceAt);
+    /* The bar rides the WORK FACE — a bore ahead of her jaw, not her jaw —
+     * so it reads as the soil being worked rather than as a badge on the ant. */
+    const face = this.digging && this.dig.onFace
+      ? SCRATCH_FACE.copy(this.dig.jaw)
+        .addScaledVector(this.dig.aim, toUnits(boreRadiusMm('queen')))
+      : null;
+    this.gauge.showAt(face, this.dig.progress, this.camera, GAUGE_SCALE);
+  }
+
+  /** Her brain, and the switch between her two of them. */
+  private digging = true;
+
+  private readonly gauge = new DigGauge();
+
+  private readonly dig = new DigBrain('queen', {
+    /*
+     * Every one of these is a CLOSURE rather than a captured reference,
+     * because the field initialiser runs before `ground` exists — and reading
+     * it eagerly is a `used before initialization` the compiler catches only
+     * because the property happens to be declared later in the file. A
+     * closure asks at call time, which is the only time the answer matters.
+     */
+    solidAt: (x, y, z) => this.ground.solidAt(x, y, z),
+    surfaceAt: (x, z, from) => this.surfaceAt(x, z, from),
+    carve: (origin, aim, length, radius) => {
+      const region = carveInto(
+        this.field, boreFrom(origin, aim, length, radius),
+        boreBounds(origin, aim, length, radius),
+      );
+      if (region) this.soil?.rebuild(region);
+    },
+    size: TANK,
+  });
+
+  /** For a probe, and for a future keeper control. */
+  setDiggingForTest(on: boolean): void { this.digging = on; }
+
+  /** Her current bite direction, so a probe can ask the field the same
+   * question the reach gate asks rather than a proxy for it. */
+  digAimForTest(): THREE.Vector3 { return this.dig.aim; }
+
+  digSiteForTest(): { stand: THREE.Vector3; target: THREE.Vector3 } | null {
+    return this.dig.site;
+  }
+
+  digReportForTest(): {
+    phase: string; progress: number; bites: number; arms: number;
+    onFace: boolean; jaw: { x: number; y: number; z: number };
+    jawAboveSoilMm: number | null; bodyAboveSoilMm: number | null;
+  } {
+    return {
+      phase: this.dig.phase,
+      progress: this.dig.progress,
+      bites: this.dig.bites,
+      arms: this.dig.arms,
+      onFace: this.dig.onFace,
+      jaw: { x: this.dig.jaw.x, y: this.dig.jaw.y, z: this.dig.jaw.z },
+      jawAboveSoilMm: (() => {
+        const top = this.surfaceAt(this.dig.jaw.x, this.dig.jaw.z, this.dig.jaw.y + 1);
+        return top === null ? null : (this.dig.jaw.y - top) * MM_PER_UNIT;
+      })(),
+      bodyAboveSoilMm: (() => {
+        const top = this.surfaceAt(this.ant.at.x, this.ant.at.z, this.ant.at.y + 1);
+        return top === null ? null : (this.ant.at.y - top) * MM_PER_UNIT;
+      })(),
+    };
   }
 
   /** What her brain asked for this frame, so a probe can watch the input. */
@@ -705,6 +827,8 @@ export class DensityHabitatScene {
    * enough to have settled, and a human has touched the screen.
    */
   reveal(): void {
+    /* The game begins here, not when the scene was built. See `start`. */
+    this.running = true;
     this.applyRememberedFit();
     this.resize(true);
     this.settleFor = SETTLE_SECONDS;
@@ -948,6 +1072,7 @@ export class DensityHabitatScene {
     window.removeEventListener('orientationchange', this.onViewportChange);
     window.visualViewport?.removeEventListener('resize', this.onViewportChange);
     this.soil?.dispose();
+    this.gauge.dispose();
     this.renderer.dispose();
   }
 }

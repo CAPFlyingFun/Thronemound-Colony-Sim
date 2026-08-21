@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  AntStroll, AVOID_TURN, CLEAR_AHEAD, LOOK_AHEAD, type StrollSenses,
+  AntStroll, AVOID_MIN_SECONDS, AVOID_TURN, CLEAR_AHEAD, LOOK_AHEAD,
+  type StrollSenses,
 } from '../src/sim/antStroll';
 
 /**
@@ -111,9 +112,27 @@ describe('AntStroll wall avoidance', () => {
   it('resumes once she can see past what stopped her', () => {
     const ant = new AntStroll(cycling([0.5]));
     ant.step(1 / 60, 0, WALLED);
-    const intents = run(ant, OPEN, 10);
-    expect(intents[0]!.walk).toBe(1);
-    expect(intents[0]!.turn).toBe(0);
+    /* Not instantly — see `AVOID_MIN_SECONDS`. */
+    const intents = run(ant, OPEN, 40);
+    expect(intents.some((it) => it.walk === 1)).toBe(true);
+  });
+
+  /*
+   * THE ONE-FRAME AVOID, which is what a turn impulse looks like at source.
+   * One frame of avoid-turn swings her 1.3 degrees, and near the tray's edge
+   * that was enough to flip the probe back to clear — so she entered the
+   * avoid and left it on the next frame, four times a minute, each one a
+   * 0.85 spike that snapped her gaster.
+   */
+  it('commits to an avoid instead of leaving on the next frame', () => {
+    const ant = new AntStroll(cycling([0.5]));
+    /* Blocked for exactly one frame, clear ever after. */
+    let frame = 0;
+    const flicker: StrollSenses = { groundAhead: () => frame > 0 };
+    ant.step(1 / 60, 0, flicker);
+    frame = 1;
+    const turning = run(ant, flicker, 40).filter((it) => Math.abs(it.turn) > 1e-9);
+    expect(turning.length).toBeGreaterThanOrEqual(Math.floor(AVOID_MIN_SECONDS * 60) - 1);
   });
 
   it('needs a genuinely longer sightline to clear', () => {

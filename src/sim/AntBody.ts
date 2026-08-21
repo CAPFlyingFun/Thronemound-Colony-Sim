@@ -65,6 +65,7 @@ export const WALK_SPEED = 1.4;
  */
 export const POSE_SPEED_TAU = 0.09;
 export const POSE_TURN_TAU = 0.14;
+export const POSE_DIG_TAU = 0.18;
 
 /**
  * WHERE THE FLOOR IS UNDER A POINT, ASKED FROM A HEIGHT.
@@ -242,6 +243,9 @@ export class AntBody {
 
   private poseTurn = 0;
 
+  /** And how far her head is dipped into the work. See `StrollIntent.dig`. */
+  private poseDig = 0;
+
   /**
    * How far her body origin rides above the ground her belly is clearing —
    * her measured belly drop plus `BELLY_CLEARANCE_MM`. A constant, because
@@ -406,6 +410,7 @@ export class AntBody {
      * she was doing before she was moved. */
     this.poseSpeed = 0;
     this.poseTurn = 0;
+    this.poseDig = 0;
   }
 
   /** Plant every foot where it stands — after a placement or a teleport. */
@@ -487,11 +492,20 @@ export class AntBody {
       * Math.min(1, 1 - Math.exp(-dt / POSE_SPEED_TAU));
     this.poseTurn += (wantTurn - this.poseTurn)
       * Math.min(1, 1 - Math.exp(-dt / POSE_TURN_TAU));
+    /*
+     * The dip eases in and out on its own, slower time constant. A head that
+     * snaps to the soil the frame a bite is decided is the same fault as the
+     * gaster that snapped on a one-frame turn: correct in the numbers, wrong
+     * in the animal.
+     */
+    const wantDig = Math.max(0, Math.min(1, intent.dig ?? 0));
+    this.poseDig += (wantDig - this.poseDig)
+      * Math.min(1, 1 - Math.exp(-dt / POSE_DIG_TAU));
 
     this.model.update(dt, {
       speed: this.poseSpeed,
       turn: this.poseTurn,
-      digging: 0,
+      digging: this.poseDig,
       carrying: 0,
       headYaw: 0,
       headPitch: 0,

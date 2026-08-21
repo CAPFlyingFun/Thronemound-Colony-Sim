@@ -30,6 +30,22 @@ export interface StrollIntent {
   walk: number;
   /** -1..1 about her up; positive turns the way `LegDrive` calls positive. */
   turn: number;
+  /**
+   * 0..1 of DIGGING EFFORT — how far her head is dipped into the work.
+   *
+   * Optional, and the stroller never sets it: a wandering ant has nothing to
+   * dip into. It lives on the intent rather than in a second channel because
+   * it is the same kind of thing as `walk` and `turn` — something she WANTS,
+   * in a unit her body knows how to act on — and splitting it out would give
+   * two brains two different ways to ask for one pose.
+   *
+   * It is not decoration. Standing on flat soil her mandibles are 1.121 mm
+   * ABOVE the ground; the dip brings them to 0.070 mm, which is the only
+   * reason a bite taken at the jaw reaches the soil at all. Without it a
+   * digger walks to her work, faces it, and can never touch it — measured,
+   * before this field existed: eleven sites armed, zero bites taken.
+   */
+  dig?: number;
 }
 
 /** The one question she asks the world. */
@@ -85,6 +101,23 @@ export const AVOID_TURN = 0.85;
 export const CLEAR_AHEAD = 1.8;
 
 /**
+ * The shortest an avoid may last, in seconds.
+ *
+ * Hysteresis on the PROBE was not enough, and the trace says why: one frame
+ * of avoid-turn moves her 1.3 degrees, which swings a probe three body
+ * lengths ahead by about a third of a millimetre — and near the tray's edge
+ * that is the difference between ground and no ground. So she entered the
+ * avoid, turned once, found the way clear, and left. Four times a minute,
+ * each one a single-frame turn impulse of 0.85.
+ *
+ * Widening the probes chases that; committing to the decision ends it. An
+ * animal that has decided to turn away from something turns away from it —
+ * it does not re-open the question 16 milliseconds later. This is the one
+ * fix that does not depend on how sharp the sensor happens to be.
+ */
+export const AVOID_MIN_SECONDS = 0.3;
+
+/**
  * How long a new-bearing turn is HELD, in seconds.
  *
  * The turn used to be returned on one frame and then dropped, which meant the
@@ -108,6 +141,9 @@ export class AntStroll {
 
   /** Which way she peels off an obstacle; held for the whole avoid. */
   private avoidSign = 1;
+
+  /** How long the current avoid has run. See `AVOID_MIN_SECONDS`. */
+  private avoiding = 0;
 
   /** Seconds of the current bearing sweep still to run, and how hard. */
   private turning = 0;
@@ -136,6 +172,7 @@ export class AntStroll {
   step(dt: number, heading: number, senses: StrollSenses): StrollIntent {
     this.left -= dt;
     this.turning -= dt;
+    if (this.phase === 'avoiding') this.avoiding += dt;
 
     /*
      * THE WALL COMES FIRST, whatever she was doing. A pause that ends with
@@ -144,6 +181,7 @@ export class AntStroll {
      */
     if (this.phase !== 'avoiding' && !senses.groundAhead(heading, this.lookAhead)) {
       this.phase = 'avoiding';
+      this.avoiding = 0;
       /*
        * Peel toward whichever side has ground. Asked at a quarter turn
        * either way — far enough to be a different direction, near enough
@@ -157,18 +195,39 @@ export class AntStroll {
       /* Both or neither: keep turning the way she already was, so a corner
        * does not become a place she oscillates in. */
       this.left = 0;
-      /* A wall outranks whatever sweep she was part-way through. */
-      this.turning = 0;
+      /*
+       * The bearing sweep is LEFT ALONE. Cancelling it here was tidier to
+       * read and it manufactured the exact fault `turnRuns` exists to catch:
+       * a sweep that had just started, killed on its second frame, is a
+       * one-frame turn impulse — and those are what snapped her gaster. The
+       * avoid below returns its own turn while it is active, so it already
+       * takes precedence; by the time it ends the sweep has usually expired
+       * on its own, and if it has not, resuming it is what she was doing.
+       */
     }
 
     if (this.phase === 'avoiding') {
       /* Turning on the spot until the way ahead is clear again. Not walking
        * while she does it: a wall is exactly where a forward stride cannot
        * go, and pressing into one is the scrabbling this avoids. */
-      /* Cleared only when she can see PAST the thing that stopped her. See
-       * `CLEAR_AHEAD` — the same probe on both edges is what made her
-       * chatter. */
-      if (senses.groundAhead(heading, this.lookAhead * CLEAR_AHEAD)) {
+      /*
+       * Cleared only when she can see past the thing that stopped her AND
+       * the near ground is good — see `CLEAR_AHEAD` for why the far probe
+       * exists, and note that the far one ALONE is not enough.
+       *
+       * Blocked near and clear far is a real reading, not a contradiction:
+       * a lip a body-length ahead with open tray beyond it answers exactly
+       * that. Leaving on the far probe alone let her enter the avoid and
+       * leave it on the next frame, which is a one-frame turn impulse — the
+       * very thing `turnRuns` counts and the gaster snap it causes. Three of
+       * them in sixty seconds, measured.
+       *
+       * Entering on the near probe and leaving on both is the hysteresis
+       * stated properly: harder to leave than to enter, in both directions.
+       */
+      if (this.avoiding >= AVOID_MIN_SECONDS
+        && senses.groundAhead(heading, this.lookAhead)
+        && senses.groundAhead(heading, this.lookAhead * CLEAR_AHEAD)) {
         this.phase = 'walking';
         this.left = this.span(LEG_SECONDS);
         return { walk: 1, turn: 0 };

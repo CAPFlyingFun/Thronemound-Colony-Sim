@@ -148,6 +148,36 @@ export class DigGauge {
     this.ring.visible = segments > 0;
   }
 
+  /**
+   * The same readout, on a WORLD POINT rather than a cell.
+   *
+   * The density tray has no cells to outline — a bore is a capsule at an
+   * arbitrary angle, and boxing it would draw a grid that does not exist.
+   * So the box is hidden here and the ring alone carries the progress, which
+   * is the half of Ant Scout's readout that was ever about time.
+   *
+   * A separate entry point rather than a mode flag on `show`, because the
+   * voxel tray still uses cells and its call should not have to know that
+   * another tray exists.
+   */
+  showAt(
+    point: THREE.Vector3 | null,
+    progress: number,
+    camera: THREE.Camera,
+    scale = 1,
+  ): void {
+    if (!point) { this.root.visible = false; return; }
+    this.root.visible = true;
+    this.root.position.copy(point);
+    this.outline.visible = false;
+    this.ring.quaternion.copy(camera.quaternion);
+    this.ring.scale.setScalar(scale);
+    const filled = Math.max(0, Math.min(1, progress));
+    const segments = filled <= 0 ? 0 : Math.max(1, Math.ceil(filled * RING_SEGMENTS));
+    this.ringGeometry.setDrawRange(0, segments * 6);
+    this.ring.visible = segments > 0;
+  }
+
   dispose(): void {
     this.ringGeometry.dispose();
     (this.ring.material as THREE.Material).dispose();

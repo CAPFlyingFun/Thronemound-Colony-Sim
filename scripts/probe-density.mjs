@@ -51,6 +51,14 @@ const r = await page.evaluate(async () => {
   lab.setPausedForTest(true);
   const ant = lab.ant;
   const tank = lab.boundsForTest();
+  /*
+   * LOCOMOTION ONLY. This probe's question is "can she stand and walk on
+   * density soil", and since the digger became her default brain `tick` was
+   * driving her to work sites and measuring an ant halfway down a hole —
+   * every foot number collapsed and the seat drifted, none of it about
+   * walking. `probe:dig` is where the digging is held to account.
+   */
+  lab.setDiggingForTest(false);
 
   /* Three seconds to settle, then three standing still. */
   for (let i = 0; i < 180; i += 1) lab.tickForTest(1 / 60, 0, 0);
