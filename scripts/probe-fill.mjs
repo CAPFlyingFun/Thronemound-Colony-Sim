@@ -105,6 +105,42 @@ for (const size of SIZES) {
    * must be the canvas's own colour, so an inset the browser imposes cannot
    * paint itself a different shade.
    */
+  /*
+   * THE HUD MUST CLEAR THE EDGE UNDER EITHER FIT.
+   *
+   * `viewport-fit=contain` makes every `env(safe-area-inset-*)` read 0,
+   * because the system has already inset the viewport. Offsets written as
+   * `calc(10px + env(...))` therefore collapsed to ten pixels the moment the
+   * fit changed, and the build stamp ended up hard against the bottom edge —
+   * reported from the device as "zoomed in a little too much at the bottom
+   * left with the version number". A floor is what survives the switch.
+   */
+  const hud = await page.evaluate(() => {
+    const gap = (sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return null;
+      const b = el.getBoundingClientRect();
+      return {
+        left: +b.left.toFixed(1),
+        bottom: +(window.innerHeight - b.bottom).toFixed(1),
+        right: +(window.innerWidth - b.right).toFixed(1),
+      };
+    };
+    return { stamp: gap('.tm-build'), button: gap('.tm-watch, button') };
+  });
+  const clears = (g) => g !== null && g.left >= 12 && g.bottom >= 12;
+  check(`${size.label}: HUD clears the screen edge`,
+    clears(hud.stamp), `stamp ${JSON.stringify(hud.stamp)}`);
+
+  /*
+   * THE GUARD RAN, AND SAID SO. A fit that happens to be right is not the
+   * same as a fit that was measured — the runtime toggle "worked" and then
+   * evaporated on reopen, which is the failure this replaces.
+   */
+  const fitReport = await page.evaluate(() => window.habitatScene.fitReport);
+  check(`${size.label}: the fit guard measured the screen`,
+    /covers|fixed|remembered/.test(fitReport), fitReport);
+
   check(`${size.label}: page matches the scene behind it`,
     r.pageBg === r.sceneBg && r.bodyBg === r.sceneBg,
     `page ${r.pageBg}, body ${r.bodyBg}, scene ${r.sceneBg}`);
@@ -205,6 +241,8 @@ const manifest = await page.evaluate(async () => {
   const res = await fetch(link.href);
   return res.ok ? res.json() : null;
 }).catch(() => null);
+const viewportMeta = await page.evaluate(() => document
+  .querySelector('meta[name="viewport"]')?.getAttribute('content') ?? '');
 await ctx.close();
 
 if (manifest) {
@@ -231,6 +269,19 @@ if (manifest) {
    * `viewport-fit=cover` and `black-translucent` and ask for `standalone`.
    * That was the one shell setting where TCS differed.
    */
+  /*
+   * `viewport-fit=contain`, and it is not a style preference.
+   *
+   * With `cover`, an installed iOS app in PORTRAIT reported a 374 x 759
+   * viewport on a 430 x 932 screen at zoom 1.150 — covering 872.8 of 932
+   * points and stranding 59.2, exactly the `t59px` status-bar inset.
+   * Landscape reported `t0px` and covered 931.5 of 932, which is why the
+   * fault was portrait-only. Flipping this live from the debug panel closed
+   * the gap on the installed app, with no reinstall.
+   */
+  check('viewport asks to fit INSIDE the safe area',
+    /viewport-fit=contain/.test(viewportMeta), viewportMeta || 'no viewport meta');
+
   check('manifest asks for standalone, not fullscreen',
     manifest.display === 'standalone'
       && Array.isArray(manifest.display_override)

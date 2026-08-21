@@ -5,7 +5,25 @@
     <!-- A game, not a document: no page zoom. `user-scalable=no` covers
          Android and standalone iOS; Safari in a tab ignores it, which is
          what the gesture guard in the scene is for. -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <!--
+      `viewport-fit=contain`, NOT `cover` — and this one was A/B'd on the
+      device rather than argued about.
+
+      `cover` asks the page to extend under the system insets, and in an
+      installed iOS app that is where the portrait gap came from: the
+      viewport came back 374 x 759 against a 430 x 932 screen, scaled 1.150,
+      covering 872.8 points of 932 and stranding the missing 59.2 — exactly
+      the status-bar inset it had budgeted at the top and then not used.
+      Landscape, which reports no top inset, covered 931.5 of 932 and was
+      always fine. Flipping this one word live, from the debug panel, closed
+      the gap on the installed app with no reinstall and no deploy.
+
+      The cost is that `env(safe-area-inset-*)` all read 0 now, because the
+      system has already done the insetting. Anything that was spacing itself
+      off those values is spacing itself off nothing, so the HUD offsets carry
+      their own floors — see `MARGIN_PX` in the scene.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=contain" />
     <meta name="theme-color" content="#1a1d22" />
     <meta name="description" content="Thronemound Colony Sim, a living 2.5D ant colony simulation." />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%90%9C%3C/text%3E%3C/svg%3E" />

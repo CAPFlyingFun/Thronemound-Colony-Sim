@@ -52,6 +52,34 @@ declare const __BUILD_TIME__: string;
  */
 const SETTLE_SECONDS = 2;
 
+/**
+ * How far HUD furniture sits from the screen edge, in CSS pixels.
+ *
+ * A FLOOR, not an addition to `env(safe-area-inset-*)`. Those insets read 0
+ * under `viewport-fit=contain`, because the system has already done the
+ * insetting — so `calc(10px + env(...))` that used to clear a home indicator
+ * now clears ten pixels, and the build stamp ended up hard against the bottom
+ * edge. `max()` keeps whichever is larger, so the same rule is right under
+ * either fit and the numbers stop depending on which one is set.
+ */
+const MARGIN_PX = 18;
+
+/** Which way the page is asked to sit relative to the system insets. */
+type ViewportFit = 'cover' | 'contain';
+
+/** Where the guard's verdict is kept between launches. */
+const FIT_KEY = 'tm.viewportFit';
+
+/**
+ * How many screen points of shortfall count as "covered", per axis.
+ *
+ * Not zero: the zoom makes these numbers fractional — 810 x 1.150 came to
+ * 931.5 against a 932-point screen, which is covered by any sane reading and
+ * is not zero. Two points is under one device pixel of visible edge and well
+ * clear of the 59 the real fault produced.
+ */
+const FIT_TOLERANCE = 2;
+
 /** How much room to keep around her when the camera is following, in units. */
 const FOLLOW_RADIUS = 6;
 
@@ -294,8 +322,8 @@ export class DensityHabitatScene {
     b.textContent = 'WATCH HER';
     b.style.cssText = [
       'position:absolute', 'z-index:5',
-      'right:calc(14px + env(safe-area-inset-right,0px))',
-      'bottom:calc(14px + env(safe-area-inset-bottom,0px))',
+      `right:max(${MARGIN_PX}px, env(safe-area-inset-right,0px))`,
+      `bottom:max(${MARGIN_PX}px, env(safe-area-inset-bottom,0px))`,
       'min-height:44px', 'padding:10px 16px',
       'font:600 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace',
       'letter-spacing:0.12em', 'color:#efe3c4',
@@ -312,13 +340,18 @@ export class DensityHabitatScene {
 
   /** So the live version is never a guess. */
   private buildStamp(): void {
+    /* One stamp, whatever happens upstream. Cheap insurance: a second scene
+     * constructed over the first would otherwise leave two of these on top of
+     * each other, and a duplicate is exactly the sort of thing that reads as
+     * a rendering fault in a screenshot. */
+    for (const old of this.host.querySelectorAll('.tm-build')) old.remove();
     const tag = document.createElement('div');
     tag.className = 'tm-build';
     tag.textContent = `v${__APP_VERSION__} · ${__BUILD_TIME__}`;
     tag.style.cssText = [
       'position:absolute', 'z-index:5',
-      'left:calc(12px + env(safe-area-inset-left,0px))',
-      'bottom:calc(10px + env(safe-area-inset-bottom,0px))',
+      `left:max(${MARGIN_PX}px, env(safe-area-inset-left,0px))`,
+      `bottom:max(${MARGIN_PX}px, env(safe-area-inset-bottom,0px))`,
       'font:500 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace',
       'letter-spacing:0.08em', 'color:rgba(239,227,196,0.42)',
       'user-select:none', 'padding:6px', 'margin:-6px',
@@ -367,9 +400,9 @@ export class DensityHabitatScene {
     box.className = 'tm-metrics';
     box.style.cssText = [
       'position:absolute', 'z-index:6',
-      'left:calc(10px + env(safe-area-inset-left,0px))',
-      'top:calc(10px + env(safe-area-inset-top,0px))',
-      'right:calc(10px + env(safe-area-inset-right,0px))',
+      `left:max(${MARGIN_PX}px, env(safe-area-inset-left,0px))`,
+      `top:max(${MARGIN_PX}px, env(safe-area-inset-top,0px))`,
+      `right:max(${MARGIN_PX}px, env(safe-area-inset-right,0px))`,
       'padding:8px 10px', 'border-radius:8px',
       'background:rgba(8,10,14,0.86)', 'color:#cfe3d0',
       'font:500 9.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace',
@@ -499,6 +532,7 @@ export class DensityHabitatScene {
       lines.textContent = [
         `v${__APP_VERSION__}`,
         `manifest ${wantDisplay}  ->  live ${live}${stale ? '   ** REINSTALL **' : ''}`,
+        `fit      ${this.fitReport}`,
         `mode     standalone ${yn(mStandalone)} fullscreen ${yn(mFullscreen)}`,
         `         minimal-ui ${yn(mMinimalUi)} nav.standalone ${yn(navStandalone)}`,
         `screen   ${n(sh.width)} x ${n(sh.height)}  avail ${n(sh.availWidth)} x ${n(sh.availHeight)}`,
@@ -550,19 +584,20 @@ export class DensityHabitatScene {
       b.addEventListener('click', (e) => { e.stopPropagation(); act(); paint(); });
       bar.appendChild(b);
     };
-    const setFit = (fit: string): void => {
-      if (!meta) return;
-      meta.setAttribute(
-        'content',
-        meta.content.replace(/viewport-fit=\w+/, `viewport-fit=${fit}`),
-      );
-      /* A resize event is not fired for a viewport-meta change, so the scene
-       * is told directly — otherwise the canvas keeps the old size and the
-       * readout shows a gap that is the probe's fault, not the shell's. */
-      this.onViewportChange();
+    void meta;
+    /* The manual overrides go through the guard's own setter and are
+     * REMEMBERED, so a choice made here survives closing the app — the
+     * runtime-only version of these buttons reset on every reopen, which is
+     * what prompted the guard in the first place. */
+    const pick = (fit: ViewportFit): void => {
+      this.setFit(fit);
+      this.remember(fit);
+      this.fitReport = `${fit} (chosen)`;
+      if (!this.following) this.frameTank();
     };
-    button('fit cover', () => setFit('cover'));
-    button('fit contain', () => setFit('contain'));
+    button('fit cover', () => pick('cover'));
+    button('fit contain', () => pick('contain'));
+    button('re-scan', () => { this.fitTried = false; this.fitGuard(); });
     button('reload', () => window.location.reload());
     box.appendChild(bar);
     /* The bar takes taps; the panel around it still must not. */
@@ -585,6 +620,10 @@ export class DensityHabitatScene {
       /* An EVENT always re-applies. See `resize`'s note on `force`. */
       this.resize(true);
       if (!this.following) this.frameTank();
+      /* And a rotation is exactly when the fault appeared: the fit that
+       * covered in landscape was 59 points short in portrait. Re-measured
+       * here, not only at startup. */
+      if (this.ready) this.fitGuard();
     });
   };
 
@@ -697,9 +736,134 @@ export class DensityHabitatScene {
    * enough to have settled, and a human has touched the screen.
    */
   reveal(): void {
+    this.applyRememberedFit();
     this.resize(true);
     this.settleFor = SETTLE_SECONDS;
     if (!this.following) this.frameTank();
+    this.fitGuard();
+  }
+
+  /* ------------------------------------------------ the viewport-fit guard */
+
+  /**
+   * HOW MUCH OF THE SCREEN THE PAGE ACTUALLY COVERS, in screen points, along
+   * the long and the short axis.
+   *
+   * The viewport is in CSS pixels and the screen is in points, and the two
+   * differ by the page zoom — which on the device in question was 1.150 when
+   * nobody had asked for any zoom at all. Multiplying through is what makes
+   * the comparison mean anything.
+   *
+   * Sorted axes, because `screen` does not rotate on iOS: it read 430 x 932
+   * in BOTH orientations while the viewport rotated underneath it, so
+   * width-against-width is nonsense the moment the phone turns.
+   */
+  private coverage(): { long: number; short: number } {
+    const sh = window.screen;
+    const zoom = window.visualViewport?.scale ?? 1;
+    const w = window.innerWidth * zoom;
+    const h = window.innerHeight * zoom;
+    return {
+      long: Math.max(sh.width, sh.height) - Math.max(w, h),
+      short: Math.min(sh.width, sh.height) - Math.min(w, h),
+    };
+  }
+
+  /** The `viewport-fit` currently asked for, and how to ask for another. */
+  private currentFit(): ViewportFit {
+    const meta = document.querySelector<HTMLMetaElement>('meta[name="viewport"]');
+    return /viewport-fit=cover/.test(meta?.content ?? '') ? 'cover' : 'contain';
+  }
+
+  private setFit(fit: ViewportFit): void {
+    const meta = document.querySelector<HTMLMetaElement>('meta[name="viewport"]');
+    if (!meta) return;
+    meta.setAttribute(
+      'content',
+      /viewport-fit=\w+/.test(meta.content)
+        ? meta.content.replace(/viewport-fit=\w+/, `viewport-fit=${fit}`)
+        : `${meta.content}, viewport-fit=${fit}`,
+    );
+    /* A viewport-meta edit fires no resize event, so the scene is told. */
+    this.resize(true);
+  }
+
+  /**
+   * WHAT THE GUARD DECIDED, for the readout. Not a boolean: "it was already
+   * fine" and "it was short and this fixed it" are different answers and the
+   * panel should not have to guess which one it is looking at.
+   */
+  fitReport = 'not run';
+
+  private fitTried = false;
+
+  /** Start in whatever won last time, so a fixed device does not re-flash. */
+  private applyRememberedFit(): void {
+    try {
+      const saved = window.localStorage.getItem(FIT_KEY);
+      if (saved === 'cover' || saved === 'contain') {
+        if (saved !== this.currentFit()) this.setFit(saved);
+        this.fitReport = `${saved} (remembered)`;
+      }
+    } catch {
+      /* Private mode, or storage disabled. The guard below still runs, so
+       * the only thing lost is one frame of the wrong fit at startup. */
+    }
+  }
+
+  /**
+   * MEASURE THE FIT, AND CORRECT IT — every launch, on every device.
+   *
+   * The alternative was to write down the answer that worked once. It was
+   * `contain`, measured on an iPhone 15 Plus, where `cover` left the portrait
+   * viewport 59.2 points short of a 932-point screen — exactly the status-bar
+   * inset — while landscape covered 931.5 of 932 and looked perfect. But a
+   * constant is a claim about every device and every iOS version, and this
+   * one has already changed its behaviour under us once.
+   *
+   * So the app asks instead. If the page is not covering the screen, try the
+   * other fit and keep whichever covers more; if the first one was already
+   * fine, leave it alone — `cover` is the better look where it works, and
+   * there is no reason to give it up on a device that never had the fault.
+   *
+   * ONE FLIP PER SESSION. `fitTried` is what stops a device where neither fit
+   * covers from oscillating between them forever at rotation speed.
+   */
+  private fitGuard(): void {
+    const before = this.coverage();
+    const fit = this.currentFit();
+    if (before.long <= FIT_TOLERANCE && before.short <= FIT_TOLERANCE) {
+      this.fitReport = `${fit} (covers)`;
+      this.remember(fit);
+      return;
+    }
+    if (this.fitTried) {
+      this.fitReport = `${fit} (short ${before.long.toFixed(0)}, no better fit)`;
+      return;
+    }
+    this.fitTried = true;
+    const other: ViewportFit = fit === 'cover' ? 'contain' : 'cover';
+    this.setFit(other);
+    /* Re-measured on the NEXT frame: the meta change has to reach layout
+     * before the numbers mean anything, and reading them now reads the old
+     * ones — the same trap `onViewportChange` defers a frame for. */
+    requestAnimationFrame(() => {
+      const after = this.coverage();
+      const better = Math.max(after.long, after.short)
+        < Math.max(before.long, before.short);
+      const won: ViewportFit = better ? other : fit;
+      if (!better) this.setFit(fit);
+      this.remember(won);
+      this.fitReport = better
+        ? `${won} (fixed ${before.long.toFixed(0)}pt shortfall)`
+        : `${won} (short ${before.long.toFixed(0)}, ${other} no better)`;
+      this.resize(true);
+      if (!this.following) this.frameTank();
+    });
+  }
+
+  private remember(fit: ViewportFit): void {
+    try { window.localStorage.setItem(FIT_KEY, fit); } catch { /* see above */ }
   }
 
   setPausedForTest(on: boolean): void { this.running = !on; }
