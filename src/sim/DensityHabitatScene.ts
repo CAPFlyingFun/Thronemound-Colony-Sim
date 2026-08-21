@@ -321,11 +321,105 @@ export class DensityHabitatScene {
       'bottom:calc(10px + env(safe-area-inset-bottom,0px))',
       'font:500 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace',
       'letter-spacing:0.08em', 'color:rgba(239,227,196,0.42)',
-      'pointer-events:none', 'user-select:none',
+      'user-select:none', 'padding:6px', 'margin:-6px',
     ].join(';');
+    /* TAP THE STAMP FOR THE NUMBERS. See `toggleMetrics`. The padding and
+     * negative margin give a 10px label a thumb-sized hit area without
+     * moving it. */
+    tag.addEventListener('click', () => this.toggleMetrics());
     this.host.appendChild(tag);
     this.stamp = tag;
   }
+
+  private metrics: HTMLDivElement | null = null;
+
+  private metricsTimer = 0;
+
+  /**
+   * THE VIEWPORT, ON SCREEN, ON THE DEVICE.
+   *
+   * This exists because I have now guessed twice about a screen I cannot see
+   * and been wrong twice, and a third guess is worth less than one
+   * measurement. iOS's standalone-PWA viewport is not reproducible in the
+   * headless Chromium the probes run in — on the build that was visibly short
+   * on device, every probe here measured the canvas as reaching all four
+   * edges exactly. So the instrument goes to where the fault is.
+   *
+   * Every number that could disagree, side by side, updating live: if the
+   * canvas is short, exactly one of these rows is lying and this says which.
+   * `innerHeight` against `visualViewport.height` against the host's client
+   * box against the canvas's own rectangle against the size the renderer was
+   * last given — plus the safe-area insets, which are the usual suspect, and
+   * whether the app is actually in standalone mode at all.
+   *
+   * It is a debug readout and it should not outlive the bug.
+   */
+  private toggleMetrics(): void {
+    if (this.metrics) {
+      window.clearInterval(this.metricsTimer);
+      this.metrics.remove();
+      this.metrics = null;
+      this.metricsRuler?.remove();
+      this.metricsRuler = null;
+      return;
+    }
+    const box = document.createElement('div');
+    box.className = 'tm-metrics';
+    box.style.cssText = [
+      'position:absolute', 'z-index:6',
+      'left:calc(10px + env(safe-area-inset-left,0px))',
+      'top:calc(10px + env(safe-area-inset-top,0px))',
+      'right:calc(10px + env(safe-area-inset-right,0px))',
+      'padding:8px 10px', 'border-radius:8px',
+      'background:rgba(8,10,14,0.86)', 'color:#cfe3d0',
+      'font:500 10px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace',
+      'white-space:pre', 'pointer-events:none', 'user-select:none',
+      'overflow:hidden',
+    ].join(';');
+    this.host.appendChild(box);
+    this.metrics = box;
+
+    /* `env()` is not readable from script, so it is measured off a probe
+     * element that has been given the insets as its padding. */
+    const ruler = document.createElement('div');
+    ruler.style.cssText = [
+      'position:fixed', 'left:0', 'top:0', 'width:0', 'height:0',
+      'visibility:hidden', 'pointer-events:none',
+      'padding-top:env(safe-area-inset-top,0px)',
+      'padding-right:env(safe-area-inset-right,0px)',
+      'padding-bottom:env(safe-area-inset-bottom,0px)',
+      'padding-left:env(safe-area-inset-left,0px)',
+    ].join(';');
+    document.body.appendChild(ruler);
+
+    const n = (v: number): string => String(Math.round(v * 10) / 10);
+    const paint = (): void => {
+      if (!this.metrics) return;
+      const vv = window.visualViewport;
+      const rect = this.renderer.domElement.getBoundingClientRect();
+      const pad = getComputedStyle(ruler);
+      const hostRect = this.host.getBoundingClientRect();
+      const standalone = window.matchMedia('(display-mode: standalone)').matches
+        || window.matchMedia('(display-mode: fullscreen)').matches
+        || (navigator as unknown as { standalone?: boolean }).standalone === true;
+      this.metrics.textContent = [
+        `v${__APP_VERSION__}  ${standalone ? 'standalone' : 'browser'}`,
+        `window   ${n(window.innerWidth)} x ${n(window.innerHeight)}`,
+        `visual   ${vv ? `${n(vv.width)} x ${n(vv.height)}  off ${n(vv.offsetTop)}  scale ${n(vv.scale)}` : 'none'}`,
+        `docEl    ${n(document.documentElement.clientWidth)} x ${n(document.documentElement.clientHeight)}`,
+        `#app     ${n(this.host.clientWidth)} x ${n(this.host.clientHeight)}  top ${n(hostRect.top)}  bot ${n(hostRect.bottom)}`,
+        `canvas   ${n(rect.width)} x ${n(rect.height)}  top ${n(rect.top)}  bot ${n(rect.bottom)}`,
+        `renderer ${n(this.sizedW)} x ${n(this.sizedH)}  ratio ${n(this.renderer.getPixelRatio())}  dpr ${n(window.devicePixelRatio)}`,
+        `safe     t${pad.paddingTop} r${pad.paddingRight} b${pad.paddingBottom} l${pad.paddingLeft}`,
+        `GAP bottom ${n(window.innerHeight - rect.bottom)}   right ${n(window.innerWidth - rect.width)}`,
+      ].join('\n');
+    };
+    paint();
+    this.metricsTimer = window.setInterval(paint, 250);
+    this.metricsRuler = ruler;
+  }
+
+  private metricsRuler: HTMLElement | null = null;
 
   private readonly onViewportChange = (): void => {
     /* Deferred a frame: every rotation signal a browser has fires before the
@@ -333,7 +427,8 @@ export class DensityHabitatScene {
     if (this.reframe) cancelAnimationFrame(this.reframe);
     this.reframe = requestAnimationFrame(() => {
       this.reframe = 0;
-      this.resize();
+      /* An EVENT always re-applies. See `resize`'s note on `force`. */
+      this.resize(true);
       if (!this.following) this.frameTank();
     });
   };
@@ -360,15 +455,23 @@ export class DensityHabitatScene {
   }
 
   /**
-   * Size the renderer to the viewport, and do nothing if it already is.
+   * Size the renderer to the viewport.
    *
-   * The early return is what makes it safe to call every frame during the
-   * settling window below: `setSize` reallocates the drawing buffer, so a
-   * per-frame unconditional call would be a per-frame reallocation.
+   * `force` exists because skipping the work when the measurement has not
+   * changed is only safe for the per-frame settling window, where `setSize`
+   * would otherwise reallocate the drawing buffer sixty times a second. It is
+   * NOT safe for an event.
+   *
+   * That distinction was learned the hard way. An unconditional early return
+   * made rotation stop fixing the short canvas — which had been the one
+   * reliable workaround — because if the measurement is wrong in a way that
+   * is STABLE, "it has not changed" is exactly the wrong reason to do
+   * nothing. An event says the world moved; the answer to that is always to
+   * re-measure and re-apply, whatever the numbers say.
    */
-  private resize(): void {
+  private resize(force = false): void {
     const { w, h } = this.viewportSize();
-    if (w === this.sizedW && h === this.sizedH) return;
+    if (!force && w === this.sizedW && h === this.sizedH) return;
     this.sizedW = w;
     this.sizedH = h;
     this.renderer.setSize(w, h);
@@ -407,9 +510,7 @@ export class DensityHabitatScene {
    * enough to have settled, and a human has touched the screen.
    */
   reveal(): void {
-    this.sizedW = 0;
-    this.sizedH = 0;
-    this.resize();
+    this.resize(true);
     this.settleFor = SETTLE_SECONDS;
     if (!this.following) this.frameTank();
   }
@@ -519,6 +620,9 @@ export class DensityHabitatScene {
     this.view?.dispose();
     this.viewButton?.remove();
     this.stamp?.remove();
+    window.clearInterval(this.metricsTimer);
+    this.metrics?.remove();
+    this.metricsRuler?.remove();
     this.watcher?.disconnect();
     window.removeEventListener('resize', this.onViewportChange);
     window.removeEventListener('orientationchange', this.onViewportChange);

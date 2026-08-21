@@ -12,18 +12,9 @@
  * about the inset existing at all rather than about how it looks.
  */
 html,
-body,
-#app {
+body {
   width: 100%;
   height: 100%;
-  /*
-   * `dvh` is the DYNAMIC viewport height, and it exists because `100%` does
-   * not mean the same thing on iOS as it does elsewhere: in a standalone PWA
-   * it can resolve against the safe area rather than the screen, leaving a
-   * band along the bottom where the home indicator lives. `100%` stays as the
-   * line above for anything that does not know `dvh`.
-   */
-  height: 100dvh;
   margin: 0;
   overflow: hidden;
   background: #1a1d22;
@@ -31,13 +22,23 @@ body,
 }
 
 /*
- * And the game surface is pinned to the VIEWPORT, not sized through the
- * html -> body -> #app chain.
+ * THE GAME SURFACE IS THE VIEWPORT, DEFINED BY ITS EDGES.
  *
- * Three percentage heights in a row is three chances for one of them to
- * resolve against something other than the screen, and the renderer sizes
- * itself from this element's client box — so a short `#app` is a short canvas
- * and a visible gap. Fixed to `inset: 0` there is no chain to get wrong.
+ * `inset: 0` on a fixed element means top, right, bottom and left are all
+ * zero, and the box is whatever spans them. That is the viewport by
+ * definition, on every browser, with nothing to resolve and no chain of
+ * percentages to get wrong.
+ *
+ * AND IT MUST NOT ALSO BE GIVEN A HEIGHT. It was, and that was the bug: this
+ * element inherited `height: 100dvh` from the rule above, so it had `top: 0`,
+ * `bottom: 0` AND an explicit height at once. CSS calls that over-constrained
+ * and resolves it by DROPPING `bottom` — the height wins, the element is
+ * pinned to the top, and any shortfall in `dvh` becomes a band along the
+ * bottom that stays there. Which is exactly what it did: the belt and the
+ * braces were fighting and the braces won.
+ *
+ * `dvh` was added to fix a gap and instead froze one. An element that spans
+ * its edges cannot be short; that is the whole argument for doing it this way.
  *
  * `.dig-host` sets `position: relative` for the HUD's absolute children; an ID
  * outranks a class so this wins, and a fixed element is a containing block for
@@ -46,6 +47,10 @@ body,
 #app {
   position: fixed;
   inset: 0;
+  margin: 0;
+  overflow: hidden;
+  background: #1a1d22;
+  touch-action: none;
 }
 
 /*
