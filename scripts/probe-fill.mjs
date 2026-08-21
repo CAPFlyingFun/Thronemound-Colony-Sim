@@ -208,6 +208,34 @@ const manifest = await page.evaluate(async () => {
 await ctx.close();
 
 if (manifest) {
+  /*
+   * STANDALONE, NOT FULLSCREEN — and this one was measured on the device
+   * rather than reasoned about.
+   *
+   * With `display: fullscreen` the readout on an iPhone 15 Plus said:
+   *
+   *     mode    standalone no   fullscreen YES
+   *     screen  430 x 932        window 374 x 759
+   *     zoom    1.150            GAP vs screen  bot 173
+   *
+   * The screen reports its full size, so the device's own Display Zoom is
+   * not involved. WebKit took the fullscreen path, shrank the web viewport
+   * to 374 x 759 and scaled it by 1.150 — and 759 x 1.150 is 872.85 device
+   * points of content on a 932-point screen, leaving 59.15 uncovered, which
+   * is exactly the `t59px` status-bar inset it budgeted at the top and then
+   * did not use. The band along the bottom was the status bar's height,
+   * stranded.
+   *
+   * WebKit has open bugs about manifest fullscreen on iOS. The comparison
+   * apps that behave — Ant Scout, StormTracker — have the same
+   * `viewport-fit=cover` and `black-translucent` and ask for `standalone`.
+   * That was the one shell setting where TCS differed.
+   */
+  check('manifest asks for standalone, not fullscreen',
+    manifest.display === 'standalone'
+      && Array.isArray(manifest.display_override)
+      && manifest.display_override.every((m) => m === 'standalone'),
+    `display "${manifest.display}", override ${JSON.stringify(manifest.display_override)}`);
   check('manifest does not lock an orientation', manifest.orientation === 'any',
     `orientation "${manifest.orientation}"`);
   check('manifest colours match the scene',
