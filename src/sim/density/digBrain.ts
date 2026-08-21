@@ -40,10 +40,12 @@
  */
 
 import * as THREE from 'three';
+import { DigJob } from '../../scenes/digJob';
 import type { StrollIntent } from '../antStroll';
 import {
-  CASTE_DIG, boreRadiusMm, boreSegmentMm, toUnits, type Caste,
+  CASTE_DIG, MM_PER_UNIT, boreRadiusMm, boreSegmentMm, toUnits, type Caste,
 } from './casteDig';
+import { seatOnSoil } from './digSweep';
 
 export type DigPhase = 'walking' | 'facing' | 'closing' | 'digging';
 
@@ -53,12 +55,12 @@ export interface DigWorld {
   solidAt(x: number, y: number, z: number): boolean;
   /** The top of the soil under an x/z, seen from a height. */
   surfaceAt(x: number, z: number, from?: number): number | null;
-  /** Take a bore out, starting at `origin` and running along `aim`. */
-  carve(
-    origin: readonly [number, number, number],
-    aim: readonly [number, number, number],
-    length: number, radius: number,
-  ): void;
+  /**
+   * Take a BEAT of the cut out — a run of overlapping spheres along the
+   * bore's line, handed over by `DigJob`. The island's shape, not a capsule
+   * per press: see `digSweep.ts` for why the difference is the scalloping.
+   */
+  carveSweep(points: readonly THREE.Vector3[], radius: number): void;
   /** The tank's interior span, in world units. */
   size: number;
 }
@@ -115,6 +117,24 @@ export const TOUCH_PER_LENGTH = 0.28;
 export function touchMm(caste: Caste): number {
   return CASTE_DIG[caste].lengthMm * TOUCH_PER_LENGTH;
 }
+
+/**
+ * HOW FAR THE AIM IS WALKED LOOKING FOR SOIL, in millimetres — the island's
+ * `NOSE_REACH + JAW_PAST_NOSE`, measured from her CENTRE rather than her jaw.
+ *
+ * This is the number that lets her open an entrance on level ground, and its
+ * absence is why the tray could not. A gate asking whether soil lay within a
+ * couple of millimetres of her MANDIBLES fails on flat soil, because her jaw
+ * sits 1.89 mm above it even fully dipped — thirteen sites armed, no bites.
+ * Measured from her centre the same ground is well inside reach, and the bore
+ * is then SEATED where the ray lands rather than started where her mouth
+ * happens to be.
+ *
+ * It is not "digging at a distance": nothing is removed at the far end of the
+ * ray. The ray only finds the face; the cut begins half a bore-radius on the
+ * AIR side of it and eats forward from there.
+ */
+export const NOSE_REACH_MM = 5.1;
 
 /** Seconds of held, gated effort per bite. "It will take over time." */
 export const BITE_SECONDS = 2.4;
@@ -175,6 +195,9 @@ const wrap = (a: number): number => {
 
 const clamp1 = (x: number): number => Math.max(-1, Math.min(1, x));
 
+const SEAT = new THREE.Vector3();
+const ORIGIN = new THREE.Vector3();
+
 export class DigBrain {
   phase: DigPhase = 'walking';
 
@@ -205,6 +228,21 @@ export class DigBrain {
   private creptSet = false;
 
   private failedCloses = 0;
+
+  /** The bore being eaten right now, if any. One at a time — the island's
+   *  rule, and its duration is the cooldown. */
+  private job: DigJob | null = null;
+
+  /** Where she stood this frame, for the ray seat. */
+  private readonly at = new THREE.Vector3();
+
+  /** Where the last bore's face was found, and how far from her centre. */
+  readonly seat = new THREE.Vector3();
+
+  seatReachMm = 0;
+
+  /** Whether a cut is being eaten right now. */
+  get cutting(): boolean { return this.job !== null; }
 
   constructor(
     private readonly caste: Caste,
@@ -325,6 +363,7 @@ export class DigBrain {
     this.aim.y = -Math.sin(DIG_PITCH);
     this.aim.normalize();
 
+    this.at.copy(at);
     if (!jawAt(this.jaw)) return { walk: 0, turn: 0 };
     const touch = toUnits(touchMm(this.caste));
     this.onFace = this.world.solidAt(
@@ -441,63 +480,61 @@ export class DigBrain {
    * whole file exists to end.
    */
   private dig(dt: number): StrollIntent {
-    if (!this.onFace) {
+    /*
+     * A CUT IN PROGRESS IS THE ANSWER TO EVERYTHING. The island's rule, and
+     * it is the cooldown too: "one bore at a time — the duration is the
+     * cooldown, by decree." While a job runs she stands and eats it.
+     */
+    if (this.job) {
+      const points = this.job.tick(dt);
+      if (points.length > 0) this.world.carveSweep(points, this.boreRadius());
+      this.progress = this.job.progress;
+      if (this.job.done) {
+        this.job = null;
+        this.bites += 1;
+        this.progress = 0;
+        /* Held past the end starts the next bore from where she now stands,
+         * which is how a long tunnel is one continuous effort rather than a
+         * row of pockets. */
+        this.phase = 'closing';
+        this.left = PATIENCE.closing;
+        this.creptSet = false;
+      }
+      return { walk: 0, turn: 0, dig: 1 };
+    }
+    if (this.left <= 0) { this.arm(this.jaw); return { walk: 0, turn: 0 }; }
+
+    /*
+     * SEAT THE BORE ON THE FIRST SOIL THE AIM MEETS, then start it half a
+     * radius back on the AIR side so the mouth's lip opens on this side of
+     * the face. Straight from `islandDig.bite`.
+     */
+    const r = this.boreRadius();
+    if (!seatOnSoil(
+      (x, y, z) => this.world.solidAt(x, y, z),
+      this.at, this.aim, toUnits(NOSE_REACH_MM), toUnits(0.25), SEAT,
+    )) {
       this.phase = 'closing';
       this.left = PATIENCE.closing;
       this.progress = 0;
       return { walk: 0, turn: 0, dig: 1 };
     }
-    if (this.left <= 0) { this.arm(this.jaw); return { walk: 0, turn: 0 }; }
-    this.progress += dt / BITE_SECONDS;
-    if (this.progress < 1) return { walk: 0, turn: 0, dig: 1 };
-
-    /*
-     * AND THE SOIL COMES AWAY — from her jaw, along her aim, one caste
-     * segment. `boreSegmentMm` and not `lengthMm`: the round work face
-     * reaches a radius further, so the segment is short by exactly that and
-     * the finished hole is the depth the spec asks for.
-     */
-    this.world.carve(
-      [this.jaw.x, this.jaw.y, this.jaw.z],
-      [this.aim.x, this.aim.y, this.aim.z],
-      toUnits(boreSegmentMm(this.caste)),
-      toUnits(boreRadiusMm(this.caste)),
+    /* Kept for the probe: where the ray found the face, and how far that
+     * was from her centre. A cut that begins outside her reach is the thing
+     * "it won't dig it remotely" forbids, and this is what proves it did not. */
+    this.seat.copy(SEAT);
+    this.seatReachMm = SEAT.distanceTo(this.at) * MM_PER_UNIT;
+    ORIGIN.copy(SEAT).addScaledVector(this.aim, -(r * 1.5));
+    this.job = new DigJob(
+      ORIGIN.clone(), this.aim.clone(), toUnits(CASTE_DIG[this.caste].lengthMm), r,
     );
-    this.bites += 1;
-    this.site!.bites += 1;
-    this.progress = 0;
-    /*
-     * THE WORK FACE MOVES WITH THE TUNNEL — and this is the difference
-     * between a shaft and a trench.
-     *
-     * Left to creep blindly forward, she stopped the instant ANY soil came
-     * within reach — which at the lip of a fresh bite is its own near wall,
-     * a step away. So she nibbled the rim, shuffled on, nibbled the next rim,
-     * and produced a line of shallow scoops across the surface. Joshua had
-     * already reported that shape once, on the voxel build: "she isn't
-     * digging straight down at first and making a trench, haha."
-     *
-     * Advancing the target by the bore she just took gives her somewhere to
-     * BE rather than merely something to touch. She walks to stand over the
-     * new deepest point, which is further along her aim and lower, so the
-     * next bite continues the hole instead of starting another one.
-     */
-    this.site!.target.addScaledVector(this.aim, toUnits(boreSegmentMm(this.caste)));
-    const standTop = this.world.surfaceAt(
-      this.site!.target.x, this.site!.target.z, this.site!.target.y + 2,
-    );
-    const back = toUnits(CASTE_DIG[this.caste].jawForwardOfThoraxMm);
-    this.site!.stand.set(
-      this.site!.target.x - Math.sin(this.site!.heading) * back,
-      standTop ?? this.site!.stand.y,
-      this.site!.target.z - Math.cos(this.site!.heading) * back,
-    );
-    /* Straight back to closing, not to a new site: the face has moved away
-     * from her by one bore and the next mouthful is the next step into the
-     * tunnel she has just started. */
-    this.phase = 'closing';
-    this.left = PATIENCE.closing;
-    this.creptSet = false;
+    /* Beat zero now, not next frame — the press answers immediately. */
+    const first = this.job.tick(0);
+    if (first.length > 0) this.world.carveSweep(first, r);
     return { walk: 0, turn: 0, dig: 1 };
+  }
+
+  private boreRadius(): number {
+    return toUnits(boreRadiusMm(this.caste));
   }
 }

@@ -38,8 +38,7 @@ import { ObserverCamera } from './observerCamera';
 import { DensityGround } from './density/densityGround';
 import { DigBrain } from './density/digBrain';
 import { DigGauge } from './digGauge';
-import { boreFrom } from './density/boreFrom';
-import { boreBounds, carveInto } from './density/carveInto';
+import { carveSweep } from './density/digSweep';
 import { boreRadiusMm, toUnits } from './density/casteDig';
 import { SoilMesh } from './density/soilMesh';
 import {
@@ -370,11 +369,8 @@ export class DensityHabitatScene {
      */
     solidAt: (x, y, z) => this.ground.solidAt(x, y, z),
     surfaceAt: (x, z, from) => this.surfaceAt(x, z, from),
-    carve: (origin, aim, length, radius) => {
-      const region = carveInto(
-        this.field, boreFrom(origin, aim, length, radius),
-        boreBounds(origin, aim, length, radius),
-      );
+    carveSweep: (points, radius) => {
+      const region = carveSweep(this.field, points, radius);
       if (region) this.soil?.rebuild(region);
     },
     size: TANK,
@@ -393,7 +389,8 @@ export class DensityHabitatScene {
 
   digReportForTest(): {
     phase: string; progress: number; bites: number; arms: number;
-    onFace: boolean; jaw: { x: number; y: number; z: number };
+    onFace: boolean; cutting: boolean; seatReachMm: number;
+    jaw: { x: number; y: number; z: number };
     jawAboveSoilMm: number | null; bodyAboveSoilMm: number | null;
   } {
     return {
@@ -402,6 +399,8 @@ export class DensityHabitatScene {
       bites: this.dig.bites,
       arms: this.dig.arms,
       onFace: this.dig.onFace,
+      cutting: this.dig.cutting,
+      seatReachMm: this.dig.seatReachMm,
       jaw: { x: this.dig.jaw.x, y: this.dig.jaw.y, z: this.dig.jaw.z },
       jawAboveSoilMm: (() => {
         const top = this.surfaceAt(this.dig.jaw.x, this.dig.jaw.z, this.dig.jaw.y + 1);

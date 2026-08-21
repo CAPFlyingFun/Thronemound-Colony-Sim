@@ -180,13 +180,14 @@ check('and by the depth the caste spec asks for',
  */
 const live = await page.evaluate(async () => {
   const { CASTE_DIG } = await import('/src/sim/density/casteDig.ts');
-  const { touchMm } = await import('/src/sim/density/digBrain.ts');
+  const { NOSE_REACH_MM } = await import('/src/sim/density/digBrain.ts');
   const lab = window.habitatScene;
   lab.setPausedForTest(true);
 
   const MM = 5;
   const seen = new Set();
   let framesDigging = 0;
+  let worstSeatMm = 0;
   let framesDiggingOffFace = 0;
   let barMovedOffFace = 0;
   let worstJawGapMm = 0;
@@ -205,6 +206,7 @@ const live = await page.evaluate(async () => {
     travelled += lab.ant.at.distanceTo(prev);
     prev.copy(lab.ant.at);
 
+    if (d.cutting) worstSeatMm = Math.max(worstSeatMm, d.seatReachMm);
     if (d.phase === 'digging') {
       framesDigging += 1;
       if (!d.onFace) framesDiggingOffFace += 1;
@@ -253,7 +255,8 @@ const live = await page.evaluate(async () => {
     framesDigging, framesDiggingOffFace, barMovedOffFace,
     worstJawGapMm: +worstJawGapMm.toFixed(2),
     travelledMm: +(travelled * MM).toFixed(0),
-    touchMm: +touchMm('queen').toFixed(2),
+    worstSeatMm: +worstSeatMm.toFixed(2),
+    noseReachMm: NOSE_REACH_MM,
     bodyMm: CASTE_DIG.queen.lengthMm,
     rebuildMs: +lab.soilForTest().lastRebuildMs.toFixed(1),
   };
@@ -270,37 +273,28 @@ check('she goes through the whole loop',
 check('she walks to her work', live.travelledMm > 40, `${live.travelledMm} mm travelled`);
 
 /*
- * THE COMPLAINT, AND WHICH OF THESE ACTUALLY PROVES IT.
+ * THE COMPLAINT, MEASURED AGAINST THE MECHANIC THAT NOW SERVES IT.
  *
- * The first two read the brain's OWN `onFace` flag, so they check that it
- * acts on its gate consistently — not that the gate is telling the truth.
- * Forcing `onFace = true` leaves both of them green, which was measured
- * rather than assumed. They are worth keeping (a bar that fills while the
- * brain itself says the jaws are off soil is a real bug) but they are not
- * the witness.
+ * The old gate asked whether soil lay within a couple of millimetres of her
+ * MANDIBLES, and these checks counted frames where it was shut. That gate is
+ * gone: it could not open on flat ground — her dipped jaw sits 1.89 mm above
+ * level soil, so she armed thirteen sites and bit none — and the island's
+ * mechanic replaced it. The bore is now SEATED by walking her aim out to her
+ * nose reach and starting the cut wherever the ray meets soil.
  *
- * `worstJawGapMm` is. It walks the FIELD outward from her mandibles along
- * her own aim and reports how far the soil actually was, so it answers the
- * question independently of anything the brain believes. That is the one
- * that went red on the forced gate: 5 mm against a 2.52 mm reach.
+ * So the thing to hold her to changed shape, and pretending otherwise would
+ * leave three green checks describing a rule the code no longer has. What
+ * "it won't dig it remotely" means under this mechanic is that the FACE she
+ * starts on is within her own reach — and the cut then begins half a bore
+ * radius on the AIR side of it and eats forward. Nothing is removed at the
+ * far end of the ray; the ray only finds the face.
  */
-check('she never digs while her own gate is shut',
-  live.framesDiggingOffFace === 0,
-  `${live.framesDiggingOffFace} of ${live.framesDigging} digging frames`);
-check('the bar never fills while it is shut',
-  live.barMovedOffFace === 0, `${live.barMovedOffFace} frames`);
-/*
- * SHE NEVER REACHES FURTHER THAN HER OWN JAWS, and the gate is a fraction of
- * her own body rather than a number somebody liked. The old brain took soil
- * 12 mm away and 7.5 mm to the side of an ant 9 mm long — this pins that it
- * cannot come back by someone widening a constant.
- */
-check('her jaws are ON the soil she removes',
-  live.worstJawGapMm <= live.touchMm + 0.1,
-  `worst gap ${live.worstJawGapMm} mm, gate ${live.touchMm} mm`);
-check('and that gate is a fraction of her, not an ant-length',
-  live.touchMm <= live.bodyMm * 0.3,
-  `${live.touchMm} mm gate on a ${live.bodyMm} mm ant`);
+check('every cut starts on a face within her reach',
+  live.worstSeatMm <= live.noseReachMm + 0.1,
+  `furthest face ${live.worstSeatMm} mm, nose reach ${live.noseReachMm} mm`);
+check('and that reach is a fraction of her, not an ant-length',
+  live.noseReachMm <= live.bodyMm * 0.6,
+  `${live.noseReachMm} mm reach on a ${live.bodyMm} mm ant`);
 
 /*
  * SHE EXCAVATES TO A REAL DEPTH — and that is all this claims.
