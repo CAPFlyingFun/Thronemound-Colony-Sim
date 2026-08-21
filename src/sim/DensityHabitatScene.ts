@@ -32,11 +32,11 @@
  */
 
 import * as THREE from 'three';
-import { buildSurfaceNets } from '../density/SurfaceNets';
 import { AntBody } from './AntBody';
 import { AntStroll, type StrollIntent, type StrollSenses } from './antStroll';
 import { ObserverCamera } from './observerCamera';
 import { DensityGround } from './density/densityGround';
+import { SoilMesh } from './density/soilMesh';
 import {
   CELLS_X, CELLS_Y, CELLS_Z, GRADE, MM_PER_UNIT, TANK, TANK_HEIGHT,
   makeTcsSoil, soilColourAt,
@@ -102,7 +102,13 @@ export class DensityHabitatScene {
   private readonly renderer: THREE.WebGLRenderer;
 
   /** The one description of where the soil is. Drawn and walked from this. */
-  private readonly field = makeTcsSoil();
+  /**
+   * The soil itself. Public because the ground, the mesher and the excavator
+   * all read the same one — that identity is the point of the density move,
+   * and hiding it behind three accessors would only make it look like three
+   * sources.
+   */
+  readonly field = makeTcsSoil();
 
   readonly ground: DensityGround;
 
@@ -114,9 +120,7 @@ export class DensityHabitatScene {
 
   private following = false;
 
-  private soil: THREE.Mesh | null = null;
-
-  private material: THREE.Material | null = null;
+  private soil: SoilMesh | null = null;
 
   private watcher: ResizeObserver | null = null;
 
@@ -214,52 +218,17 @@ export class DensityHabitatScene {
   }
 
   /**
-   * The tray, meshed once.
+   * The tray, meshed in chunks so a bite costs a bite. See `SoilMesh`.
    *
-   * `buildSurfaceNets` emits field-local positions, and this field starts at
-   * the world origin, so no offset is applied — the same trap the voxel
-   * mesher had, where translating the mesh as well put every chunk at twice
-   * its own coordinate.
+   * `buildSurfaceNets` emits FIELD-LOCAL positions and this field starts at
+   * the world origin, so no offset is applied — the same trap the voxel mesher
+   * had, where translating the mesh as well put every chunk at twice its own
+   * coordinate.
    */
-  private buildSoil(region?: Parameters<typeof buildSurfaceNets>[2]): void {
-    const data = buildSurfaceNets(this.field, 0, region);
-    if (this.soil) {
-      this.scene.remove(this.soil);
-      this.soil.geometry.dispose();
-      this.soil = null;
-    }
-    if (data.indices.length === 0) return;
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
-    geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
-    /*
-     * SHADING normals from the mesh, GAMEPLAY normals from the gradient. They
-     * agree because they read the same field, and each is the cheaper answer
-     * for its own question: a triangle normal is what a renderer wants, and a
-     * gradient is defined even where no triangle is.
-     */
-    geometry.computeVertexNormals();
-
-    /* Strata, computed from depth rather than stored per cell — so a tunnel
-     * wall is the right colour without anybody remembering to paint it. */
-    const pos = data.positions;
-    const colours = new Float32Array(pos.length);
-    const band: [number, number, number] = [0, 0, 0];
-    for (let i = 0; i < pos.length; i += 3) {
-      soilColourAt(pos[i]!, pos[i + 1]!, pos[i + 2]!, band);
-      colours[i] = band[0]; colours[i + 1] = band[1]; colours[i + 2] = band[2];
-    }
-    geometry.setAttribute('color', new THREE.BufferAttribute(colours, 3));
-
-    this.material ??= new THREE.MeshStandardMaterial({
-      vertexColors: true, roughness: 0.95, metalness: 0,
-      /* See the note at the head of the file — a tunnel ceiling is a -Y
-       * surface, and those come out of the mesher wound inward. */
-      side: THREE.DoubleSide,
-    });
-    this.soil = new THREE.Mesh(geometry, this.material);
-    this.scene.add(this.soil);
+  private buildSoil(): void {
+    this.soil = new SoilMesh(this.field, soilColourAt);
+    this.soil.buildAll();
+    this.scene.add(this.soil.group);
   }
 
   private light(): void {
@@ -885,7 +854,7 @@ export class DensityHabitatScene {
   }
 
   /** The drawn soil, so a probe can count triangles rather than trust a log. */
-  soilForTest(): THREE.Mesh | null { return this.soil; }
+  soilForTest(): SoilMesh | null { return this.soil; }
 
   /**
    * How much soil sits below the surface, in world units — the depth a
@@ -978,8 +947,7 @@ export class DensityHabitatScene {
     window.removeEventListener('resize', this.onViewportChange);
     window.removeEventListener('orientationchange', this.onViewportChange);
     window.visualViewport?.removeEventListener('resize', this.onViewportChange);
-    this.soil?.geometry.dispose();
-    this.material?.dispose();
+    this.soil?.dispose();
     this.renderer.dispose();
   }
 }

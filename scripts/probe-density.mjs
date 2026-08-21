@@ -121,7 +121,7 @@ const r = await page.evaluate(async () => {
 
   return {
     tank,
-    tris: (lab.soilForTest?.().geometry.index?.count ?? 0) / 3,
+    tris: lab.soilForTest?.().triangles() ?? 0,
     cellMm: settled.cellMm,
     soilDepthMm: +(lab.gradeForTest() * 5).toFixed(1),
     tankMm: +(tank.size * 5).toFixed(0),
