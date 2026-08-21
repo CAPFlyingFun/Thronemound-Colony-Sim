@@ -471,10 +471,24 @@ export class DensityHabitatScene {
      */
     const cut = document.createElement('button');
     cut.textContent = 'CUTAWAY';
-    cut.style.cssText = b.style.cssText.replace(
-      `bottom:max(${MARGIN_PX}px, env(safe-area-inset-bottom,0px))`,
-      `bottom:calc(max(${MARGIN_PX}px, env(safe-area-inset-bottom,0px)) + 54px)`,
-    );
+    /*
+     * BUILT FROM THE SAME LIST, not by editing the other button's cssText.
+     *
+     * The first cut read `b.style.cssText` back and string-replaced the
+     * bottom rule — and a style read back from the DOM is the browser's
+     * NORMALISED form, with its own spacing and ordering, so the replace
+     * matched nothing and failed silently. Both buttons then carried the same
+     * offset and landed on top of each other in the corner.
+     */
+    cut.style.cssText = [
+      'position:absolute', 'z-index:5',
+      `right:max(${MARGIN_PX}px, env(safe-area-inset-right,0px))`,
+      `bottom:calc(max(${MARGIN_PX}px, env(safe-area-inset-bottom,0px)) + 56px)`,
+      'min-height:44px', 'padding:10px 16px',
+      'font:600 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace',
+      'letter-spacing:0.12em', 'color:#efe3c4',
+      'background:#20241d', 'border:1px solid #4c5340', 'border-radius:10px',
+    ].join(';');
     cut.addEventListener('click', () => {
       this.cutOpen = !this.cutOpen;
       cut.textContent = this.cutOpen ? 'WHOLE TANK' : 'CUTAWAY';

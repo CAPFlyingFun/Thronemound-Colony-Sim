@@ -55,7 +55,13 @@ const host = document.getElementById('app');
  * island earns its delay — it is a megabyte of queen behind a height field —
  * and every other route is up as soon as its module is. See `pwa.ts`.
  */
-const ISLAND_ROUTES = new Set(['island', 'menu']);
+/*
+ * `aidig` rides with the island because it IS the island — same body, same
+ * HUD, same 932 x 430 landscape layout — with the colony's brain on the
+ * controls instead of a thumb. See `AiDigScene`; it is a one-time exception
+ * to the no-scenes rule, granted explicitly.
+ */
+const ISLAND_ROUTES = new Set(['island', 'menu', 'aidig']);
 const island = !colonySim && ISLAND_ROUTES.has(scene ?? '');
 if (!island) markLoaded();
 
@@ -76,7 +82,18 @@ if (island) document.documentElement.setAttribute('data-orient-lock', '');
 
 if (host) {
   host.classList.add('dig-host');
-  if (colonySim) {
+  if (scene === 'aidig') {
+    /*
+     * THE ISLAND, DRIVEN BY THE COLONY'S AI. Joshua, 2026-08-21: "add your
+     * AI's to the player controls and make it a new scene like ?scene=aidig
+     * and I don't mind for this one time." It exists to answer whether the
+     * tray's trouble is its BODY layer or its brain, by putting the same
+     * brain on a body that already tunnels correctly.
+     */
+    void import('./scenes/AiDigScene').then(({ AiDigScene }) => {
+      (window as unknown as { aiDig: unknown }).aiDig = new AiDigScene(host);
+    });
+  } else if (colonySim) {
     void import('./scenes/DensityTerrainLabScene').then(
       ({ DensityTerrainLabScene }) => new DensityTerrainLabScene(host),
     );

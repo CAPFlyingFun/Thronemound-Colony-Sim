@@ -126,11 +126,31 @@ for (const size of SIZES) {
         right: +(window.innerWidth - b.right).toFixed(1),
       };
     };
-    return { stamp: gap('.tm-build'), button: gap('.tm-watch, button') };
+    /* Every button's rectangle, so an overlap is a measurement rather than
+     * something to notice in a screenshot. */
+    const rects = [...document.querySelectorAll('#app > button')]
+      .map((el) => el.getBoundingClientRect())
+      .map((b) => ({ l: b.left, r: b.right, t: b.top, b: b.bottom }));
+    let overlap = 0;
+    for (let i = 0; i < rects.length; i += 1) {
+      for (let j = i + 1; j < rects.length; j += 1) {
+        const a = rects[i]; const c = rects[j];
+        if (a.l < c.r && c.l < a.r && a.t < c.b && c.t < a.b) overlap += 1;
+      }
+    }
+    return { stamp: gap('.tm-build'), buttons: rects.length, overlap };
   });
   const clears = (g) => g !== null && g.left >= 12 && g.bottom >= 12;
   check(`${size.label}: HUD clears the screen edge`,
     clears(hud.stamp), `stamp ${JSON.stringify(hud.stamp)}`);
+  /*
+   * NO TWO BUTTONS ON TOP OF EACH OTHER. The cutaway button was positioned
+   * by string-replacing the watch button's `cssText`, which the browser
+   * hands back normalised — the replace matched nothing, both carried the
+   * same offset, and they stacked in the corner.
+   */
+  check(`${size.label}: buttons do not overlap`,
+    hud.overlap === 0, `${hud.overlap} overlapping of ${hud.buttons}`);
 
   /*
    * THE GUARD RAN, AND SAID SO. A fit that happens to be right is not the
