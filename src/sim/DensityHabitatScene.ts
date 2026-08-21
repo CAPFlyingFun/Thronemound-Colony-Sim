@@ -378,6 +378,11 @@ export class DensityHabitatScene {
     ].join(';');
     this.host.appendChild(box);
     this.metrics = box;
+    /* The numbers get their own element: writing `textContent` on the panel
+     * itself would delete the buttons every quarter second. */
+    const lines = document.createElement('div');
+    lines.style.cssText = 'white-space:pre';
+    box.appendChild(lines);
 
     /* `env()` is not readable from script, so it is measured off a probe
      * element that has been given the insets as its padding. */
@@ -491,7 +496,7 @@ export class DensityHabitatScene {
       const screenShort = Math.min(sh.width, sh.height);
       const coverLong = Math.max(coveredW, coveredH);
       const coverShort = Math.min(coveredW, coveredH);
-      this.metrics.textContent = [
+      lines.textContent = [
         `v${__APP_VERSION__}`,
         `manifest ${wantDisplay}  ->  live ${live}${stale ? '   ** REINSTALL **' : ''}`,
         `mode     standalone ${yn(mStandalone)} fullscreen ${yn(mFullscreen)}`,
@@ -512,6 +517,58 @@ export class DensityHabitatScene {
         `SHORT BY ${n(screenLong - coverLong)} long   ${n(screenShort - coverShort)} short  (screen pts)`,
       ].join('\n');
     };
+    /*
+     * LEVERS THAT WORK ON THE INSTALLED APP, with no reinstall and no push.
+     *
+     * The manifest's `display` is the one setting iOS bakes in at install
+     * time. Everything else in the shell comes from META TAGS in the HTML,
+     * which are read on every page load — and the viewport meta can be
+     * rewritten at RUNTIME and takes effect at once. So the remaining
+     * suspects can be A/B'd right here, against a readout that updates four
+     * times a second, instead of through a build-deploy-reinstall cycle for
+     * each guess.
+     *
+     * `viewport-fit` is the interesting one: `cover` asks the page to extend
+     * under the system insets and `contain` asks it not to. If the portrait
+     * shortfall moves when that flips, the insets are the mechanism and the
+     * manifest was never the whole story.
+     */
+    const bar = document.createElement('div');
+    bar.style.cssText = [
+      'display:flex', 'gap:6px', 'flex-wrap:wrap', 'margin-top:8px',
+      'pointer-events:auto',
+    ].join(';');
+    const meta = document.querySelector<HTMLMetaElement>('meta[name="viewport"]');
+    const button = (label: string, act: () => void): void => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.style.cssText = [
+        'font:600 9.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace',
+        'padding:7px 9px', 'border-radius:6px', 'border:1px solid #3a4a3c',
+        'background:#16321c', 'color:#cfe3d0', 'letter-spacing:0.06em',
+      ].join(';');
+      b.addEventListener('click', (e) => { e.stopPropagation(); act(); paint(); });
+      bar.appendChild(b);
+    };
+    const setFit = (fit: string): void => {
+      if (!meta) return;
+      meta.setAttribute(
+        'content',
+        meta.content.replace(/viewport-fit=\w+/, `viewport-fit=${fit}`),
+      );
+      /* A resize event is not fired for a viewport-meta change, so the scene
+       * is told directly — otherwise the canvas keeps the old size and the
+       * readout shows a gap that is the probe's fault, not the shell's. */
+      this.onViewportChange();
+    };
+    button('fit cover', () => setFit('cover'));
+    button('fit contain', () => setFit('contain'));
+    button('reload', () => window.location.reload());
+    box.appendChild(bar);
+    /* The bar takes taps; the panel around it still must not. */
+    box.style.pointerEvents = 'none';
+    bar.style.pointerEvents = 'auto';
+
     paint();
     this.metricsTimer = window.setInterval(paint, 250);
     this.metricsRuler = ruler;
