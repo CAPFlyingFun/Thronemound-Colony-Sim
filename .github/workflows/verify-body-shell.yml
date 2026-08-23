@@ -1,0 +1,66 @@
+# Adapted from ChatGPT's PR #14.
+#
+# TWO STEPS WERE REMOVED, and the reason is the point of having this at all.
+# As written it ran `scripts/patch-rail-clearance.py` over `src/sim/AntBody.ts`
+# before probing, and uploaded the patched file as an artifact — so the check
+# reported on code that was not in the repository. That is a reasonable trick
+# for an agent that cannot clone (which is why it was there) and the exact
+# opposite of what a verification gate is for.
+#
+# Also NOT adopted: `apply-rail-clearance.yml`, which took `contents: write` on
+# a pull_request trigger and committed and pushed from inside CI.
+name: Verify body shell
+
+on:
+  pull_request:
+    paths:
+      - 'src/sim/bodyShell.ts'
+      - 'src/sim/AntBody.ts'
+      - 'scripts/probe-shell.mjs'
+      - '.github/workflows/verify-body-shell.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: body-shell-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe-shell:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: npm ci
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Bridge the probe's local Chromium path
+        run: |
+          CHROME="$(node -e "import('playwright').then(({ chromium }) => process.stdout.write(chromium.executablePath()))")"
+          sudo mkdir -p /opt/pw-browsers/chromium-1194/chrome-linux
+          sudo ln -sf "$CHROME" /opt/pw-browsers/chromium-1194/chrome-linux/chrome
+      - name: Start game server
+        run: |
+          npm run dev -- --host 127.0.0.1 --port 5177 > /tmp/tcs-vite.log 2>&1 &
+          for attempt in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:5177/ > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/tcs-vite.log
+          exit 1
+      - name: Run collision-shell probe
+        run: npm run probe:shell
+      - name: Show server log on failure
+        if: failure()
+        run: cat /tmp/tcs-vite.log || true

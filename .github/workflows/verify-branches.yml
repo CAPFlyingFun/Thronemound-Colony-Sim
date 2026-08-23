@@ -1,0 +1,43 @@
+name: Verify branches and pull requests
+
+# Adapted from ChatGPT's PR #14, with `main` added to the push triggers.
+# Work on this project lands on main directly rather than through pull
+# requests, so a gate that only watched PRs would never see most of it — and
+# local verification is now deliberately light to keep token usage down, which
+# makes this the place the whole suite actually runs.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'chatgpt/**'
+      - 'claude/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: npm ci
+      - name: Run tests
+        run: npm test
+      - name: Type check
+        run: npm run typecheck
+      - name: Build
+        run: npm run build
