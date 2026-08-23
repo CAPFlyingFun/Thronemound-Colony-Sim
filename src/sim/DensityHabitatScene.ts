@@ -342,7 +342,25 @@ export class DensityHabitatScene {
      * it lapses the moment the job finishes rather than lasting as long as
      * she feels like calling herself a digger.
      */
-    if (this.digging && this.dig.cutting) this.ant.exempt.add('head');
+    /*
+     * TIED TO THE INTENT, not to a live bore — and the difference was a
+     * chicken and egg that stopped her dead.
+     *
+     * The first cut exempted her head only while a `DigJob` was running.
+     * But `closing` is the phase whose entire job is to put her mandibles ON
+     * the soil, and it happens BEFORE any job exists — so the clamp forbade
+     * her head from reaching the face, no bore could be seated, and no bore
+     * meant no exemption. Measured at the stall: she asked for walk 0.3, the
+     * clip allowed 0.000, and a forward step raised her HEAD from 0.61 mm
+     * inside to 1.19 while her thorax got SHALLOWER and her gaster never
+     * touched anything. The one segment blocking her was the one doing the
+     * work.
+     *
+     * `intent.dig` is the honest signal: her head may be in soil exactly
+     * when she is working with it. Both `close` and `dig` raise it, and
+     * nothing else does.
+     */
+    if (this.digging && (intent.dig ?? 0) > 0.5) this.ant.exempt.add('head');
     else this.ant.exempt.delete('head');
     this.ant.step(dt, intent, this.ground, this.surfaceAt);
     /* The bar rides the WORK FACE — a bore ahead of her jaw, not her jaw —

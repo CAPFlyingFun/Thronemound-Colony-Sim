@@ -1256,6 +1256,40 @@ export class LegDrive {
           }
         }
       }
+      /*
+       * AND SHE DOES NOT MARCH IN PLACE WHEN SHE IS PINNED.
+       *
+       * Strain says a tripod is spent; it does not say the step would go
+       * anywhere. Normally those are the same question, because strain is
+       * made by the body travelling. With a body-clearance test in play they
+       * come apart: the clip can allow 0.000 of the twist while strain is
+       * already full from the frames before, so the tripod lifts, swings to
+       * a target derived from a body that has not moved, and lands on the
+       * anchor it just left.
+       *
+       * Measured at the stall: three legs released 27 times in four seconds
+       * and ALL SIX anchors moved 0.000 mm, with the body travelling
+       * 0.0000 mm. Joshua saw it on the device as her legs staying fixed
+       * while "her body just wiggles in place".
+       *
+       * `stepGoesSomewhere` is the existing answer to exactly this question
+       * and the corner path already trusts it. This asks it on the other
+       * side: not "may she step early" but "is this step worth taking at
+       * all". Only when the body is actually pinned, and only for a caller
+       * that passes `bodyClear`, so the frozen island build never reaches
+       * it.
+       */
+      if (due && input.bodyClear && wanted > 1e-9 && moved < wanted * 0.02) {
+        let goesSomewhere = false;
+        for (const leg of this.legs) {
+          if (!group.includes(leg.slot) || !leg.planted) continue;
+          if (this.stepGoesSomewhere(leg, body, input, ground, cornerGround, radius)) {
+            goesSomewhere = true;
+            break;
+          }
+        }
+        if (!goesSomewhere) due = false;
+      }
       if (due) {
         /*
          * ONE GAIT, THROUGH THE CORNER TOO — gated, never re-sequenced.

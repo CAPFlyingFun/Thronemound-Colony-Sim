@@ -64,16 +64,55 @@ const out = await page.evaluate(async () => {
   const drive = (seconds, walk, turn) => {
     const from = ant.at.clone();
     let worst = 0;
+    /*
+     * STEPS TAKEN, AND STEPS THAT WENT NOWHERE.
+     *
+     * A foot that lifts and lands back on the anchor it left is a step in
+     * the gait's books and nothing at all in the world. Six of them a second
+     * is what Joshua saw as her body wiggling in place with her legs fixed.
+     * Counting both is the only way to tell walking from dancing.
+     */
+    let lifts = 0;
+    let futile = 0;
+    /*
+     * And the same two counted over the LAST QUARTER of the drive only.
+     *
+     * Walking into a face is not instantaneous: she covers real ground, and
+     * those steps are real. The question this probe asks is what she does
+     * once she has ARRIVED and cannot go further, so the steady state is
+     * what has to be clean. Counting the whole run conflates the approach
+     * with the stall and reads 5 futile steps that were mostly neither.
+     */
+    let liftsLate = 0;
+    let futileLate = 0;
+    const planted = new Map(ant.drive.legs.map((l) => [l.slot, l.planted]));
+    const anchor = new Map(ant.drive.legs.map((l) => [l.slot, l.anchor.clone()]));
     const frames = Math.round(seconds * 60);
     for (let f = 0; f < frames; f += 1) {
       lab.tickForTest(1 / 60, walk, turn);
+      const late = f >= frames * 0.75;
       const d = ant.inside;
       if (d > worst) worst = d;
+      for (const l of ant.drive.legs) {
+        if (planted.get(l.slot) && !l.planted) { lifts += 1; if (late) liftsLate += 1; }
+        if (!planted.get(l.slot) && l.planted) {
+          if (l.anchor.distanceTo(anchor.get(l.slot)) * MM < 0.05) {
+            futile += 1;
+            if (late) futileLate += 1;
+          }
+          anchor.get(l.slot).copy(l.anchor);
+        }
+        planted.set(l.slot, l.planted);
+      }
     }
     return {
       travelledMm: +(ant.at.distanceTo(from) * MM).toFixed(2),
       alongMm: +((ant.at.z - from.z) * MM).toFixed(2),
       worstInsideMm: +(worst * MM).toFixed(4),
+      lifts,
+      futile,
+      liftsLate,
+      futileLate,
     };
   };
 
@@ -185,6 +224,17 @@ check('and stays out of the walls while doing it',
  */
 console.log(`  NOTE  her nominal 6 mm bore: ${out.downBore6.travelledMm} mm travelled, `
   + `${out.downBore6.worstInsideMm} mm deepest — Phase 6 owns this, see the source`);
+
+/*
+ * SHE DOES NOT DANCE WHEN SHE CANNOT GO. Driven into a face she cannot pass,
+ * the honest behaviour is to stand: any step she takes must actually move
+ * the foot. Before the fix this ran at 27 lifts in four seconds with every
+ * anchor unchanged.
+ */
+check('pinned at a face, she stands rather than marching in place',
+  out.atFace.futileLate === 0,
+  `${out.atFace.futileLate} of ${out.atFace.liftsLate} steps in the last second `
+  + `landed back on their own anchor (${out.atFace.futile}/${out.atFace.lifts} over the whole run)`);
 
 check('her core body is narrower than the bore she cuts',
   out.shell !== null && out.shell.widestMm < 6,

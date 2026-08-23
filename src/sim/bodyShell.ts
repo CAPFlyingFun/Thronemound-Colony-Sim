@@ -84,6 +84,9 @@ const A = new THREE.Vector3();
 const B = new THREE.Vector3();
 const AB = new THREE.Vector3();
 const AP = new THREE.Vector3();
+const OFFSET = new THREE.Vector3();
+const AXIS_R = new THREE.Vector3(1, 0, 0);
+const AXIS_U = new THREE.Vector3(0, 1, 0);
 
 /** Distance from a point to a polyline, world units. */
 function distanceToSpine(point: THREE.Vector3, spine: THREE.Vector3[]): number {
@@ -238,7 +241,8 @@ export class BodyShell {
      * which is the ballooning this is here to avoid.
      */
     const dense = new Map<SegmentName, THREE.Vector3[]>();
-    const denseR = new Map<SegmentName, number[]>();
+    /** Per station, how far her skin reaches across her own right and up. */
+    const denseOwn = new Map<SegmentName, Array<{ right: number; up: number }>>();
     for (const [name] of groups) {
       const world = spineWorld.get(name)!;
       const pts: THREE.Vector3[] = [];
@@ -255,7 +259,7 @@ export class BodyShell {
         for (let k = 1; k <= cuts; k += 1) pts.push(a.clone().lerp(b, (k * step) / span));
       }
       dense.set(name, pts);
-      denseR.set(name, new Array(pts.length).fill(0));
+      denseOwn.set(name, pts.map(() => ({ right: 0, up: 0 })));
     }
     for (let i = 0; i < position.count; i += 1) {
       let best = -1;
@@ -271,47 +275,49 @@ export class BodyShell {
       mesh.applyBoneTransform(i, vertex);
       vertex.applyMatrix4(mesh.matrixWorld);
       const pts = dense.get(seg)!;
-      const rs = denseR.get(seg)!;
+      const own = denseOwn.get(seg)!;
       let near = -1;
       let nearest = Infinity;
       for (let k = 0; k < pts.length; k += 1) {
         const d = vertex.distanceToSquared(pts[k]!);
         if (d < nearest) { nearest = d; near = k; }
       }
-      if (near >= 0) {
-        const d = Math.sqrt(nearest);
-        if (d > rs[near]!) rs[near] = d;
-      }
+      if (near < 0) continue;
+      /* The offset from its station, in HER frame, so right and up mean
+       * across her body and over her back rather than world axes. */
+      OFFSET.copy(vertex).sub(pts[near]!).applyQuaternion(spin);
+      const slot = own[near]!;
+      slot.right = Math.max(slot.right, Math.abs(OFFSET.x));
+      slot.up = Math.max(slot.up, Math.abs(OFFSET.y));
     }
     /*
-     * A SAMPLE NO VERTEX CHOSE STILL HAS TO BE FAT ENOUGH. Nearest-vertex
-     * attribution leaves gaps — a sample tucked between two bulges may own
-     * nothing — and a zero there is a hole in the collision. Each empty
-     * sample takes the larger of its filled neighbours.
+     * A STATION NO VERTEX CHOSE IS SIMPLY SKIPPED below — with stations a
+     * tenth of a unit apart along a body millimetres thick, an unclaimed one
+     * lies between two that are claimed and its neighbours' spheres already
+     * cover the gap.
      */
-    for (const [name] of groups) {
-      const rs = denseR.get(name)!;
-      for (let k = 0; k < rs.length; k += 1) {
-        if (rs[k]! > 0) continue;
-        let lo = k; let hi = k;
-        while (lo > 0 && rs[lo]! <= 0) lo -= 1;
-        while (hi < rs.length - 1 && rs[hi]! <= 0) hi += 1;
-        rs[k] = Math.max(rs[lo] ?? 0, rs[hi] ?? 0);
-      }
-    }
 
     /*
-     * THINNED SO NO GAP IS WIDER THAN THE TUBE THERE.
+     * A ROW OF SPHERES THAT FITS THE SECTION, not one that swallows it.
      *
-     * The measuring pass ran at a fixed 0.1 world units; the test does not
-     * need that many. Keep every sample whose own radius would otherwise
-     * leave a waist — half a radius apart, the spacing `DigJob` uses for the
-     * same geometry — and drop the rest.
+     * A single sphere per station has to reach the widest vertex there, so
+     * on a cross-section 1.89 mm wide and 2.36 mm tall it takes the larger
+     * half-extent and applies it in EVERY direction — fat where the body is
+     * thin, and fattest of all at the corners. Measured against her own skin
+     * over ninety poses, the one-sphere shell over-stated her penetration by
+     * a median of 0.88 mm and a worst of 1.12, while her skin never went
+     * more than 0.11 mm into soil. It was refusing her movements of a tenth
+     * of a millimetre on evidence that was nine tenths artefact: she reached
+     * the mouth of her own bore and could not step into it.
+     *
+     * So each station takes spheres of the THIN half-extent, laid in a row
+     * along the fat one. The section is covered without the corners being
+     * invented. It costs more samples and they are cheaper than being wrong.
      */
     const segments: Segment[] = [];
     for (const [name] of groups) {
       const pts = dense.get(name)!;
-      const rs = denseR.get(name)!;
+      const own = denseOwn.get(name)!;
       if (pts.length === 0) continue;
       const spine: THREE.Vector3[] = [];
       const radii: number[] = [];
@@ -319,13 +325,42 @@ export class BodyShell {
       let travelled = 0;
       for (let k = 0; k < pts.length; k += 1) {
         if (k > 0) travelled += pts[k]!.distanceTo(pts[k - 1]!);
-        const r = rs[k]!;
-        const keep = k === 0 || k === pts.length - 1
-          || travelled - lastKept >= Math.max(r * 0.5, 1e-3);
-        if (!keep) continue;
+        const mine = own[k]!;
+        if (mine.right <= 0 && mine.up <= 0) continue;
+        /* The thin direction sets the radius; the fat one sets how many. */
+        const thin = Math.max(1e-4, Math.min(mine.right, mine.up));
+        const fat = Math.max(mine.right, mine.up);
+        if (k > 0 && k < pts.length - 1 && travelled - lastKept < thin * 0.5) continue;
         lastKept = travelled;
-        spine.push(toLocal(pts[k]!.clone()));
-        radii.push(r);
+        /*
+         * A LATTICE OVER THE SECTION, not a row across it.
+         *
+         * A row of spheres covers a STADIUM; her cross-sections have
+         * corners, and the corners stuck out of it. Measured, the row shell
+         * under-reported her skin's penetration by up to 0.43 mm — tight in
+         * the middle and blind at the edges, which is the wrong way round
+         * for a collision shape. Spanning both axes costs a handful more
+         * spheres per station and covers the section.
+         */
+        void fat;
+        const here = toLocal(pts[k]!.clone());
+        const spanR = Math.max(0, mine.right - thin);
+        const spanU = Math.max(0, mine.up - thin);
+        const nR = Math.max(1, Math.ceil(spanR / thin) * 2 + 1);
+        const nU = Math.max(1, Math.ceil(spanU / thin) * 2 + 1);
+        for (let a = 0; a < nR; a += 1) {
+          for (let b = 0; b < nU; b += 1) {
+            const tr = nR === 1 ? 0 : (a / (nR - 1)) * 2 - 1;
+            const tu = nU === 1 ? 0 : (b / (nU - 1)) * 2 - 1;
+            /* The corners of the lattice are outside an oval section, so
+             * they are dropped — she is not a box either. */
+            if (tr * tr + tu * tu > 1.0001 && nR > 1 && nU > 1) continue;
+            spine.push(here.clone()
+              .addScaledVector(AXIS_R, tr * spanR)
+              .addScaledVector(AXIS_U, tu * spanU));
+            radii.push(thin);
+          }
+        }
       }
       if (spine.length > 0) segments.push({ name, spine, radii });
     }
