@@ -1,9 +1,7 @@
 name: Apply rail clearance fix
 
 on:
-  push:
-    branches:
-      - 'chatgpt/fix-body-shell-lattice'
+  pull_request:
     paths:
       - '.github/workflows/apply-rail-clearance.yml'
 
