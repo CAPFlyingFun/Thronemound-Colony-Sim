@@ -890,15 +890,26 @@ export class AntBody {
      * "the floor" mean the wall she is standing against.
      */
     /*
-     * SEATED SO SHE FITS, which is lower than the axis and higher than the
-     * floor. Her origin drops by whatever room the bore has left once her own
-     * cross-section is accounted for, so her widest point just clears the
-     * wall and she still reads as resting on the floor rather than floating
-     * down the middle. Seating the ORIGIN on the floor — the first cut — put
-     * her gaster through the wall on every bend.
+     * HER BELLY ON THE FLOOR OF THE BORE, which puts the centreline just
+     * over her back.
+     *
+     * The version before this dropped her by `radiusWu - crossRadius`, and
+     * that is a units mistake wearing a plausible face: `crossRadius` is how
+     * far she reaches ACROSS the tube, and it was being spent as a VERTICAL
+     * offset. It floated her up into the middle of the bore, so the rail ran
+     * through the low part of her body instead of above it. Joshua, from the
+     * device, looking straight down the shaft: "the center rails need to be
+     * at the top of her body not bottom".
+     *
+     * The right quantity is how far her skin hangs BELOW her origin, so that
+     * her lowest point lands on the wall — an ant in a gallery walks on its
+     * floor. Her sides are what the bore's own width has to accommodate, and
+     * it does: at her widest she sits about 2.2 mm from a centreline with
+     * 3 mm to give.
      */
-    const room = Math.max(0, rail.radiusWu - (this.shell?.crossRadius ?? 0));
-    this.at.copy(RAIL_FRAME.at).addScaledVector(this.up, -room);
+    const belly = this.shell?.dropBelowOrigin ?? 0;
+    this.at.copy(RAIL_FRAME.at)
+      .addScaledVector(this.up, -Math.max(0, rail.radiusWu - belly));
     this.aim = this.at.y - this.ride;
 
     RIGHT.crossVectors(this.up, this.forward).normalize();

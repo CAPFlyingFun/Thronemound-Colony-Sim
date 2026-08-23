@@ -129,28 +129,6 @@ export class BodyShell {
     return drop;
   }
 
-  /**
-   * HER CROSS-SECTIONAL RADIUS ABOUT HER OWN ORIGIN, world units — how much
-   * room she needs in a tube, measured across her forward axis.
-   *
-   * `dropBelowOrigin` answers a different question and answered it usefully
-   * on open ground: how far under her origin does she hang. In a tube that
-   * is not enough, because a tunnel is round and she has sides. Seating her
-   * origin ON the floor of a 6 mm bore put her gaster a millimetre through
-   * the wall on every bend — measured against her own skin, and visible.
-   */
-  get crossRadius(): number {
-    let worst = 0;
-    for (const seg of this.segments) {
-      for (let i = 0; i < seg.spine.length; i += 1) {
-        const p = seg.spine[i]!;
-        const r = Math.hypot(p.x, p.y) + seg.radii[i]!;
-        if (r > worst) worst = r;
-      }
-    }
-    return worst;
-  }
-
   /** How long she is nose to tail, world units, off the same spheres. */
   get lengthAlongForward(): number {
     let lo = Infinity;
