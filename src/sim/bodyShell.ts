@@ -353,21 +353,24 @@ export class BodyShell {
      */
 
     /*
-     * A ROW OF SPHERES THAT FITS THE SECTION, not one that swallows it.
+     * A LATTICE OF SPHERES THAT FITS THE SECTION, not one sphere that
+     * swallows it.
      *
      * A single sphere per station has to reach the widest vertex there, so
      * on a cross-section 1.89 mm wide and 2.36 mm tall it takes the larger
      * half-extent and applies it in EVERY direction — fat where the body is
-     * thin, and fattest of all at the corners. Measured against her own skin
-     * over ninety poses, the one-sphere shell over-stated her penetration by
-     * a median of 0.88 mm and a worst of 1.12, while her skin never went
-     * more than 0.11 mm into soil. It was refusing her movements of a tenth
-     * of a millimetre on evidence that was nine tenths artefact: she reached
-     * the mouth of her own bore and could not step into it.
+     * thin. The first thin-radius replacement solved that overstatement, but
+     * it accidentally collapsed the promised two-dimensional lattice into a
+     * one-dimensional row: because the sphere radius equalled the thin
+     * half-extent, `mine.thin - radius` was always zero on one axis.
      *
-     * So each station takes spheres of the THIN half-extent, laid in a row
-     * along the fat one. The section is covered without the corners being
-     * invented. It costs more samples and they are cheaper than being wrong.
+     * Give each bead three quarters of the thin half-extent instead. That
+     * leaves a quarter of the measured section available for off-axis bead
+     * centres, so both right and up participate in the shell. Keeping the
+     * small corner beads is deliberate: those diagonal skin regions are
+     * exactly what the one-dimensional stadium missed against curved tunnel
+     * walls. The existing skin-vs-shell probe is the authority on whether
+     * this conservative coverage has become too fat again.
      */
     const segments: Segment[] = [];
     for (const [name] of groups) {
@@ -382,38 +385,24 @@ export class BodyShell {
         if (k > 0) travelled += pts[k]!.distanceTo(pts[k - 1]!);
         const mine = own[k]!;
         if (mine.right <= 0 && mine.up <= 0) continue;
-        /* The thin direction sets the radius; the fat one sets how many. */
         const thin = Math.max(1e-4, Math.min(mine.right, mine.up));
-        const fat = Math.max(mine.right, mine.up);
         if (k > 0 && k < pts.length - 1 && travelled - lastKept < thin * 0.5) continue;
         lastKept = travelled;
-        /*
-         * A LATTICE OVER THE SECTION, not a row across it.
-         *
-         * A row of spheres covers a STADIUM; her cross-sections have
-         * corners, and the corners stuck out of it. Measured, the row shell
-         * under-reported her skin's penetration by up to 0.43 mm — tight in
-         * the middle and blind at the edges, which is the wrong way round
-         * for a collision shape. Spanning both axes costs a handful more
-         * spheres per station and covers the section.
-         */
-        void fat;
+
+        const bead = Math.max(1e-4, thin * 0.75);
         const here = toLocal(pts[k]!.clone());
-        const spanR = Math.max(0, mine.right - thin);
-        const spanU = Math.max(0, mine.up - thin);
-        const nR = Math.max(1, Math.ceil(spanR / thin) * 2 + 1);
-        const nU = Math.max(1, Math.ceil(spanU / thin) * 2 + 1);
+        const spanR = Math.max(0, mine.right - bead);
+        const spanU = Math.max(0, mine.up - bead);
+        const nR = Math.max(1, Math.ceil(spanR / bead) * 2 + 1);
+        const nU = Math.max(1, Math.ceil(spanU / bead) * 2 + 1);
         for (let a = 0; a < nR; a += 1) {
           for (let b = 0; b < nU; b += 1) {
             const tr = nR === 1 ? 0 : (a / (nR - 1)) * 2 - 1;
             const tu = nU === 1 ? 0 : (b / (nU - 1)) * 2 - 1;
-            /* The corners of the lattice are outside an oval section, so
-             * they are dropped — she is not a box either. */
-            if (tr * tr + tu * tu > 1.0001 && nR > 1 && nU > 1) continue;
             spine.push(here.clone()
               .addScaledVector(AXIS_R, tr * spanR)
               .addScaledVector(AXIS_U, tu * spanU));
-            radii.push(thin);
+            radii.push(bead);
           }
         }
       }
