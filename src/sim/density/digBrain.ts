@@ -41,6 +41,7 @@
 
 import * as THREE from 'three';
 import { DigJob } from '../../scenes/digJob';
+import { DIG_PITCH_DOWN } from '../AntBody';
 import type { StrollIntent } from '../antStroll';
 import {
   CASTE_DIG, MM_PER_UNIT, boreRadiusMm, boreSegmentMm, toUnits, type Caste,
@@ -90,6 +91,44 @@ const POSE_SIDE = [0, -0.3, 0.3, -0.6, 0.6] as const;
 
 /** Heading offsets tried, in radians, about the bore's own bearing. */
 const POSE_TURN = [0, -0.25, 0.25, -0.5, 0.5] as const;
+
+/**
+ * THE GRADIENT HER SHAFT SETTLES TO, in radians below horizontal.
+ *
+ * Her body pitches to `DIG_PITCH_DOWN` and no further, so a tunnel steeper
+ * than that is one she cannot lie along however well she reasons about it.
+ * Measured: the bore descended at 57.3 degrees and she could hold 34.4, a
+ * mismatch of 23 — reported from the device as digging one section and then
+ * refusing to crawl into it. This is the same number as her pitch, taken
+ * from the same constant, because the two ARE the same claim: the shaft may
+ * be as steep as she can lie.
+ *
+ * The OPENING bite is deliberately not held to it. `DIG_PITCH` stays steep
+ * because a level aim on flat ground travels through air and the reach gate
+ * never opens; that was measured too, at 28.6 and 40.1 degrees, and both dug
+ * less than 57 did. So the mouth is cut steep and the shaft eases out of it.
+ */
+const SHAFT_DESCENT = DIG_PITCH_DOWN;
+
+/**
+ * How far the shaft's tangent may bend per bore, in radians.
+ *
+ * A tunnel is not a hinge. This is what turns the step from a 57 degree
+ * mouth to a 34 degree gallery into a curve she can follow rather than a
+ * corner she meets.
+ */
+const MAX_BEND = 0.18;
+
+/**
+ * How far a continuing bore starts BEHIND the last one's face, as a fraction
+ * of the bore radius.
+ *
+ * Measured on v0.8.3: consecutive jobs began 1.14 to 1.35 radii PAST the
+ * previous end, which leaves a waist between two spheres and is the beading
+ * Joshua described as connected rounded segments. Starting behind the face
+ * instead of ahead of it makes the two overlap.
+ */
+const SEAM_OVERLAP = 0.25;
 
 /** How much closer counts as progress, in world units — a tenth of a mm. */
 const PROGRESS_MIN = 0.02;
@@ -279,6 +318,7 @@ const ORIGIN = new THREE.Vector3();
 const POSE_AT = new THREE.Vector3();
 const POSE_AIM = new THREE.Vector3();
 const POSE_SEAT = new THREE.Vector3();
+const TANGENT = new THREE.Vector3();
 
 export class DigBrain {
   phase: DigPhase = 'walking';
@@ -664,6 +704,30 @@ export class DigBrain {
      * the face. Straight from `islandDig.bite`.
      */
     const r = this.boreRadius();
+    /*
+     * CONTINUE THE SHAFT IF ITS FACE IS IN REACH, and only then.
+     *
+     * This is the whole of the job-to-job continuity fix. Each bore used to
+     * be seated afresh on whatever soil her aim ray happened to meet, so two
+     * consecutive bores shared nothing — not an origin, not a direction —
+     * and the tunnel was a row of beads with a waist at every seam.
+     *
+     * The reach rule is unchanged and non-negotiable: she may only remove
+     * soil she can touch. If the face has got away from her, this does not
+     * fire and the ordinary seat runs, or the pose search moves her.
+     */
+    if (this.shaft && this.shaft.at.distanceTo(this.at) <= toUnits(NOSE_REACH_MM)) {
+      const aim = this.nextTangent(this.shaft.aim);
+      ORIGIN.copy(this.shaft.at).addScaledVector(aim, -(r * SEAM_OVERLAP));
+      this.seat.copy(this.shaft.at);
+      this.seatReachMm = this.shaft.at.distanceTo(this.at) * MM_PER_UNIT;
+      this.job = new DigJob(
+        ORIGIN.clone(), aim, toUnits(boreSegmentMm(this.caste)), r,
+      );
+      const beat = this.job.tick(0);
+      if (beat.length > 0) this.world.carveSweep(beat, r);
+      return { walk: 0, turn: 0, dig: 1 };
+    }
     if (!seatOnSoil(
       (x, y, z) => this.world.solidAt(x, y, z),
       this.at, this.aim, toUnits(NOSE_REACH_MM), toUnits(0.25), SEAT,
@@ -692,7 +756,7 @@ export class DigBrain {
     this.seatReachMm = SEAT.distanceTo(this.at) * MM_PER_UNIT;
     ORIGIN.copy(SEAT).addScaledVector(this.aim, -(r * 1.5));
     this.job = new DigJob(
-      ORIGIN.clone(), this.aim.clone(), toUnits(CASTE_DIG[this.caste].lengthMm), r,
+      ORIGIN.clone(), this.aim.clone(), toUnits(boreSegmentMm(this.caste)), r,
     );
     /* Beat zero now, not next frame — the press answers immediately. */
     const first = this.job.tick(0);
@@ -793,6 +857,20 @@ export class DigBrain {
     }
     if (best) this.poseFound += 1;
     return best;
+  }
+
+  /**
+   * The direction the next bore runs — the last one's, eased toward the
+   * gradient she can actually lie along. See `SHAFT_DESCENT`.
+   */
+  private nextTangent(prev: THREE.Vector3): THREE.Vector3 {
+    const horiz = Math.hypot(prev.x, prev.z);
+    if (horiz < 1e-6) return prev.clone().normalize();
+    const flat = Math.cos(SHAFT_DESCENT) / horiz;
+    TANGENT.set(prev.x * flat, -Math.sin(SHAFT_DESCENT), prev.z * flat).normalize();
+    const bend = prev.angleTo(TANGENT);
+    if (bend <= MAX_BEND) return TANGENT.clone();
+    return prev.clone().lerp(TANGENT, MAX_BEND / bend).normalize();
   }
 
   /** Steer to the working pose, then hand back to the ordinary approach. */

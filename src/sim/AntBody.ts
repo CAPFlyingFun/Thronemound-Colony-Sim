@@ -286,6 +286,9 @@ export class AntBody {
    */
   private bodyPitch = 0;
 
+  /** Her penetration at the top of this frame. See `bodyClear`. */
+  private insideBefore = 0;
+
   /**
    * How far her body origin rides above the ground her belly is clearing —
    * her measured belly drop plus `BELLY_CLEARANCE_MM`. A constant, because
@@ -564,6 +567,10 @@ export class AntBody {
   ): void {
     if (!this.ready || !this.drive) return;
 
+    /* How deep she is BEFORE anything moves her, so every clamp this frame
+     * judges against the same starting point. See `bodyClear`. */
+    this.insideBefore = this.insideAt(this.at, this.forward, this.up);
+
     this.report = this.drive.step(
       dt,
       { at: this.at, up: this.up, forward: this.forward },
@@ -580,8 +587,31 @@ export class AntBody {
          * `DriveInput.bodyClear`. Undefined until the world hands her a
          * field, so nothing changes for a caller that has no soil.
          */
+        /*
+         * NEVER WORSE, rather than never touching — and the difference was
+         * the whole of why she danced instead of walking.
+         *
+         * A strict `<= CLEARANCE_TOL` sounds stricter and is in fact
+         * unusable: an ant walking has her belly ON the ground, and the
+         * shell is a capsule approximation of a body that is not a capsule,
+         * so ordinary contact reads as a hair of penetration. She sat at
+         * exactly 0.01 mm — the tolerance itself — and every step that
+         * momentarily deepened it by a thousandth was bisected away. She
+         * covered 2.49 mm in four seconds against a walk that should carry
+         * her 28, while the gait cycled at full rate. Marching in place,
+         * reported from the device as "digs one section then does a little
+         * abdomen dance with her back legs".
+         *
+         * So the rule is the one `clearFraction` and `clearPitch` already
+         * use, and it should have been the same rule from the start: a
+         * movement is legal if it leaves her no deeper than she already is,
+         * or clear. She can always get out; she can never get further in.
+         */
         bodyClear: this.solid && this.shell
-          ? (at, forward, up) => this.insideAt(at, forward, up) <= CLEARANCE_TOL
+          ? (at, forward, up) => {
+            const d = this.insideAt(at, forward, up);
+            return d <= CLEARANCE_TOL || d <= this.insideBefore;
+          }
           : undefined,
         /* No corners in this milestone — she has nothing to climb onto and
          * a transition she cannot finish is worse than one she never
