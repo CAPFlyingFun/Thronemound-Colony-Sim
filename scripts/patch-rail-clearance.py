@@ -1,0 +1,153 @@
+from pathlib import Path
+
+path = Path('src/sim/AntBody.ts')
+text = path.read_text()
+
+old = """const RAIL_FRAME: RailFrameOut = {
+  at: new THREE.Vector3(), up: new THREE.Vector3(), forward: new THREE.Vector3(),
+};
+const ANCHOR = new THREE.Vector3();"""
+new = """const RAIL_FRAME: RailFrameOut = {
+  at: new THREE.Vector3(), up: new THREE.Vector3(), forward: new THREE.Vector3(),
+};
+const RAIL_TRY_FRAME: RailFrameOut = {
+  at: new THREE.Vector3(), up: new THREE.Vector3(), forward: new THREE.Vector3(),
+};
+const RAIL_TRY_AT = new THREE.Vector3();
+const RAIL_TRY_UP = new THREE.Vector3();
+const RAIL_TRY_FORWARD = new THREE.Vector3();
+const ANCHOR = new THREE.Vector3();"""
+if text.count(old) != 1:
+    raise SystemExit('scratch block did not match exactly once')
+text = text.replace(old, new, 1)
+
+old = """  private rideRail(dt: number, intent: StrollIntent): void {
+    const rail = this.rail!;
+    const step = intent.walk * WALK_SPEED * dt;
+    this.railS = Math.max(0, Math.min(rail.lengthWu, this.railS + step));
+    if (!rail.frameAt(this.railS, RAIL_FRAME)) return;
+
+    this.up.copy(RAIL_FRAME.up).normalize();
+    /*
+     * Her nose runs along the tunnel, squared to her up. Backwards is a
+     * negative walk, not a reversed frame: a tunnel has one direction and
+     * an ant backing out of one is still facing the way she came.
+     */
+    this.forward.copy(RAIL_FRAME.forward)
+      .addScaledVector(this.up, -RAIL_FRAME.forward.dot(this.up));
+    if (this.forward.lengthSq() < 1e-12) this.forward.set(0, 0, 1);
+    this.forward.normalize();
+    /*
+     * SEATED ON THE TUBE'S FLOOR, not on its centreline — down by the bore's
+     * radius, less the height her body rides at. On the level this is the
+     * same seat the ground gives her; in a plumb shaft it is what makes
+     * "the floor" mean the wall she is standing against.
+     */
+    /*
+     * SEATED SO SHE FITS, which is lower than the axis and higher than the
+     * floor. Her origin drops by whatever room the bore has left once her own
+     * cross-section is accounted for, so her widest point just clears the
+     * wall and she still reads as resting on the floor rather than floating
+     * down the middle. Seating the ORIGIN on the floor — the first cut — put
+     * her gaster through the wall on every bend.
+     */
+    const room = Math.max(0, rail.radiusWu - (this.shell?.crossRadius ?? 0));
+    this.at.copy(RAIL_FRAME.at).addScaledVector(this.up, -room);
+    this.aim = this.at.y - this.ride;
+"""
+new = """  private rideRail(dt: number, intent: StrollIntent): void {
+    const rail = this.rail!;
+    const step = intent.walk * WALK_SPEED * dt;
+    const fromS = this.railS;
+    const askedS = Math.max(0, Math.min(rail.lengthWu, fromS + step));
+    const room = Math.max(0, rail.radiusWu - (this.shell?.crossRadius ?? 0));
+
+    /*
+     * THE RAIL DOES NOT OVERRIDE SOLID SOIL.
+     *
+     * The first rail implementation returned before LegDrive's bodyClear
+     * path and then stated that nothing on a cut bore could be refused.
+     * The skin probe disproved that assumption: on the curved track her
+     * thorax reached 0.524 mm into the wall while the rail kept advancing.
+     * A centreline guarantees that the TUNNEL exists, not that a rigid body
+     * tangent to that centreline fits every bend.
+     *
+     * Test the same seated pose the rail is about to draw. If the full step
+     * deepens her into soil, bisect distance along the track and take the
+     * largest fraction that is no worse than the pose she started from. It
+     * is the rail equivalent of LegDrive.bodyClear and clearFraction: she
+     * may always back out of contact, but the track may not push her farther
+     * through a wall.
+     */
+    const allow = Math.max(CLEARANCE_TOL, this.insideBefore);
+    const fitsAt = (s: number): boolean => {
+      if (!rail.frameAt(s, RAIL_TRY_FRAME)) return false;
+      RAIL_TRY_UP.copy(RAIL_TRY_FRAME.up).normalize();
+      RAIL_TRY_FORWARD.copy(RAIL_TRY_FRAME.forward)
+        .addScaledVector(RAIL_TRY_UP,
+          -RAIL_TRY_FRAME.forward.dot(RAIL_TRY_UP));
+      if (RAIL_TRY_FORWARD.lengthSq() < 1e-12) RAIL_TRY_FORWARD.set(0, 0, 1);
+      RAIL_TRY_FORWARD.normalize();
+      RAIL_TRY_AT.copy(RAIL_TRY_FRAME.at).addScaledVector(RAIL_TRY_UP, -room);
+      return this.insideAt(RAIL_TRY_AT, RAIL_TRY_FORWARD, RAIL_TRY_UP) <= allow;
+    };
+
+    let nextS = askedS;
+    if (this.shell && this.solid && Math.abs(askedS - fromS) > 1e-12
+        && !fitsAt(askedS)) {
+      let lo = 0;
+      let hi = 1;
+      for (let i = 0; i < 10; i += 1) {
+        const mid = (lo + hi) / 2;
+        const atS = fromS + (askedS - fromS) * mid;
+        if (fitsAt(atS)) lo = mid;
+        else hi = mid;
+      }
+      nextS = fromS + (askedS - fromS) * lo;
+    }
+
+    this.railS = nextS;
+    if (!rail.frameAt(this.railS, RAIL_FRAME)) return;
+
+    this.up.copy(RAIL_FRAME.up).normalize();
+    /*
+     * Her nose runs along the tunnel, squared to her up. Backwards is a
+     * negative walk, not a reversed frame: a tunnel has one direction and
+     * an ant backing out of one is still facing the way she came.
+     */
+    this.forward.copy(RAIL_FRAME.forward)
+      .addScaledVector(this.up, -RAIL_FRAME.forward.dot(this.up));
+    if (this.forward.lengthSq() < 1e-12) this.forward.set(0, 0, 1);
+    this.forward.normalize();
+    /*
+     * SEATED ON THE TUBE'S FLOOR, not on its centreline — down by the bore's
+     * radius, less the height her body rides at. On the level this is the
+     * same seat the ground gives her; in a plumb shaft it is what makes
+     * "the floor" mean the wall she is standing against.
+     */
+    /*
+     * SEATED SO SHE FITS, which is lower than the axis and higher than the
+     * floor. Her origin drops by whatever room the bore has left once her own
+     * cross-section is accounted for, so her widest point just clears the
+     * wall and she still reads as resting on the floor rather than floating
+     * down the middle. Seating the ORIGIN on the floor — the first cut — put
+     * her gaster through the wall on every bend.
+     */
+    this.at.copy(RAIL_FRAME.at).addScaledVector(this.up, -room);
+    this.aim = this.at.y - this.ride;
+"""
+if text.count(old) != 1:
+    raise SystemExit('rideRail opening did not match exactly once')
+text = text.replace(old, new, 1)
+
+old = """    this.report = { planted: 6, groping: 0, movedMm: Math.abs(step) * VOXEL_MM,
+      allowed: 1 } as DriveReport;"""
+new = """    const travelled = this.railS - fromS;
+    const requested = askedS - fromS;
+    this.report = { planted: 6, groping: 0, movedMm: Math.abs(travelled) * VOXEL_MM,
+      allowed: Math.abs(requested) < 1e-12 ? 1 : Math.abs(travelled / requested) } as DriveReport;"""
+if text.count(old) != 1:
+    raise SystemExit('rail report block did not match exactly once')
+text = text.replace(old, new, 1)
+
+path.write_text(text)
