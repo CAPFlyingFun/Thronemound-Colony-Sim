@@ -372,6 +372,11 @@ export class AntBody {
 
   private readonly railFootS = new Map<string, number>();
 
+  /** A foot in the air: where it left, where it lands, how far through. */
+  private readonly railSwing = new Map<string, {
+    from: THREE.Vector3; to: THREE.Vector3; t: number;
+  }>();
+
   /** Which tripod takes the next turn. */
   private railTripod = 0;
 
@@ -662,6 +667,7 @@ export class AntBody {
      * the scene calls this on every latch and unlatch. */
     this.railFoot.clear();
     this.railFootS.clear();
+    this.railSwing.clear();
     this.drive?.plantAll(
       { at: this.at, up: this.up, forward: this.forward }, ground,
     );
@@ -1049,20 +1055,66 @@ export class AntBody {
       if (st.tripod !== this.railTripod) continue;
       spent = Math.max(spent, Math.abs(this.railS - wasS));
     }
-    const stepping = spent >= stride;
+    /* No group may take its turn while the other one is still in the air. */
+    const stepping = spent >= stride && this.railSwing.size === 0;
 
     const anchors = new Map<string, readonly [number, number, number]>();
     for (const st of this.tubeStations) {
-      /* Where this foot WANTS to be, given where she is now. */
+      /*
+       * Where this foot WANTS to be — its own angle around the bore, at her
+       * current station, pulled INSIDE the wall by the same clearance the
+       * leg solver uses. Sitting it exactly on the radius put the claw on
+       * the tunnel's own surface, and the drawn tip came through: reported
+       * from the device as the leg tips poking out of the tube.
+       */
+      const grip = Math.max(0, rail.radiusWu - FOOT_CLEARANCE_MM / VOXEL_MM);
       ANCHOR.copy(RAIL_FRAME.at)
         .addScaledVector(this.forward, st.along)
-        .addScaledVector(RIGHT, st.cos * rail.radiusWu)
-        .addScaledVector(this.up, st.sin * rail.radiusWu);
+        .addScaledVector(RIGHT, st.cos * grip)
+        .addScaledVector(this.up, st.sin * grip);
+
       let held = this.railFoot.get(st.slot);
-      if (held === undefined || (stepping && st.tripod === this.railTripod)) {
-        held = (held ?? new THREE.Vector3()).copy(ANCHOR);
+      if (held === undefined) {
+        held = new THREE.Vector3().copy(ANCHOR);
         this.railFoot.set(st.slot, held);
         this.railFootS.set(st.slot, this.railS);
+      } else if (stepping && st.tripod === this.railTripod) {
+        /*
+         * A STEP IS SWUNG, NOT TELEPORTED.
+         *
+         * The first cut moved the foot to its new station in one frame. With
+         * three feet doing that at once and three holding still, the eye
+         * reads it as every leg jumping forward and then sliding back —
+         * which is exactly what Joshua reported, and is not a tripod gait
+         * however correctly the tripods alternate underneath.
+         */
+        this.railSwing.set(st.slot, {
+          from: held.clone(), to: ANCHOR.clone(), t: 0,
+        });
+        this.railFootS.set(st.slot, this.railS);
+      }
+
+      const swing = this.railSwing.get(st.slot);
+      if (swing) {
+        swing.t = Math.min(1, swing.t + dt / RAIL_SWING_S);
+        held.lerpVectors(swing.from, swing.to, swing.t);
+        /*
+         * Lifted OFF THE WALL, which in a tube means toward the axis rather
+         * than toward the sky — the same distinction that made the legs
+         * search a vertical line for a floor beside them.
+         */
+        INWARD.copy(RAIL_FRAME.at).sub(held);
+        const reach = INWARD.length();
+        if (reach > 1e-9) {
+          held.addScaledVector(
+            INWARD.multiplyScalar(1 / reach),
+            Math.sin(Math.PI * swing.t) * stride * RAIL_SWING_LIFT,
+          );
+        }
+        if (swing.t >= 1) {
+          held.copy(swing.to);
+          this.railSwing.delete(st.slot);
+        }
       }
       anchors.set(st.slot, [held.x, held.y, held.z]);
     }
@@ -1267,7 +1319,14 @@ const RAIL_FRAME: RailFrameOut = {
  */
 const RAIL_STRIDE_MM = 2;
 
+/** How long a foot spends in the air crossing to its next grip, seconds. */
+const RAIL_SWING_S = 0.22;
+
+/** How far off the wall it arcs, as a fraction of the stride. */
+const RAIL_SWING_LIFT = 0.5;
+
 const ANCHOR = new THREE.Vector3();
+const INWARD = new THREE.Vector3();
 const WALL_FRAME: RailFrameOut = {
   at: new THREE.Vector3(), up: new THREE.Vector3(), forward: new THREE.Vector3(),
 };

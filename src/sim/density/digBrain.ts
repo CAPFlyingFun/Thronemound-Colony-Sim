@@ -47,7 +47,7 @@ import {
 } from './casteDig';
 import { seatOnSoil } from './digSweep';
 import {
-  ShaftTrack, advanceRateMmS, foundingTrack,
+  ShaftTrack, advanceRateMmS, continueTrack, foundingTrack,
 } from './foundingTrack';
 import type { DigPiece } from '../../scenes/digPlan';
 
@@ -62,6 +62,14 @@ export interface WorkingPose {
   z: number;
   heading: number;
 }
+
+/**
+ * How many pieces are added each time she digs out the plan she has.
+ *
+ * Small, so the nest keeps its shape rather than sprouting a corridor at a
+ * time, and so the rail rebuild that comes with it stays cheap.
+ */
+const GROWTH_PIECES = 3;
 
 /** How much closer counts as progress, in world units — a tenth of a mm. */
 const PROGRESS_MIN = 0.02;
@@ -630,10 +638,19 @@ export class DigBrain {
     const track = this.track;
     if (!track) { this.arm(this.at); return { walk: 0, turn: 0 }; }
     if (track.done) {
-      /* The nest as planned is dug. Nothing here decides what a colony does
-       * next; it stops, which is honest, and the phase says so. */
-      this.progress = 1;
-      return { walk: 0, turn: 0 };
+      /*
+       * THE PLAN IS DUG, SO THERE IS MORE PLAN.
+       *
+       * This used to stop, which read from the device as "it dug for a little
+       * bit and stopped" — the founding track is only a handful of pieces and
+       * she gets through all of it. A colony does not finish. Another few
+       * pieces are laid on the end from the same palette and the same seeded
+       * stream, so the nest grows as one continuous tunnel rather than as a
+       * second unrelated hole.
+       */
+      const last = track.pieces[track.pieces.length - 1];
+      track.extend(continueTrack(this.rand, last?.pitch ?? -45, GROWTH_PIECES));
+      return { walk: 0, turn: 0, dig: 1 };
     }
 
     const face = track.face();

@@ -37,7 +37,7 @@
  */
 
 import { PIECE_LIMITS, clampPiece, type DigPiece } from '../../scenes/digPlan';
-import { railFromPlan, type TunnelRail } from '../../scenes/tunnelRail';
+import { railFromPlan, type TunnelRail, type Vec3Like } from '../../scenes/tunnelRail';
 import { DIG_RATE_MM3_S } from '../../scenes/islandTuning';
 import type { BodyRail, RailFrameOut } from '../AntBody';
 import { MM_PER_UNIT, boreRadiusMm, type Caste } from './casteDig';
@@ -83,10 +83,28 @@ function oneOf<T>(items: readonly T[], rand: () => number): T {
  * palette's own 15 degree steps, which is what turns a drop into a nest.
  */
 export function foundingTrack(rand: () => number, pieces = 5): DigPiece[] {
-  const out: DigPiece[] = [clampPiece({ ...ENTRANCE_DROP })];
-  let pitch = ENTRANCE_DROP.pitch;
-  for (let i = 1; i < pieces; i += 1) {
-    /* Toward the level, never past it: a founding shaft goes down. */
+  return [clampPiece({ ...ENTRANCE_DROP }),
+    ...continueTrack(rand, ENTRANCE_DROP.pitch, pieces - 1)];
+}
+
+/**
+ * MORE OF THE SAME NEST, carrying on from the grade it has reached.
+ *
+ * Separate from `foundingTrack` because that one always opens with the plumb
+ * drop, and appending a plumb drop to the middle of a tunnel puts a ninety
+ * degree corner in it. A nest has one entrance.
+ *
+ * The pitch walks toward the level in the palette's own 15 degree steps and
+ * never past it — a nest goes down — so a long tunnel gradually flattens into
+ * galleries the way a real one does, without any of that being a special
+ * case here.
+ */
+export function continueTrack(
+  rand: () => number, fromPitch: number, pieces: number,
+): DigPiece[] {
+  const out: DigPiece[] = [];
+  let pitch = fromPitch;
+  for (let i = 0; i < pieces; i += 1) {
     pitch = Math.min(-15, pitch + oneOf(LEAN_STEPS, rand));
     const turn = (Math.floor(rand() * 3) - 1) * PIECE_LIMITS.turn.step;
     out.push(clampPiece({
@@ -128,24 +146,51 @@ export interface RailPose {
  * nowhere else.
  */
 export class ShaftTrack implements BodyRail {
-  private readonly rail: TunnelRail;
+  /** The plan, which may grow. See `extend`. */
+  pieces: readonly DigPiece[] = [];
+
+  private rail: TunnelRail;
+
+  /** Kept so the rail can be rebuilt when the plan grows. See `extend`. */
+  private readonly start: { at: Vec3Like; forward: Vec3Like };
 
   /** How far along the centreline has actually been excavated, in mm. */
   private cutMm = 0;
 
   constructor(
     readonly caste: Caste,
-    readonly pieces: readonly DigPiece[],
+    pieces: readonly DigPiece[],
     /** The mouth, in WORLD UNITS. */
     start: { x: number; y: number; z: number },
     /** Which way the first piece runs, before its own pitch is applied. */
     forward: { x: number; y: number; z: number },
   ) {
     this.radiusWu = boreRadiusMm(caste) / MM_PER_UNIT;
-    this.rail = railFromPlan(pieces, {
+    this.pieces = pieces;
+    this.start = {
       at: { x: start.x * MM_PER_UNIT, y: start.y * MM_PER_UNIT, z: start.z * MM_PER_UNIT },
       forward,
-    });
+    };
+    this.rail = railFromPlan(this.pieces, this.start);
+  }
+
+  /**
+   * ADD MORE NEST TO THE END OF THE PLAN.
+   *
+   * The founding track is a handful of pieces and she digs the lot, at which
+   * point the old code simply stopped — reported from the device as "it dug
+   * for a little bit and stopped", which was the plan being finished rather
+   * than anything breaking. A colony does not stop at one shaft.
+   *
+   * The rail is rebuilt from the full list rather than spliced, because
+   * `railFromPlan` walks the pieces in order: the geometry of the prefix is
+   * identical whatever is appended after it, so the tunnel she has already
+   * dug does not move. `cutMm` is untouched for the same reason.
+   */
+  extend(more: readonly DigPiece[]): void {
+    if (more.length === 0) return;
+    this.pieces = [...this.pieces, ...more];
+    this.rail = railFromPlan(this.pieces, this.start);
   }
 
   /** The whole planned length, in millimetres. */

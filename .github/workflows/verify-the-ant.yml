@@ -1,4 +1,12 @@
-# Adapted from ChatGPT's PR #14.
+# Adapted from ChatGPT's PR #14, and since widened from the shell probe alone
+# to the behavioural ones.
+#
+# THIS IS WHERE THE PROBES RUN NOW. They cost a browser, a dev server and two
+# minutes of simulated time each, and running them locally on every change is
+# not affordable — so the measurements this project is built on happen here,
+# on every push to main and every pull request, and the local loop is
+# typecheck plus unit tests.
+#
 #
 # TWO STEPS WERE REMOVED, and the reason is the point of having this at all.
 # As written it ran `scripts/patch-rail-clearance.py` over `src/sim/AntBody.ts`
@@ -9,15 +17,15 @@
 #
 # Also NOT adopted: `apply-rail-clearance.yml`, which took `contents: write` on
 # a pull_request trigger and committed and pushed from inside CI.
-name: Verify body shell
+name: Verify the ant
 
 on:
   pull_request:
-    paths:
-      - 'src/sim/bodyShell.ts'
-      - 'src/sim/AntBody.ts'
-      - 'scripts/probe-shell.mjs'
-      - '.github/workflows/verify-body-shell.yml'
+  push:
+    branches:
+      - main
+      - 'chatgpt/**'
+      - 'claude/**'
 
 permissions:
   contents: read
@@ -27,7 +35,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  probe-shell:
+  probes:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -59,7 +67,18 @@ jobs:
           done
           cat /tmp/tcs-vite.log
           exit 1
-      - name: Run collision-shell probe
+      # Each probe reports on its own, and a failure in one must not hide the
+      # result of the next — these are measurements before they are gates.
+      - name: Digging — does she plan a nest and excavate it?
+        id: dig
+        run: npm run probe:dig
+      - name: Body — solid soil, and no marching in place
+        id: body
+        if: '!cancelled()'
+        run: npm run probe:body
+      - name: Collision shell against her own skin
+        id: shell
+        if: '!cancelled()'
         run: npm run probe:shell
       - name: Show server log on failure
         if: failure()
