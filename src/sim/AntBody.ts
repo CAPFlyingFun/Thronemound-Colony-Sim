@@ -293,6 +293,10 @@ export class AntBody {
    */
   private ride = 0;
 
+  /** How far her body origin rides above the floor, world units. Read by the
+   *  world when it works out where a candidate pose would seat her. */
+  get rideHeight(): number { return this.ride; }
+
   /**
    * And where her SOLE PLANE sits in the bind pose, signed, relative to the
    * same origin. Kept only as the fallback seat for a rig whose skin never
@@ -388,7 +392,21 @@ export class AntBody {
    * How far inside solid soil her core body is at a PROPOSED pose, world
    * units. Zero when clear, and zero when nothing can measure it.
    */
-  insideAt(at: THREE.Vector3, forward: THREE.Vector3, up: THREE.Vector3): number {
+  insideAt(
+    at: THREE.Vector3,
+    forward: THREE.Vector3,
+    up: THREE.Vector3,
+    /**
+     * Segments to ignore, defaulting to whatever is exempt right now.
+     *
+     * Passed explicitly by the WORKING-POSE SEARCH, which asks a different
+     * question from the movement clamp: not "may she be here" but "could she
+     * work from here" — and working means her head is ON the face, which is
+     * solid by definition. Asking with the head included rejects every pose
+     * that can actually reach anything, which is precisely what it did.
+     */
+    skip: ReadonlySet<SegmentName> = this.exempt,
+  ): number {
     if (!this.shell || !this.solid) return 0;
     PROBE_RIGHT.crossVectors(up, forward).normalize();
     PROBE_BASIS.makeBasis(PROBE_RIGHT, up, forward);
@@ -400,7 +418,7 @@ export class AntBody {
       PROBE_PITCH.setFromAxisAngle(PROBE_RIGHT, this.bodyPitch);
       PROBE_Q.premultiply(PROBE_PITCH);
     }
-    return this.shell.worstInside(this.solid, at, PROBE_Q, this.exempt);
+    return this.shell.worstInside(this.solid, at, PROBE_Q, skip);
   }
 
   /** Her body's deepest penetration where she actually is, world units. */
@@ -601,8 +619,23 @@ export class AntBody {
      * solving against real ground while the body leans into its work.
      */
     const wantPitch = DIG_PITCH_DOWN * this.poseDig;
-    this.bodyPitch += (wantPitch - this.bodyPitch)
+    const pitchStep = (wantPitch - this.bodyPitch)
       * Math.min(1, 1 - Math.exp(-dt / PITCH_TAU));
+    /*
+     * AND THE PITCH IS SUBJECT TO SOLID SOIL TOO — the third way her body
+     * moves, and the one the first cut of the collision work missed.
+     *
+     * Translation goes through `LegDrive`'s clip and the seat goes through
+     * `clearFraction`; this rotates her about her own origin, which drives
+     * her gaster down and her thorax through whatever is behind her without
+     * touching either path. It showed up two phases later, when the working
+     * pose search found that her body measured 0.69 mm inside soil at the
+     * pose she was standing in — so the search rejected every candidate,
+     * including the spot she was on. A body-collision system has to own
+     * EVERY way the body moves or it owns none of them, and rotation is one
+     * of them.
+     */
+    this.bodyPitch += this.clearPitch(pitchStep) * pitchStep;
     this.model.root.position.copy(this.at);
     this.model.root.quaternion.setFromRotationMatrix(
       BASIS.makeBasis(RIGHT, this.up, this.forward),
@@ -783,15 +816,50 @@ export class AntBody {
   }
 
   /**
+   * The largest fraction of a proposed PITCH change that keeps her core body
+   * out of soil.
+   *
+   * A movement that only ever reduces her penetration is always allowed —
+   * without that she could be trapped by a carve that closed around her, or
+   * by the small residue the shell's approximation leaves at a surface she
+   * is legitimately resting on, and would never be able to lean back out.
+   */
+  private clearPitch(step: number): number {
+    if (!this.shell || !this.solid || Math.abs(step) < 1e-9) return 1;
+    const was = this.bodyPitch;
+    const now = this.insideAt(this.at, this.forward, this.up);
+    const at = (f: number): number => {
+      this.bodyPitch = was + step * f;
+      const d = this.insideAt(this.at, this.forward, this.up);
+      this.bodyPitch = was;
+      return d;
+    };
+    const full = at(1);
+    if (full <= CLEARANCE_TOL || full <= now) return 1;
+    let lo = 0;
+    let hi = 1;
+    for (let i = 0; i < 8; i += 1) {
+      const mid = (lo + hi) / 2;
+      if (at(mid) <= Math.max(CLEARANCE_TOL, now)) lo = mid;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  /**
    * The largest fraction of a proposed vertical step that keeps her core body
    * out of soil. One when the whole step fits, zero when none of it does.
    */
   private clearFraction(step: number): number {
     if (!this.shell || !this.solid || Math.abs(step) < 1e-12) return 1;
     const y0 = this.at.y;
+    /* A step that only reduces her penetration is always allowed — see
+     * `clearPitch` for why refusing one can trap her. */
+    const now = this.insideAt(this.at, this.forward, this.up);
+    const allow = Math.max(CLEARANCE_TOL, now);
     const fits = (f: number): boolean => {
       SEAT_TRY.set(this.at.x, y0 + step * f, this.at.z);
-      return this.insideAt(SEAT_TRY, this.forward, this.up) <= CLEARANCE_TOL;
+      return this.insideAt(SEAT_TRY, this.forward, this.up) <= allow;
     };
     if (fits(1)) return 1;
     let lo = 0;
@@ -825,7 +893,7 @@ const LOOK_RING: readonly (readonly [number, number])[] = [
  * frame a bisection that never converges. This is well under the 0.05 mm the
  * brief asks to hold her to and two orders under the 5 mm she was managing.
  */
-const CLEARANCE_TOL = 0.01 / VOXEL_MM;
+export const CLEARANCE_TOL = 0.01 / VOXEL_MM;
 
 /* Scratch, so a walking ant allocates nothing per frame. */
 const RIGHT = new THREE.Vector3();

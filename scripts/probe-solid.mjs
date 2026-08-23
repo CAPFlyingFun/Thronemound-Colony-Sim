@@ -199,6 +199,17 @@ async function measure() {
     let reArms = 0;
     const phases = {};
     let travelled = 0;
+    /*
+     * DID THE BRAIN ASK FOR SOMETHING THE WORLD WOULD REFUSE?
+     *
+     * Phase 11's measurement. `BodyShell` guarantees she cannot ENTER soil;
+     * it says nothing about how often she tries. An ant that walks into a
+     * wall until a timer expires is safe and looks like a Roomba, and this
+     * is the number that tells the two apart.
+     */
+    let blockedAsks = 0;
+    let walkAsks = 0;
+    const STEP_AHEAD = 0.4;
     const prev = ant.at.clone();
     let lastY = ant.at.y;
 
@@ -215,6 +226,15 @@ async function measure() {
       prev.copy(ant.at);
 
       if (d.arms > arms) { reArms += d.arms - arms; arms = d.arms; }
+
+      const want = lab.intentForTest();
+      if ((want.walk ?? 0) > 0.05) {
+        walkAsks += 1;
+        const h = ant.heading;
+        const nx = ant.at.x + Math.sin(h) * STEP_AHEAD;
+        const nz = ant.at.z + Math.cos(h) * STEP_AHEAD;
+        if (lab.dig.world.standAt(nx, nz, h, ant.at.y + 0.4) === null) blockedAsks += 1;
+      }
 
       /* A job is born the frame `dig.job` becomes an object. */
       const job = lab.dig.job ?? null;
@@ -373,6 +393,9 @@ async function measure() {
       legs: legOut,
       dig: {
         arms, reArms, jobs: jobs.length, phases,
+      poseSearches: lab.dig.poseSearches, poseFound: lab.dig.poseFound,
+      walkAsks,
+      blockedAskPct: walkAsks === 0 ? 0 : +(100 * blockedAsks / walkAsks).toFixed(1),
         travelledMm: +(travelled * MM).toFixed(0),
         deepestMm: +deepestMm.toFixed(1),
         seams,
@@ -447,4 +470,7 @@ console.log(`    worst seam gap     ${span((r) => r.dig.worstSeamMm)} mm between
 console.log(`    worst tangent turn ${span((r) => r.dig.worstTurnDeg)} deg`);
 console.log(`    deepest excavation ${span((r) => r.dig.deepestMm)} mm`);
 console.log(`    travelled          ${span((r) => r.dig.travelledMm)} mm`);
+console.log(`    working poses      ${span((r) => r.dig.poseFound)} found of ${span((r) => r.dig.poseSearches)} searched`);
+console.log(`    walk asks          ${span((r) => r.dig.walkAsks)} frames`);
+console.log(`    ...into solid      ${span((r) => r.dig.blockedAskPct)} % of them`);
 console.log('');

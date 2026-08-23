@@ -32,7 +32,8 @@
  */
 
 import * as THREE from 'three';
-import { AntBody } from './AntBody';
+import { AntBody, CLEARANCE_TOL } from './AntBody';
+import type { SegmentName } from './bodyShell';
 import { AntStroll, type StrollIntent, type StrollSenses } from './antStroll';
 import { ObserverCamera } from './observerCamera';
 import { DensityGround } from './density/densityGround';
@@ -401,6 +402,52 @@ export class DensityHabitatScene {
     carveSweep: (points, radius) => {
       const region = carveSweep(this.field, points, radius);
       if (region) this.soil?.rebuild(region);
+    },
+    standAt: (x, z, heading, fromY) => {
+      /*
+       * BETWEEN THE FLOOR AND THE RIM, and the first cut of this used only
+       * the floor — which made it answer NULL for the spot she was standing
+       * on at that very moment.
+       *
+       * `surfaceAt` returns the first solid going down, so at the mouth of
+       * her own bore it returns the BOTTOM OF THE BORE. Measured while she
+       * stood on the lip after her first bite: she was at y 10.58, the floor
+       * under her centre was 9.47 — five and a half millimetres below her —
+       * and seating her on it buried her. Her feet were on the rim all
+       * round, which is exactly where an ant at the edge of a hole stands.
+       * Every one of 125 candidate poses was rejected for "no room" on that
+       * basis, and the search found nothing anywhere.
+       *
+       * So the column is searched UPWARD from its floor to the highest
+       * surface on a ring at her own stance width — the rim — and the lowest
+       * height her body fits at is the answer. The cap is not a tuning
+       * number: she cannot stand higher than the ground around her.
+       *
+       * This also makes the sensing agree with the MOVER, which is the
+       * property that matters. `seat` eases her down toward the floor and
+       * the clearance clamp stops her when her body will not follow — so the
+       * height this returns is the height she actually ends up at.
+       */
+      const floor = this.surfaceAt(x, z, fromY);
+      if (floor === null) return null;
+      let rim = floor;
+      for (const [ox, oz] of BODY_RING) {
+        const h = this.surfaceAt(x + ox * STANCE_HALF, z + oz * STANCE_HALF, fromY);
+        if (h !== null && h > rim) rim = h;
+      }
+      STAND_FWD.set(Math.sin(heading), 0, Math.cos(heading));
+      const ride = this.ant.rideHeight;
+      for (let y = floor; y <= rim + 1e-9; y += STAND_STEP) {
+        STAND_AT.set(x, y + ride, z);
+        if (this.ant.insideAt(STAND_AT, STAND_FWD, this.ant.up, WORKING_SKIP)
+          <= CLEARANCE_TOL) {
+          return y + ride;
+        }
+      }
+      /* And the rim itself, which the loop can step past. */
+      STAND_AT.set(x, rim + ride, z);
+      return this.ant.insideAt(STAND_AT, STAND_FWD, this.ant.up, WORKING_SKIP)
+        <= CLEARANCE_TOL ? rim + ride : null;
     },
     size: TANK,
   },
@@ -1240,3 +1287,24 @@ function mulberry(state: Uint32Array): number {
   t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 }
+
+/**
+ * Half her planted stance, in world units — the radius the rim is sampled
+ * at. 7.22 mm across, off the caste spec, so it is her feet's own reach and
+ * not a number chosen here.
+ */
+const STANCE_HALF = 7.22 / 2 / MM_PER_UNIT;
+
+/** How finely the column is searched upward. Half a soil cell. */
+const STAND_STEP = 0.25 / MM_PER_UNIT;
+
+/**
+ * The head is not part of the WORKING-pose test. See `AntBody.insideAt`: a
+ * pose she can work from is one where her mandibles are on the face, and a
+ * face is solid. Movement still holds her head to the ordinary rule.
+ */
+const WORKING_SKIP: ReadonlySet<SegmentName> = new Set<SegmentName>(['head']);
+
+/* Scratch for `standAt`, which a brain may ask many times in a frame. */
+const STAND_FWD = new THREE.Vector3();
+const STAND_AT = new THREE.Vector3();
