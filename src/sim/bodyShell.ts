@@ -129,6 +129,26 @@ export class BodyShell {
     return drop;
   }
 
+  /**
+   * WHERE THE MIDDLE OF HER BODY IS, relative to her origin, world units.
+   *
+   * Her origin is neither her belly nor her back, so "centre her in the
+   * tube" is not an offset of zero. This is halfway between the lowest and
+   * highest her skin reaches, which is the point a rail should run through
+   * if she is to sit in the middle of a bore rather than on its floor.
+   */
+  get centreAboveOrigin(): number {
+    let lo = 0;
+    let hi = 0;
+    for (const seg of this.segments) {
+      for (let i = 0; i < seg.spine.length; i += 1) {
+        lo = Math.min(lo, seg.spine[i]!.y - seg.radii[i]!);
+        hi = Math.max(hi, seg.spine[i]!.y + seg.radii[i]!);
+      }
+    }
+    return (lo + hi) / 2;
+  }
+
   /** How long she is nose to tail, world units, off the same spheres. */
   get lengthAlongForward(): number {
     let lo = Infinity;

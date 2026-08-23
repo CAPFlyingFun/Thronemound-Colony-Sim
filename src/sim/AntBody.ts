@@ -356,8 +356,24 @@ export class AntBody {
    * spec changing, which is what `CASTE_DIG` holding 6 mm nominal requires.
    */
   private tubeStations: Array<{
-    slot: string; cos: number; sin: number; along: number;
+    slot: string; cos: number; sin: number; along: number; tripod: number;
   }> = [];
+
+  /**
+   * WHERE EACH FOOT IS ACTUALLY STANDING on the rail, in world space, and how
+   * far along the tunnel she was when it was put there.
+   *
+   * A foot pinned to a station computed from her CURRENT position slides
+   * along the wall with her — six feet skating, which is what Joshua saw as
+   * her legs not moving at all while she dug. A foot has to hold a world
+   * point and then step, which is the whole of what a gait is.
+   */
+  private readonly railFoot = new Map<string, THREE.Vector3>();
+
+  private readonly railFootS = new Map<string, number>();
+
+  /** Which tripod takes the next turn. */
+  private railTripod = 0;
 
   /**
    * How far her body origin rides above the ground her belly is clearing —
@@ -436,11 +452,21 @@ export class AntBody {
          * is the angle that foot owns. A home dead on the axis (which no
          * real leg has) would be ambiguous, so it falls to straight down. */
         const across = Math.hypot(leg.home[0], leg.home[1]);
+        /*
+         * The alternating tripod, off the slot's own name: front-left,
+         * mid-right and rear-left step together, and the other three hold.
+         * Row plus side, mod two — the same pairing `legDrive` uses, derived
+         * here rather than imported because the rail does not run its gait.
+         */
+        const row = leg.slot.startsWith('front') ? 0
+          : leg.slot.startsWith('mid') ? 1 : 2;
+        const side = leg.slot.endsWith('Right') ? 1 : 0;
         return {
           slot: leg.slot,
           cos: across < 1e-6 ? 0 : leg.home[0] / across,
           sin: across < 1e-6 ? -1 : leg.home[1] / across,
           along: leg.home[2],
+          tripod: (row + side) % 2,
         };
       });
     }
@@ -632,6 +658,10 @@ export class AntBody {
 
   /** Plant every foot where it stands — after a placement or a teleport. */
   plant(ground: Ground): void {
+    /* Whatever the rail had her feet holding is about to stop being true —
+     * the scene calls this on every latch and unlatch. */
+    this.railFoot.clear();
+    this.railFootS.clear();
     this.drive?.plantAll(
       { at: this.at, up: this.up, forward: this.forward }, ground,
     );
@@ -890,26 +920,22 @@ export class AntBody {
      * "the floor" mean the wall she is standing against.
      */
     /*
-     * HER BELLY ON THE FLOOR OF THE BORE, which puts the centreline just
-     * over her back.
+     * HER MIDDLE ON THE CENTRELINE — third time, and the two before it
+     * bracket it.
      *
-     * The version before this dropped her by `radiusWu - crossRadius`, and
-     * that is a units mistake wearing a plausible face: `crossRadius` is how
-     * far she reaches ACROSS the tube, and it was being spent as a VERTICAL
-     * offset. It floated her up into the middle of the bore, so the rail ran
-     * through the low part of her body instead of above it. Joshua, from the
-     * device, looking straight down the shaft: "the center rails need to be
-     * at the top of her body not bottom".
+     * The first dropped her by `radiusWu - crossRadius`, spending a LATERAL
+     * extent as a vertical offset; it floated her up so the rail ran through
+     * the low part of her body. Joshua: "the center rails need to be at the
+     * top of her body not bottom." The second put her belly on the floor of
+     * the bore, which is what an ant walking a gallery does and, seen down a
+     * plumb shaft, reads as "now it's too low".
      *
-     * The right quantity is how far her skin hangs BELOW her origin, so that
-     * her lowest point lands on the wall — an ant in a gallery walks on its
-     * floor. Her sides are what the bore's own width has to accommodate, and
-     * it does: at her widest she sits about 2.2 mm from a centreline with
-     * 3 mm to give.
+     * So: the middle. Her origin is neither her belly nor her back, so
+     * centring her is not an offset of zero — it is `centreAboveOrigin`,
+     * measured off the same shell everything else is.
      */
-    const belly = this.shell?.dropBelowOrigin ?? 0;
     this.at.copy(RAIL_FRAME.at)
-      .addScaledVector(this.up, -Math.max(0, rail.radiusWu - belly));
+      .addScaledVector(this.up, -(this.shell?.centreAboveOrigin ?? 0));
     this.aim = this.at.y - this.ride;
 
     RIGHT.crossVectors(this.up, this.forward).normalize();
@@ -999,14 +1025,51 @@ export class AntBody {
      * an anchor per leg — its own angular station on the bore — is what
      * folds her stance to the tunnel. See `tubeStations`.
      */
+    /*
+     * AND THE FEET WALK THE TUBE.
+     *
+     * `solveFeet` without anchors can only move a foot along up: the walk
+     * animation owns the rest, and in a bore narrower than her stance that
+     * put her feet outside the wall. Anchoring each leg to its own angular
+     * station folds the stance to the tunnel — but an anchor recomputed from
+     * her CURRENT position every frame slides with her, so six feet skate
+     * down the wall and nothing ever lifts. Reported from the device as her
+     * legs not moving while she dug.
+     *
+     * So a foot HOLDS a world point until it has fallen a stride behind the
+     * station it wants, and then the whole tripod it belongs to steps up to
+     * theirs at once. Three feet always hold the wall while three move, which
+     * is what a hexapod in a gallery does and what makes the motion read.
+     */
+    const stride = RAIL_STRIDE_MM / VOXEL_MM;
+    let spent = 0;
+    for (const st of this.tubeStations) {
+      const wasS = this.railFootS.get(st.slot);
+      if (wasS === undefined) continue;
+      if (st.tripod !== this.railTripod) continue;
+      spent = Math.max(spent, Math.abs(this.railS - wasS));
+    }
+    const stepping = spent >= stride;
+
     const anchors = new Map<string, readonly [number, number, number]>();
     for (const st of this.tubeStations) {
+      /* Where this foot WANTS to be, given where she is now. */
       ANCHOR.copy(RAIL_FRAME.at)
         .addScaledVector(this.forward, st.along)
         .addScaledVector(RIGHT, st.cos * rail.radiusWu)
         .addScaledVector(this.up, st.sin * rail.radiusWu);
-      anchors.set(st.slot, [ANCHOR.x, ANCHOR.y, ANCHOR.z]);
+      let held = this.railFoot.get(st.slot);
+      if (held === undefined || (stepping && st.tripod === this.railTripod)) {
+        held = (held ?? new THREE.Vector3()).copy(ANCHOR);
+        this.railFoot.set(st.slot, held);
+        this.railFootS.set(st.slot, this.railS);
+      }
+      anchors.set(st.slot, [held.x, held.y, held.z]);
     }
+    /* The group that just stepped is fresh by definition, so the other one is
+     * always the one due next. No bookkeeping beyond the flip. */
+    if (stepping) this.railTripod = 1 - this.railTripod;
+
     this.model.solveFeet(
       () => 0,
       FOOT_CLEARANCE_MM / VOXEL_MM,
@@ -1195,6 +1258,15 @@ const SEAT_TRY = new THREE.Vector3();
 const RAIL_FRAME: RailFrameOut = {
   at: new THREE.Vector3(), up: new THREE.Vector3(), forward: new THREE.Vector3(),
 };
+/**
+ * HOW FAR SHE TRAVELS DOWN A TUNNEL BEFORE A TRIPOD STEPS, in millimetres.
+ *
+ * Her stride on open ground is 2 mm (`STRIDE_MM.walk` in `hexapod`), and this
+ * is deliberately the same order: a tunnel does not change how long her legs
+ * are. Shorter and she scurries; longer and she skates between steps.
+ */
+const RAIL_STRIDE_MM = 2;
+
 const ANCHOR = new THREE.Vector3();
 const WALL_FRAME: RailFrameOut = {
   at: new THREE.Vector3(), up: new THREE.Vector3(), forward: new THREE.Vector3(),
