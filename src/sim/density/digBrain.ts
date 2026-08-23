@@ -40,31 +40,18 @@
  */
 
 import * as THREE from 'three';
-import { DigJob } from '../../scenes/digJob';
 import { DIG_PITCH_DOWN } from '../AntBody';
 import type { StrollIntent } from '../antStroll';
 import {
   CASTE_DIG, MM_PER_UNIT, boreRadiusMm, boreSegmentMm, toUnits, type Caste,
 } from './casteDig';
 import { seatOnSoil } from './digSweep';
+import {
+  ShaftTrack, advanceRateMmS, foundingTrack,
+} from './foundingTrack';
+import type { DigPiece } from '../../scenes/digPlan';
 
 export type DigPhase = 'walking' | 'facing' | 'closing' | 'digging' | 'moving';
-
-/**
- * WHERE HER SHAFT HAS GOT TO — the smallest memory that makes a tunnel one
- * tunnel rather than a row of unrelated holes.
- *
- * Not the full plan Phase 8 will want. It holds only what the working-pose
- * search cannot do without: where the face is now, and which way the bore
- * was running when it got there. Everything else — the centreline, the
- * target depth, the segment list — belongs to that later card.
- */
-export interface WorkFace {
-  /** The far end of the last bore, in world units. */
-  at: THREE.Vector3;
-  /** The unit direction that bore was running. */
-  aim: THREE.Vector3;
-}
 
 /**
  * A place she could stand and work from — the answer the pose search gives.
@@ -75,60 +62,6 @@ export interface WorkingPose {
   z: number;
   heading: number;
 }
-
-/**
- * HOW FAR BACK FROM THE FACE A WORKING POSE IS TRIED, as fractions of her
- * nose reach.
- *
- * Nearest first. She wants to be as close to the work as her own reach
- * allows, because the bore starts where the aim ray MEETS soil and a stand
- * spot further back spends reach on air.
- */
-const POSE_BACK = [0.55, 0.75, 0.95, 1.15, 1.4] as const;
-
-/** Sideways offsets tried at each of those distances, in world units. */
-const POSE_SIDE = [0, -0.3, 0.3, -0.6, 0.6] as const;
-
-/** Heading offsets tried, in radians, about the bore's own bearing. */
-const POSE_TURN = [0, -0.25, 0.25, -0.5, 0.5] as const;
-
-/**
- * THE GRADIENT HER SHAFT SETTLES TO, in radians below horizontal.
- *
- * Her body pitches to `DIG_PITCH_DOWN` and no further, so a tunnel steeper
- * than that is one she cannot lie along however well she reasons about it.
- * Measured: the bore descended at 57.3 degrees and she could hold 34.4, a
- * mismatch of 23 — reported from the device as digging one section and then
- * refusing to crawl into it. This is the same number as her pitch, taken
- * from the same constant, because the two ARE the same claim: the shaft may
- * be as steep as she can lie.
- *
- * The OPENING bite is deliberately not held to it. `DIG_PITCH` stays steep
- * because a level aim on flat ground travels through air and the reach gate
- * never opens; that was measured too, at 28.6 and 40.1 degrees, and both dug
- * less than 57 did. So the mouth is cut steep and the shaft eases out of it.
- */
-const SHAFT_DESCENT = DIG_PITCH_DOWN;
-
-/**
- * How far the shaft's tangent may bend per bore, in radians.
- *
- * A tunnel is not a hinge. This is what turns the step from a 57 degree
- * mouth to a 34 degree gallery into a curve she can follow rather than a
- * corner she meets.
- */
-const MAX_BEND = 0.18;
-
-/**
- * How far a continuing bore starts BEHIND the last one's face, as a fraction
- * of the bore radius.
- *
- * Measured on v0.8.3: consecutive jobs began 1.14 to 1.35 radii PAST the
- * previous end, which leaves a waist between two spheres and is the beading
- * Joshua described as connected rounded segments. Starting behind the face
- * instead of ahead of it makes the two overlap.
- */
-const SEAM_OVERLAP = 0.25;
 
 /** How much closer counts as progress, in world units — a tenth of a mm. */
 const PROGRESS_MIN = 0.02;
@@ -179,6 +112,15 @@ export interface DigWorld {
    * that bumps into it until a timer expires.
    */
   standAt(x: number, z: number, heading: number, fromY?: number): number | null;
+  /**
+   * IS SHE ON THE RAIL RIGHT NOW — inside the tunnel, carried by it?
+   *
+   * It changes what "go to the face" means. On open ground it is a place to
+   * steer toward; on the rail it is simply FURTHER ALONG, and a brain that
+   * kept steering by heading would be turning a body the tunnel is already
+   * turning.
+   */
+  onRail(): boolean;
   /** The tank's interior span, in world units. */
   size: number;
 }
@@ -313,12 +255,20 @@ const wrap = (a: number): number => {
 
 const clamp1 = (x: number): number => Math.max(-1, Math.min(1, x));
 
+/**
+ * HOW FAR BEHIND THE FACE SHE STANDS TO WORK IT, in millimetres.
+ *
+ * Her mandibles sit a measured distance in front of her thorax and her reach
+ * is `NOSE_REACH_MM` beyond that; standing this far back down the rail puts
+ * the face inside it with room to spare, and puts HER inside tunnel that is
+ * already cut. Nearer than her own body length and she would be asked to
+ * stand where the face is.
+ */
+const STATION_BACK_MM = 4;
+
+const FACE_AT = new THREE.Vector3();
+const CARVE_PTS: THREE.Vector3[] = [];
 const SEAT = new THREE.Vector3();
-const ORIGIN = new THREE.Vector3();
-const POSE_AT = new THREE.Vector3();
-const POSE_AIM = new THREE.Vector3();
-const POSE_SEAT = new THREE.Vector3();
-const TANGENT = new THREE.Vector3();
 
 export class DigBrain {
   phase: DigPhase = 'walking';
@@ -334,28 +284,13 @@ export class DigBrain {
   arms = 0;
 
   /**
-   * The face her shaft has reached, or null before the first bore lands.
-   * See `WorkFace` — this is the seed of the shaft plan, not the plan.
-   *
-   * Named for the shaft rather than the face because `face()` is already the
-   * phase method that settles her onto a bearing.
+   * The nest she is digging, drawn in full before the first grain moves.
+   * Null until `arm` lays one. See `foundingTrack`.
    */
-  shaft: WorkFace | null = null;
+  track: ShaftTrack | null = null;
 
   /** Where she is heading in order to work, when `phase` is `moving`. */
   pose: WorkingPose | null = null;
-
-  /**
-   * Poses she has already failed to reach on THIS face.
-   *
-   * Without it the search is deterministic and so is the failure: she picks
-   * the best pose, cannot get to it, times out, picks the same best pose
-   * again, and repeats forever. Measured — eight searches, eight identical
-   * answers, one bore in two minutes. Cleared whenever the face moves,
-   * because a pose that was unreachable from one face may be the obvious one
-   * from the next.
-   */
-  private readonly refused: WorkingPose[] = [];
 
   /** The closest she has got to the current pose, and for how long. */
   private moveBest = Infinity;
@@ -385,10 +320,6 @@ export class DigBrain {
 
   private failedCloses = 0;
 
-  /** The bore being eaten right now, if any. One at a time — the island's
-   *  rule, and its duration is the cooldown. */
-  private job: DigJob | null = null;
-
   /** Where she stood this frame, for the ray seat. */
   private readonly at = new THREE.Vector3();
 
@@ -398,7 +329,11 @@ export class DigBrain {
   seatReachMm = 0;
 
   /** Whether a cut is being eaten right now. */
-  get cutting(): boolean { return this.job !== null; }
+  /** Is soil actually leaving right now? On a track: she is at the face and
+   *  there is track left to eat. */
+  get cutting(): boolean {
+    return this.phase === 'digging' && !!this.track && !this.track.done;
+  }
 
   constructor(
     private readonly caste: Caste,
@@ -422,41 +357,55 @@ export class DigBrain {
    * random approach bearing, so she always arrives facing her work rather
    * than arriving and then discovering she has to turn around.
    */
+  /**
+   * CHOOSE A MOUTH AND DRAW THE WHOLE NEST FROM IT.
+   *
+   * The old version of this picked a random patch of surface to bite and
+   * nothing else — no notion of a tunnel, so every re-arm threw the last one
+   * away. Now it lays a `ShaftTrack`: a plumb ten-millimetre drop and a few
+   * pieces easing off vertical, taken from the same palette the player-facing
+   * builder offers. The shape of the nest is decided here, once, and the rest
+   * of this file only digs it.
+   */
   arm(at: THREE.Vector3): void {
     this.arms += 1;
     this.progress = 0;
     this.creptSet = false;
     this.failedCloses = 0;
+    this.track = null;
+    this.pose = null;
     const margin = 1.2;
     const span = this.world.size - margin * 2;
     for (let tries = 0; tries < 12; tries += 1) {
-      const tx = margin + this.rand() * span;
-      const tz = margin + this.rand() * span;
-      const top = this.world.surfaceAt(tx, tz);
+      const mx = margin + this.rand() * span;
+      const mz = margin + this.rand() * span;
+      const top = this.world.surfaceAt(mx, mz);
       if (top === null) continue;
       const bearing = this.rand() * Math.PI * 2;
       /*
-       * BACK OFF BY HER OWN JAW REACH. She has to end up with her mandibles
-       * over the target, and her mandibles are a measured distance in front
-       * of her thorax — so the stand spot is the target minus that, along the
-       * approach. A constant here would put a major and a minim in the same
-       * place and only one of them would be able to reach.
+       * SHE STANDS BESIDE THE MOUTH, NOT ON IT — backed off by her own jaw
+       * reach along the approach, the same rule the old stand spot used and
+       * for the same reason: her mandibles are a measured distance in front
+       * of her thorax, so a queen and a minim cannot share a stand point.
        */
       const back = toUnits(CASTE_DIG[this.caste].jawForwardOfThoraxMm);
-      const sx = tx - Math.sin(bearing) * back;
-      const sz = tz - Math.cos(bearing) * back;
+      const sx = mx - Math.sin(bearing) * back;
+      const sz = mz - Math.cos(bearing) * back;
       const standTop = this.world.surfaceAt(sx, sz);
       if (standTop === null) continue;
       this.site = {
-        target: new THREE.Vector3(tx, top, tz),
+        target: new THREE.Vector3(mx, top, mz),
         stand: new THREE.Vector3(sx, standTop, sz),
         heading: bearing,
         bites: 0,
       };
+      this.track = new ShaftTrack(
+        this.caste,
+        this.pieces(),
+        { x: mx, y: top, z: mz },
+        { x: Math.sin(bearing), y: 0, z: Math.cos(bearing) },
+      );
       this.phase = 'walking';
-      this.left = PATIENCE.walking;
-      /* Distance decides how long she is given, within reason: a site across
-       * the tray is not a hang just because it is far. */
       const far = Math.hypot(sx - at.x, sz - at.z);
       this.left = Math.min(PATIENCE.walking, 3 + far * 2.2);
       return;
@@ -465,6 +414,11 @@ export class DigBrain {
      * was asked, which is a terrain fault rather than a brain one. Keep the
      * old site rather than clearing it, so the caller sees no phase change and
      * the next tick tries again. */
+  }
+
+  /** The pieces this caste's founding nest is made of. Seeded. */
+  private pieces(): DigPiece[] {
+    return foundingTrack(this.rand);
   }
 
   /**
@@ -648,250 +602,119 @@ export class DigBrain {
    * that fills while her jaws are in the air is the "magical digging" this
    * whole file exists to end.
    */
+  /**
+   * SHE EATS ALONG THE TRACK, and the track was drawn before she started.
+   *
+   * Joshua, 2026-08-23: "How about the AI using like the rail system where it
+   * creates random preset tunnels/pipes/tubing. Think plumbing with starting
+   * with a straight down piece that's 6x6x10mm, but it still digs the dirt
+   * over time."
+   *
+   * What this replaces is three phases of searching. A bore used to be seated
+   * on whatever soil her aim ray met, so the tunnel's shape was an accident
+   * of where she stood; then the next work face had to be found, and a place
+   * to stand and reach it had to be found, and neither search could be
+   * trusted because the thing being searched for did not exist until she made
+   * it. Two bores in two minutes was the honest result.
+   *
+   * On a track all three are coordinates. The face is `s = dug`. A place to
+   * stand is `s = dug - back`, which is excavated by definition because the
+   * cut has already passed it. Continuity is not measured, it is what a curve
+   * IS.
+   *
+   * The soil still comes out over time — the advance is the caste's own
+   * volumetric rate expressed as millimetres of tunnel a second, so a metre
+   * of track costs exactly what the same volume of bores cost.
+   */
   private dig(dt: number): StrollIntent {
-    /*
-     * A CUT IN PROGRESS IS THE ANSWER TO EVERYTHING. The island's rule, and
-     * it is the cooldown too: "one bore at a time — the duration is the
-     * cooldown, by decree." While a job runs she stands and eats it.
-     */
-    if (this.job) {
-      const points = this.job.tick(dt);
-      if (points.length > 0) this.world.carveSweep(points, this.boreRadius());
-      this.progress = this.job.progress;
-      if (this.job.done) {
-        const done = this.job;
-        this.job = null;
-        this.bites += 1;
-        this.progress = 0;
-        /* Held past the end starts the next bore from where she now stands,
-         * which is how a long tunnel is one continuous effort rather than a
-         * row of pockets. */
-        /*
-         * AND THE SHAFT REMEMBERS WHERE IT GOT TO. See `WorkFace`. Recorded
-         * from the job that has just finished rather than from where she is
-         * standing, because the two are a bore-length apart and it is the
-         * FACE she has to reach next, not herself.
-         */
-        this.shaft = {
-          at: done.origin.clone().addScaledVector(done.aim, done.lengthWu),
-          aim: done.aim.clone(),
-        };
-        this.refused.length = 0;
-        /*
-         * If she can still reach the new face from here, carry straight on —
-         * that is the ordinary case early in a bore and it costs nothing.
-         * Otherwise go and find somewhere she CAN work from, rather than
-         * creeping at a face that is now out of reach.
-         */
-        if (this.canSeat()) { this.toClosing(); return { walk: 0, turn: 0, dig: 1 }; }
-        this.pose = this.findPose();
-        if (this.pose) {
-          this.phase = 'moving';
-          this.left = PATIENCE.walking;
-          this.moveBest = Infinity;
-          this.moveStall = 0;
-        } else {
-          this.toClosing();
-        }
-      }
-      return { walk: 0, turn: 0, dig: 1 };
+    const track = this.track;
+    if (!track) { this.arm(this.at); return { walk: 0, turn: 0 }; }
+    if (track.done) {
+      /* The nest as planned is dug. Nothing here decides what a colony does
+       * next; it stops, which is honest, and the phase says so. */
+      this.progress = 1;
+      return { walk: 0, turn: 0 };
     }
-    if (this.left <= 0) { this.arm(this.jaw); return { walk: 0, turn: 0 }; }
+
+    const face = track.face();
+    if (!face) { this.arm(this.at); return { walk: 0, turn: 0 }; }
+    FACE_AT.set(face.at.x, face.at.y, face.at.z);
 
     /*
-     * SEAT THE BORE ON THE FIRST SOIL THE AIM MEETS, then start it half a
-     * radius back on the AIR side so the mouth's lip opens on this side of
-     * the face. Straight from `islandDig.bite`.
+     * CAN SHE TOUCH IT? The reach rule is unchanged and non-negotiable: soil
+     * only leaves where her mandibles are. What HAS changed is the answer
+     * when she cannot — she now knows exactly where to go, rather than
+     * hunting for it.
      */
-    const r = this.boreRadius();
-    /*
-     * CONTINUE THE SHAFT IF ITS FACE IS IN REACH, and only then.
-     *
-     * This is the whole of the job-to-job continuity fix. Each bore used to
-     * be seated afresh on whatever soil her aim ray happened to meet, so two
-     * consecutive bores shared nothing — not an origin, not a direction —
-     * and the tunnel was a row of beads with a waist at every seam.
-     *
-     * The reach rule is unchanged and non-negotiable: she may only remove
-     * soil she can touch. If the face has got away from her, this does not
-     * fire and the ordinary seat runs, or the pose search moves her.
-     */
-    if (this.shaft && this.shaft.at.distanceTo(this.at) <= toUnits(NOSE_REACH_MM)) {
-      const aim = this.nextTangent(this.shaft.aim);
-      ORIGIN.copy(this.shaft.at).addScaledVector(aim, -(r * SEAM_OVERLAP));
-      this.seat.copy(this.shaft.at);
-      this.seatReachMm = this.shaft.at.distanceTo(this.at) * MM_PER_UNIT;
-      this.job = new DigJob(
-        ORIGIN.clone(), aim, toUnits(boreSegmentMm(this.caste)), r,
-      );
-      const beat = this.job.tick(0);
-      if (beat.length > 0) this.world.carveSweep(beat, r);
-      return { walk: 0, turn: 0, dig: 1 };
-    }
-    if (!seatOnSoil(
-      (x, y, z) => this.world.solidAt(x, y, z),
-      this.at, this.aim, toUnits(NOSE_REACH_MM), toUnits(0.25), SEAT,
-    )) {
-      this.progress = 0;
+    if (FACE_AT.distanceTo(this.at) > toUnits(NOSE_REACH_MM)) {
       /*
-       * NO FACE IN REACH FROM HERE. If the shaft remembers where its face
-       * is, go and stand somewhere that can reach it; only fall back to the
-       * blind creep when there is no shaft to go back to.
+       * ON THE RAIL, "get to the face" IS "walk deeper". No steering, no
+       * station to find, no pose to search: the tunnel is already pointed at
+       * the work and she is in it.
        */
-      this.pose = this.shaft ? this.findPose() : null;
-      if (this.pose) {
+      if (this.world.onRail()) return { walk: 1, turn: 0, dig: 1 };
+      const station = track.station(STATION_BACK_MM);
+      if (station) {
+        this.pose = {
+          x: station.at.x,
+          y: station.at.y,
+          z: station.at.z,
+          heading: Math.atan2(station.forward.x, station.forward.z),
+        };
         this.phase = 'moving';
         this.left = PATIENCE.walking;
         this.moveBest = Infinity;
         this.moveStall = 0;
-      } else {
-        this.toClosing();
+        return { walk: 0, turn: 0, dig: 1 };
       }
+      this.toClosing();
       return { walk: 0, turn: 0, dig: 1 };
     }
-    /* Kept for the probe: where the ray found the face, and how far that
-     * was from her centre. A cut that begins outside her reach is the thing
-     * "it won't dig it remotely" forbids, and this is what proves it did not. */
-    this.seat.copy(SEAT);
-    this.seatReachMm = SEAT.distanceTo(this.at) * MM_PER_UNIT;
-    ORIGIN.copy(SEAT).addScaledVector(this.aim, -(r * 1.5));
-    this.job = new DigJob(
-      ORIGIN.clone(), this.aim.clone(), toUnits(boreSegmentMm(this.caste)), r,
+
+    /* Within reach: eat. */
+    const before = track.dugMm;
+    const points = track.advance(
+      advanceRateMmS(this.caste) * dt, this.boreRadius(),
     );
-    /* Beat zero now, not next frame — the press answers immediately. */
-    const first = this.job.tick(0);
-    if (first.length > 0) this.world.carveSweep(first, r);
+    if (points.length > 0) {
+      for (const p of points) CARVE_PTS.push(new THREE.Vector3(p.x, p.y, p.z));
+      this.world.carveSweep(CARVE_PTS, this.boreRadius());
+      CARVE_PTS.length = 0;
+    }
+    /* One "bite" per millimetre of tunnel, so the counter still means
+     * something comparable to what it meant before the track existed. */
+    if (Math.floor(track.dugMm) > Math.floor(before)) this.bites += 1;
+    this.progress = track.plannedMm > 0 ? track.dugMm / track.plannedMm : 0;
+    this.seat.copy(FACE_AT);
+    this.seatReachMm = FACE_AT.distanceTo(this.at) * MM_PER_UNIT;
     return { walk: 0, turn: 0, dig: 1 };
   }
 
   /**
-   * WHERE SHE COULD STAND AND STILL REACH THE WORK — Phase 12.
+   * Steer to the working station, then hand back to the ordinary approach.
    *
-   * The measurement that produced this is worth keeping: with the soil made
-   * solid, she completed one bore and then oscillated between `closing` and
-   * `digging` every single frame for the remaining nineteen hundred, without
-   * moving a micron. Not a deadlock of patience — a livelock of two gates
-   * that disagreed. `close` asks whether her JAW is on soil and sends her to
-   * dig; `dig` asks whether a ray from her CENTRE meets soil within her nose
-   * reach and sends her back. Standing at the lip of the bore she had just
-   * cut, her jaw touched the rim while the ray went down her own hole and
-   * found nothing for more than five millimetres. Both gates were right.
-   *
-   * What was missing is the thing between them: a way to get INTO the hole.
-   * She had none, because nothing remembered the hole existed. Before Phase
-   * 1 she did not need one — she sank through solid soil and the seat
-   * followed her down.
-   *
-   * So this searches, nearest first, for a pose that satisfies all of:
-   *
-   *   1. there is a floor there and her core body fits above it — `standAt`,
-   *      which is the same evaluator the movement clamp uses, so the brain
-   *      cannot believe in a pose the body will refuse;
-   *   2. from it, a ray along her working aim meets soil inside her nose
-   *      reach — the same gate `dig` will apply when she arrives, so she
-   *      cannot walk somewhere she will be turned away from;
-   *   3. it is inside the tank.
-   *
-   * Local and cheap on purpose: at most 125 candidates of three field-ish
-   * queries each, and it runs when a bore finishes rather than per frame.
-   * This is not a path search and there is no graph — she has to be able to
-   * WALK there, which the caller leaves to the ordinary steering and the
-   * body clamp between them.
+   * Unlike the version this replaces, the destination is a point on the rail
+   * BEHIND the cut face — so it is inside tunnel she has already dug, and
+   * "can she get there" is a question about walking rather than about whether
+   * such a place exists at all.
    */
-  private findPose(): WorkingPose | null {
-    const shaft = this.shaft;
-    if (!shaft) return null;
-    this.poseSearches += 1;
-    const bearing = Math.atan2(shaft.aim.x, shaft.aim.z);
-    const reach = toUnits(NOSE_REACH_MM);
-    /* Her right, in the ground plane — the axis the sideways offsets run
-     * along. Taken off the bearing rather than off her current facing, so a
-     * candidate means the same thing however she happens to be standing. */
-    const rx = Math.cos(bearing);
-    const rz = -Math.sin(bearing);
-    let best: WorkingPose | null = null;
-    let bestCost = Infinity;
-    for (const back of POSE_BACK) {
-      for (const side of POSE_SIDE) {
-        for (const turn of POSE_TURN) {
-          const heading = bearing + turn;
-          const x = shaft.at.x - shaft.aim.x * (reach * back) + rx * side;
-          const z = shaft.at.z - shaft.aim.z * (reach * back) + rz * side;
-          if (!this.insideTank(x, z)) continue;
-          if (this.refused.some((p) => Math.hypot(p.x - x, p.z - z) < REFUSED_NEAR
-            && Math.abs(wrap(p.heading - heading)) < 0.2)) continue;
-          /*
-           * Looked for from ABOVE THE FACE rather than from her own height:
-           * the pose she wants is usually further down the shaft than she is
-           * standing, and a search that starts at her feet finds the floor
-           * she is already on.
-           */
-          const y = this.world.standAt(x, z, heading, shaft.at.y + reach);
-          if (y === null) continue;
-          /* And from there, can she actually reach the work? The same ray
-           * `dig` uses, asked before she walks rather than after. */
-          POSE_AT.set(x, y, z);
-          POSE_AIM.set(Math.sin(heading), 0, Math.cos(heading))
-            .multiplyScalar(Math.cos(DIG_PITCH));
-          POSE_AIM.y = -Math.sin(DIG_PITCH);
-          POSE_AIM.normalize();
-          if (!seatOnSoil(
-            (px, py, pz) => this.world.solidAt(px, py, pz),
-            POSE_AT, POSE_AIM, reach, toUnits(0.25), POSE_SEAT,
-          )) continue;
-          /*
-           * Cheapest wins, and cheap means: close to the work first, then
-           * close to where she already stands, then square to the bore. The
-           * walk matters least — she is going to take it either way.
-           */
-          const cost = back
-            + Math.abs(turn) * 0.5
-            + Math.hypot(x - this.at.x, z - this.at.z) * 0.15
-            + Math.abs(side) * 0.2;
-          if (cost < bestCost) {
-            bestCost = cost;
-            best = { x, y, z, heading };
-          }
-        }
-      }
-    }
-    if (best) this.poseFound += 1;
-    return best;
-  }
-
-  /**
-   * The direction the next bore runs — the last one's, eased toward the
-   * gradient she can actually lie along. See `SHAFT_DESCENT`.
-   */
-  private nextTangent(prev: THREE.Vector3): THREE.Vector3 {
-    const horiz = Math.hypot(prev.x, prev.z);
-    if (horiz < 1e-6) return prev.clone().normalize();
-    const flat = Math.cos(SHAFT_DESCENT) / horiz;
-    TANGENT.set(prev.x * flat, -Math.sin(SHAFT_DESCENT), prev.z * flat).normalize();
-    const bend = prev.angleTo(TANGENT);
-    if (bend <= MAX_BEND) return TANGENT.clone();
-    return prev.clone().lerp(TANGENT, MAX_BEND / bend).normalize();
-  }
-
-  /** Steer to the working pose, then hand back to the ordinary approach. */
   private move(dt: number, at: THREE.Vector3, heading: number): StrollIntent {
     const pose = this.pose;
     if (!pose) { this.toClosing(); return { walk: 0, turn: 0 }; }
     const dx = pose.x - at.x;
     const dz = pose.z - at.z;
     const away = Math.hypot(dx, dz);
+    if (away <= ARRIVE) {
+      this.phase = 'digging';
+      this.left = PATIENCE.digging;
+      return { walk: 0, turn: 0, dig: 1 };
+    }
     /*
-     * IS SHE STILL GETTING CLOSER? The body clamp can refuse a walk the
-     * brain thinks is fine — around the lip of her own bore, most obviously
-     * — and a steering loop with no notion of progress will lean on that
-     * wall until its timer runs out and then lean on it again. Measured:
-     * she stalled two millimetres short and re-chose the identical pose
+     * IS SHE STILL GETTING CLOSER? The body clamp can refuse a walk the brain
+     * thinks is fine, and a steering loop with no notion of progress leans on
+     * that wall until its timer runs out. Measured before this existed: she
+     * stalled two millimetres short and re-chose the identical destination
      * eight times running.
-     *
-     * So a pose she stops closing on is RECORDED AS REFUSED and another one
-     * on the same face is tried. That is the brief's rule — try another
-     * working pose before abandoning the plan — and it is what makes the
-     * search a search rather than one guess repeated.
      */
     if (away < this.moveBest - PROGRESS_MIN) {
       this.moveBest = away;
@@ -899,33 +722,24 @@ export class DigBrain {
     } else {
       this.moveStall += dt;
     }
-    if (this.moveStall >= STALL_SECONDS) {
-      this.refused.push(pose);
-      this.pose = this.findPose();
-      this.moveBest = Infinity;
-      this.moveStall = 0;
-      if (!this.pose) { this.toClosing(); return { walk: 0, turn: 0 }; }
-      this.left = PATIENCE.walking;
-      return { walk: 0, turn: 0 };
-    }
-    if (away <= ARRIVE) {
-      /* Arrived. Settle onto the working bearing before touching anything —
-       * the same order the first approach uses. */
-      if (this.site) this.site.heading = pose.heading;
-      this.phase = 'facing';
-      this.left = PATIENCE.facing;
-      return { walk: 0, turn: 0 };
-    }
-    if (this.left <= 0) {
+    if (this.left <= 0 || this.moveStall >= STALL_SECONDS) {
       /*
-       * SHE COULD NOT GET THERE. Try another pose on the SAME face before
-       * giving the shaft up — which is the brief's rule, and the opposite of
-       * what the old timeout did: it forgot the tunnel and picked a fresh
-       * random patch of tray.
+       * She cannot reach the station. Take the shallowest part of the shaft
+       * she CAN stand in — further back up her own tunnel — before writing
+       * the nest off. The old code re-armed a fresh random site here, which
+       * threw away the tunnel she had just dug.
        */
-      this.pose = this.findPose();
-      if (this.pose) { this.left = PATIENCE.walking; return { walk: 0, turn: 0 }; }
-      this.shaft = null;
+      const nearer = this.track?.station(STATION_BACK_MM * 2) ?? null;
+      if (nearer && Math.hypot(nearer.at.x - at.x, nearer.at.z - at.z) > ARRIVE) {
+        this.pose = {
+          x: nearer.at.x, y: nearer.at.y, z: nearer.at.z,
+          heading: Math.atan2(nearer.forward.x, nearer.forward.z),
+        };
+        this.left = PATIENCE.walking;
+        this.moveBest = Infinity;
+        this.moveStall = 0;
+        return { walk: 0, turn: 0 };
+      }
       this.arm(at);
       return { walk: 0, turn: 0 };
     }
@@ -935,15 +749,16 @@ export class DigBrain {
   }
 
   /**
-   * Could a bore START from where she stands right now? The exact test `dig`
-   * applies, factored out so no other phase can hold a different opinion —
-   * see the note in `close`.
+   * Could she start cutting from where she stands? On a track this is simply
+   * whether the face is within her reach — the same question `dig` asks, kept
+   * in one place so no two phases can hold different opinions about it. Two
+   * that did cost nineteen hundred frames of a one-frame livelock.
    */
   private canSeat(): boolean {
-    return seatOnSoil(
-      (x, y, z) => this.world.solidAt(x, y, z),
-      this.at, this.aim, toUnits(NOSE_REACH_MM), toUnits(0.25), SEAT,
-    );
+    const face = this.track?.face();
+    if (!face) return false;
+    SEAT.set(face.at.x, face.at.y, face.at.z);
+    return SEAT.distanceTo(this.at) <= toUnits(NOSE_REACH_MM);
   }
 
   /** Back to the approach, from wherever she is. */
@@ -951,12 +766,6 @@ export class DigBrain {
     this.phase = 'closing';
     this.left = PATIENCE.closing;
     this.creptSet = false;
-  }
-
-  /** Is this column far enough inside the glass to work from? */
-  private insideTank(x: number, z: number): boolean {
-    return x > EDGE_MARGIN && x < this.world.size - EDGE_MARGIN
-      && z > EDGE_MARGIN && z < this.world.size - EDGE_MARGIN;
   }
 
   private boreRadius(): number {

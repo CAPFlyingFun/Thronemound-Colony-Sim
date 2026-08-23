@@ -228,7 +228,14 @@ async function measure() {
       if (d.arms > arms) { reArms += d.arms - arms; arms = d.arms; }
 
       const want = lab.intentForTest();
-      if ((want.walk ?? 0) > 0.05) {
+      /*
+       * ONLY WHILE SHE IS WALKING ON GROUND. On the rail there is no column
+       * to stand in and no heading to steer — the tunnel carries her — so
+       * asking `standAt` about a point inside a tube reads "solid" and means
+       * nothing. Counting those frames put the figure at 46.7 % during a
+       * descent in which she never once asked for anything illegal.
+       */
+      if (!ant.rail && (want.walk ?? 0) > 0.05) {
         walkAsks += 1;
         const h = ant.heading;
         const nx = ant.at.x + Math.sin(h) * STEP_AHEAD;
@@ -236,16 +243,17 @@ async function measure() {
         if (lab.dig.world.standAt(nx, nz, h, ant.at.y + 0.4) === null) blockedAsks += 1;
       }
 
-      /* A job is born the frame `dig.job` becomes an object. */
-      const job = lab.dig.job ?? null;
-      if (job && job !== lastJob) {
-        jobs.push({
-          o: [job.origin.x, job.origin.y, job.origin.z],
-          a: [job.aim.x, job.aim.y, job.aim.z],
-          len: job.lengthWu, r: job.radiusWu, frame: f,
-        });
+      /*
+       * A TRACK IS BORN the frame `dig.track` becomes an object, and the
+       * seams that used to be measured between bores no longer exist: the
+       * centreline is one curve. What is worth watching now is how much of
+       * the planned nest she has actually excavated.
+       */
+      const track = lab.dig.track ?? null;
+      if (track && track !== lastJob) {
+        jobs.push({ frame: f, plannedMm: +track.plannedMm.toFixed(2) });
       }
-      lastJob = job;
+      lastJob = track;
 
       /* ---- core body against the field, as a depth */
       if (f % SAMPLE_EVERY === 0) {
@@ -320,23 +328,20 @@ async function measure() {
       }
     }
 
-    /* -------------------------------------------------- job-to-job seams */
-
-    const seams = [];
-    for (let i = 1; i < jobs.length; i += 1) {
-      const p = jobs[i - 1]; const q = jobs[i];
-      const endX = p.o[0] + p.a[0] * p.len;
-      const endY = p.o[1] + p.a[1] * p.len;
-      const endZ = p.o[2] + p.a[2] * p.len;
-      const gap = Math.hypot(q.o[0] - endX, q.o[1] - endY, q.o[2] - endZ);
-      const dot = Math.max(-1, Math.min(1,
-        p.a[0] * q.a[0] + p.a[1] * q.a[1] + p.a[2] * q.a[2]));
-      seams.push({
-        gapMm: +(gap * MM).toFixed(2),
-        gapInRadii: +(gap / q.r).toFixed(2),
-        turnDeg: +(Math.acos(dot) * 180 / Math.PI).toFixed(1),
-      });
-    }
+    /*
+     * NO SEAMS TO MEASURE ANY MORE.
+     *
+     * The old digger cut independent bores, so the gap and the tangent break
+     * between consecutive ones were the thing to watch — 1.14 to 1.35 bore
+     * radii of discontinuity, which is the beading Joshua reported. On a
+     * track there are no consecutive bores: there is one centreline, carved
+     * forward. Continuity is not a measurement, it is the definition, so the
+     * checks that used to guard it are gone rather than left green forever
+     * on a property nothing can break.
+     *
+     * What replaces them is progress along the plan.
+     */
+    const track = lab.dig.track ?? null;
 
     /* deepest excavation, the same sweep probe:dig uses */
     const grade = lab.gradeForTest();
@@ -393,15 +398,17 @@ async function measure() {
       legs: legOut,
       dig: {
         arms, reArms, jobs: jobs.length, phases,
-      poseSearches: lab.dig.poseSearches, poseFound: lab.dig.poseFound,
-      walkAsks,
-      blockedAskPct: walkAsks === 0 ? 0 : +(100 * blockedAsks / walkAsks).toFixed(1),
+        walkAsks,
+        blockedAskPct: walkAsks === 0 ? 0 : +(100 * blockedAsks / walkAsks).toFixed(1),
         travelledMm: +(travelled * MM).toFixed(0),
         deepestMm: +deepestMm.toFixed(1),
-        seams,
-        worstSeamMm: seams.length ? Math.max(...seams.map((s) => s.gapMm)) : null,
-        worstTurnDeg: seams.length ? Math.max(...seams.map((s) => s.turnDeg)) : null,
-        boreRadiusMm: jobs.length ? +(jobs[0].r * MM).toFixed(2) : null,
+        plannedMm: track ? +track.plannedMm.toFixed(1) : null,
+        dugMm: track ? +track.dugMm.toFixed(1) : null,
+        dugPct: track && track.plannedMm > 0
+          ? +(100 * track.dugMm / track.plannedMm).toFixed(1) : null,
+        pieces: track ? track.pieces.length : null,
+        dropPitch: track ? track.pieces[0].pitch : null,
+        dropLenMm: track ? track.pieces[0].length : null,
       },
     };
   }, { seconds: SECONDS });
@@ -464,13 +471,11 @@ for (const slot of Object.keys(runs[0].legs)) {
 console.log('\n  DIGGING');
 console.log(`    sites armed        ${span((r) => r.dig.arms)}`);
 console.log(`    re-arms            ${span((r) => r.dig.reArms)}`);
-console.log(`    DigJobs started    ${span((r) => r.dig.jobs)}`);
-console.log(`    bore radius        ${span((r) => r.dig.boreRadiusMm)} mm`);
-console.log(`    worst seam gap     ${span((r) => r.dig.worstSeamMm)} mm between job N end and job N+1 start`);
-console.log(`    worst tangent turn ${span((r) => r.dig.worstTurnDeg)} deg`);
+console.log(`    tracks laid        ${span((r) => r.dig.jobs)}`);
+console.log(`    planned nest       ${span((r) => r.dig.plannedMm)} mm over ${span((r) => r.dig.pieces)} pieces`);
+console.log(`    ...excavated       ${span((r) => r.dig.dugMm)} mm  (${span((r) => r.dig.dugPct)} %)`);
 console.log(`    deepest excavation ${span((r) => r.dig.deepestMm)} mm`);
 console.log(`    travelled          ${span((r) => r.dig.travelledMm)} mm`);
-console.log(`    working poses      ${span((r) => r.dig.poseFound)} found of ${span((r) => r.dig.poseSearches)} searched`);
-console.log(`    walk asks          ${span((r) => r.dig.walkAsks)} frames`);
+console.log(`    walk asks on foot  ${span((r) => r.dig.walkAsks)} frames`);
 console.log(`    ...into solid      ${span((r) => r.dig.blockedAskPct)} % of them`);
 console.log('');

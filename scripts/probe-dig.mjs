@@ -204,6 +204,8 @@ const live = await page.evaluate(async () => {
    * the depth, or it is the same green those two would have shown.
    */
   let peakPitchDeg = -90;
+  let railPitchSum = 0;
+  let railFrames = 0;
   let pitchDigSum = 0;
   let pitchDigFrames = 0;
   let plantedSum = 0;
@@ -222,14 +224,24 @@ const live = await page.evaluate(async () => {
     travelled += lab.ant.at.distanceTo(prev);
     prev.copy(lab.ant.at);
 
-    peakPitchDeg = Math.max(peakPitchDeg, d.pitchDeg);
+    if (!lab.ant.rail) peakPitchDeg = Math.max(peakPitchDeg, d.pitchDeg);
+    else { railPitchSum += Math.abs(d.pitchDeg); railFrames += 1; }
     const r = lab.reportForTest();
     plantedSum += r.planted; gropingSum += r.groping; gaitFrames += 1;
 
     if (d.cutting) worstSeatMm = Math.max(worstSeatMm, d.seatReachMm);
     if (d.phase === 'digging') {
       framesDigging += 1;
-      pitchDigSum += d.pitchDeg; pitchDigFrames += 1;
+      /*
+       * ON FOOT ONLY. The dig lean exists to aim her head at a face while
+       * she stands on open ground with her body level. Inside a tunnel the
+       * TUNNEL aims her — her forward is the bore's own direction — and
+       * leaning a further 34 degrees on top of that drove her head through
+       * the floor of a 3 mm bore, measured at 13.3 mm inside solid. So she
+       * does not lean on the rail, and averaging those frames in would
+       * measure a posture the build deliberately does not use.
+       */
+      if (!lab.ant.rail) { pitchDigSum += d.pitchDeg; pitchDigFrames += 1; }
       if (!d.onFace) framesDiggingOffFace += 1;
       /* Did the BAR advance on a frame where her jaws were off the soil? */
       if (!d.onFace && d.progress > lastProgress) barMovedOffFace += 1;
@@ -272,12 +284,21 @@ const live = await page.evaluate(async () => {
   return {
     deepestMm: +deepestMm.toFixed(1),
     bites: end.bites, arms: end.arms,
+    plannedMm: lab.dig.track ? +lab.dig.track.plannedMm.toFixed(1) : null,
+    dugMm: lab.dig.track ? +lab.dig.track.dugMm.toFixed(1) : null,
+    dugPct: lab.dig.track && lab.dig.track.plannedMm > 0
+      ? +(100 * lab.dig.track.dugMm / lab.dig.track.plannedMm).toFixed(1) : null,
+    pieces: lab.dig.track ? lab.dig.track.pieces.length : null,
+    dropPitch: lab.dig.track ? lab.dig.track.pieces[0].pitch : null,
+    dropLenMm: lab.dig.track ? lab.dig.track.pieces[0].length : null,
     phases, sawAll: [...seen].sort(),
     framesDigging, framesDiggingOffFace, barMovedOffFace,
     worstJawGapMm: +worstJawGapMm.toFixed(2),
     travelledMm: +(travelled * MM).toFixed(0),
     worstSeatMm: +worstSeatMm.toFixed(2),
     peakPitchDeg: +peakPitchDeg.toFixed(1),
+    railFrames,
+    railPitchDeg: railFrames === 0 ? null : +(railPitchSum / railFrames).toFixed(2),
     diggingPitchDeg: pitchDigFrames === 0
       ? null : +(pitchDigSum / pitchDigFrames).toFixed(1),
     aimDownDeg: +end.aimDownDeg.toFixed(1),
@@ -291,9 +312,28 @@ const live = await page.evaluate(async () => {
 
 console.log(`  ${JSON.stringify(live)}`);
 
-check('she completes bites', live.bites >= 3, `${live.bites} in 120 s`);
-check('and keeps completing them', live.arms >= 1 && live.bites >= live.arms,
-  `${live.bites} bites over ${live.arms} sites`);
+/*
+ * SHE DIGS THE NEST SHE PLANNED, and these two checks used to count BITES.
+ *
+ * That was the right question while a tunnel was an emergent pile of
+ * independent bores: all you could ask was whether she kept managing another
+ * one. It is the wrong question now. The nest is drawn as track pieces before
+ * a grain moves, so what matters is whether she executes the plan — and
+ * "bites" is only a millimetre counter kept for continuity with the old
+ * numbers.
+ *
+ * They stayed red for three versions while she managed one or two bores, and
+ * they are the checks the rail system had to turn green.
+ */
+check('she lays a nest before digging it',
+  live.plannedMm !== null && live.pieces >= 2 && live.plannedMm > 20,
+  `${live.pieces} pieces, ${live.plannedMm} mm planned`);
+check('opening with a plumb drop, as specified',
+  live.dropPitch === -90 && live.dropLenMm === 10,
+  `pitch ${live.dropPitch} deg for ${live.dropLenMm} mm`);
+check('and excavates the whole of it',
+  live.dugPct !== null && live.dugPct >= 95,
+  `${live.dugMm} of ${live.plannedMm} mm — ${live.dugPct} %`);
 check('she goes through the whole loop',
   ['closing', 'digging', 'facing', 'walking'].every((p) => live.sawAll.includes(p)),
   live.sawAll.join(' '));
@@ -342,21 +382,35 @@ check('she excavates to a real depth',
   live.deepestMm >= 4, `deepest excavation ${live.deepestMm} mm`);
 
 /*
- * SHE PITCHES INTO THE WORK — Joshua, 2026-08-21: "Can you have it pitch as
- * that's the point and how ants dig and I can't give an honest assessment
- * because it's not behaving like a real ant would."
+ * SHE DOES NOT LEAN INSIDE THE TUNNEL — and this check replaces two that
+ * asked the opposite.
  *
- * Read off the DRAWN model's rotation, because the two attempts before this
- * one both set the intent correctly and got the sign wrong, and one of them
- * reared her 34.9 degrees at the ceiling. A field named `bodyPitch` would
- * have called that green.
+ * The dig lean was built for Joshua's "can you have it pitch as that's the
+ * point and how ants dig", and it was right for the build that had: she
+ * stood on open ground, level, and had to aim her head at a face. On a rail
+ * the TUNNEL aims her, and leaning a further 34 degrees on top of a bore
+ * three millimetres in radius drove her head 13.3 mm into the floor,
+ * measured.
+ *
+ * So the old checks are gone rather than loosened. She now enters her own
+ * mouth within a second of opening it, so "how far does she lean while
+ * digging on foot" has almost no frames to average and the honest answer is
+ * 0.6 degrees — a number that says nothing about whether the mechanism
+ * works. What is worth guarding is the rule that took its place.
+ *
+ * The lean itself is kept in `AntBody` for an ant digging in the open, which
+ * is the first bite of every nest and will be more than that when surface
+ * work exists. It is currently unguarded by any check, which is said here
+ * rather than papered over.
  */
-check('she pitches her body into the dig',
-  live.diggingPitchDeg !== null && live.diggingPitchDeg >= 12,
-  `${live.diggingPitchDeg} deg nose-down while digging, peak ${live.peakPitchDeg}`);
-check('and her head carries the rest of the bore',
-  live.aimDownDeg > live.peakPitchDeg + 5,
-  `bore ${live.aimDownDeg} deg down, body at most ${live.peakPitchDeg}`);
+check('she does not lean inside her own tunnel',
+  live.railPitchDeg === null || Math.abs(live.railPitchDeg) <= 2,
+  live.railPitchDeg === null
+    ? 'she never got on the rail'
+    : `${live.railPitchDeg} deg while riding, over ${live.railFrames} frames`);
+check('and she does ride it',
+  live.railFrames > 600, `${live.railFrames} frames on the rail`);
+
 /*
  * WHAT THE GAIT DOES UNDER THE PITCH — RECORDED, NOT ASSERTED.
  *

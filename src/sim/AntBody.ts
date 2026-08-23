@@ -235,6 +235,32 @@ export const FALL_TAU = 0.13;
 export const AHEAD_MM = 3;
 export const LOOK_RADIUS_MM = 3;
 
+/**
+ * A TUNNEL SHE CAN RIDE — the shape of a rail, as this file needs it.
+ *
+ * Declared here in WORLD UNITS rather than importing `TunnelRail`, which
+ * speaks millimetres and lives with the island's track builder. The
+ * conversion belongs at the edge, in whatever supplies the rail; three unit
+ * systems have caused real bugs in this project and this keeps the movement
+ * system in exactly one of them.
+ */
+export interface BodyRail {
+  /** How long the tunnel is, in world units. */
+  lengthWu: number;
+  /** The bore's radius, world units — the tube her feet stand inside. */
+  radiusWu: number;
+  /** The frame at a distance along, or null past the ends. */
+  frameAt(sWu: number, into: RailFrameOut): boolean;
+  /** Where on the rail a world point is nearest, or null. */
+  nearestTo(x: number, y: number, z: number): { sWu: number; distWu: number } | null;
+}
+
+export interface RailFrameOut {
+  at: THREE.Vector3;
+  up: THREE.Vector3;
+  forward: THREE.Vector3;
+}
+
 /** The castes with a rig. Taken off `QueenModel` so the two cannot drift. */
 export type Caste = ConstructorParameters<typeof QueenModel>[0];
 
@@ -288,6 +314,50 @@ export class AntBody {
 
   /** Her penetration at the top of this frame. See `bodyClear`. */
   private insideBefore = 0;
+
+  /**
+   * THE TUNNEL SHE IS IN, when she is in one. Null on open ground.
+   *
+   * Riding is a second way of moving her and that is a deliberate exception
+   * to this file's own first rule, "THE LEGS MOVE HER". The rule is right on
+   * open ground, where the gait and the travel must not be able to disagree.
+   * It cannot hold inside a plumb shaft: a tube six millimetres across gives
+   * a nine-millimetre ant nowhere to put a tripod, and her body pitches to
+   * 34 degrees against a shaft that drops at 90. Measured over four phases of
+   * work, a free-walking ant simply cannot enter her own entrance — she stands
+   * on the rim and stalls, which is what Joshua saw as the abdomen dance.
+   *
+   * On a rail the tunnel says where her body is and which way is up, and her
+   * legs are posed against the tube's wall rather than searching a vertical
+   * line for a floor that is not under her. That is how `RailScene` — the
+   * room built to prove the track — has always ridden it, and this brings
+   * the same mechanism to the colony build rather than inventing a third.
+   */
+  rail: BodyRail | null = null;
+
+  /** How far along that rail she is, world units. */
+  railS = 0;
+
+  /**
+   * WHERE EACH FOOT BRACES ON THE TUBE WALL, as an angle about the bore and
+   * an offset along it. Derived once from the rig's own leg plan.
+   *
+   * Her planted stance is 7.22 mm across and her nominal bore is 6. On open
+   * ground that is a curiosity; inside the tube it is decisive — the walk
+   * animation puts her feet a millimetre or two OUTSIDE the wall, the height
+   * solve has nothing to stand them on, and the drawn feet ended up as much
+   * as 22 mm inside solid. Measured, with one leg groping 94 % of the ride.
+   *
+   * An ant in a gallery does not stand on a floor with her legs splayed as
+   * if she were on the surface: she braces on the walls. So each foot keeps
+   * its own ANGLE around the bore — the direction its home already points,
+   * out from her spine — and is placed where that direction meets the wall.
+   * The stance folds to whatever the tunnel is, without the rig or the caste
+   * spec changing, which is what `CASTE_DIG` holding 6 mm nominal requires.
+   */
+  private tubeStations: Array<{
+    slot: string; cos: number; sin: number; along: number;
+  }> = [];
 
   /**
    * How far her body origin rides above the ground her belly is clearing —
@@ -361,6 +431,18 @@ export class AntBody {
        * default, so the type admits `undefined` while the value never is. */
       const rig = RIGS[this.caste ?? 'queen'];
       if (rig) this.shell = BodyShell.measure(this.model.root, rig);
+      this.tubeStations = this.model.legPlan().map((leg) => {
+        /* Her home's direction ACROSS the bore — sideways and vertical —
+         * is the angle that foot owns. A home dead on the axis (which no
+         * real leg has) would be ambiguous, so it falls to straight down. */
+        const across = Math.hypot(leg.home[0], leg.home[1]);
+        return {
+          slot: leg.slot,
+          cos: across < 1e-6 ? 0 : leg.home[0] / across,
+          sin: across < 1e-6 ? -1 : leg.home[1] / across,
+          along: leg.home[2],
+        };
+      });
     }
     return ok;
   }
@@ -571,6 +653,8 @@ export class AntBody {
      * judges against the same starting point. See `bodyClear`. */
     this.insideBefore = this.insideAt(this.at, this.forward, this.up);
 
+    if (this.rail) { this.rideRail(dt, intent); return; }
+
     this.report = this.drive.step(
       dt,
       { at: this.at, up: this.up, forward: this.forward },
@@ -770,6 +854,171 @@ export class AntBody {
    *    this milestone, so "no ground under me" is a situation to stay put
    *    in rather than to fall through.
    */
+  /**
+   * ONE FRAME ON THE RAIL. See `rail` for why this exists at all.
+   *
+   * Named `rideRail` rather than `ride` because `ride` is already the height
+   * her body sits at above the floor, and the two would be one identifier
+   * meaning two things a line apart.
+   *
+   * The tunnel is the mover: her distance along it integrates from the
+   * intent, and her position, up and forward all come from the frame there.
+   * Nothing is searched and nothing can be refused, because every point of
+   * the rail is the centre of a bore that has been cut — which is the whole
+   * reason the track was drawn before she started digging.
+   */
+  private rideRail(dt: number, intent: StrollIntent): void {
+    const rail = this.rail!;
+    const step = intent.walk * WALK_SPEED * dt;
+    this.railS = Math.max(0, Math.min(rail.lengthWu, this.railS + step));
+    if (!rail.frameAt(this.railS, RAIL_FRAME)) return;
+
+    this.up.copy(RAIL_FRAME.up).normalize();
+    /*
+     * Her nose runs along the tunnel, squared to her up. Backwards is a
+     * negative walk, not a reversed frame: a tunnel has one direction and
+     * an ant backing out of one is still facing the way she came.
+     */
+    this.forward.copy(RAIL_FRAME.forward)
+      .addScaledVector(this.up, -RAIL_FRAME.forward.dot(this.up));
+    if (this.forward.lengthSq() < 1e-12) this.forward.set(0, 0, 1);
+    this.forward.normalize();
+    /*
+     * SEATED ON THE TUBE'S FLOOR, not on its centreline — down by the bore's
+     * radius, less the height her body rides at. On the level this is the
+     * same seat the ground gives her; in a plumb shaft it is what makes
+     * "the floor" mean the wall she is standing against.
+     */
+    /*
+     * SEATED SO SHE FITS, which is lower than the axis and higher than the
+     * floor. Her origin drops by whatever room the bore has left once her own
+     * cross-section is accounted for, so her widest point just clears the
+     * wall and she still reads as resting on the floor rather than floating
+     * down the middle. Seating the ORIGIN on the floor — the first cut — put
+     * her gaster through the wall on every bend.
+     */
+    const room = Math.max(0, rail.radiusWu - (this.shell?.crossRadius ?? 0));
+    this.at.copy(RAIL_FRAME.at).addScaledVector(this.up, -room);
+    this.aim = this.at.y - this.ride;
+
+    RIGHT.crossVectors(this.up, this.forward).normalize();
+    /*
+     * NO DIG PITCH ON THE RAIL, and it is not a detail.
+     *
+     * The lean exists to aim her head at a face while she is standing on
+     * open ground with her body level. In a tunnel the TUNNEL aims her —
+     * `forward` is the bore's own direction — so leaning a further 34 degrees
+     * on top of it drives her head straight through the floor of a bore three
+     * millimetres in radius. Measured before this: her head read 13.3 mm
+     * inside solid partway down a plumb shaft, while her thorax, which is not
+     * pitched away from the frame, read 0.6.
+     */
+    this.bodyPitch += (0 - this.bodyPitch)
+      * Math.min(1, 1 - Math.exp(-dt / PITCH_TAU));
+    this.model.root.position.copy(this.at);
+    this.model.root.quaternion.setFromRotationMatrix(
+      BASIS.makeBasis(RIGHT, this.up, this.forward),
+    );
+    if (Math.abs(this.bodyPitch) > 1e-4) {
+      PITCH_Q.setFromAxisAngle(RIGHT, this.bodyPitch);
+      this.model.root.quaternion.premultiply(PITCH_Q);
+    }
+
+    const wantSpeed = Math.abs(intent.walk) * WALK_SPEED;
+    this.poseSpeed += (wantSpeed - this.poseSpeed)
+      * Math.min(1, 1 - Math.exp(-dt / POSE_SPEED_TAU));
+    this.poseTurn += (0 - this.poseTurn)
+      * Math.min(1, 1 - Math.exp(-dt / POSE_TURN_TAU));
+    const wantDig = Math.max(0, Math.min(1, intent.dig ?? 0));
+    this.poseDig += (wantDig - this.poseDig)
+      * Math.min(1, 1 - Math.exp(-dt / POSE_DIG_TAU));
+    this.model.update(dt, {
+      speed: this.poseSpeed,
+      turn: this.poseTurn,
+      digging: this.poseDig,
+      carrying: 0,
+      headYaw: 0,
+      headPitch: 0,
+    });
+
+    /*
+     * HER FEET ON THE TUNNEL WALL — the analytic tube, not a height field.
+     *
+     * For a query point, take its radial offset from the nearest centreline
+     * frame with the tangential part removed, and drop along her up to the
+     * wall: |r - t*u| = R solves to t = r.u + sqrt((r.u)^2 - (|r|^2 - R^2)).
+     * The positive root, because the frame's up is already perpendicular to
+     * the tangent. A point outside the tube falls back to the plane under
+     * her, so a foot never solves against a wall that is not there.
+     *
+     * This is `RailScene`'s wall function, which is where it was measured.
+     * `solveFeet`'s `frame` parameter has existed for it all along and the
+     * density build simply never passed one — which is why her legs spent
+     * every underground frame searching a vertical line for a floor that was
+     * five millimetres to their left.
+     */
+    const upX = this.up.x;
+    const upY = this.up.y;
+    const upZ = this.up.z;
+    const floor = this.at.x * upX + this.at.y * upY + this.at.z * upZ;
+    const wall = (x: number, y: number, z: number): number => {
+      const near = rail.nearestTo(x, y, z);
+      if (!near) return floor;
+      if (!rail.frameAt(near.sWu, WALL_FRAME)) return floor;
+      let rx = x - WALL_FRAME.at.x;
+      let ry = y - WALL_FRAME.at.y;
+      let rz = z - WALL_FRAME.at.z;
+      const t = rx * WALL_FRAME.forward.x + ry * WALL_FRAME.forward.y
+        + rz * WALL_FRAME.forward.z;
+      rx -= WALL_FRAME.forward.x * t;
+      ry -= WALL_FRAME.forward.y * t;
+      rz -= WALL_FRAME.forward.z * t;
+      const k = rx * upX + ry * upY + rz * upZ;
+      const disc = k * k - (rx * rx + ry * ry + rz * rz
+        - rail.radiusWu * rail.radiusWu);
+      if (disc <= 0) return floor;
+      return (x * upX + y * upY + z * upZ) - (k + Math.sqrt(disc));
+    };
+    /*
+     * AND THE FEET ARE PUT ON THE WALL, not merely dropped onto it.
+     *
+     * `solveFeet` without anchors can only move a foot along up: the gait
+     * animation owns where it is fore, aft and sideways, and in a tube
+     * narrower than her stance that is outside the wall entirely. Handing it
+     * an anchor per leg — its own angular station on the bore — is what
+     * folds her stance to the tunnel. See `tubeStations`.
+     */
+    const anchors = new Map<string, readonly [number, number, number]>();
+    for (const st of this.tubeStations) {
+      ANCHOR.copy(RAIL_FRAME.at)
+        .addScaledVector(this.forward, st.along)
+        .addScaledVector(RIGHT, st.cos * rail.radiusWu)
+        .addScaledVector(this.up, st.sin * rail.radiusWu);
+      anchors.set(st.slot, [ANCHOR.x, ANCHOR.y, ANCHOR.z]);
+    }
+    this.model.solveFeet(
+      () => 0,
+      FOOT_CLEARANCE_MM / VOXEL_MM,
+      this.ride * 2,
+      (slot) => anchors.get(slot) ?? null,
+      { up: [upX, upY, upZ], surface: wall },
+    );
+    /*
+     * AND THE DRIVE IS TOLD WHERE HER FEET WENT.
+     *
+     * It is not running — the rail moved her — but its legs are the record
+     * every other system reads, and a record left at whatever it held before
+     * she entered the tunnel is a lie that outlives the ride: a probe read
+     * one leg as groping for 94 % of a descent during which it was braced on
+     * a wall, and the first frame after she leaves would swing a stale
+     * anchor. Planting them on their own stations makes the state true and
+     * the hand-back clean.
+     */
+    this.drive?.plantOn(anchors);
+    this.report = { planted: 6, groping: 0, movedMm: Math.abs(step) * VOXEL_MM,
+      allowed: 1 } as DriveReport;
+  }
+
   private seat(dt: number, surfaceAt: SurfaceQuery): void {
     const lead = AHEAD_MM / VOXEL_MM;
     const radius = LOOK_RADIUS_MM / VOXEL_MM;
@@ -932,5 +1181,12 @@ const PROBE_BASIS = new THREE.Matrix4();
 const PROBE_Q = new THREE.Quaternion();
 const PROBE_PITCH = new THREE.Quaternion();
 const SEAT_TRY = new THREE.Vector3();
+const RAIL_FRAME: RailFrameOut = {
+  at: new THREE.Vector3(), up: new THREE.Vector3(), forward: new THREE.Vector3(),
+};
+const ANCHOR = new THREE.Vector3();
+const WALL_FRAME: RailFrameOut = {
+  at: new THREE.Vector3(), up: new THREE.Vector3(), forward: new THREE.Vector3(),
+};
 const PITCH_Q = new THREE.Quaternion();
 const BASIS = new THREE.Matrix4();

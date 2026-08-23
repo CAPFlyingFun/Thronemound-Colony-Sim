@@ -109,6 +109,61 @@ function distanceToSpine(point: THREE.Vector3, spine: THREE.Vector3[]): number {
 export class BodyShell {
   private constructor(readonly segments: readonly Segment[]) {}
 
+  /**
+   * HOW FAR HER BODY HANGS BELOW HER ORIGIN, world units.
+   *
+   * Her origin is not her lowest point, and on open ground that barely
+   * matters because the seater works off a measured belly. Inside a tube it
+   * matters completely: seating the ORIGIN on the floor of a three
+   * millimetre bore puts everything under it inside the wall. Measured off
+   * the shell itself so it cannot drift from the shape being tested.
+   */
+  get dropBelowOrigin(): number {
+    let drop = 0;
+    for (const seg of this.segments) {
+      for (let i = 0; i < seg.spine.length; i += 1) {
+        const d = seg.radii[i]! - seg.spine[i]!.y;
+        if (d > drop) drop = d;
+      }
+    }
+    return drop;
+  }
+
+  /**
+   * HER CROSS-SECTIONAL RADIUS ABOUT HER OWN ORIGIN, world units — how much
+   * room she needs in a tube, measured across her forward axis.
+   *
+   * `dropBelowOrigin` answers a different question and answered it usefully
+   * on open ground: how far under her origin does she hang. In a tube that
+   * is not enough, because a tunnel is round and she has sides. Seating her
+   * origin ON the floor of a 6 mm bore put her gaster a millimetre through
+   * the wall on every bend — measured against her own skin, and visible.
+   */
+  get crossRadius(): number {
+    let worst = 0;
+    for (const seg of this.segments) {
+      for (let i = 0; i < seg.spine.length; i += 1) {
+        const p = seg.spine[i]!;
+        const r = Math.hypot(p.x, p.y) + seg.radii[i]!;
+        if (r > worst) worst = r;
+      }
+    }
+    return worst;
+  }
+
+  /** How long she is nose to tail, world units, off the same spheres. */
+  get lengthAlongForward(): number {
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const seg of this.segments) {
+      for (let i = 0; i < seg.spine.length; i += 1) {
+        lo = Math.min(lo, seg.spine[i]!.z - seg.radii[i]!);
+        hi = Math.max(hi, seg.spine[i]!.z + seg.radii[i]!);
+      }
+    }
+    return hi > lo ? hi - lo : 0;
+  }
+
   /** How many field queries one full clearance test costs. */
   get sampleCount(): number {
     return this.segments.reduce((n, s) => n + s.spine.length, 0);

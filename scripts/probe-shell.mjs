@@ -72,9 +72,11 @@ const out = await page.evaluate(async () => {
   const pick = {};
   for (const k of Object.keys(idx)) pick[k] = idx[k].filter((_, n) => n % 40 === 0);
   const v = new Vec();
+  let worstWhere = null;
   const skinDepth = (skip) => {
     ant.model.root.updateMatrixWorld(true);
     let worst = -1e9;
+    let seg = null;
     for (const k of Object.keys(pick)) {
       if (skip.has(k)) continue;
       for (const i of pick[k]) {
@@ -82,8 +84,13 @@ const out = await page.evaluate(async () => {
         mesh.applyBoneTransform(i, v);
         v.applyMatrix4(mesh.matrixWorld);
         const d = lab.field.sample(v.x, v.y, v.z);
-        if (d > worst) worst = d;
+        if (d > worst) { worst = d; seg = k; }
       }
+    }
+    if (worstWhere === null || worst > worstWhere.depth) {
+      worstWhere = { depth: worst, seg,
+        onRail: !!ant.rail, phase: lab.digReportForTest().phase,
+        sMm: +(ant.railS * MM).toFixed(2) };
     }
     return worst;
   };
@@ -103,6 +110,7 @@ const out = await page.evaluate(async () => {
     overStatedMm: { min: over[0], p50: q(0.5), p90: q(0.9), p99: q(0.99), max: over[over.length - 1] },
     cellMm: 0.5,
     worstShellMm: Math.max(...rows.map((r) => r.shellMm)),
+    worstWhere: worstWhere && { ...worstWhere, depthMm: +(worstWhere.depth * MM).toFixed(3) },
     worstSkinMm: Math.max(...rows.map((r) => r.skinMm)) };
 });
 await browser.close();

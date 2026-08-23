@@ -706,6 +706,31 @@ export class LegDrive {
     return Math.min(1, twiceArea / (span * span));
   }
 
+  /**
+   * PLANT EVERY FOOT ON A GIVEN WORLD POINT, and count it as standing.
+   *
+   * For a caller that is moving the body ITSELF and posing the feet itself —
+   * riding a tunnel, where the gait cannot run because the stance is wider
+   * than the bore. Without it the legs keep whatever state they held when
+   * the ride began, and that state is read by everything downstream.
+   *
+   * Nothing calls this unless it means to take the legs over; the frozen
+   * island build does not.
+   */
+  plantOn(anchors: ReadonlyMap<string, readonly [number, number, number]>): void {
+    for (const leg of this.legs) {
+      const a = anchors.get(leg.slot);
+      if (!a) continue;
+      leg.anchor.set(a[0], a[1], a[2]);
+      leg.at.copy(leg.anchor);
+      leg.from.copy(leg.anchor);
+      leg.to.copy(leg.anchor);
+      leg.planted = true;
+      leg.groping = false;
+      leg.t = 1;
+    }
+  }
+
   /** Where each foot should be drawn this frame, for the IK. */
   anchorFor(slot: string): readonly [number, number, number] | null {
     const leg = this.legs.find((l) => l.slot === slot);

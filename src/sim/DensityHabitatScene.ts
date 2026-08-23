@@ -362,6 +362,7 @@ export class DensityHabitatScene {
      */
     if (this.digging && (intent.dig ?? 0) > 0.5) this.ant.exempt.add('head');
     else this.ant.exempt.delete('head');
+    this.railHer();
     this.ant.step(dt, intent, this.ground, this.surfaceAt);
     /* The bar rides the WORK FACE — a bore ahead of her jaw, not her jaw —
      * so it reads as the soil being worked rather than as a badge on the ant. */
@@ -371,6 +372,60 @@ export class DensityHabitatScene {
       : null;
     this.gauge.showAt(face, this.dig.progress, this.camera, GAUGE_SCALE);
     this.cutaway();
+  }
+
+  /**
+   * ON THE RAIL WHEN SHE IS IN THE TUNNEL, off it when she is not.
+   *
+   * The latch is generous at the MOUTH and only there — within one and a half
+   * bores of the centreline. That is not a fudge, it is what entering a
+   * tunnel is: an ant at the lip of a shaft steps into it, and a rule that
+   * demanded she already be inside before the tunnel could carry her would be
+   * the same chicken and egg that blocked every previous attempt at this.
+   * Past the mouth the tube is the only place she can be anyway.
+   *
+   * She comes off the rail at s = 0, walking out of her own front door.
+   */
+  private railHer(): void {
+    const track = this.dig.track;
+    /*
+     * NOT UNTIL THERE IS ENOUGH TUNNEL TO HOLD HER.
+     *
+     * The first cut latched as soon as any soil had moved, and the shaft's
+     * first frame is a plumb one — so she stood straight up in a hole two
+     * millimetres deep with her thorax in the surrounding dirt. Measured
+     * against her own skin, that single moment was the worst penetration in
+     * the whole descent: 0.92 mm, at s = 0.03 mm. She digs the mouth on foot,
+     * which she can reach into perfectly well, and gets in once it is a
+     * tunnel.
+     */
+    const enough = LATCH_DEPTH_MM;
+    if (!this.digging || !track || track.dugMm < enough) {
+      if (this.ant.rail !== null) {
+        this.ant.rail = null;
+        this.ant.plant(this.ground);
+      }
+      return;
+    }
+    const near = track.nearestTo(this.ant.at.x, this.ant.at.y, this.ant.at.z);
+    if (!near) { this.ant.rail = null; return; }
+    const inside = near.distWu <= track.radiusWu * 1.5
+      && near.sWu <= track.lengthWu + 1e-6;
+    if (inside && this.ant.rail === null) {
+      this.ant.rail = track;
+      this.ant.railS = near.sWu;
+      /* Her feet are on the old ground and the tunnel is about to say
+       * otherwise; a fresh plant stops the gait carrying a stale anchor
+       * through the transition. */
+      this.ant.plant(this.ground);
+    } else if (!inside && this.ant.rail !== null) {
+      this.ant.rail = null;
+      this.ant.plant(this.ground);
+    }
+    if (this.ant.rail !== null && this.ant.railS <= 1e-6) {
+      this.ant.rail = null;
+      this.ant.plant(this.ground);
+    }
   }
 
   /**
@@ -421,6 +476,7 @@ export class DensityHabitatScene {
       const region = carveSweep(this.field, points, radius);
       if (region) this.soil?.rebuild(region);
     },
+    onRail: () => this.ant.rail !== null,
     standAt: (x, z, heading, fromY) => {
       /*
        * BETWEEN THE FLOOR AND THE RIM, and the first cut of this used only
@@ -1322,6 +1378,13 @@ const STAND_STEP = 0.25 / MM_PER_UNIT;
  * face is solid. Movement still holds her head to the ordinary rule.
  */
 const WORKING_SKIP: ReadonlySet<SegmentName> = new Set<SegmentName>(['head']);
+
+/**
+ * HOW MUCH SHAFT THERE HAS TO BE BEFORE SHE GETS INTO IT, millimetres.
+ *
+ * Placeholder; set by measurement below.
+ */
+const LATCH_DEPTH_MM = 4;
 
 /* Scratch for `standAt`, which a brain may ask many times in a frame. */
 const STAND_FWD = new THREE.Vector3();
