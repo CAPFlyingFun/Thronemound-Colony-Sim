@@ -4,7 +4,9 @@ on:
   pull_request:
     paths:
       - 'src/sim/bodyShell.ts'
+      - 'src/sim/AntBody.ts'
       - 'scripts/probe-shell.mjs'
+      - 'scripts/patch-rail-clearance.py'
       - '.github/workflows/verify-body-shell.yml'
 
 permissions:
@@ -29,6 +31,14 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
         run: npm ci
+      - name: Apply rail-clearance candidate
+        run: python scripts/patch-rail-clearance.py
+      - name: Upload patched AntBody candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: patched-antbody
+          path: src/sim/AntBody.ts
+          if-no-files-found: error
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
       - name: Bridge the probe's local Chromium path
