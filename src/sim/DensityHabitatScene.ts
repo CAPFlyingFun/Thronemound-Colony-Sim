@@ -44,7 +44,7 @@ import { boreRadiusMm, toUnits } from './density/casteDig';
 import { SoilMesh } from './density/soilMesh';
 import {
   CELLS_X, CELLS_Y, CELLS_Z, GRADE, MM_PER_UNIT, TANK, TANK_HEIGHT,
-  makeTcsSoil, soilColourAt,
+  makeTcsSoil, soilColourAt, TANK_FLOOR,
 } from './density/tcsSoil';
 
 declare const __APP_VERSION__: string;
@@ -476,6 +476,7 @@ export class DensityHabitatScene {
       const region = carveSweep(this.field, points, radius);
       if (region) this.soil?.rebuild(region);
     },
+    floorY: TANK_FLOOR,
     onRail: () => this.ant.rail !== null,
     standAt: (x, z, heading, fromY) => {
       /*
@@ -668,7 +669,40 @@ export class DensityHabitatScene {
     });
     this.host.appendChild(cut);
     this.cutButton = cut;
+
+    /*
+     * AND THE FOUR SIDES, separately from the lid. Joshua: "would be nice to
+     * have an option to also hide the walls." Only the block's outer skin
+     * goes — see `SoilMesh.setWalls` — so what you get is the nest in a glass
+     * case rather than an empty tray.
+     */
+    const walls = document.createElement('button');
+    walls.textContent = 'HIDE WALLS';
+    walls.style.cssText = [
+      'position:absolute', 'z-index:5',
+      `right:max(${MARGIN_PX}px, env(safe-area-inset-right,0px))`,
+      `bottom:calc(max(${MARGIN_PX}px, env(safe-area-inset-bottom,0px)) + 112px)`,
+      'min-height:44px', 'padding:10px 16px',
+      'font:600 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace',
+      'letter-spacing:0.12em', 'color:#efe3c4',
+      'background:#20241d', 'border:1px solid #4c5340', 'border-radius:10px',
+    ].join(';');
+    walls.addEventListener('click', () => {
+      this.wallsOn = !this.wallsOn;
+      this.soil?.setWalls(this.wallsOn);
+      walls.textContent = this.wallsOn ? 'HIDE WALLS' : 'SHOW WALLS';
+      walls.style.background = this.wallsOn ? '#20241d' : '#3a4a2c';
+    });
+    this.host.appendChild(walls);
+    this.wallsButton = walls;
   }
+
+  private wallsButton: HTMLButtonElement | null = null;
+
+  /** Whether the tray's outer skin is drawn. See `buildViewButton`. */
+  private wallsOn = true;
+
+  wallsForTest(): boolean { return this.wallsOn; }
 
   private cutButton: HTMLButtonElement | null = null;
 
@@ -1332,6 +1366,7 @@ export class DensityHabitatScene {
     this.view?.dispose();
     this.viewButton?.remove();
     this.cutButton?.remove();
+    this.wallsButton?.remove();
     this.stamp?.remove();
     window.clearInterval(this.metricsTimer);
     this.metrics?.remove();

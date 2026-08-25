@@ -75,6 +75,13 @@ export type ColourAt = (
   x: number, y: number, z: number, into: [number, number, number],
 ) => void;
 
+/**
+ * HOW FAR IN FROM THE TRAY'S EDGE STILL COUNTS AS ITS OUTER SKIN, in world
+ * units — about one soil cell. Wider and a tunnel that runs close to the
+ * glass loses its own wall along with the block's.
+ */
+const WALL_SKIN = 0.12;
+
 export class SoilMesh {
   readonly group = new THREE.Group();
 
@@ -143,17 +150,28 @@ export class SoilMesh {
      */
     this.material.onBeforeCompile = (shader) => {
       shader.uniforms.tmCutY = this.cutY;
+      shader.uniforms.tmWallLo = this.wallLo;
+      shader.uniforms.tmWallHi = this.wallHi;
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', '#include <common>\nvarying vec3 vTmWorld;\nvarying vec3 vTmNormal;')
         .replace('#include <worldpos_vertex>',
           '#include <worldpos_vertex>\n  vTmWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\n  vTmNormal = normalize(mat3(modelMatrix) * objectNormal);');
       shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', '#include <common>\nuniform float tmCutY;\nvarying vec3 vTmWorld;\nvarying vec3 vTmNormal;')
+        .replace('#include <common>', '#include <common>\nuniform float tmCutY;\nuniform float tmWallLo;\nuniform float tmWallHi;\nvarying vec3 vTmWorld;\nvarying vec3 vTmNormal;')
         .replace('#include <clipping_planes_fragment>',
           /* Up-facing, and above the cut. 0.4 is about 66 degrees off
            * vertical — steep enough that a tunnel wall survives, shallow
            * enough that a rolling surface is taken whole. */
-          '  if (vTmWorld.y > tmCutY && vTmNormal.y > 0.4) discard;\n#include <clipping_planes_fragment>');
+          /* The lid, and then the four sides. A side is a fragment sitting
+           * on the tray's outer boundary whose normal is roughly horizontal
+           * — the outer SKIN of the block. Tunnel walls inside the soil are
+           * nowhere near those planes and survive, which is the whole point:
+           * hiding the walls should show the nest, not delete it. */
+          '  if (vTmWorld.y > tmCutY && vTmNormal.y > 0.4) discard;\n'
+          + '  if (abs(vTmNormal.y) < 0.5 && ('
+          + 'vTmWorld.x < tmWallLo || vTmWorld.x > tmWallHi'
+          + ' || vTmWorld.z < tmWallLo || vTmWorld.z > tmWallHi)) discard;\n'
+          + '#include <clipping_planes_fragment>');
     };
   }
 
@@ -177,6 +195,31 @@ export class SoilMesh {
    *
    * `null` restores the whole tray.
    */
+  /**
+   * HIDE THE FOUR SIDES OF THE BLOCK, so the nest can be seen from outside
+   * without taking the lid off. Joshua: "would be nice to have an option to
+   * also hide the walls."
+   *
+   * Only the outer skin goes. A tunnel's own walls are interior surfaces
+   * nowhere near the tray's boundary planes, so they stay — otherwise this
+   * would hide the very thing it is for.
+   */
+  setWalls(on: boolean): void {
+    /* Off-tray bounds when the walls are wanted, so nothing is ever near
+     * them and the test costs a comparison rather than a branch. */
+    this.wallLo.value = on ? -1e9 : WALL_SKIN;
+    this.wallHi.value = on ? 1e9 : this.field.cellsX * this.field.cellSize - WALL_SKIN;
+    this.wallsOn = on;
+  }
+
+  wallsForTest(): boolean { return this.wallsOn; }
+
+  private wallsOn = true;
+
+  private readonly wallLo = { value: -1e9 };
+
+  private readonly wallHi = { value: 1e9 };
+
   setCut(y: number | null): void {
     /* A height nothing can be above switches it off without branching in the
      * shader — the uniform is always there, the test simply never passes. */

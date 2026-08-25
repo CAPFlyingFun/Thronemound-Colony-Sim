@@ -148,6 +148,7 @@ describe('the founding track', () => {
       carveSweep: () => {},
       standAt: () => 5,
       onRail: () => true,
+    floorY: 0.75,
       size,
     };
     const brain = new DigBrain('queen', world, () => 0.5);
@@ -186,6 +187,64 @@ describe('the founding track', () => {
       expect(point.x).toBeLessThanOrEqual(size - EDGE_MARGIN);
       expect(point.z).toBeGreaterThanOrEqual(EDGE_MARGIN);
       expect(point.z).toBeLessThanOrEqual(size - EDGE_MARGIN);
+    }
+  });
+
+  /*
+   * REGRESSION: A TANK HAS SIX SIDES.
+   *
+   * The edge guard above watches x and z. It says nothing about depth, so a
+   * shaft steered clear of every wall was free to keep descending through the
+   * bottom of the tray — and did. Joshua, watching her leave through the
+   * floor and hang underneath it: "the Queen was an escape artist."
+   *
+   * Turning cannot fix this: at the bottom of the tank every bearing descends
+   * just as fast. The planner has to LEVEL OFF, so this puts a steep finished
+   * shaft just above the floor and asks that the next planned section stays
+   * above it.
+   */
+  it('levels a growing tunnel off before it digs through the floor', () => {
+    const size = 10;
+    const floorY = 1;
+    const world: DigWorld = {
+      solidAt: () => false,
+      surfaceAt: () => 8,
+      carveSweep: () => {},
+      standAt: () => 8,
+      onRail: () => true,
+      floorY,
+      size,
+    };
+    const brain = new DigBrain('queen', world, () => 0.5);
+    const r = boreRadiusMm('queen') / MM_PER_UNIT;
+    /* Plunging, and a short piece from the bottom. */
+    const track = new ShaftTrack(
+      'queen',
+      [{ pitch: -75, turn: 0, roll: 0, length: 1 }],
+      { x: 5, y: 2.4, z: 5 },
+      { x: 0, y: 0, z: 1 },
+    );
+    while (!track.done) track.advance(1, r);
+    const face = track.face()!;
+    const at = new THREE.Vector3(face.at.x, face.at.y, face.at.z);
+    const forward = new THREE.Vector3(face.forward.x, face.forward.y, face.forward.z);
+
+    brain.track = track;
+    brain.site = {
+      target: at.clone(), stand: at.clone(), bites: 0,
+      heading: Math.atan2(forward.x, forward.z),
+    };
+    brain.phase = 'digging';
+    brain.step(
+      1 / 60, at, brain.site.heading, forward,
+      (into) => { into.copy(at); return true; },
+    );
+
+    expect(track.done).toBe(false);
+    const grown = track.advance(1000, r);
+    expect(grown.length).toBeGreaterThan(0);
+    for (const point of grown) {
+      expect(point.y).toBeGreaterThanOrEqual(floorY + EDGE_MARGIN);
     }
   });
 });

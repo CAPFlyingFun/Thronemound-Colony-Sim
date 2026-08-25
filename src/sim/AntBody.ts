@@ -1067,7 +1067,7 @@ export class AntBody {
        * the tunnel's own surface, and the drawn tip came through: reported
        * from the device as the leg tips poking out of the tube.
        */
-      const grip = Math.max(0, rail.radiusWu - FOOT_CLEARANCE_MM / VOXEL_MM);
+      const grip = rail.radiusWu * TUBE_GRIP;
       ANCHOR.copy(RAIL_FRAME.at)
         .addScaledVector(this.forward, st.along)
         .addScaledVector(RIGHT, st.cos * grip)
@@ -1318,6 +1318,22 @@ const RAIL_FRAME: RailFrameOut = {
  * are. Shorter and she scurries; longer and she skates between steps.
  */
 const RAIL_STRIDE_MM = 2;
+
+/**
+ * HOW FAR OUT SHE BRACES, as a fraction of the bore's radius.
+ *
+ * The first attempt at this pulled the feet in by `FOOT_CLEARANCE_MM`, which
+ * is 0.005 mm — a number for deciding whether a claw is touching, not for
+ * deciding where to put it. The stations stayed effectively ON the wall,
+ * which is the tunnel's own rendered surface, so the tips came through it
+ * and the stance read as splayed. Reported twice from the device: the leg
+ * tips poking out, and "spread too wide".
+ *
+ * Four fifths puts her feet a real fraction of a millimetre inside the wall
+ * of a 6 mm bore and draws the stance in with them, which is what an ant in
+ * a gallery looks like — braced, not spread as if she were on open ground.
+ */
+const TUBE_GRIP = 0.8;
 
 /** How long a foot spends in the air crossing to its next grip, seconds. */
 const RAIL_SWING_S = 0.22;

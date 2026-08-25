@@ -27,7 +27,20 @@ import * as THREE from 'three';
 
 /** How far the pitch may swing, in radians — just under straight down and
  *  just above the horizon, so the world never flips. */
-const PITCH_MIN = 0.08;
+/**
+ * HOW FAR UNDER THE TANK THE VIEW MAY GO.
+ *
+ * Was 0.08 — a hair above the horizon, so the tray could be circled and
+ * never looked UNDER. That was fine while everything happened on the
+ * surface; it is not fine now that she digs to the bottom of it. Joshua:
+ * "would be nice ... to move all around from top to bottom to see when they
+ * dig underneath the tank."
+ *
+ * Stops just short of straight up from below for the same reason `PITCH_MAX`
+ * stops short of straight down: at the pole the yaw has nothing to swing
+ * about and the view spins on its own axis.
+ */
+const PITCH_MIN = -(Math.PI / 2 - 0.05);
 const PITCH_MAX = Math.PI / 2 - 0.05;
 
 /** Zoom rails, in world units (one unit is five millimetres). */

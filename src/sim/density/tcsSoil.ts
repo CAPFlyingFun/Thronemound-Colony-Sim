@@ -109,6 +109,15 @@ export const RELIEF = TANK * RELIEF_FRACTION;
 const MARGIN = CELL_SIZE * 1.5;
 
 /**
+ * THE INSIDE OF THE TANK'S FLOOR, in world units.
+ *
+ * Exported because the dig planner has to know where the bottom is. It had
+ * no idea, guarded the four walls only, and drove a shaft straight out
+ * through the base of the tray.
+ */
+export const TANK_FLOOR = MARGIN;
+
+/**
  * The untouched tray's density at a world point.
  *
  * Exported on its own because it is the BASE SOIL FUNCTION the chunk manager

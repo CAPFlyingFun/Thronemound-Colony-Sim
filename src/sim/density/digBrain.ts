@@ -148,6 +148,15 @@ export interface DigWorld {
   onRail(): boolean;
   /** The tank's interior span, in world units. */
   size: number;
+  /**
+   * THE INSIDE OF THE TANK'S FLOOR, in world units.
+   *
+   * The edge planner used to guard x and z and nothing else, so a shaft that
+   * had been steered away from every wall was free to keep descending
+   * through the bottom of the tray. Joshua watched her leave: "the Queen was
+   * an escape artist." A tank has six sides.
+   */
+  floorY: number;
 }
 
 /** Where she is going and what she means to do when she gets there. */
@@ -374,8 +383,15 @@ export class DigBrain {
   }
 
   /** Distance from a centreline point to its nearest wall, in world units. */
-  private edgeClearance(x: number, z: number): number {
-    return Math.min(x, this.world.size - x, z, this.world.size - z);
+  private edgeClearance(x: number, y: number, z: number): number {
+    return Math.min(
+      x, this.world.size - x,
+      z, this.world.size - z,
+      /* And the floor, which is the one that let her out. There is no
+       * ceiling term: a tunnel that climbs toward the surface breaks out of
+       * it, which is a mouth, not an escape. */
+      y - this.world.floorY,
+    );
   }
 
   /**
@@ -395,8 +411,10 @@ export class DigBrain {
     if (!face || pieces.length === 0) return -Infinity;
     const probe = new ShaftTrack(this.caste, pieces, face.at, face.forward);
     const points = probe.advance(probe.plannedMm, this.boreRadius());
-    let nearest = this.edgeClearance(face.at.x, face.at.z);
-    for (const p of points) nearest = Math.min(nearest, this.edgeClearance(p.x, p.z));
+    let nearest = this.edgeClearance(face.at.x, face.at.y, face.at.z);
+    for (const p of points) {
+      nearest = Math.min(nearest, this.edgeClearance(p.x, p.y, p.z));
+    }
     return nearest;
   }
 
@@ -425,15 +443,37 @@ export class DigBrain {
       return true;
     }
 
-    const pitch = ordinary[0]?.pitch ?? Math.min(-15, (last?.pitch ?? -45) + 15);
-    let fallback: { piece: DigPiece; clearance: number } | null = null;
+    /*
+     * TURNING DOES NOT SAVE YOU FROM A FLOOR.
+     *
+     * The first version of this searched turns alone, which is the right
+     * answer at a wall and no answer at all at the bottom of the tray: every
+     * bearing descends just as fast. So the search runs over PITCH as well,
+     * from her current grade up through level and a little above it, and the
+     * flattest option that restores the reserve wins. A shaft that has run
+     * out of depth levels off into a gallery, which is what a real nest does
+     * when it reaches hardpan.
+     */
+    const base = ordinary[0]?.pitch ?? Math.min(-15, (last?.pitch ?? -45) + 15);
+    const grades: number[] = [base];
+    for (let g = base; g < PIECE_LIMITS.pitch.step * 2; g += PIECE_LIMITS.pitch.step) {
+      grades.push(Math.min(PIECE_LIMITS.pitch.step * 2, g + PIECE_LIMITS.pitch.step));
+    }
+    const turns: number[] = [0];
     for (
       let amount = PIECE_LIMITS.turn.step;
       amount <= PIECE_LIMITS.turn.max;
       amount += PIECE_LIMITS.turn.step
-    ) {
-      for (const turn of [amount, -amount]) {
-        const piece = clampPiece({ pitch, turn, roll: 0, length: EDGE_TURN_LENGTH_MM });
+    ) turns.push(amount, -amount);
+
+    let fallback: { piece: DigPiece; clearance: number } | null = null;
+    /* Grade first, then turn: levelling off reads as a nest finding its
+     * depth, where a hard swerve reads as a mistake being corrected. */
+    for (const grade of grades) {
+      for (const turn of turns) {
+        const piece = clampPiece({
+          pitch: grade, turn, roll: 0, length: EDGE_TURN_LENGTH_MM,
+        });
         const clearance = this.extensionClearance(track, [piece]);
         if (clearance >= preferred) {
           track.extend([piece]);
