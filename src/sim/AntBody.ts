@@ -1329,11 +1329,16 @@ const RAIL_STRIDE_MM = 2;
  * and the stance read as splayed. Reported twice from the device: the leg
  * tips poking out, and "spread too wide".
  *
- * Four fifths puts her feet a real fraction of a millimetre inside the wall
- * of a 6 mm bore and draws the stance in with them, which is what an ant in
- * a gallery looks like — braced, not spread as if she were on open ground.
+ * Seven tenths puts her feet nearly a millimetre inside the wall of a 6 mm
+ * bore and draws the stance in with them, which is what an ant in a gallery
+ * looks like — braced, not spread as if she were on open ground.
+ *
+ * Four fifths was the first value and Joshua's read of it was "on and off the
+ * legs poke out but a lot better" — so the direction was right and the margin
+ * was not yet enough. The tips wander a little because the drawn claw is
+ * posed by the IK from the anchor, not placed at it.
  */
-const TUBE_GRIP = 0.8;
+const TUBE_GRIP = 0.7;
 
 /** How long a foot spends in the air crossing to its next grip, seconds. */
 const RAIL_SWING_S = 0.22;

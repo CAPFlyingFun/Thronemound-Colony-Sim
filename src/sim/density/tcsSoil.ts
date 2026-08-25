@@ -118,6 +118,17 @@ const MARGIN = CELL_SIZE * 1.5;
 export const TANK_FLOOR = MARGIN;
 
 /**
+ * HOW FAR THE SOIL IS INSET FROM THE TANK'S NOMINAL SPAN, world units.
+ *
+ * The block does not start at zero: `tcsSoilAt` intersects with `x - MARGIN`
+ * and friends, so its outer skin sits one and a half cells inside. Anything
+ * that wants to reason about where that skin IS has to know this — the first
+ * wall-hiding toggle guessed a band that did not contain it and silently did
+ * nothing at all.
+ */
+export const TANK_MARGIN = MARGIN;
+
+/**
  * The untouched tray's density at a world point.
  *
  * Exported on its own because it is the BASE SOIL FUNCTION the chunk manager

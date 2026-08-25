@@ -44,7 +44,7 @@ import { boreRadiusMm, toUnits } from './density/casteDig';
 import { SoilMesh } from './density/soilMesh';
 import {
   CELLS_X, CELLS_Y, CELLS_Z, GRADE, MM_PER_UNIT, TANK, TANK_HEIGHT,
-  makeTcsSoil, soilColourAt, TANK_FLOOR,
+  makeTcsSoil, soilColourAt, TANK_FLOOR, TANK_MARGIN,
 } from './density/tcsSoil';
 
 declare const __APP_VERSION__: string;
@@ -364,13 +364,20 @@ export class DensityHabitatScene {
     else this.ant.exempt.delete('head');
     this.railHer();
     this.ant.step(dt, intent, this.ground, this.surfaceAt);
-    /* The bar rides the WORK FACE — a bore ahead of her jaw, not her jaw —
-     * so it reads as the soil being worked rather than as a badge on the ant. */
-    const face = this.digging && this.dig.onFace
-      ? SCRATCH_FACE.copy(this.dig.jaw)
-        .addScaledVector(this.dig.aim, toUnits(boreRadiusMm('queen')))
-      : null;
-    this.gauge.showAt(face, this.dig.progress, this.camera, GAUGE_SCALE);
+    /*
+     * NO PROGRESS BAR. Joshua: "you can remove that yellow loading bar."
+     *
+     * It was built when a bite was a discrete job with a duration worth
+     * counting down. On a track she eats continuously along a planned
+     * centreline, so the bar had become a permanent fixture floating at the
+     * work face rather than an occasional readout — and the thing worth
+     * watching is the tunnel, not a meter on top of it.
+     *
+     * `DigGauge` is kept and simply not shown: it is the right instrument
+     * for a per-action cooldown, which castes other than the queen will want
+     * when they have actions with one.
+     */
+    this.gauge.showAt(null, 0, this.camera, GAUGE_SCALE);
     this.cutaway();
   }
 
@@ -689,7 +696,7 @@ export class DensityHabitatScene {
     ].join(';');
     walls.addEventListener('click', () => {
       this.wallsOn = !this.wallsOn;
-      this.soil?.setWalls(this.wallsOn);
+      this.soil?.setWalls(this.wallsOn, TANK_MARGIN, TANK - TANK_MARGIN);
       walls.textContent = this.wallsOn ? 'HIDE WALLS' : 'SHOW WALLS';
       walls.style.background = this.wallsOn ? '#20241d' : '#3a4a2c';
     });

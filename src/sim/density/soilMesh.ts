@@ -76,11 +76,15 @@ export type ColourAt = (
 ) => void;
 
 /**
- * HOW FAR IN FROM THE TRAY'S EDGE STILL COUNTS AS ITS OUTER SKIN, in world
- * units — about one soil cell. Wider and a tunnel that runs close to the
+ * HOW DEEP A SHELL COUNTS AS THE TRAY'S OUTER SKIN, in world units — one
+ * millimetre, two soil cells.
+ *
+ * It has to be thicker than one cell or the meshed surface, which wanders
+ * within the cell it was found in, is only partly taken and the wall goes
+ * lacy instead of away. Wider than this and a tunnel running close to the
  * glass loses its own wall along with the block's.
  */
-const WALL_SKIN = 0.12;
+const WALL_SKIN = 0.2;
 
 export class SoilMesh {
   readonly group = new THREE.Group();
@@ -204,11 +208,20 @@ export class SoilMesh {
    * nowhere near the tray's boundary planes, so they stay — otherwise this
    * would hide the very thing it is for.
    */
-  setWalls(on: boolean): void {
-    /* Off-tray bounds when the walls are wanted, so nothing is ever near
-     * them and the test costs a comparison rather than a branch. */
-    this.wallLo.value = on ? -1e9 : WALL_SKIN;
-    this.wallHi.value = on ? 1e9 : this.field.cellsX * this.field.cellSize - WALL_SKIN;
+  setWalls(on: boolean, lo: number, hi: number): void {
+    /*
+     * The caller passes the tray's real bounds. The first version worked
+     * them out here from the field's cell count, which is the tank's NOMINAL
+     * span — but the soil is inset from that by `TANK_MARGIN`, so the band
+     * this tested sat entirely outside the skin it meant to remove and the
+     * button did nothing. What looked like the near wall vanishing was the
+     * cutaway, which was also on.
+     *
+     * Off-tray values when the walls are wanted, so nothing is ever near them
+     * and the test costs a comparison rather than a branch.
+     */
+    this.wallLo.value = on ? -1e9 : lo + WALL_SKIN;
+    this.wallHi.value = on ? 1e9 : hi - WALL_SKIN;
     this.wallsOn = on;
   }
 
