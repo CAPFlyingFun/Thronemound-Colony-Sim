@@ -49,7 +49,7 @@ import { seatOnSoil } from './digSweep';
 import {
   ShaftTrack, advanceRateMmS, continueTrack, foundingTrack,
 } from './foundingTrack';
-import type { DigPiece } from '../../scenes/digPlan';
+import { PIECE_LIMITS, clampPiece, type DigPiece } from '../../scenes/digPlan';
 
 export type DigPhase = 'walking' | 'facing' | 'closing' | 'digging' | 'moving';
 
@@ -70,6 +70,23 @@ export interface WorkingPose {
  * time, and so the rail rebuild that comes with it stays cheap.
  */
 const GROWTH_PIECES = 3;
+
+/**
+ * How much room the planner keeps beyond the body-safe glass margin, in world
+ * units. A turn has a chord: if she waits until her centreline reaches the
+ * hard edge, even a ninety-degree bend moves forward before it gets sideways.
+ * Four millimetres gives a three-millimetre steering piece room to bend while
+ * the whole bore is still safely inside the tray.
+ */
+const EDGE_TURN_RESERVE = toUnits(4);
+
+/**
+ * The short piece used only when an ordinary random continuation would hit
+ * glass. Three millimetres is already in the player tunnel palette's design
+ * language and makes a ninety-degree escape turn tight enough for the reserve
+ * above without creating an on-the-spot pivot.
+ */
+const EDGE_TURN_LENGTH_MM = 3;
 
 /** How much closer counts as progress, in world units — a tenth of a mm. */
 const PROGRESS_MIN = 0.02;
@@ -354,6 +371,86 @@ export class DigBrain {
     const edge = EDGE_MARGIN;
     return at.x > edge && at.x < this.world.size - edge
       && at.z > edge && at.z < this.world.size - edge;
+  }
+
+  /** Distance from a centreline point to its nearest wall, in world units. */
+  private edgeClearance(x: number, z: number): number {
+    return Math.min(x, this.world.size - x, z, this.world.size - z);
+  }
+
+  /**
+   * HOW CLOSE A PROPOSED CONTINUATION COMES TO THE GLASS.
+   *
+   * This asks the same `ShaftTrack` geometry she will actually ride, rather
+   * than guessing from the last heading. A turn is spread over its length, so
+   * checking only its endpoint misses the outward bulge of the curve, which is
+   * precisely the bit that can put her through the wall.
+   *
+   * The probe track is disposable and never carves. Advancing it only exposes
+   * its own sampled centreline so the planner can score the shape before the
+   * real track accepts it.
+   */
+  private extensionClearance(track: ShaftTrack, pieces: readonly DigPiece[]): number {
+    const face = track.face();
+    if (!face || pieces.length === 0) return -Infinity;
+    const probe = new ShaftTrack(this.caste, pieces, face.at, face.forward);
+    const points = probe.advance(probe.plannedMm, this.boreRadius());
+    let nearest = this.edgeClearance(face.at.x, face.at.z);
+    for (const p of points) nearest = Math.min(nearest, this.edgeClearance(p.x, p.z));
+    return nearest;
+  }
+
+  /**
+   * ADD MORE NEST WITHOUT WRITING A RAIL THROUGH THE GLASS.
+   *
+   * v0.10.3 made the nest continuous by appending three random pieces every
+   * time the plan finished. That solved "she stops digging", but a random
+   * piece has no idea where the tank ends. Once the rail pointed out of the
+   * tray, the queen did exactly what it told her: rode it until the body/soil
+   * clamp refused the next frame, then visibly wiggled at the glass.
+   *
+   * Keep the ordinary seeded continuation whenever it has room. Only when it
+   * would spend the steering reserve do we try progressively stronger short
+   * turns, using the first ordinary piece's pitch so vertical development is
+   * unchanged. The first turn that restores the reserve wins. If none can do
+   * that in one piece, take the legal turn with the best clearance and the
+   * next growth beat will continue bending her inward.
+   */
+  private growTrack(track: ShaftTrack): boolean {
+    const last = track.pieces[track.pieces.length - 1];
+    const ordinary = continueTrack(this.rand, last?.pitch ?? -45, GROWTH_PIECES);
+    const preferred = EDGE_MARGIN + EDGE_TURN_RESERVE;
+    if (this.extensionClearance(track, ordinary) >= preferred) {
+      track.extend(ordinary);
+      return true;
+    }
+
+    const pitch = ordinary[0]?.pitch ?? Math.min(-15, (last?.pitch ?? -45) + 15);
+    let fallback: { piece: DigPiece; clearance: number } | null = null;
+    for (
+      let amount = PIECE_LIMITS.turn.step;
+      amount <= PIECE_LIMITS.turn.max;
+      amount += PIECE_LIMITS.turn.step
+    ) {
+      for (const turn of [amount, -amount]) {
+        const piece = clampPiece({ pitch, turn, roll: 0, length: EDGE_TURN_LENGTH_MM });
+        const clearance = this.extensionClearance(track, [piece]);
+        if (clearance >= preferred) {
+          track.extend([piece]);
+          return true;
+        }
+        if (clearance >= EDGE_MARGIN
+          && (fallback === null || clearance > fallback.clearance)) {
+          fallback = { piece, clearance };
+        }
+      }
+    }
+
+    if (fallback) {
+      track.extend([fallback.piece]);
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -641,15 +738,12 @@ export class DigBrain {
       /*
        * THE PLAN IS DUG, SO THERE IS MORE PLAN.
        *
-       * This used to stop, which read from the device as "it dug for a little
-       * bit and stopped" — the founding track is only a handful of pieces and
-       * she gets through all of it. A colony does not finish. Another few
-       * pieces are laid on the end from the same palette and the same seeded
-       * stream, so the nest grows as one continuous tunnel rather than as a
-       * second unrelated hole.
+       * v0.10.3 made this continuous, but it appended random pieces without
+       * asking whether their rail still fitted in the tank. `growTrack` keeps
+       * that ordinary seeded growth when it is safe and substitutes a short
+       * inward bend only when the glass would otherwise become the next stop.
        */
-      const last = track.pieces[track.pieces.length - 1];
-      track.extend(continueTrack(this.rand, last?.pitch ?? -45, GROWTH_PIECES));
+      this.growTrack(track);
       return { walk: 0, turn: 0, dig: 1 };
     }
 
