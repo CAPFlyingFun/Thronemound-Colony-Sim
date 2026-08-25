@@ -5,7 +5,9 @@
  * pieces, so everything the digger will rely on can be checked here rather
  * than inferred from a hole in a probe.
  */
+import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
+import { DigBrain, EDGE_MARGIN, type DigWorld } from './digBrain';
 import { ENTRANCE_DROP, ShaftTrack, advanceRateMmS, foundingTrack } from './foundingTrack';
 import { MM_PER_UNIT, boreRadiusMm } from './casteDig';
 
@@ -125,5 +127,65 @@ describe('the founding track', () => {
     /* 30 mm3/s through a 6 mm bore. Stated so a change to either is caught. */
     expect(advanceRateMmS('queen')).toBeCloseTo(30 / (Math.PI * 9), 4);
     expect(advanceRateMmS('worker')).toBeGreaterThan(advanceRateMmS('queen'));
+  });
+
+  /*
+   * REGRESSION: v0.10.3 could grow a perfectly valid rail through the glass.
+   * The body-edge guard only noticed AFTER the queen had ridden off the soil,
+   * and at that point the ordinary walker had no ground to recover on. The
+   * visible result on the phone was a queen stopped at the glass, wiggling.
+   *
+   * Put a finished track one short piece from the east wall, let the real
+   * DigBrain grow it with the deterministic "straight" random stream, then
+   * inspect the actual carve points the new plan would make. The plan must
+   * bend while its centreline is still inside the safe body margin.
+   */
+  it('turns a growing tunnel before the queen reaches the glass', () => {
+    const size = 10;
+    const world: DigWorld = {
+      solidAt: () => false,
+      surfaceAt: () => 5,
+      carveSweep: () => {},
+      standAt: () => 5,
+      onRail: () => true,
+      size,
+    };
+    const brain = new DigBrain('queen', world, () => 0.5);
+    const r = boreRadiusMm('queen') / MM_PER_UNIT;
+    const track = new ShaftTrack(
+      'queen',
+      [{ pitch: -15, turn: 0, roll: 0, length: 1 }],
+      { x: 7.6, y: 5, z: 5 },
+      { x: 1, y: 0, z: 0 },
+    );
+    while (!track.done) track.advance(1, r);
+    const face = track.face()!;
+    const at = new THREE.Vector3(face.at.x, face.at.y, face.at.z);
+    const forward = new THREE.Vector3(face.forward.x, face.forward.y, face.forward.z);
+
+    brain.track = track;
+    brain.site = {
+      target: at.clone(), stand: at.clone(), bites: 0,
+      heading: Math.atan2(forward.x, forward.z),
+    };
+    brain.phase = 'digging';
+
+    brain.step(
+      1 / 60,
+      at,
+      brain.site.heading,
+      forward,
+      (into) => { into.copy(at); return true; },
+    );
+
+    expect(track.done).toBe(false);
+    const grown = track.advance(1000, r);
+    expect(grown.length).toBeGreaterThan(0);
+    for (const point of grown) {
+      expect(point.x).toBeGreaterThanOrEqual(EDGE_MARGIN);
+      expect(point.x).toBeLessThanOrEqual(size - EDGE_MARGIN);
+      expect(point.z).toBeGreaterThanOrEqual(EDGE_MARGIN);
+      expect(point.z).toBeLessThanOrEqual(size - EDGE_MARGIN);
+    }
   });
 });
