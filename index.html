@@ -30,6 +30,14 @@
     <title>Thronemound Colony Sim</title>
     <link rel="manifest" href="./manifest.webmanifest" />
     <!--
+      Narrow component correction for the CARRY fill. It is deliberately a
+      separate sheet so the fix can override the old shrinking nine-slice
+      without rewriting the 3,000-line scene stylesheet for one meter. The
+      selector inside is more specific than the base rule, so Vite's later
+      scene-CSS injection cannot reverse it.
+    -->
+    <link rel="stylesheet" href="/src/scenes/carryMeter.css" />
+    <!--
       iOS installs through Safari's own Add to Home Screen and has never read
       the manifest for the icon, so the touch icon is declared separately or
       the home screen shows a screenshot of the page. The capability meta tags
